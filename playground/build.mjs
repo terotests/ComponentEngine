@@ -4,23 +4,19 @@
 // Builds the playground into playground/dist:
 //
 //   wasm/cer.wasm      CEr (cer/) by cargo, --target wasm32-wasip1
-//   wasm/ce.wasm       ComponentEngine (engine/) by rgrc to C++, then clang
-//                      from wasi-sdk (WASI_SDK_PATH, default /opt/wasi-sdk)
-//   workers/<id>.js    one worker per engine (esbuild), with the JS builds of
-//                      ComponentEngine (bin/engine_module.cjs) and CEr
-//                      (cer/bin/Cer.cjs), QuickJS, Sval and JS-Interpreter
+//   workers/<id>.js    one worker per engine (esbuild): the browser's own
+//                      engine, CEr and QuickJS
 //   engines.json       which engines this build has, and why one is missing
 //
 // A step whose toolchain is missing is skipped and its engine marked
 // unavailable, unless --strict (CI) makes that a failure.
 //
-//   node playground/build.mjs [--strict] [--skip=ce-wasm,cer-js,…]
+//   node playground/build.mjs [--strict] [--skip=cer-wasm]
 
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { REPO, rgrc } from "../scripts/compiler.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(HERE, "src");
@@ -29,7 +25,8 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "ce-wasm", "ce-js", "cer-js", "quickjs", "sval", "js-interpreter"];
+const ENGINES = ["native", "cer-wasm", "quickjs"];
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const status = {}; // id -> { available, reason, size }
 
 function log(s) {
@@ -64,44 +61,16 @@ function step(id, fn) {
   }
 }
 
-const rgr = (argv, cwd = REPO) => run(process.execPath, ["--stack-size=8000", rgrc(), ...argv], { cwd });
-
 fs.rmSync(DIST, { recursive: true, force: true });
 fs.mkdirSync(path.join(DIST, "wasm"), { recursive: true });
 fs.mkdirSync(path.join(DIST, "workers"), { recursive: true });
 
-// ---- the WebAssembly builds -----------------------------------------------
+// ---- CEr as WebAssembly ----------------------------------------------------
 
 step("cer-wasm", () => {
   const crate = path.join(HERE, "cer-wasm");
   run("cargo", ["build", "--release", "--quiet", "--target", "wasm32-wasip1", "--manifest-path", path.join(crate, "Cargo.toml")]);
   fs.copyFileSync(path.join(crate, "target/wasm32-wasip1/release/cer_wasm.wasm"), path.join(DIST, "wasm/cer.wasm"));
-});
-
-step("ce-wasm", () => {
-  const sdk = process.env.WASI_SDK_PATH || "/opt/wasi-sdk";
-  const clang = path.join(sdk, "bin/clang++");
-  if (!fs.existsSync(clang)) throw new Error(`no wasi-sdk at ${sdk} (set WASI_SDK_PATH)`);
-  const dir = path.join(HERE, "ce-wasm");
-  const tmp = path.join(dir, "build");
-  fs.mkdirSync(tmp, { recursive: true });
-  rgr(["install"], dir);
-  rgr(["-l=cpp", "ce_wasm.rgr", "-d=" + tmp, "-o=ce_wasm.cpp"], dir);
-  run(process.execPath, [path.join(dir, "patch-cpp.mjs"), path.join(tmp, "ce_wasm.cpp"), path.join(dir, "glue.cpp"), path.join(tmp, "all.cpp")]);
-  const sys = ["--target=wasm32-wasip1", "--sysroot=" + path.join(sdk, "share/wasi-sysroot")];
-  run(clang, [...sys, "-std=c++17", "-O2", "-fno-exceptions", "-w", "-c", path.join(tmp, "all.cpp"), "-o", path.join(tmp, "all.o")]);
-  run(clang, [...sys, "-mexec-model=reactor", path.join(tmp, "all.o"), "-o", path.join(DIST, "wasm/ce.wasm"), "-Wl,-z,stack-size=8388608", "-Wl,--strip-all"]);
-});
-
-// ---- the JavaScript builds of the two engines ------------------------------
-
-step("ce-js", () => {
-  if (!fs.existsSync(path.join(REPO, "bin/engine_module.cjs"))) run(process.execPath, [path.join(REPO, "scripts/build.mjs")]);
-});
-
-step("cer-js", () => {
-  fs.mkdirSync(path.join(REPO, "cer/bin"), { recursive: true });
-  rgr(["-es6", "-nodemodule", "cer/src/lib.rs", "-d=cer/bin", "-o=Cer.cjs"]);
 });
 
 // ---- the page and one worker per engine -----------------------------------
@@ -126,7 +95,7 @@ for (const id of ENGINES) {
       target: "es2022",
       minify: true,
       legalComments: "eof",
-      alias: { fs: stub, path: stub, child_process: stub, os: stub, crypto: stub, vm: stub },
+      alias: { fs: stub, path: stub, child_process: stub, os: stub, crypto: stub },
       outfile: path.join(DIST, "workers", id + ".js"),
       logLevel: "silent",
     });
@@ -158,7 +127,7 @@ for (const id of ENGINES) {
 }
 const sizeOf = (id) => {
   let n = 0;
-  for (const f of [`workers/${id}.js`, id === "cer-wasm" ? "wasm/cer.wasm" : "", id === "ce-wasm" ? "wasm/ce.wasm" : ""]) {
+  for (const f of [`workers/${id}.js`, id === "cer-wasm" ? "wasm/cer.wasm" : ""]) {
     if (f && fs.existsSync(path.join(DIST, f))) n += fs.statSync(path.join(DIST, f)).size;
   }
   return n;

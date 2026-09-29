@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ComponentEngine Playground</title>
-  <meta name="description" content="ComponentEngine's JavaScript evaluator — in Rust compiled to WebAssembly, in Ranger compiled to C++ and WebAssembly, and as JavaScript — benchmarked against the browser's own engine, QuickJS and other small interpreters.">
+  <meta name="description" content="CEr, ComponentEngine's JavaScript evaluator written in Rust and compiled to WebAssembly, benchmarked against the browser's own engine and QuickJS.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='9' width='3' height='6' rx='1' fill='%232a78d6'/%3E%3Crect x='6.5' y='5' width='3' height='10' rx='1' fill='%232a78d6'/%3E%3Crect x='12' y='1' width='3' height='14' rx='1' fill='%232a78d6'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -12,9 +12,9 @@
   <header class="top">
     <div class="wrap">
       <h1>ComponentEngine Playground</h1>
-      <p class="lede">One JavaScript evaluator, written in Ranger and again in Rust, built several ways and run
-        in your browser next to the browser's own engine and other small interpreters. Every engine runs in a
-        worker of its own; times are wall-clock in this tab.</p>
+      <p class="lede">CEr, ComponentEngine's JavaScript evaluator written in Rust and compiled to WebAssembly,
+        running in your browser next to the browser's own engine and QuickJS. Every engine runs in a worker of
+        its own; times are wall-clock in this tab.</p>
       <nav class="tabs" role="tablist">
         <button role="tab" id="tab-bench" aria-selected="true" aria-controls="panel-bench">Benchmark</button>
         <button role="tab" id="tab-editor" aria-selected="false" aria-controls="panel-editor">Editor</button>

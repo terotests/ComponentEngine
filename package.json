@@ -22,10 +22,8 @@
   "devDependencies": {
     "@jitl/quickjs-singlefile-browser-release-sync": "^0.32.0",
     "esbuild": "^0.28.2",
-    "js-interpreter": "^6.0.2",
     "playwright-core": "^1.62.1",
     "quickjs-emscripten-core": "^0.32.0",
-    "ranger-compiler": "^4.0.0",
-    "sval": "^0.6.12"
+    "ranger-compiler": "^4.0.0"
   }
 }

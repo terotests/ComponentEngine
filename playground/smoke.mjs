@@ -3,10 +3,8 @@
 //
 // Serves playground/dist, opens it in Chromium (playwright-core), runs the
 // benchmark at scale 1 once, and checks that every engine in the build
-// loaded and answered what the browser answers, but for the known gaps of
-// the third-party interpreters in EXPECTED_GAPS: JS-Interpreter is ES5 (no
-// classes, no Map) and its sort is too slow for the time limit; Sval reads
-// a getter through `super` as NaN.
+// loaded and answered what the browser answers (but for a workload listed
+// for it in EXPECTED_GAPS).
 //
 //   node playground/smoke.mjs [--shot=out.png]
 
@@ -17,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
 const shot = (process.argv.find((a) => a.startsWith("--shot=")) || "").slice(7);
-const EXPECTED_GAPS = { "js-interpreter": ["classes", "Map/Set", "sort"], sval: ["classes"] };
+const EXPECTED_GAPS = {};
 
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
 const server = http.createServer((req, res) => {
