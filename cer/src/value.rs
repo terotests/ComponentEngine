@@ -51,6 +51,9 @@ pub const C_SYMBOL: int = 17;
 pub const C_PROMISE: int = 18;
 /// a generator object, or the coroutine of an async call
 pub const C_GENERATOR: int = 19;
+/// an ArrayBuffer (bytes in elems) and a typed array over one (typed.rs)
+pub const C_ARRAYBUFFER: int = 20;
+pub const C_TYPED: int = 21;
 
 // property attributes
 pub const P_HIDDEN: int = 1;

@@ -2096,12 +2096,26 @@ impl Compiler {
         }
         let strs = self.ast.nodes[t as usize].list.clone();
         let exprs = self.ast.nodes[t as usize].list2.clone();
+        // the site's template object is made once: a constant slot keeps it
+        let fi = self.fs.len() - 1;
+        let slot = self.fs[fi].proto.consts.len() as int;
+        self.fs[fi].proto.consts.push(Val::Undef);
+        let cnt = strs.len() as int;
+        let site = self.emit(OP_TEMPLATE_OBJ, 0, slot);
         for s in strs.iter() {
-            let v = self.ast.nodes[*s as usize].s.clone();
+            if (self.ast.nodes[*s as usize].flags & 1) != 0 {
+                self.op(OP_UNDEF);
+            } else {
+                let v = self.ast.nodes[*s as usize].s.clone();
+                self.push_str(v.as_str());
+            }
+        }
+        for s in strs.iter() {
+            let v = self.ast.nodes[*s as usize].op.clone();
             self.push_str(v.as_str());
         }
-        let cnt = strs.len() as int;
-        self.emit(OP_TEMPLATE_OBJ, cnt, 0);
+        self.emit(OP_TEMPLATE_OBJ, cnt, -1 - slot);
+        self.patch(site);
         let argc = (exprs.len() as int) + 1;
         for e in exprs {
             self.expr(e);

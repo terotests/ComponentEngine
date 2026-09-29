@@ -800,6 +800,9 @@ impl Vm {
                         }
                     }
                 }
+                if ob.class == C_TYPED {
+                    return self.ta_get(*o, i);
+                }
                 let a = self.index_atom(i);
                 self.get_obj(*o, a, v)
             }
@@ -976,6 +979,10 @@ impl Vm {
 
     pub fn set_index(&mut self, o: int, i: int, v: Val) {
         let class = self.objs[o as usize].class;
+        if class == C_TYPED {
+            self.ta_set(o, i, &v);
+            return;
+        }
         if class == C_ARRAY || class == C_ARGUMENTS {
             let len = self.objs[o as usize].elems.len() as int;
             if i < len {
@@ -1090,6 +1097,9 @@ impl Vm {
             if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int {
                 return true;
             }
+            if class == C_TYPED {
+                return i < self.ta_length(o);
+            }
             if class == C_STRING {
                 if let Val::Str(s) = &self.objs[o as usize].prim {
                     if i < jsstr::len(s.as_str()) {
@@ -1133,6 +1143,9 @@ impl Vm {
         if i >= 0 {
             if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int {
                 return true;
+            }
+            if class == C_TYPED {
+                return i < self.ta_length(o);
             }
             if class == C_STRING {
                 if let Val::Str(s) = &self.objs[o as usize].prim {
@@ -1210,6 +1223,14 @@ impl Vm {
                     out.push(string_val(format!("{}", i)));
                     i += 1;
                 }
+            }
+        }
+        if class == C_TYPED {
+            let n = self.ta_length(o);
+            let mut i: int = 0;
+            while i < n {
+                out.push(string_val(format!("{}", i)));
+                i += 1;
             }
         }
         let keys = self.objs[o as usize].keys.clone();
@@ -2348,6 +2369,10 @@ impl Vm {
         }
     }
 
+    pub fn freeze_obj(&mut self, o: int) {
+        self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, vec![Val::Obj(o)], false, Val::Undef);
+    }
+
     pub fn gc_due(&self) -> bool {
         self.alloc_count >= self.gc_threshold && self.native_depth == 0
     }
@@ -3053,17 +3078,37 @@ impl Vm {
                 }
             }
             OP_TEMPLATE_OBJ => {
+                // b >= 0: the site's cached object, if made, then a jump
+                // past the strings; b < 0: make it from [cooked…, raw…]
+                if op.b >= 0 {
+                    let c = self.protos[pi].consts[op.b as usize].clone();
+                    if is_obj(&c) {
+                        self.stack.push(c);
+                        *pc = op.a;
+                    }
+                    return false;
+                }
+                let slot = (-1 - op.b) as usize;
                 let n = self.stack.len() as int;
-                let mut items: Vec<Val> = Vec::new();
-                let mut i = n - op.a;
+                let mut cooked: Vec<Val> = Vec::new();
+                let mut raws: Vec<Val> = Vec::new();
+                let mut i = n - 2 * op.a;
                 while i < n {
-                    items.push(self.stack[i as usize].clone());
+                    if i < n - op.a {
+                        cooked.push(self.stack[i as usize].clone());
+                    } else {
+                        raws.push(self.stack[i as usize].clone());
+                    }
                     i += 1;
                 }
-                self.stack.truncate((n - op.a) as usize);
-                let raw = self.new_array(items.clone());
-                let a = self.new_array(items);
-                self.define(a, A_RAW, Val::Obj(raw), P_HIDDEN);
+                self.stack.truncate((n - 2 * op.a) as usize);
+                let raw = self.new_array(raws);
+                let a = self.new_array(cooked);
+                self.define(a, A_RAW, Val::Obj(raw), P_HIDDEN | P_READONLY | P_FIXED);
+                self.freeze_obj(raw);
+                self.freeze_obj(a);
+                self.roots.push(a);
+                self.protos[pi].consts[slot] = Val::Obj(a);
                 self.stack.push(Val::Obj(a));
             }
             OP_THROW => {

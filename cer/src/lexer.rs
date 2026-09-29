@@ -25,6 +25,10 @@ pub struct Tok {
     pub parts: Vec<String>,
     /// a template: the source text of each `${…}`
     pub exprs: Vec<String>,
+    /// a template: the raw strings, and whether each cooked string is
+    /// valid (an invalid escape is allowed in a tagged template only)
+    pub raws: Vec<String>,
+    pub cooked_ok: Vec<bool>,
     /// a regular expression: its flags
     pub flags: String,
     /// an identifier written with an escape, or a string with an octal
@@ -42,6 +46,8 @@ impl Tok {
             line: line,
             parts: Vec::new(),
             exprs: Vec::new(),
+            raws: Vec::new(),
+            cooked_ok: Vec::new(),
             flags: String::new(),
             escaped: false,
         }
@@ -562,11 +568,83 @@ impl Lexer {
         s
     }
 
+    /// The raw text of a template part: the source with CR and CRLF as LF.
+    fn raw_between(&self, from: int, to: int) -> String {
+        let mut out = String::new();
+        let mut i = from;
+        while i < to {
+            let c = self.src[i as usize];
+            if c == '\r' {
+                out.push('\n');
+                if i + 1 < to && self.src[(i + 1) as usize] == '\n' {
+                    i += 1;
+                }
+            } else {
+                out.push(c);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// An escape in a template: false when it is not a valid one (the
+    /// cooked string is then undefined).
+    fn template_escape(&mut self, out: &mut String) -> bool {
+        let c = self.cur();
+        if c >= '0' && c <= '9' {
+            if c == '0' && !(self.at(self.pos + 1) >= '0' && self.at(self.pos + 1) <= '9') {
+                self.pos += 1;
+                out.push('\0');
+                return true;
+            }
+            self.pos += 1;
+            return false;
+        }
+        if c == 'x' {
+            if hex_val(self.at(self.pos + 1)) < 0 || hex_val(self.at(self.pos + 2)) < 0 {
+                self.pos += 1;
+                return false;
+            }
+        }
+        if c == 'u' {
+            if self.at(self.pos + 1) == '{' {
+                let mut i = self.pos + 2;
+                let mut v: int = 0;
+                let mut digits = 0;
+                while hex_val(self.at(i)) >= 0 {
+                    v = v * 16 + hex_val(self.at(i));
+                    if v > 0x10ffff {
+                        break;
+                    }
+                    digits += 1;
+                    i += 1;
+                }
+                if digits == 0 || v > 0x10ffff || self.at(i) != '}' {
+                    self.pos += 1;
+                    return false;
+                }
+            } else {
+                let mut k = 1;
+                while k <= 4 {
+                    if hex_val(self.at(self.pos + k)) < 0 {
+                        self.pos += 1;
+                        return false;
+                    }
+                    k += 1;
+                }
+            }
+        }
+        let mut octal = false;
+        self.read_escape(out, true, &mut octal);
+        true
+    }
+
     fn read_template(&mut self, t: &mut Tok) {
         self.pos += 1;
         let n = self.src.len() as int;
         let mut cur = String::new();
-        let mut octal = false;
+        let mut ok = true;
+        let mut start = self.pos;
         loop {
             if self.pos >= n {
                 self.fail("unterminated template");
@@ -574,17 +652,25 @@ impl Lexer {
             }
             let c = self.cur();
             if c == '`' {
+                let raw = self.raw_between(start, self.pos);
+                t.raws.push(raw);
                 self.pos += 1;
                 break;
             }
             if c == '\\' {
                 self.pos += 1;
-                self.read_escape(&mut cur, true, &mut octal);
+                if !self.template_escape(&mut cur) {
+                    ok = false;
+                }
                 continue;
             }
             if c == '$' && self.at(self.pos + 1) == '{' {
+                let raw = self.raw_between(start, self.pos);
+                t.raws.push(raw);
                 self.pos += 2;
                 t.parts.push(cur.clone());
+                t.cooked_ok.push(ok);
+                ok = true;
                 cur = String::new();
                 // the substitution's source, braces and strings balanced
                 let mut depth = 1;
@@ -629,6 +715,7 @@ impl Lexer {
                     self.pos += 1;
                 }
                 t.exprs.push(e);
+                start = self.pos;
                 continue;
             }
             if c == '\r' {
@@ -648,6 +735,10 @@ impl Lexer {
             self.pos += 1;
         }
         t.parts.push(cur);
+        t.cooked_ok.push(ok);
+        if t.raws.len() < t.parts.len() {
+            t.raws.push(String::new());
+        }
     }
 
     fn read_regex(&mut self, t: &mut Tok) {

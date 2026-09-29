@@ -1442,7 +1442,7 @@ impl Parser {
                 self.ast.nodes[n as usize].list = args;
                 e = n;
             } else if self.kind() == T_TEMPLATE {
-                let t = self.template();
+                let t = self.template(true);
                 let n = self.ast.add(N_TAGGED, l);
                 self.ast.nodes[n as usize].a = e;
                 self.ast.nodes[n as usize].b = t;
@@ -1498,17 +1498,32 @@ impl Parser {
         e
     }
 
-    fn template(&mut self) -> int {
+    /// A template literal: N_STR parts (raw text in `op`, flags 1 when the
+    /// cooked string is undefined) and the substitutions.
+    fn template(&mut self, tagged: bool) -> int {
         let n = self.node(N_TEMPLATE);
         let parts = self.toks[self.pos as usize].parts.clone();
         let exprs = self.toks[self.pos as usize].exprs.clone();
+        let raws = self.toks[self.pos as usize].raws.clone();
+        let oks = self.toks[self.pos as usize].cooked_ok.clone();
         let line = self.line();
         self.next();
         let mut strs: Vec<int> = Vec::new();
+        let mut i: usize = 0;
         for p in parts {
             let s = self.ast.add(N_STR, line);
             self.ast.nodes[s as usize].s = p;
+            if i < raws.len() {
+                self.ast.nodes[s as usize].op = raws[i].clone();
+            }
+            if i < oks.len() && !oks[i] {
+                if !tagged {
+                    self.fail("Invalid escape sequence in template");
+                }
+                self.ast.nodes[s as usize].flags = 1;
+            }
             strs.push(s);
+            i += 1;
         }
         let mut es: Vec<int> = Vec::new();
         for src in exprs {
@@ -1548,7 +1563,7 @@ impl Parser {
             return n;
         }
         if k == T_TEMPLATE {
-            return self.template();
+            return self.template(false);
         }
         if k == T_REGEX {
             let n = self.node(N_REGEX);

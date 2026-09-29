@@ -778,6 +778,7 @@ impl Vm {
         self.method(pp, "catch", NF_PR_CATCH, 1);
         self.method(pp, "finally", NF_PR_FINALLY, 1);
         self.setup_coroutines();
+        self.setup_typed();
     }
 
     // ---- helpers
@@ -2593,6 +2594,9 @@ impl Vm {
     // ---- the dispatch
 
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>, construct: bool, new_target: Val) -> Val {
+        if id >= 920 && id < 940 {
+            return self.call_native_typed(id, args);
+        }
         if id >= 900 && id < 1000 {
             return self.call_native_co(id, fobj, this, args);
         }
@@ -3605,7 +3609,7 @@ impl Vm {
             23 => x.asinh(),
             24 => x.acosh(),
             25 => x.atanh(),
-            26 => (x as f32) as double,
+            26 => crate::typed::fround(x),
             27 => {
                 let mut u = to_uint32(x) as int;
                 let mut n: int = 32;
