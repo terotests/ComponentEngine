@@ -1086,15 +1086,59 @@ impl Vm {
             }
             // ---- RegExp
             NF_REGEXP => {
-                if self.class_of(&a0) == C_REGEXP {
+                // IsRegExp: Symbol.match when set, else the internal slot
+                let mut is_re = false;
+                if is_obj(&a0) {
+                    let am = self.intern("@@match");
+                    let m = self.get(&a0, am);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { truthy(&m) };
+                }
+                if !construct && is_re && matches!(a1, Val::Undef) {
+                    let pc = self.get(&a0, A_CONSTRUCTOR);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    if let Val::Obj(c) = pc {
+                        if c == fobj {
+                            return a0;
+                        }
+                    }
+                }
+                let (src, fl) = if self.class_of(&a0) == C_REGEXP {
                     let src = self.objs[obj_of(&a0) as usize].prim.clone();
                     let fl = if matches!(a1, Val::Undef) { string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
-                    if !construct && matches!(arg(&args, 1), Val::Undef) {
-                        return a0;
+                    (src, fl)
+                } else if is_re {
+                    let a_source = self.intern("source");
+                    let src = self.get(&a0, a_source);
+                    if self.throwing {
+                        return Val::Undef;
                     }
-                    return self.new_regexp(&src, &fl);
+                    let fl = if matches!(a1, Val::Undef) {
+                        let a_flags = self.intern("flags");
+                        self.get(&a0, a_flags)
+                    } else {
+                        a1
+                    };
+                    (src, fl)
+                } else {
+                    (a0, a1)
+                };
+                if self.throwing {
+                    return Val::Undef;
                 }
-                self.new_regexp(&a0, &a1)
+                let r = self.new_regexp(&src, &fl);
+                if construct && !self.throwing {
+                    let rp = self.regexp_proto;
+                    let proto = self.proto_from(&new_target, rp);
+                    if proto != rp {
+                        self.objs[obj_of(&r) as usize].proto = proto;
+                    }
+                }
+                r
             }
             NF_RP_EXEC | NF_RP_TEST => {
                 let ro = obj_of(&this);

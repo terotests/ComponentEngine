@@ -1841,7 +1841,8 @@ impl Vm {
         let mut nt = new_target;
         if arrow {
             this_val = self.objs[fo as usize].prim.clone();
-            nt = Val::Undef;
+            // new.target as the arrow found it
+            nt = if self.objs[fo as usize].elems2.is_empty() { Val::Undef } else { self.objs[fo as usize].elems2[0].clone() };
         } else if !strict && !construct {
             if matches!(this_val, Val::Undef) || matches!(this_val, Val::Null) {
                 this_val = Val::Obj(self.global);
@@ -1927,6 +1928,19 @@ impl Vm {
         false
     }
 
+    /// The function whose `this` / new.target frame `fi` shares: its own,
+    /// or for an arrow the one it was made in.
+    pub fn ctor_of_frame(&self, fi: usize) -> int {
+        let fo = self.frames[fi].fobj;
+        if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION && self.objs[fo as usize].elems2.len() == 2 {
+            let pi = self.objs[fo as usize].func;
+            if self.protos[pi as usize].arrow {
+                return obj_of(&self.objs[fo as usize].elems2[1]);
+            }
+        }
+        fo
+    }
+
     fn closure(&mut self, pi: int) -> int {
         let fp = self.closure_proto(pi);
         let f = self.alloc(C_FUNCTION, fp);
@@ -1939,6 +1953,12 @@ impl Vm {
             self.objs[f as usize].prim = t;
             let home = self.objs[self.frames[fi].fobj as usize].home;
             self.objs[f as usize].home = home;
+            if self.protos[pi as usize].lexical_ctor {
+                let nt = self.frames[fi].new_target.clone();
+                let owner = self.ctor_of_frame(fi);
+                self.objs[f as usize].elems2.push(nt);
+                self.objs[f as usize].elems2.push(Val::Obj(owner));
+            }
         }
         f
     }
@@ -2060,6 +2080,43 @@ impl Vm {
             if self.throwing {
                 break;
             }
+        }
+        self.temp_roots.pop();
+        out
+    }
+
+    /// The first `n` values of an iterable; an iterator not done by then is
+    /// closed (array destructuring without a rest element).
+    pub fn iterable_take(&mut self, v: &Val, n: int) -> Vec<Val> {
+        if let Val::Obj(o) = v {
+            if self.objs[*o as usize].class == C_ARRAY {
+                let f = self.get_obj(*o, A_ITERATOR, v);
+                if obj_of(&f) == self.array_values_fn {
+                    return self.objs[*o as usize].elems.clone();
+                }
+            }
+        }
+        let it = self.iter_values(v);
+        let mut out: Vec<Val> = Vec::new();
+        if self.throwing {
+            return out;
+        }
+        self.temp_roots.push(it.clone());
+        let mut done = false;
+        while (out.len() as int) < n {
+            match self.iter_next(&it) {
+                Some(x) => out.push(x),
+                None => {
+                    done = true;
+                    break;
+                }
+            }
+            if self.throwing {
+                break;
+            }
+        }
+        if !done && !self.throwing {
+            self.iter_close(&it);
         }
         self.temp_roots.pop();
         out
@@ -3238,8 +3295,9 @@ impl Vm {
                     }
                     self.stack.truncate((n - op.a) as usize);
                 }
-                // the class whose constructor is running (arrows: their home's)
-                let fobj = self.frames[fi].fobj;
+                // the class whose constructor is running (arrows: the one
+                // they were made in)
+                let fobj = self.ctor_of_frame(fi);
                 let parent = self.objs[fobj as usize].proto;
                 let nt = self.frames[fi].new_target.clone();
                 let this = self.frames[fi].this_val.clone();
@@ -3284,8 +3342,7 @@ impl Vm {
                     return false;
                 }
                 self.frames[fi].this_val = result.clone();
-                let ctor = self.frames[fi].fobj;
-                self.run_fields(ctor, &result);
+                self.run_fields(fobj, &result);
                 if self.throwing {
                     return false;
                 }
@@ -3682,7 +3739,7 @@ impl Vm {
                     self.throw_type("value is not iterable");
                     return false;
                 }
-                let items = self.iterable_to_vec(&v);
+                let items = if op.a > 0 { self.iterable_take(&v, op.a - 1) } else { self.iterable_to_vec(&v) };
                 if self.throwing {
                     return false;
                 }

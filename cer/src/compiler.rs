@@ -562,9 +562,11 @@ impl Compiler {
         if k == N_CLASS {
             let mut inner = scope;
             let name = self.ast.nodes[n as usize].s.clone();
-            if (self.ast.nodes[n as usize].flags & F_DECL) == 0 && !name.is_empty() {
+            // the class body sees its own name, bound apart from a
+            // declaration's outer (mutable) binding
+            if !name.is_empty() {
                 inner = self.new_scope(scope, n, false, false);
-                self.declare(inner, name.as_str(), K_CLASS);
+                self.declare(inner, name.as_str(), K_CONST);
             }
             self.visit(a, scope);
             self.visit(b, inner);
@@ -582,6 +584,9 @@ impl Compiler {
             }
             if !name.is_empty() {
                 self.mark_inited(inner, name.as_str());
+                if (self.ast.nodes[n as usize].flags & F_DECL) != 0 {
+                    self.mark_inited(scope, name.as_str());
+                }
             }
             return;
         }
@@ -734,6 +739,16 @@ impl Compiler {
 
     // =====================================================================
     // pass 2: code
+
+    /// The arrows around the code being written keep new.target and their
+    /// constructor.
+    fn mark_lexical_ctor(&mut self) {
+        let mut i = self.fs.len();
+        while i > 0 && self.fs[i - 1].proto.arrow {
+            self.fs[i - 1].proto.lexical_ctor = true;
+            i -= 1;
+        }
+    }
 
     fn f(&mut self) -> &mut FnState {
         let i = self.fs.len() - 1;
@@ -2279,6 +2294,7 @@ impl Compiler {
             return;
         }
         if k == N_SUPER_CALL {
+            self.mark_lexical_ctor();
             let args = self.ast.nodes[n as usize].list.clone();
             if self.has_spread(&args) {
                 self.spread_array(&args);
@@ -2304,6 +2320,7 @@ impl Compiler {
             return;
         }
         if k == N_NEW_TARGET {
+            self.mark_lexical_ctor();
             self.op(OP_NEW_TARGET);
             return;
         }
@@ -2787,6 +2804,8 @@ impl Compiler {
             let key = self.ast.nodes[p as usize].b;
             self.expr(obj);
             self.expr(key);
+            // [v, obj, key] → [obj, key, v]
+            self.op(OP_ROT3);
             self.op(OP_ROT3);
             self.op(OP_SET_ELEM);
             self.op(OP_POP);
@@ -2804,8 +2823,16 @@ impl Compiler {
             return;
         }
         if k == N_ARRAY {
-            self.op(OP_TO_ARRAY);
             let items = self.ast.nodes[p as usize].list.clone();
+            let mut has_rest = false;
+            for it in items.iter() {
+                if self.ast.nodes[*it as usize].kind == N_REST {
+                    has_rest = true;
+                }
+            }
+            // without a rest element only as many values as there are
+            // targets are taken, and the iterator closed
+            self.emit(OP_TO_ARRAY, if has_rest { 0 } else { (items.len() as int) + 1 }, 0);
             let mut i: int = 0;
             for it in items {
                 let ik = self.ast.nodes[it as usize].kind;

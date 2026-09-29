@@ -182,7 +182,8 @@ pub const OP_GET_SUPER_ELEM: int = 112;
 pub const OP_REQUIRE_OBJ: int = 113;
 /// [src, k1…ka] → [src, rest]: own enumerable properties but the keys
 pub const OP_OBJ_REST: int = 114;
-/// [iterable] → [array]
+/// [iterable] → [array]; a > 0: its first a - 1 values, the iterator closed
+/// when not done by then
 pub const OP_TO_ARRAY: int = 115;
 /// [arr] → [arr, arr.slice(a)] (rest element)
 pub const OP_ARRAY_REST: int = 116;
