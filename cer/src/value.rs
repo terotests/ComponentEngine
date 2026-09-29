@@ -54,6 +54,8 @@ pub const C_GENERATOR: int = 19;
 /// an ArrayBuffer (bytes in elems) and a typed array over one (typed.rs)
 pub const C_ARRAYBUFFER: int = 20;
 pub const C_TYPED: int = 21;
+/// a Proxy (proxy.rs)
+pub const C_PROXY: int = 22;
 
 // property attributes
 pub const P_HIDDEN: int = 1;

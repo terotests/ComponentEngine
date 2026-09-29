@@ -483,12 +483,20 @@ impl Vm {
             }
             NF_AP_FILL => {
                 let o = self.this_array(&this);
-                let len = self.objs[o as usize].elems.len() as int;
+                let generic = !self.is_array_obj(o);
+                let len = if generic { self.len_of(&Val::Obj(o)) } else { self.objs[o as usize].elems.len() as int };
                 let s = self.rel_index(&a1, len, 0);
                 let e = self.rel_index(&arg(&args, 2), len, len);
                 let mut i = s;
                 while i < e {
-                    self.objs[o as usize].elems[i as usize] = a0.clone();
+                    if generic {
+                        self.set_index(o, i, a0.clone());
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                    } else {
+                        self.objs[o as usize].elems[i as usize] = a0.clone();
+                    }
                     i += 1;
                 }
                 Val::Obj(o)
@@ -500,9 +508,17 @@ impl Vm {
                 let t = self.rel_index(&a0, len, 0);
                 let s = self.rel_index(&a1, len, 0);
                 let e = self.rel_index(&arg(&args, 2), len, len);
+                let generic = !self.is_array_obj(o);
                 let mut i: int = 0;
                 while s + i < e && t + i < len {
-                    self.objs[o as usize].elems[(t + i) as usize] = items[(s + i) as usize].clone();
+                    if generic {
+                        self.set_index(o, t + i, items[(s + i) as usize].clone());
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                    } else {
+                        self.objs[o as usize].elems[(t + i) as usize] = items[(s + i) as usize].clone();
+                    }
                     i += 1;
                 }
                 Val::Obj(o)

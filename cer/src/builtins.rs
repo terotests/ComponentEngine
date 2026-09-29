@@ -779,6 +779,7 @@ impl Vm {
         self.method(pp, "finally", NF_PR_FINALLY, 1);
         self.setup_coroutines();
         self.setup_typed();
+        self.setup_proxy();
     }
 
     // ---- helpers
@@ -1843,7 +1844,7 @@ impl Vm {
                 stack.push(o);
                 let inner = format!("{}{}", indent, gap);
                 let class = self.objs[o as usize].class;
-                if class == C_ARRAY {
+                if class == C_ARRAY || (class == C_PROXY && self.is_array_val(&v)) {
                     let n = self.len_of(&v);
                     out.push('[');
                     let mut i: int = 0;
@@ -2594,8 +2595,23 @@ impl Vm {
     // ---- the dispatch
 
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>, construct: bool, new_target: Val) -> Val {
-        if id >= 920 && id < 940 {
+        if id >= NF_AP_PUSH && id <= NF_AP_WITH && (matches!(this, Val::Undef) || matches!(this, Val::Null)) {
+            self.throw_type("Array.prototype method called on null or undefined");
+            return Val::Undef;
+        }
+        if id >= 920 && id < 930 {
             return self.call_native_typed(id, args);
+        }
+        if id >= 930 && id < 940 {
+            return self.call_native_proxy(id, args, construct);
+        }
+        if self.proxy_hooks >= 0 {
+            let p = if id == NF_OP_HASOWN || id == NF_OP_PROPENUM { obj_of(&this) } else if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            if p >= 0 && self.objs[p as usize].class == C_PROXY {
+                if let Some(v) = self.proxy_native(id, p, &args) {
+                    return v;
+                }
+            }
         }
         if id >= 900 && id < 1000 {
             return self.call_native_co(id, fobj, this, args);
@@ -3483,6 +3499,20 @@ impl Vm {
             }
             NF_REFLECT_GET => {
                 let k = arg(&args, 1);
+                let o = obj_of(&a0);
+                if o < 0 {
+                    self.throw_type("Reflect.get called on non-object");
+                    return Val::Undef;
+                }
+                if args.len() > 2 {
+                    // a getter sees the receiver
+                    let (i, a) = self.to_key(&k);
+                    let atom = if i >= 0 { self.index_atom(i) } else { a };
+                    if i >= 0 && self.objs[o as usize].class != C_OBJECT {
+                        return self.get_elem(&a0, &k);
+                    }
+                    return self.get_obj(o, atom, &args[2]);
+                }
                 self.get_elem(&a0, &k)
             }
             NF_REFLECT_SET => {

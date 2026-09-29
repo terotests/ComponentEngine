@@ -747,6 +747,248 @@ hide(Atomics, 'notify', function notify(ta, index, count) { var i = intTA(ta, 'n
 tag(Atomics, 'Atomics');
 hide(globalThis, 'Atomics', Atomics);
 
+// ---- Proxy: the hooks the VM calls for an operation on a proxy (proxy.rs):
+// each runs the handler's trap, or forwards to the target, and checks the
+// invariants the specification puts on the trap's answer
+var proxySetup = globalThis.__proxySetup, proxyRevoke = globalThis.__proxyRevoke;
+delete globalThis.__proxySetup; delete globalThis.__proxyRevoke;
+var gopd = Object.getOwnPropertyDescriptor, isExt = Object.isExtensible, objGetProto = Object.getPrototypeOf;
+var reflectGet = Reflect.get, reflectHas = Reflect.has, reflectOwnKeys = Reflect.ownKeys;
+var reflectDefine = Reflect.defineProperty, reflectDelete = Reflect.deleteProperty;
+var reflectApply = Reflect.apply, reflectConstruct = Reflect.construct, nativeReflectSet = Reflect.set;
+function trapOf(h, name) {
+  var t = h[name];
+  if (t === undefined || t === null) return undefined;
+  if (!isCallable(t)) throw new TypeError("'" + name + "' on proxy: trap is not a function");
+  return t;
+}
+function keyName(k) { return typeof k === 'symbol' ? k.toString() : String(k); }
+function pfail(trap, msg) { throw new TypeError("'" + trap + "' on proxy: " + msg); }
+function isDataDesc(d) { return 'value' in d || 'writable' in d; }
+function isAccDesc(d) { return 'get' in d || 'set' in d; }
+function toDesc(o) {
+  if (!isObject(o)) throw new TypeError('Property description must be an object: ' + String(o));
+  var d = {};
+  if ('enumerable' in o) d.enumerable = !!o.enumerable;
+  if ('configurable' in o) d.configurable = !!o.configurable;
+  if ('value' in o) d.value = o.value;
+  if ('writable' in o) d.writable = !!o.writable;
+  if ('get' in o) { var g = o.get; if (g !== undefined && !isCallable(g)) throw new TypeError('Getter must be a function: ' + String(g)); d.get = g; }
+  if ('set' in o) { var s = o.set; if (s !== undefined && !isCallable(s)) throw new TypeError('Setter must be a function: ' + String(s)); d.set = s; }
+  if (isAccDesc(d) && isDataDesc(d)) throw new TypeError('Invalid property descriptor. Cannot both specify accessors and a value or writable attribute');
+  return d;
+}
+/** IsCompatiblePropertyDescriptor */
+function compatible(ext, d, cur) {
+  if (cur === undefined) return ext;
+  if (cur.configurable) return true;
+  if (d.configurable) return false;
+  if ('enumerable' in d && d.enumerable !== cur.enumerable) return false;
+  if (isAccDesc(d) && !('get' in cur || 'set' in cur)) return false;
+  if (isDataDesc(d) && ('get' in cur || 'set' in cur)) return false;
+  if ('value' in cur && !cur.writable) {
+    if (d.writable) return false;
+    if ('value' in d && !Object.is(d.value, cur.value)) return false;
+  }
+  if ('get' in cur) {
+    if ('get' in d && d.get !== cur.get) return false;
+    if ('set' in d && d.set !== cur.set) return false;
+  }
+  return true;
+}
+var proxyHooks = [];
+proxyHooks[0] = function (t, h, k, r) {
+  var trap = trapOf(h, 'get');
+  if (!trap) return reflectGet(t, k, r);
+  var v = trap.call(h, t, k, r);
+  var d = gopd(t, k);
+  if (d !== undefined && !d.configurable) {
+    if ('value' in d && !d.writable && !Object.is(v, d.value)) pfail('get', "property '" + keyName(k) + "' is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value");
+    if ('get' in d && d.get === undefined && v !== undefined) pfail('get', "property '" + keyName(k) + "' is a non-configurable accessor property on the proxy target and does not have a getter function, but the trap did not return 'undefined'");
+  }
+  return v;
+};
+proxyHooks[1] = function (t, h, k, v, r) {
+  var trap = trapOf(h, 'set');
+  if (!trap) return Reflect.set(t, k, v, r);
+  if (!trap.call(h, t, k, v, r)) return false;
+  var d = gopd(t, k);
+  if (d !== undefined && !d.configurable) {
+    if ('value' in d && !d.writable && !Object.is(v, d.value)) pfail('set', "trap returned truish for property '" + keyName(k) + "' which exists in the proxy target as a non-configurable and non-writable data property with a different value");
+    if ('set' in d && d.set === undefined) pfail('set', "trap returned truish for property '" + keyName(k) + "' which exists in the proxy target as a non-configurable and non-writable accessor property without a setter");
+  }
+  return true;
+};
+proxyHooks[2] = function (t, h, k) {
+  var trap = trapOf(h, 'has');
+  if (!trap) return reflectHas(t, k);
+  var b = !!trap.call(h, t, k);
+  if (!b) {
+    var d = gopd(t, k);
+    if (d !== undefined) {
+      if (!d.configurable) pfail('has', "trap returned falsish for property '" + keyName(k) + "' which exists in the proxy target as non-configurable");
+      if (!isExt(t)) pfail('has', "trap returned falsish for property '" + keyName(k) + "' but the proxy target is not extensible");
+    }
+  }
+  return b;
+};
+proxyHooks[3] = function (t, h, k) {
+  var trap = trapOf(h, 'deleteProperty');
+  if (!trap) return reflectDelete(t, k);
+  if (!trap.call(h, t, k)) return false;
+  var d = gopd(t, k);
+  if (d !== undefined) {
+    if (!d.configurable) pfail('deleteProperty', "trap returned truish for property '" + keyName(k) + "' which is non-configurable in the proxy target");
+    if (!isExt(t)) pfail('deleteProperty', "trap returned truish for property '" + keyName(k) + "' but the proxy target is non-extensible");
+  }
+  return true;
+};
+proxyHooks[4] = function (t, h) {
+  var trap = trapOf(h, 'ownKeys');
+  if (!trap) return reflectOwnKeys(t);
+  var res = trap.call(h, t);
+  if (!isObject(res)) pfail('ownKeys', 'trap returned a non-object');
+  var n = toLength(res.length), keys = [], seen = new Map();
+  for (var i = 0; i < n; i++) {
+    var k = res[i];
+    if (typeof k !== 'string' && typeof k !== 'symbol') pfail('ownKeys', String(k) + ' is not a valid property name');
+    if (seen.has(k)) pfail('ownKeys', "trap returned duplicate entries");
+    seen.set(k, true); keys.push(k);
+  }
+  var ext = isExt(t), tk = reflectOwnKeys(t), fixed = [], loose = [];
+  for (var j = 0; j < tk.length; j++) { var d = gopd(t, tk[j]); if (d !== undefined && !d.configurable) fixed.push(tk[j]); else loose.push(tk[j]); }
+  if (ext && fixed.length === 0) return keys;
+  for (var a = 0; a < fixed.length; a++) {
+    if (!seen.has(fixed[a])) pfail('ownKeys', "trap result did not include '" + keyName(fixed[a]) + "'");
+    seen.delete(fixed[a]);
+  }
+  if (ext) return keys;
+  for (var b = 0; b < loose.length; b++) {
+    if (!seen.has(loose[b])) pfail('ownKeys', "trap result did not include '" + keyName(loose[b]) + "'");
+    seen.delete(loose[b]);
+  }
+  if (seen.size > 0) pfail('ownKeys', 'trap returned extra keys but proxy target is non-extensible');
+  return keys;
+};
+proxyHooks[5] = function (t, h, k) {
+  var trap = trapOf(h, 'getOwnPropertyDescriptor');
+  if (!trap) return gopd(t, k);
+  var r = trap.call(h, t, k);
+  if (r !== undefined && !isObject(r)) pfail('getOwnPropertyDescriptor', "trap returned neither object nor undefined for property '" + keyName(k) + "'");
+  var td = gopd(t, k);
+  if (r === undefined) {
+    if (td === undefined) return undefined;
+    if (!td.configurable) pfail('getOwnPropertyDescriptor', "trap returned undefined for property '" + keyName(k) + "' which is non-configurable in the proxy target");
+    if (!isExt(t)) pfail('getOwnPropertyDescriptor', "trap returned undefined for property '" + keyName(k) + "' which exists in the non-extensible proxy target");
+    return undefined;
+  }
+  var ext = isExt(t), d = toDesc(r);
+  if (isAccDesc(d)) { if (!('get' in d)) d.get = undefined; if (!('set' in d)) d.set = undefined; }
+  else { if (!('value' in d)) d.value = undefined; if (!('writable' in d)) d.writable = false; }
+  if (!('enumerable' in d)) d.enumerable = false;
+  if (!('configurable' in d)) d.configurable = false;
+  if (!compatible(ext, d, td)) pfail('getOwnPropertyDescriptor', "trap returned descriptor for property '" + keyName(k) + "' that is incompatible with the existing property in the proxy target");
+  if (!d.configurable) {
+    if (td === undefined || td.configurable) pfail('getOwnPropertyDescriptor', "trap reported non-configurability for property '" + keyName(k) + "' which is either non-existent or configurable in the proxy target");
+    if ('writable' in d && !d.writable && td.writable) pfail('getOwnPropertyDescriptor', "trap reported non-configurable and writable for property '" + keyName(k) + "' which is non-configurable, non-writable in the proxy target");
+  }
+  return d;
+};
+proxyHooks[6] = function (t, h, k, desc) {
+  var d = toDesc(desc);
+  var trap = trapOf(h, 'defineProperty');
+  if (!trap) return reflectDefine(t, k, d);
+  if (!trap.call(h, t, k, d)) return false;
+  var td = gopd(t, k), ext = isExt(t);
+  var nc = 'configurable' in d && !d.configurable;
+  if (td === undefined) {
+    if (!ext) pfail('defineProperty', "trap returned truish for adding property '" + keyName(k) + "'  to the non-extensible proxy target");
+    if (nc) pfail('defineProperty', "trap returned truish for defining non-configurable property '" + keyName(k) + "' which is either non-existent or configurable in the proxy target");
+  } else {
+    if (!compatible(ext, d, td)) pfail('defineProperty', "trap returned truish for adding property '" + keyName(k) + "'  that is incompatible with the existing property in the proxy target");
+    if (nc && td.configurable) pfail('defineProperty', "trap returned truish for defining non-configurable property '" + keyName(k) + "' which is either non-existent or configurable in the proxy target");
+    if ('value' in td && !td.configurable && td.writable && 'writable' in d && !d.writable) pfail('defineProperty', "trap returned truish for defining non-configurable property '" + keyName(k) + "' which cannot be non-writable, unless there exists a corresponding non-configurable, non-writable own property of the target object.");
+  }
+  return true;
+};
+proxyHooks[7] = function (t, h) {
+  var trap = trapOf(h, 'getPrototypeOf');
+  if (!trap) return objGetProto(t);
+  var p = trap.call(h, t);
+  if (p !== null && !isObject(p)) pfail('getPrototypeOf', 'trap returned neither object nor null');
+  if (!isExt(t) && p !== objGetProto(t)) pfail('getPrototypeOf', 'proxy target is non-extensible but the trap did not return its actual prototype');
+  return p;
+};
+proxyHooks[8] = function (t, h, p) {
+  var trap = trapOf(h, 'setPrototypeOf');
+  if (!trap) { try { Object.setPrototypeOf(t, p); return true; } catch (e) { return false; } }
+  if (!trap.call(h, t, p)) return false;
+  if (!isExt(t) && p !== objGetProto(t)) pfail('setPrototypeOf', 'trap returned truish for setting a new prototype on the non-extensible proxy target');
+  return true;
+};
+proxyHooks[9] = function (t, h) {
+  var trap = trapOf(h, 'isExtensible');
+  if (!trap) return isExt(t);
+  var b = !!trap.call(h, t);
+  if (b !== isExt(t)) pfail('isExtensible', 'trap result does not reflect extensibility of proxy target (which is ' + isExt(t) + ')');
+  return b;
+};
+proxyHooks[10] = function (t, h) {
+  var trap = trapOf(h, 'preventExtensions');
+  if (!trap) { Object.preventExtensions(t); return true; }
+  var b = !!trap.call(h, t);
+  if (b && isExt(t)) pfail('preventExtensions', 'trap returned truish but the proxy target is extensible');
+  return b;
+};
+proxyHooks[11] = function (t, h, thisArg, args) {
+  var trap = trapOf(h, 'apply');
+  if (!trap) return reflectApply(t, thisArg, args);
+  return trap.call(h, t, thisArg, args);
+};
+proxyHooks[12] = function (t, h, args, nt) {
+  var trap = trapOf(h, 'construct');
+  if (!trap) return reflectConstruct(t, args, nt);
+  var r = trap.call(h, t, args, nt);
+  if (!isObject(r)) pfail('construct', 'trap returned non-object (' + String(r) + ')');
+  return r;
+};
+proxySetup(proxyHooks);
+hide(Proxy, 'revocable', function revocable(target, handler) {
+  var p = new Proxy(target, handler);
+  return { proxy: p, revoke: function () { proxyRevoke(p); } };
+});
+// Reflect.set with a receiver other than the target: OrdinarySet
+hide(Reflect, 'set', function set(t, k, v, r) {
+  if (!isObject(t)) throw new TypeError('Reflect.set called on non-object');
+  if (arguments.length < 4 || r === t) return nativeReflectSet(t, k, v);
+  var o = t;
+  while (o !== null) {
+    var d = gopd(o, k);
+    if (d !== undefined) {
+      if ('get' in d || 'set' in d) { if (d.set === undefined) return false; d.set.call(r, v); return true; }
+      if (!d.writable) return false;
+      break;
+    }
+    o = objGetProto(o);
+  }
+  if (!isObject(r)) return false;
+  var rd = gopd(r, k);
+  if (rd !== undefined) {
+    if ('get' in rd || 'set' in rd || !rd.writable) return false;
+    return reflectDefine(r, k, { value: v });
+  }
+  return reflectDefine(r, k, { value: v, writable: true, enumerable: true, configurable: true });
+});
+if (!Reflect.getOwnPropertyDescriptor) hide(Reflect, 'getOwnPropertyDescriptor', function getOwnPropertyDescriptor(t, k) {
+  if (!isObject(t)) throw new TypeError('Reflect.getOwnPropertyDescriptor called on non-object'); return gopd(t, k);
+});
+if (!Reflect.isExtensible) hide(Reflect, 'isExtensible', function isExtensible(t) {
+  if (!isObject(t)) throw new TypeError('Reflect.isExtensible called on non-object'); return isExt(t);
+});
+if (!Reflect.preventExtensions) hide(Reflect, 'preventExtensions', function preventExtensions(t) {
+  if (!isObject(t)) throw new TypeError('Reflect.preventExtensions called on non-object'); Object.preventExtensions(t); return !isExt(t);
+});
+
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs
 // a callback, so a held object simply stays
 function WeakRef(target) {
