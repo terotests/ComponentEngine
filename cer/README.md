@@ -13,6 +13,7 @@ The questions: how much of what ComponentEngine runs does it run, and how
 fast is it, natively and as Ranger output, next to ComponentEngine itself?
 
 ```sh
+npm run cer:test             # unit tests: tests/cases.txt (values from Node)
 npm run cer:conformance      # ComponentEngine's runtime-conformance probes
 npm run cer:micro            # ComponentEngine's micro benchmark workloads
 npm run cer:octane           # the Octane suites of Ranger's interp/bench/zoo_octane

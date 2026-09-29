@@ -7,6 +7,7 @@ and CEr, the same evaluator written again as a strict Rust module.
 | --- | --- |
 | `engine/` | ComponentEngine in Ranger — the Ranger package `componentengine` (entry `ComponentEngine.rgr`) |
 | `cer/` | CEr: the evaluator in Rust; builds with cargo, and with `rgrc` into the Ranger targets |
+| `cerxes/` | CErXes: CEr with TypeScript and JSX — a front-end of its own that builds CEr's syntax tree; builds with cargo and with `rgrc` ([`cerxes/README.md`](cerxes/README.md)) |
 | `tools/` | the generators of `engine/`'s Unicode and locale tables |
 | `test/` | the Node module build (`engine_module.rgr`) and a smoke test |
 | `playground/` | the browser playground: CEr as WebAssembly (and, as a curiosity, as JavaScript through Ranger), benchmarked against the browser's own engine and QuickJS — <https://terotests.github.io/ComponentEngine/> |
@@ -54,6 +55,7 @@ npm ci                  # ranger-compiler, the compiler
 npm test                # rgrc install, bin/engine_module.cjs, test/smoke.mjs
 npm run cer:build       # also CEr to JavaScript, cer/bin/Cer.cjs
 cargo run --release --manifest-path cer/Cargo.toml --bin cer -- file.js
+cargo run --release --manifest-path cerxes/Cargo.toml --bin cerxes -- app.tsx
 ```
 
 The compiler is `RANGER_ROOT/dist/rgrc.js` when that is set, else the

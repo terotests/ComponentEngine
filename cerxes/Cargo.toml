@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# CErXes: CEr with TypeScript and JSX. A front-end of its own (lexer and
+# parser, src/) that builds CEr's syntax tree; CEr's compiler and VM run it,
+# linked in as source files (src/ast.rs, src/vm.rs, … -> ../cer/src) so
+# that `rgrc src/lib.rs` sees one crate, as it does for CEr.
+
+[package]
+name = "cerxes"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+ranger = { git = "https://github.com/terotests/Ranger.git", rev = "ecedb1622b431aab5e6fef91c406cd04307da817" }
+
+[profile.release]
+overflow-checks = false
+debug = false
+
+[workspace]

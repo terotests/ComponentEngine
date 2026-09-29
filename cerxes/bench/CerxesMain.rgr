@@ -1,0 +1,51 @@
+; SPDX-License-Identifier: AGPL-3.0-or-later
+;
+; CErXes on a Ranger target: runs one script file, read as its extension
+; says (.ts, .tsx, .jsx, .js), and prints what it prints.
+;
+;   cerxes_main <dir> <file>                 the script's output
+;   cerxes_main <dir> <file> tsx|ts|jsx|js   only the value it answers, read
+;                                            with that syntax
+;
+; bench/cases.mjs --targets=cpp,go builds this for C++ and Go and runs
+; tests/cases.txt through it.
+
+Import "../src/lib.rs"
+
+class CerxesMain {
+    sfn m@(main):void () {
+        if ((shell_arg_cnt) < 2) {
+            print "usage: cerxes_main <dir> <file> [tsx|ts|jsx|js]"
+            return
+        }
+        def dirPath:string (shell_arg 0)
+        def fileName:string (shell_arg 1)
+        def valueOnly:boolean false
+        if ((shell_arg_cnt) > 2) {
+            valueOnly = true
+        }
+        def content@(optional):string (read_file dirPath fileName)
+        if (null? content) {
+            print ("error: could not read " + (dirPath + ("/" + fileName)))
+            return
+        }
+        def src:string (unwrap content)
+        def e:Engine (Engine.new_())
+        e.set_syntax_for_path(fileName)
+        if valueOnly {
+            def mode:string (shell_arg 2)
+            e.set_syntax(((mode == "tsx") || (mode == "ts")) ((mode == "tsx") || (mode == "jsx")))
+        }
+        if (valueOnly == false) {
+            e.set_echo(true)
+        }
+        def r:string (e.eval(src))
+        if valueOnly {
+            print r
+            return
+        }
+        if ((strlen e.error) > 0) {
+            print r
+        }
+    }
+}
