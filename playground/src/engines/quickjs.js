@@ -12,18 +12,30 @@ export default {
     const QuickJS = await newQuickJSWASMModuleFromVariant(variant);
     const runtime = QuickJS.newRuntime();
     runtime.setMaxStackSize(4 * 1024 * 1024);
-    const vm = runtime.newContext();
     let out = [];
-    const log = vm.newFunction("log", (...args) => {
-      out.push(args.map((h) => String(vm.dump(h))).join(" "));
-    });
-    vm.setProp(vm.global, "print", log);
-    const con = vm.newObject();
-    vm.setProp(con, "log", log);
-    vm.setProp(vm.global, "console", con);
-    con.dispose();
-    log.dispose();
+    // print, console.log and performance.now (Octane's timer) on a context
+    const context = () => {
+      const vm = runtime.newContext();
+      const log = vm.newFunction("log", (...args) => {
+        out.push(args.map((h) => String(vm.dump(h))).join(" "));
+      });
+      vm.setProp(vm.global, "print", log);
+      const con = vm.newObject();
+      vm.setProp(con, "log", log);
+      vm.setProp(vm.global, "console", con);
+      const now = vm.newFunction("now", () => vm.newNumber(performance.now()));
+      const perf = vm.newObject();
+      vm.setProp(perf, "now", now);
+      vm.setProp(vm.global, "performance", perf);
+      for (const h of [con, log, now, perf]) h.dispose();
+      return vm;
+    };
+    let vm = context();
     return {
+      reset() {
+        vm.dispose();
+        vm = context();
+      },
       run(src) {
         out = [];
         const r = vm.evalCode(src);

@@ -16,8 +16,12 @@ export default {
     if (x._initialize) x._initialize();
     const enc = new TextEncoder();
     const dec = new TextDecoder();
-    const engine = x.cer_new();
+    let engine = x.cer_new();
     return {
+      reset() {
+        x.cer_drop(engine);
+        engine = x.cer_new();
+      },
       run(src) {
         const data = enc.encode(src);
         const p = x.cer_alloc(data.length);

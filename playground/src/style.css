@@ -158,3 +158,18 @@ textarea#code {
   .summary { grid-template-columns: 110px 1fr; }
   .summary .label { font-size: 12px; }
 }
+
+.zoo-intro { max-width: 900px; font-size: 14px; color: var(--text-secondary); margin-top: 16px; }
+.results.zoo th.sortable { cursor: pointer; user-select: none; }
+.results.zoo td:nth-child(2), .results.zoo th:nth-child(2) { text-align: left; }
+.results.zoo td:first-child { color: var(--text-muted); }
+.results.zoo tr.ours td { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
+.results.zoo .jit { font-size: 10px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; margin-left: 4px; }
+.zoo-details details { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin: 0 0 8px; }
+.zoo-details summary { cursor: pointer; }
+.zoo-details ul { margin: 6px 0; padding-left: 20px; font-size: 13px; }
+.zoo-details ul.dirs { columns: 3 180px; }
+.zoo-details ul.failing { max-height: 360px; overflow: auto; }
+.zoo-details .why { color: var(--text-muted); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+.zoo-details .err { color: var(--bad); }
+progress { width: 140px; }

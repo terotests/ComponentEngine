@@ -22,6 +22,26 @@ included and loading excluded. The chart is the geometric mean, over the
 workloads an engine answered as the browser did, of its time over the
 browser's.
 
+## Zoo ranking
+
+The **Zoo ranking** tab runs [zoo.js.org](https://zoo.js.org/)'s two
+measurements on every ticked engine and places the results among the ~100
+engines zoo.js.org publishes (amd64):
+
+- **Conformance**: javascript-zoo's ES1–ES5 tests (pass rate) and its
+  compat-table ports (weighted pass rate, ES6 and ES2016+), 1,370 tests, each
+  in a fresh realm; a test passes when it prints `<file>: OK`, as in the zoo's
+  harness. A minute or two per engine.
+- **Speed**: the eight Octane v9 suites; Score is their geometric mean.
+  Prepared as `cer/bench/octane.mjs` prepares them. An interpreter takes
+  several minutes per suite.
+
+zoo.js.org measures native builds on a server; here the engines are
+WebAssembly in a tab. With **Calibrate** on, each suite's score is scaled by
+zoo's V8 score over this browser's own, so the browser stands in for zoo's V8.
+Results are kept in `localStorage` until the engines' build changes. The
+material and its licences are in `zoo/`.
+
 CEr's WASM build calls the few WASI functions it needs (clock, random,
 stdout) through `src/wasi.js`; there are no files and no network.
 
@@ -31,6 +51,7 @@ stdout) through `src/wasi.js`; there are no files and no network.
 npm ci
 node playground/build.mjs          # -> playground/dist
 node playground/smoke.mjs          # Chromium: runs the benchmark, checks the answers
+node playground/smoke.mjs --zoo=conf   # the zoo tab: conformance (or speed, all)
 npx serve playground/dist          # or any static server
 ```
 

@@ -2,19 +2,24 @@
 //
 // One engine per worker. build.mjs bundles this with one adapter from
 // engines/ into workers/<id>.js. Messages:
-//   { cmd: "run", id, src, reps }  ->  { id, ok, out, error, times: [ms…] }
-// A run that never ends is ended by the page, which terminates the worker.
+//   { cmd: "run", id, src, reps, fresh, settle }
+//     ->  { id, ok, out, error, times: [ms…] }
+// `fresh` runs the script in a new realm (the adapter's reset(), where it has
+// one); `settle` lets the engine's job queue drain after the timed runs, for
+// scripts that answer from a promise. A run that never ends is ended by the
+// page, which terminates the worker.
 
 export function serve(engine) {
   let ready = null;
   const load = () => (ready ||= engine.load(new URL("../", self.location.href).href));
 
   self.onmessage = async (ev) => {
-    const { cmd, id, src, reps } = ev.data;
+    const { cmd, id, src, reps, fresh, settle } = ev.data;
     if (cmd !== "run") return;
     try {
       const t0 = performance.now();
       const inst = await load();
+      if (fresh && inst.reset) inst.reset();
       const loadMs = performance.now() - t0;
       const times = [];
       let res = { out: [], error: false };
@@ -24,6 +29,7 @@ export function serve(engine) {
         times.push(performance.now() - t);
         if (res.error) break;
       }
+      if (settle && inst.settle) await inst.settle();
       self.postMessage({ id, ok: true, out: res.out, error: res.error, times, loadMs });
     } catch (e) {
       self.postMessage({ id, ok: false, out: [String(e && e.stack ? e.stack : e)], error: true, times: [] });

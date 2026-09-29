@@ -127,6 +127,10 @@ esbuild.buildSync({
 });
 for (const f of ["index.html", "style.css"]) fs.copyFileSync(path.join(SRC, f), path.join(DIST, f));
 
+// The zoo ranking's material (zoo/update.mjs refreshes it): Octane suites,
+// conformance tests, zoo.js.org's published results.
+fs.cpSync(path.join(HERE, "zoo"), path.join(DIST, "zoo"), { recursive: true, filter: (f) => !f.endsWith(".mjs") });
+
 // ---- the manifest ---------------------------------------------------------
 
 // name and about, read from each adapter's source (importing QuickJS's
