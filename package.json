@@ -16,6 +16,9 @@
     "cer:conformance": "node cer/bench/conformance.mjs",
     "cer:micro": "node cer/bench/micro.mjs",
     "cer:octane": "node cer/bench/octane.mjs",
+    "cerxes:build": "node scripts/build.mjs --cerxes",
+    "cerxes:test": "cargo test --release --manifest-path cerxes/Cargo.toml && node cerxes/bench/cases.mjs --build",
+    "cerxes:conformance": "node cer/bench/conformance.mjs --cerxes",
     "playground:build": "node playground/build.mjs",
     "playground:smoke": "node playground/smoke.mjs"
   },

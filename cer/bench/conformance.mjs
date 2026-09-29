@@ -14,6 +14,10 @@
 //   node bench/conformance.mjs --js       # CEr compiled to JS by rgrc
 //   node bench/conformance.mjs --list     # also list CEr's failures
 //   node bench/conformance.mjs --json     # one JSON object
+//   node bench/conformance.mjs --cerxes   # CErXes (../cerxes), reading them as TSX
+//   node bench/conformance.mjs --cerxes --js  # CErXes compiled to JS by rgrc
+//   node bench/conformance.mjs --min=1667  # fail (exit 1) below that many
+//                                          # agreeing probes: CI's guard
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -29,6 +33,10 @@ const args = process.argv.slice(2);
 const useJs = args.includes("--js");
 const list = args.includes("--list");
 const asJson = args.includes("--json");
+const useCerxes = args.includes("--cerxes");
+const minArg = args.find((a) => a.startsWith("--min="));
+const MIN = minArg ? Number(minArg.slice(6)) : 0;
+const CRATE = useCerxes ? path.resolve(CER, "../cerxes") : CER;
 
 /** The array or set literal that follows `marker` in the test source. */
 function literalAfter(src, marker, open, close) {
@@ -94,7 +102,7 @@ const script = (body) => "(function () { " + body + "\n})();";
 const actual = new Map();
 if (useJs) {
   const req = createRequire(import.meta.url);
-  const mod = req(path.join(CER, "bin/Cer.cjs"));
+  const mod = req(useCerxes ? path.join(CRATE, "bin/Cerxes.cjs") : path.join(CER, "bin/Cer.cjs"));
   for (const [name, body] of PROBES) {
     const e = mod.Engine.new_();
     let r;
@@ -109,10 +117,10 @@ if (useJs) {
   const recs = PROBES.map(([name, body]) => name + "\u0002" + script(body)).join("\u0001");
   const file = path.join(os.tmpdir(), "cer-probes-" + process.pid + ".txt");
   fs.writeFileSync(file, recs);
-  const r = spawnSync("cargo", ["run", ...cargoConfig(), "--release", "--quiet", "--bin", "probe", "--manifest-path", path.join(CER, "Cargo.toml"), "--", file], {
+  const r = spawnSync("cargo", ["run", ...cargoConfig(), "--release", "--quiet", "--bin", "probe", "--manifest-path", path.join(CRATE, "Cargo.toml"), "--", file], {
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
-    env: { ...process.env, CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || path.join(CER, "target") },
+    env: { ...process.env, CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || path.join(CRATE, "target") },
   });
   fs.unlinkSync(file);
   if (r.status !== 0) {
@@ -161,13 +169,14 @@ const report = {
   cerOnly,
   componentEngineOnly: ceOnly,
   build: useJs ? "js" : "native",
+  engine: useCerxes ? "cerxes" : "cer",
   groups: Object.fromEntries(groups),
 };
 if (asJson) {
   process.stdout.write(JSON.stringify(report) + "\n");
 } else {
   console.log(`probes: ${PROBES.length}`);
-  console.log(`CEr (${report.build}) agrees with Node: ${cerPass}`);
+  console.log(`${useCerxes ? "CErXes" : "CEr"} (${report.build}) agrees with Node: ${cerPass}`);
   console.log(`ComponentEngine agrees with Node:  ${cePass} (all but its KNOWN_GAPS)`);
   console.log(`both: ${both}, only CEr: ${cerOnly}, only ComponentEngine: ${ceOnly}\n`);
   console.log("group".padEnd(16) + "probes".padStart(8) + "CEr".padStart(8) + "CE".padStart(8));
@@ -180,4 +189,8 @@ if (asJson) {
       console.log(`  ${g}/${n}: want ${JSON.stringify(want).slice(0, 60)} got ${JSON.stringify(got).slice(0, 80)}`);
     }
   }
+}
+if (cerPass < MIN) {
+  console.error(`\n${cerPass} probes agree with Node, fewer than the ${MIN} required (--min): a regression`);
+  process.exit(1);
 }

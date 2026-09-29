@@ -1,0 +1,414 @@
+# CErXes syntax cases, run by tests/syntax.rs (cargo test) and by
+# bench/cases.mjs on the Ranger build (rgrc src/lib.rs, JavaScript).
+#
+# A case: a line `==== <syntax>` (tsx, ts, jsx or js), the script, a line
+# `----`, and the value the script answers (its last expression statement,
+# or its error). Lines starting with `#` before a case are comments.
+
+# types are erased: annotations, predicates, `this` parameters
+==== tsx
+let a: number = 1; const b: Array<Map<string, number[]>> = []; var c!: string; a + b.length
+----
+1
+
+==== tsx
+function f(a: number, b?: string, ...r: number[]): string { return a + (b ?? '') + r.length; } f(1, 'x', 3, 4)
+----
+1x2
+
+==== tsx
+const f = (x: number, y = 2): number => x * y; f(3)
+----
+6
+
+==== tsx
+const f = async (x: number): Promise<number> => x; typeof f
+----
+function
+
+==== tsx
+const g = ({ a, b }: { a: number; b: number }): number => a + b; g({ a: 1, b: 2 })
+----
+3
+
+==== tsx
+try { throw 1 } catch (e: unknown) { String(e) }
+----
+1
+
+==== tsx
+let t: [string, number?, ...boolean[]] = ['a']; let u: (a: string) => void = () => {}; let k: keyof typeof t = 0; t[k]
+----
+a
+
+==== tsx
+type F = <T>(x: T) => T extends string ? 'yes' : 'no'; let o: { readonly [k: string]: number } = { x: 1 }; o.x
+----
+1
+
+==== tsx
+function isStr(x: unknown): x is string { return typeof x === 'string'; } isStr('a')
+----
+true
+
+==== tsx
+function check(x: unknown): asserts x is number {} check(1); 'ok'
+----
+ok
+
+==== tsx
+function f(this: Window, a: number) { return a; } f(4)
+----
+4
+
+==== tsx
+let x: `id-${number}` | -1 | typeof globalThis | import('x').Y = -1; x
+----
+-1
+
+# classes: modifiers, parameter properties, abstract members, overloads; decorators are an error
+==== tsx
+
+        abstract class Shape<T = {}> implements Named {
+            static count: number = 0;
+            private readonly id: number;
+            declare tag: string;
+            [key: string]: any;
+            protected constructor(public readonly name: string, private sides?: number) { this.id = ++Shape.count; }
+            abstract area(): number;
+            describe(): string { return `${this.name}#${this.id}:${this.area()}`; }
+            get label(): string { return this.name; }
+            opt?(): void;
+        }
+        class Sq extends Shape<{}> {
+            override area(): number { return this.s * this.s; }
+            constructor(private s: number) { super('sq', 4); }
+            static of<T>(n: number): Sq { return new Sq(n); }
+        }
+        const q = Sq.of<number>(3);
+        [q.describe(), q.label, q.s, 'tag' in q, 'opt' in q, q.sides].join()
+----
+sq#1:9,sq,3,false,false,4
+
+==== tsx
+
+        class P {
+            constructor(a: string);
+            constructor(a: number);
+            constructor(public a: any) {}
+            m(x: string): string;
+            m(x: any) { return typeof x; }
+        }
+        new P(1).a + new P(1).m(2)
+----
+1number
+
+==== tsx
+class D { @dec m() {} }
+----
+SyntaxError: decorators are not supported (line 1)
+
+# declarations are erased: interface, type, declare, import type
+==== tsx
+
+        interface A<T> extends B, C<T> { x: T; f(): void }
+        type U<T> = T | { a: T[] };
+        declare const d: number;
+        declare function df(x: string): void;
+        declare module 'm' { export const y: number; }
+        declare global { interface Window { z: 1 } }
+        declare class DC { m(): void }
+        declare enum DE { A }
+        import type { Q } from './q';
+        import type R from './r';
+        import { type S, type T } from './s';
+        export type { A };
+        export interface E {}
+        typeof DC + typeof DE + typeof df
+----
+undefinedundefinedundefined
+
+==== tsx
+const type = 1, interface_ = 2; let declare = 3; type + interface_ + declare
+----
+6
+
+# enums
+==== tsx
+
+        enum Color { Red, Green = 5, Blue, 'Dark Grey' }
+        enum Dir { Up = 'UP', Down = 'DOWN' }
+        enum Flags { None = 0, A = 1 << 0, B = 1 << 1, AB = A | B }
+        const enum K { X = 2 }
+        [Color.Red, Color.Green, Color.Blue, Color[6], Color['Dark Grey'], Dir.Up, Dir.UP, Flags.AB, K.X].join()
+----
+0,5,6,Blue,7,UP,,3,2
+
+# export is dropped
+==== tsx
+export const a = 1; export function f() { return 2 } export default class K {} export { a as b }; a + f() + typeof K
+----
+3function
+
+# expressions: as, satisfies, !, type arguments; comparisons stay comparisons (`a < b > (c)` is a generic call, as in tsc)
+==== tsx
+const x = (1 as any as number) + (2 satisfies number); x
+----
+3
+
+==== tsx
+const o = { a: [1, 2] } as const; o.a.length
+----
+2
+
+==== tsx
+const m: { v?: { w: number } } = { v: { w: 5 } }; m.v!.w + m!.v!.w
+----
+10
+
+==== tsx
+function id<T>(x: T): T { return x; } id<number>(7) + id<Array<string>>(['a']).length
+----
+8
+
+==== tsx
+const m = new Map<string, number>([['a', 1]]); m.get('a')
+----
+1
+
+==== tsx
+const a = 1, b = 2, c = 3; [a < b, b > c, a < b && c > (b as any)].join()
+----
+true,false,true
+
+==== tsx
+let i = 0; for (let j = 0; j < 3; j++) { i += j; } i >> 1
+----
+1
+
+==== tsx
+const n: Array<Array<number>>= [[1]]; n[0][0]
+----
+1
+
+==== tsx
+const c = true; const r = c ? (1) : (2); r
+----
+1
+
+==== tsx
+const f = <T, U extends T = T>(a: T, b: U): [T, U] => [a, b]; f(1, 2).join()
+----
+1,2
+
+==== tsx
+const tag = (s: TemplateStringsArray) => s[0]; tag<string>`x`
+----
+x
+
+# function overloads
+==== tsx
+function f(a: string): string; function f(a: number): number; function f(a: any): any { return a; } f(2)
+----
+2
+
+# JSX components: functions, members, classes, null
+==== tsx
+
+        const Hello = ({ name, children }) => <b>Hi {name}{children}</b>;
+        function Wrap(props) { return <section>{props.children}</section>; }
+        const UI = { Title: (p) => <h1>{p.text}</h1> };
+        class Counter { constructor(p) { this.n = p.start; } render() { return <i>{this.n}</i>; } }
+        const Nothing = () => null;
+        renderToString(<Wrap><Hello name="A">!</Hello><UI.Title text="T" /><Counter start={3} /><Nothing /></Wrap>)
+----
+<section><b>Hi A!</b><h1>T</h1><i>3</i></section>
+
+# @jsx / @jsxFrag, and a replaced __jsx
+==== tsx
+/** @jsx h */
+/** @jsxFrag Frag */
+const Frag = 'F';
+function h(t, p, ...c) { return [typeof t === 'string' ? t : t.name, p === null ? 'null' : Object.keys(p).join('+'), c.length].join(':'); }
+[<a x="1" y={2}>t{3}</a>, <></>].join(' ')
+----
+a:x+y:2 F:null:0
+
+==== tsx
+__jsx = (t) => 'mine ' + t; <p/>
+----
+mine p
+
+# JSX elements: attributes, entities, whitespace, spread, namespaced names
+==== tsx
+renderToString(<div id="a" data-x='1' hidden>hi</div>)
+----
+<div id="a" data-x="1" hidden>hi</div>
+
+==== tsx
+renderToString(<br />)
+----
+<br />
+
+==== tsx
+renderToString(<p className="c" style={{ marginTop: 4 }}>{1 + 1} &amp; &#65;&#x42; &copy;</p>)
+----
+<p class="c" style="margin-top:4">2 &amp; AB ©</p>
+
+==== tsx
+renderToString(<ul>{[1, 2].map(i => <li key={i}>{i}</li>)}</ul>)
+----
+<ul><li>1</li><li>2</li></ul>
+
+==== tsx
+renderToString(<svg:rect xlink:href="#a" />)
+----
+<svg:rect xlink:href="#a"></svg:rect>
+
+==== tsx
+renderToString(<my-el a={null} b={false}>{null}{true}{undefined}{0}</my-el>)
+----
+<my-el>0</my-el>
+
+==== tsx
+renderToString(<p>
+   it's   a
+
+   long   <b>line</b>
+   </p>)
+----
+<p>it's   a long   <b>line</b></p>
+
+==== tsx
+renderToString(<p>{/* nothing */}  x  </p>)
+----
+<p>  x  </p>
+
+==== tsx
+renderToString(<div {...{ id: 'x', title: 't' }} title="u">{...['a', 'b']}</div>)
+----
+<div id="x" title="u">ab</div>
+
+==== tsx
+renderToString(<a b=<i>x</i> />)
+----
+<a b="[object Object]"></a>
+
+==== tsx
+const e = <div a="1">x{2}</div>; [e.type, e.props.a, e.children.length, e.children[1]].join()
+----
+div,1,2,2
+
+# JSX errors
+==== tsx
+<div>
+----
+SyntaxError: unterminated JSX element (line 1)
+
+==== tsx
+<a></b>
+----
+SyntaxError: expected '</a>' but found '</b>' (line 1)
+
+==== tsx
+<a b={}></a>
+----
+SyntaxError: a JSX attribute value must not be empty (line 1)
+
+# JSX fragments
+==== tsx
+renderToString(<ul><><li>a</li><li>b</li></><li>c</li></ul>)
+----
+<ul><li>a</li><li>b</li><li>c</li></ul>
+
+==== tsx
+const f = <><i>1</i>x</>; Array.isArray(f) + ':' + f.length
+----
+true:2
+
+# JSX inside expressions, arrows, templates, generics
+==== tsx
+const ok = true; renderToString(ok ? <b>y</b> : <i>n</i>)
+----
+<b>y</b>
+
+==== tsx
+const xs = [1, 2]; renderToString(xs.length > 1 && <p>{xs.length}</p>)
+----
+<p>2</p>
+
+==== tsx
+const f = () => (
+  <div>
+    a / b
+  </div>
+); renderToString(f()) + (6 / 3)
+----
+<div>a / b</div>2
+
+==== tsx
+const t = `${renderToString(<b>1</b>)}!`; t
+----
+<b>1</b>!
+
+==== tsx
+function f<T,>(x: T) { return <p>{String(x)}</p>; } renderToString(f(1))
+----
+<p>1</p>
+
+# line numbers survive JSX
+==== tsx
+const a = <div>
+  <p>x</p>
+</div>;
+let b = ;
+----
+SyntaxError: unexpected token ';' (line 4)
+
+# namespaces, dotted and merged; import A = B.C
+==== tsx
+
+        namespace NS { export const a = 1; const hidden = 2; export function f() { return a + hidden; } export enum E { X } }
+        namespace NS { export const b = 10; }
+        namespace A.B.C { export const deep = 'd'; }
+        [NS.a, NS.f(), NS.b, (NS as any).hidden, NS.E.X, A.B.C.deep].join()
+----
+1,3,10,,0,d
+
+==== tsx
+namespace N { export namespace M { export let x = 5 } } import Y = N.M; Y.x
+----
+5
+
+# syntax switches: TypeScript only, JSX only
+==== js
+<div/>
+----
+SyntaxError: unexpected token '<' (line 1)
+
+==== jsx
+let a: number = 1
+----
+SyntaxError: unexpected token ':' (line 1)
+
+==== jsx
+renderToString(<b>j</b>)
+----
+<b>j</b>
+
+# `<T>x` assertions in plain TypeScript
+==== ts
+const x = <number>(<any>'5' * 2); x
+----
+10
+
+==== ts
+const f = <T>(a: T) => a; f(3)
+----
+3
+
+# a value import needs modules
+==== tsx
+import x from 'y'; x
+----
+SyntaxError: modules are not supported (import) (line 1)
