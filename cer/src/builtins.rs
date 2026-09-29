@@ -785,6 +785,7 @@ impl Vm {
         self.setup_typed();
         self.setup_proxy();
         self.setup_dynamic();
+        self.setup_bigint();
     }
 
     // ---- helpers
@@ -884,6 +885,9 @@ impl Vm {
                     let d = self.objs[*o as usize].prim.clone();
                     let ds = if let Val::Str(s) = d { s.as_ref().clone() } else { String::new() };
                     return format!("Symbol({})", ds);
+                }
+                if c == C_BIGINT {
+                    return format!("{}n", self.big_text(v));
                 }
                 let s = self.to_string(v);
                 if self.throwing {
@@ -1840,6 +1844,10 @@ impl Vm {
                 if self.is_callable(&v) || self.objs[o as usize].class == C_SYMBOL {
                     return false;
                 }
+                if self.objs[o as usize].class == C_BIGINT {
+                    self.throw_type("Do not know how to serialize a BigInt");
+                    return false;
+                }
                 for s in stack.iter() {
                     if *s == o {
                         self.throw_type("Converting circular structure to JSON");
@@ -2610,6 +2618,9 @@ impl Vm {
         if id >= 930 && id < 940 {
             return self.call_native_proxy(id, args, construct);
         }
+        if id >= 950 && id < 960 {
+            return self.call_native_bigint(id, this, args, construct);
+        }
         if id >= 944 && id < 950 {
             return self.call_native_dynamic_this(id, this, args);
         }
@@ -2904,7 +2915,14 @@ impl Vm {
                 Val::Str(s)
             }
             NF_NUMBER => {
-                let n = if args.is_empty() { 0.0 } else { self.to_number(&a0) };
+                let prim = if is_obj(&a0) { self.to_primitive(&a0, "number") } else { a0.clone() };
+                let n = if args.is_empty() {
+                    0.0
+                } else if self.class_of(&prim) == C_BIGINT {
+                    crate::bigint::to_double(self.big_text(&prim).as_str())
+                } else {
+                    self.to_number(&prim)
+                };
                 if construct {
                     let proto = self.proto_from(&new_target, self.number_proto);
                     let o = self.alloc(C_NUMBER, proto);

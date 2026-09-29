@@ -17,6 +17,7 @@
 use ranger::prelude::*;
 
 pub mod ast;
+pub mod bigint;
 pub mod builtins;
 pub mod builtins2;
 pub mod compiler;

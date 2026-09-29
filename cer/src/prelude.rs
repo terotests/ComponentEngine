@@ -403,8 +403,10 @@ function transfer(newLength) {
 hide(ArrayBuffer.prototype, 'transfer', transfer);
 hide(ArrayBuffer.prototype, 'transferToFixedLength', function transferToFixedLength(newLength) { return transfer.call(this, newLength); });
 
-var KINDS = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array'];
-var SIZES = [1, 1, 1, 2, 2, 4, 4, 4, 8];
+var KINDS = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
+var SIZES = [1, 1, 1, 2, 2, 4, 4, 4, 8, 8, 8];
+/** The element conversion of a kind: ToBigInt for the 64-bit ones. */
+function elemOf(kind) { return kind >= 9 ? BigInt : Number; }
 var CTORS = [];
 function TypedArray() { throw new TypeError('Abstract class TypedArray not directly constructable'); }
 var TAP = TypedArray.prototype;
@@ -473,6 +475,8 @@ defineTA(5, function Int32Array(a, b, c) { if (new.target === undefined) throw n
 defineTA(6, function Uint32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint32Array requires 'new'"); return construct(6, new.target, a, b, c); });
 defineTA(7, function Float32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float32Array requires 'new'"); return construct(7, new.target, a, b, c); });
 defineTA(8, function Float64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float64Array requires 'new'"); return construct(8, new.target, a, b, c); });
+defineTA(9, function BigInt64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigInt64Array requires 'new'"); return construct(9, new.target, a, b, c); });
+defineTA(10, function BigUint64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigUint64Array requires 'new'"); return construct(10, new.target, a, b, c); });
 defineProperty(TypedArray, Symbol.species, { get: speciesSelf, enumerable: false, configurable: true });
 
 /** A new typed array from `exemplar`'s species, checked. */
@@ -533,7 +537,7 @@ hide(TAP, Symbol.iterator, taValues);
 hide(TAP, 'every', function every(f, t) { var n = len(this, 'TypedArray.prototype.every'); fn(f, 'every'); for (var i = 0; i < n; i++) if (!f.call(t, this[i], i, this)) return false; return true; });
 hide(TAP, 'some', function some(f, t) { var n = len(this, 'TypedArray.prototype.some'); fn(f, 'some'); for (var i = 0; i < n; i++) if (f.call(t, this[i], i, this)) return true; return false; });
 hide(TAP, 'fill', function fill(v, start, end) {
-  var n = len(this, 'TypedArray.prototype.fill'); var x = Number(v);
+  var n = len(this, 'TypedArray.prototype.fill'); var x = elemOf(taInfo(this)[0])(v);
   var s = relIndex(start, n, 0), e = relIndex(end, n, n);
   for (var i = s; i < e; i++) this[i] = x;
   return this;
@@ -656,7 +660,7 @@ hide(TAP, 'toSorted', function toSorted(cmp) {
 });
 hide(TAP, 'with', function (index, value) {
   var n = len(this, 'TypedArray.prototype.with'); var k = toIntegerOrInfinity(index); if (k < 0) k += n;
-  var x = Number(value);
+  var x = elemOf(taInfo(this)[0])(value);
   if (k < 0 || k >= n) throw new RangeError('Invalid typed array index');
   var out = sameKind(this, n);
   for (var i = 0; i < n; i++) out[i] = i === k ? x : this[i];
@@ -685,7 +689,7 @@ getter(DVP, 'buffer', function () { return dv(this, 'DataView.prototype.buffer')
 getter(DVP, 'byteLength', function () { var d = dv(this, 'DataView.prototype.byteLength'); if (bufInfo(d[0]) === -2) throw new TypeError('detached'); return d[2]; });
 getter(DVP, 'byteOffset', function () { var d = dv(this, 'DataView.prototype.byteOffset'); if (bufInfo(d[0]) === -2) throw new TypeError('detached'); return d[1]; });
 tag(DVP, 'DataView');
-['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64'].forEach(function (name, kind) {
+['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64', 'BigInt64', 'BigUint64'].forEach(function (name, kind) {
   if (!name) return;
   hide(DVP, 'get' + name, function (index, little) {
     var d = dv(this, 'DataView.prototype.get' + name); var i = toIndex(index, 'offset');
@@ -694,7 +698,7 @@ tag(DVP, 'DataView');
     return bufGet(d[0], d[1] + i, kind, !!little);
   });
   hide(DVP, 'set' + name, function (index, value, little) {
-    var d = dv(this, 'DataView.prototype.set' + name); var i = toIndex(index, 'offset'); var x = Number(value);
+    var d = dv(this, 'DataView.prototype.set' + name); var i = toIndex(index, 'offset'); var x = elemOf(kind)(value);
     if (bufInfo(d[0]) === -2) throw new TypeError('Cannot perform DataView.prototype.set' + name + ' on a detached ArrayBuffer');
     if (i + SIZES[kind] > d[2]) throw new RangeError('Offset is outside the bounds of the DataView');
     bufSet(d[0], d[1] + i, kind, x, !!little);
@@ -706,7 +710,7 @@ hide(globalThis, 'DataView', DataView);
 var Atomics = {};
 function intTA(ta, what) {
   var i = live(ta, 'Atomics.' + what);
-  if (i[0] === 2 || i[0] > 6) throw new TypeError('Atomics.' + what + ': not an integer typed array');
+  if (i[0] === 2 || (i[0] > 6 && i[0] < 9)) throw new TypeError('Atomics.' + what + ': not an integer typed array');
   return i;
 }
 function atomicIndex(i, index) {

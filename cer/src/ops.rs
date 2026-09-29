@@ -249,3 +249,5 @@ pub const OP_ITER_CLOSE: int = 139;
 pub const OP_ITER_CLOSE_AT: int = 140;
 /// [iterable] → [async iterator] (`for await`)
 pub const OP_ASYNC_ITER: int = 141;
+/// [decimal text] → [the BigInt]
+pub const OP_BIGINT: int = 142;

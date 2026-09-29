@@ -56,6 +56,8 @@ pub const C_ARRAYBUFFER: int = 20;
 pub const C_TYPED: int = 21;
 /// a Proxy (proxy.rs)
 pub const C_PROXY: int = 22;
+/// a BigInt primitive (bigint.rs): its decimal text in prim, interned
+pub const C_BIGINT: int = 23;
 
 // property attributes
 pub const P_HIDDEN: int = 1;

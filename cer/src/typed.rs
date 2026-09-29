@@ -23,6 +23,8 @@ pub const TK_INT32: int = 5;
 pub const TK_UINT32: int = 6;
 pub const TK_FLOAT32: int = 7;
 pub const TK_FLOAT64: int = 8;
+pub const TK_BIGINT64: int = 9;
+pub const TK_BIGUINT64: int = 10;
 
 pub const NF_BUF_NEW: int = 920;
 pub const NF_BUF_INFO: int = 921;
@@ -184,6 +186,44 @@ fn int_bits(kind: int, x: double) -> double {
 }
 
 impl Vm {
+    /// A BigInt64 / BigUint64 element at byte `at`.
+    pub fn buf_read_big(&mut self, b: int, at: int, kind: int, little: bool) -> Val {
+        let mut acc = String::from("0");
+        let mut k: int = 0;
+        while k < 8 {
+            let idx = if little { at + 7 - k } else { at + k };
+            let byte = self.byte(b, idx);
+            acc = crate::bigint::add(crate::bigint::mul(acc.as_str(), "256").as_str(), format!("{}", byte).as_str());
+            k += 1;
+        }
+        if kind == TK_BIGINT64 {
+            acc = crate::bigint::as_int_n(64, acc.as_str());
+        }
+        self.bigint_val(acc.as_str())
+    }
+
+    /// Writes a BigInt (converted already) as 64 bits at byte `at`.
+    pub fn buf_write_big(&mut self, b: int, at: int, v: &Val, little: bool) {
+        let t = self.big_text(v);
+        let mut x = crate::bigint::as_uint_n(64, t.as_str());
+        let mut low: Vec<int> = Vec::new();
+        let mut j = 0;
+        while j < 8 {
+            let r = crate::bigint::rem(x.as_str(), "256");
+            low.push(crate::bigint::to_double(r.as_str()) as int);
+            x = crate::bigint::div(x.as_str(), "256");
+            j += 1;
+        }
+        let mut k: int = 0;
+        while k < 8 {
+            // low[0] is the least significant byte
+            let byte = low[(7 - k) as usize];
+            let idx = if little { at + 7 - k } else { at + k };
+            self.objs[b as usize].elems[idx as usize] = Val::Num(byte as double);
+            k += 1;
+        }
+    }
+
     pub fn is_typed(&self, v: &Val) -> bool {
         self.class_of(v) == C_TYPED
     }
@@ -304,18 +344,31 @@ impl Vm {
     }
 
     /// `ta[i]`: undefined outside the view.
-    pub fn ta_get(&self, o: int, i: int) -> Val {
+    pub fn ta_get(&mut self, o: int, i: int) -> Val {
         if i < 0 || i >= self.ta_length(o) {
             return Val::Undef;
         }
         let kind = self.objs[o as usize].pos;
         let at = self.objs[o as usize].func + i * kind_size(kind);
         let b = self.objs[o as usize].env;
+        if kind >= TK_BIGINT64 {
+            return self.buf_read_big(b, at, kind, true);
+        }
         Val::Num(self.buf_read(b, at, kind, true))
     }
 
     /// `ta[i] = v`: the value is converted even when `i` is outside.
     pub fn ta_set(&mut self, o: int, i: int, v: &Val) {
+        if self.objs[o as usize].pos >= TK_BIGINT64 {
+            let big = self.to_bigint(v);
+            if self.throwing || i < 0 || i >= self.ta_length(o) {
+                return;
+            }
+            let at = self.objs[o as usize].func + i * 8;
+            let b = self.objs[o as usize].env;
+            self.buf_write_big(b, at, &big, true);
+            return;
+        }
         let x = self.to_number(v);
         if self.throwing || i < 0 || i >= self.ta_length(o) {
             return;
@@ -400,6 +453,9 @@ impl Vm {
                 self.throw_range("Offset is outside the bounds of the DataView");
                 return Val::Undef;
             }
+            if kind >= TK_BIGINT64 {
+                return self.buf_read_big(b, at, kind, truthy(&a[3]));
+            }
             return Val::Num(self.buf_read(b, at, kind, truthy(&a[3])));
         }
         if id == NF_BUF_SET {
@@ -412,6 +468,11 @@ impl Vm {
             let at = num(&a[1]) as int;
             if at < 0 || at + kind_size(kind) > self.objs[b as usize].elems.len() as int {
                 self.throw_range("Offset is outside the bounds of the DataView");
+                return Val::Undef;
+            }
+            if kind >= TK_BIGINT64 {
+                let v = a[3].clone();
+                self.buf_write_big(b, at, &v, truthy(&a[4]));
                 return Val::Undef;
             }
             let x = num(&a[3]);

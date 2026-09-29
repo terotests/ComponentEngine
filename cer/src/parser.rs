@@ -1700,6 +1700,14 @@ impl Parser {
         let line = self.line();
         let k = self.kind();
         if k == T_NUM {
+            let raw = self.toks[self.pos as usize].text.clone();
+            if raw.starts_with("n:") {
+                let n = self.node(N_BIGINT);
+                let digits: String = String::from(&raw[2..]);
+                self.ast.nodes[n as usize].s = digits;
+                self.next();
+                return n;
+            }
             let n = self.node(N_NUM);
             let v = self.toks[self.pos as usize].num;
             self.ast.nodes[n as usize].num = v;

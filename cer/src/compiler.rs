@@ -1849,6 +1849,12 @@ impl Compiler {
             self.yield_expr(n);
             return;
         }
+        if k == N_BIGINT {
+            let s = self.ast.nodes[n as usize].s.clone();
+            self.push_str(s.as_str());
+            self.op(OP_BIGINT);
+            return;
+        }
         if k == N_NUM {
             let v = self.ast.nodes[n as usize].num;
             self.push_num(v);

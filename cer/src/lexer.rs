@@ -374,6 +374,7 @@ impl Lexer {
             self.pos += 2;
             let mut v: double = 0.0;
             let mut digits = 0;
+            let mut text = String::new();
             loop {
                 let d = self.cur();
                 if d == '_' {
@@ -385,11 +386,15 @@ impl Lexer {
                     break;
                 }
                 v = v * base + (h as double);
+                text.push(d);
                 digits += 1;
                 self.pos += 1;
             }
             if self.cur() == 'n' {
+                // a BigInt literal: its decimal text, marked
                 self.pos += 1;
+                let dec = crate::bigint::from_radix(text.as_str(), base as int);
+                *raw = format!("n:{}", dec);
             }
             if digits == 0 {
                 self.fail("missing digits");
@@ -426,9 +431,11 @@ impl Lexer {
             self.pos += 1;
         }
         if self.cur() == 'n' {
-            // a BigInt literal, read as a number
+            // a BigInt literal: its decimal text, marked
             self.pos += 1;
             self.check_after_number();
+            let dec = crate::bigint::from_radix(text.as_str(), 10);
+            *raw = format!("n:{}", dec);
             return text.parse::<f64>().unwrap_or(0.0);
         }
         if self.cur() == '.' {
