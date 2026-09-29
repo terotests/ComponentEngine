@@ -1,7 +1,8 @@
 name: CI
 
-# Every pull request and every push to main runs the tests of all three
-# parts. "All tests" passes only when every test job passed: it is the one
+# Every pull request and every push to main runs the unit tests of the
+# three parts (engine, CEr, CErXes) and CEr's conformance probes on CEr
+# and CErXes. "All tests" passes only when every test job passed: it is the one
 # check main's ruleset requires (.github/rulesets/protect-main.json), so a
 # pull request cannot be merged into main while a test fails.
 
@@ -26,19 +27,24 @@ jobs:
         run: npm test
 
   cer:
-    name: CEr (cargo)
+    name: CEr (cargo, rgrc JS)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --release --manifest-path cer/Cargo.toml
-      - name: Unit tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Unit tests (cargo; cer/tests/cases.txt)
         run: cargo test --release --manifest-path cer/Cargo.toml
       - name: Run a script
         run: |
           echo 'var a=[1,2,3];console.log(a.map(function(x){return x*x}).join("-"))' > /tmp/t.js
           test "$(cer/target/release/cer /tmp/t.js)" = "1-4-9"
+      - name: The same cases on CEr built by rgrc (JavaScript)
+        run: node cerxes/bench/cases.mjs --targets=cer-js --build
 
   cerxes:
     name: CErXes (cargo, rgrc JS / C++ / Go)
@@ -54,15 +60,42 @@ jobs:
         with:
           go-version: stable
       - run: npm ci
-      - name: Unit tests (cargo)
+      - name: Unit tests (cargo; cerxes/tests/cases.txt, and CEr's cases as JS and as TSX)
         run: cargo test --release --manifest-path cerxes/Cargo.toml
       - name: The same cases on the rgrc builds (JavaScript, C++, Go)
         run: node cerxes/bench/cases.mjs --targets=js,cpp,go --build
 
+  conformance:
+    name: Conformance (CEr and CErXes, no regressions)
+    runs-on: ubuntu-latest
+    env:
+      # the probes of Ranger's tests/runtime-conformance.test.ts, at the
+      # revision cer/Cargo.toml and cerxes/Cargo.toml name
+      RANGER_DIR: ${{ github.workspace }}/Ranger
+      # how many probes agree with Node today; raise it when CEr gets better
+      MIN_AGREE: "1667"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: terotests/Ranger
+          ref: ecedb1622b431aab5e6fef91c406cd04307da817
+          path: Ranger
+          sparse-checkout: tests/runtime-conformance.test.ts
+          sparse-checkout-cone-mode: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: CEr
+        run: node cer/bench/conformance.mjs --min=$MIN_AGREE
+      - name: CErXes (the probes read as TSX)
+        run: node cer/bench/conformance.mjs --cerxes --min=$MIN_AGREE
+
   all-tests:
     name: All tests
     if: always()
-    needs: [engine, cer, cerxes]
+    needs: [engine, cer, cerxes, conformance]
     runs-on: ubuntu-latest
     steps:
       - name: Every test job passed

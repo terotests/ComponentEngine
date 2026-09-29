@@ -1,0 +1,226 @@
+# CEr unit cases: plain JavaScript, run by tests/cases.rs in a fresh
+# engine each. The expected value is what Node answers (the value of the
+# script's last expression statement); CErXes runs the same cases
+# (its tests/syntax.rs) and must answer the same.
+#
+# A case: `==== js <title>`, the script, `----`, the value.
+
+==== js numbers and operators
+String([1 + 2 * 3, 7 / 2, 2 ** 10, 7 % 3, -7 % 3, 1 / 0, 0.1 + 0.2, 5 >>> 1, -5 >> 1, 1 << 31, ~5, 10 ** -2])
+----
+7,3.5,1024,1,-1,Infinity,0.30000000000000004,2,-3,-2147483648,-6,0.01
+
+==== js number formatting
+String([(255).toString(16), (3.14159).toFixed(2), (1e21), 123.456e-10, Number('0x1f'), parseInt('08'), parseFloat('3.5abc'), (0.000001234).toPrecision(2)])
+----
+ff,3.14,1e+21,1.23456e-8,31,8,3.5,0.0000012
+
+==== js strings
+var s = 'Hello, World'; [s.length, s.toUpperCase(), s.slice(-5), s.indexOf('o'), s.split(', ').join('|'), s.replace(/o/g, '0'), s.padStart(14, '*'), s.at(-1), 'ab'.repeat(3)].join(';')
+----
+12;HELLO, WORLD;World;4;Hello|World;Hell0, W0rld;**Hello, World;d;ababab
+
+==== js template literals
+var a = 2, b = 3; `${a} + ${b} = ${a + b}, nested ${`x${a}`}`
+----
+2 + 3 = 5, nested x2
+
+==== js let/const scoping
+var out = []; for (let i = 0; i < 3; i++) out.push(() => i); { const k = 5; out.push(() => k); } out.map(f => f()).join()
+----
+0,1,2,5
+
+==== js closures
+function counter() { let n = 0; return { inc: () => ++n, get: () => n }; } var c = counter(); c.inc(); c.inc(); c.get()
+----
+2
+
+==== js hoisting
+var r = typeof f + typeof v; function f() {} var v = 1; r
+----
+functionundefined
+
+==== js arguments and rest
+function f(a, ...r) { return arguments.length + ':' + r.join('-'); } f(1, 2, 3)
+----
+3:2-3
+
+==== js default parameters
+function f(a, b = a * 2, c = b + 1) { return [a, b, c].join(); } f(1) + '|' + f(1, 5)
+----
+1,2,3|1,5,6
+
+==== js destructuring
+var { a, b: { c = 3 } = {}, ...rest } = { a: 1, d: 4, e: 5 }; var [x, , y = 9, ...z] = [1, 2, undefined, 4, 5]; [a, c, Object.keys(rest).join(''), x, y, z.join('')].join()
+----
+1,3,de,1,9,45
+
+==== js spread
+var a = [1, 2]; var o = { x: 1, ...{ y: 2 } }; [Math.max(...a, 3), [...a, ...'ab'].join(''), o.x + o.y].join()
+----
+3,12ab,3
+
+==== js arrow this
+var o = { v: 7, f() { return [1].map(() => this.v)[0]; } }; o.f()
+----
+7
+
+==== js classes
+class A { #p = 1; static s = 'S'; constructor(x) { this.x = x; } get twice() { return this.x * 2; } p() { return this.#p; } static make() { return new this(3); } } class B extends A { constructor() { super(4); } get twice() { return super.twice + 1; } } [new B().twice, A.make().twice, A.s, new A(1).p(), new B() instanceof A].join()
+----
+9,6,S,1,true
+
+==== js getters and setters
+var o = { _v: 1, get v() { return this._v * 10; }, set v(x) { this._v = x; } }; o.v = 4; o.v
+----
+40
+
+==== js prototypes
+function P(n) { this.n = n; } P.prototype.hi = function () { return 'hi ' + this.n; }; var p = new P('x'); [p.hi(), Object.getPrototypeOf(p) === P.prototype, p.hasOwnProperty('hi')].join()
+----
+hi x,true,false
+
+==== js optional chaining and nullish
+var o = { a: { b: null } }; [o?.a?.b?.c, o.x?.y, o.a.b ?? 'd', 0 ?? 1, o.f?.(), (o.a.b ||= 5), o.a.b].join()
+----
+,,d,0,,5,5
+
+==== js labels and loops
+var n = 0; outer: for (var i = 0; i < 5; i++) { for (var j = 0; j < 5; j++) { if (j == 3) continue outer; if (i == 3) break outer; n++; } } n
+----
+9
+
+==== js switch
+function f(x) { switch (x) { case 1: return 'one'; case 2: case 3: return 'few'; default: return 'many'; } } [f(1), f(3), f(9)].join()
+----
+one,few,many
+
+==== js exceptions
+function f() { try { throw new TypeError('bad'); } catch (e) { return e instanceof TypeError && e.message; } finally { } } var g = () => { try { return 1; } finally { return 2; } }; f() + g()
+----
+bad2
+
+==== js error types
+var r = []; try { null.x; } catch (e) { r.push(e.constructor.name); } try { undefinedName; } catch (e) { r.push(e.name); } try { JSON.parse('{'); } catch (e) { r.push(e.name); } r.join()
+----
+TypeError,ReferenceError,SyntaxError
+
+==== js arrays
+var a = [5, 1, 4, 2, 3]; [a.slice().sort().join(''), a.filter(x => x > 2).join(''), a.reduce((s, x) => s + x, 0), a.indexOf(4), a.includes(9), a.find(x => x > 3), a.findLast(x => x < 3), [1, [2, [3]]].flat(Infinity).join(''), Array.from({ length: 3 }, (_, i) => i * i).join('')].join()
+----
+12345,543,15,2,false,5,2,123,014
+
+==== js array mutation
+var a = [1, 2, 3]; a.push(4); a.unshift(0); var s = a.splice(1, 2, 'x'); [a.join(''), s.join(''), a.length, a.reverse().join('')].join('|')
+----
+0x34|12|4|43x0
+
+==== js sort comparator
+[10, 9, 1, 100].sort((a, b) => a - b).join() + '|' + ['b', 'a', 'C'].sort().join()
+----
+1,9,10,100|C,a,b
+
+==== js objects
+var o = { b: 2, a: 1, 1: 'x' }; [Object.keys(o).join(''), Object.values(o).join(''), Object.entries(o).length, JSON.stringify(Object.assign({}, o, { c: 3 })), 'a' in o, delete o.a, 'a' in o].join('|')
+----
+1ba|x21|3|{"1":"x","b":2,"a":1,"c":3}|true|true|false
+
+==== js JSON
+var o = JSON.parse('{"a":[1,2,{"b":null}],"c":"s"}'); JSON.stringify(o) + JSON.stringify({ x: 1, y: [true] }, null, 1).length
+----
+{"a":[1,2,{"b":null}],"c":"s"}30
+
+==== js Map and Set
+var m = new Map([[1, 'a'], ['1', 'b']]); m.set(NaN, 'n'); var s = new Set([1, 2, 2, 3]); [m.size, m.get(1), m.get('1'), m.get(NaN), s.size, [...s].join(''), s.has(2)].join()
+----
+3,a,b,n,3,123,true
+
+==== js iterators
+var it = { from: 1, to: 3, [Symbol.iterator]() { var c = this.from, t = this.to; return { next: () => c <= t ? { value: c++, done: false } : { value: undefined, done: true } }; } }; var out = []; for (var v of it) out.push(v); out.join('') + [...it].length
+----
+1233
+
+==== js for in
+var o = { a: 1, b: 2 }; var k = []; for (var p in o) k.push(p); k.join('')
+----
+ab
+
+==== js regex
+var m = /(?<y>\d{4})-(\d{2})/.exec('on 2026-09 ok'); [m.groups.y, m[2], m.index, 'aBc'.replace(/b/i, 'X'), 'a1b22c333'.match(/\d+/g).join('|'), /^\w+$/.test('ab_1'), 'x'.search(/y/)].join()
+----
+2026,09,3,aXc,1|22|333,true,-1
+
+==== js regex replace function
+'john smith'.replace(/(\w)(\w*)/g, (m, a, b) => a.toUpperCase() + b)
+----
+John Smith
+
+==== js Math
+[Math.floor(-1.5), Math.round(2.5), Math.round(-2.5), Math.trunc(-4.7), Math.sign(-3), Math.hypot(3, 4), Math.min(), Math.max()].join()
+----
+-2,3,-2,-4,-1,5,Infinity,-Infinity
+
+==== js type coercion
+[1 + '2', '3' * '4', true + 1, [] + {}, [1] == 1, null == undefined, null === undefined, NaN == NaN, typeof null, +'', +' 12 ', '10' < '9', 10 < 9].join()
+----
+12,12,2,[object Object],true,true,false,false,object,0,12,true,false
+
+==== js Symbol
+var s = Symbol('d'); var o = { [s]: 1, x: 2 }; [s.toString(), s.description, o[s], Object.keys(o).length, typeof s].join()
+----
+Symbol(d),d,1,1,symbol
+
+==== js Date (UTC)
+var d = new Date(Date.UTC(2020, 1, 29, 12, 30)); [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.toISOString()].join()
+----
+2020,1,29,2020-02-29T12:30:00.000Z
+
+==== js Promise jobs
+var log = []; Promise.resolve(1).then(v => log.push('then ' + v)); log.push('sync'); var r = log.join(); r
+----
+sync
+
+==== js getter on class static
+class C { static #n = 0; static inc() { return ++C.#n; } } C.inc(); C.inc()
+----
+2
+
+==== js Function call/apply/bind
+function f(a, b) { return this.x + a + b; } var o = { x: 1 }; [f.call(o, 2, 3), f.apply(o, [2, 3]), f.bind(o, 10)(20)].join()
+----
+6,6,31
+
+==== js recursion
+function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(20)
+----
+6765
+
+==== js string building
+var s = ''; for (var i = 0; i < 1000; i++) s += i % 10; s.length + ':' + s.slice(0, 12)
+----
+1000:012345678901
+
+==== js tagged templates
+function t(s, ...v) { return s.raw.join('|') + v.join(','); } t`a${1}b${2}c`
+----
+a|b|c1,2
+
+==== js comma, void, typeof undeclared
+var x = (1, 2, 3); [x, void 0, typeof nope].join()
+----
+3,,undefined
+
+==== js strict mode this
+function f() { 'use strict'; return this; } String(f())
+----
+undefined
+
+==== js automatic semicolons
+var a = 1
+var b = a
+++b
+var c = function () { return
+5 }
+;[a, b, c()].join()
+----
+1,2,

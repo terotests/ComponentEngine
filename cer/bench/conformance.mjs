@@ -16,6 +16,8 @@
 //   node bench/conformance.mjs --json     # one JSON object
 //   node bench/conformance.mjs --cerxes   # CErXes (../cerxes), reading them as TSX
 //   node bench/conformance.mjs --cerxes --js  # CErXes compiled to JS by rgrc
+//   node bench/conformance.mjs --min=1667  # fail (exit 1) below that many
+//                                          # agreeing probes: CI's guard
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -32,6 +34,8 @@ const useJs = args.includes("--js");
 const list = args.includes("--list");
 const asJson = args.includes("--json");
 const useCerxes = args.includes("--cerxes");
+const minArg = args.find((a) => a.startsWith("--min="));
+const MIN = minArg ? Number(minArg.slice(6)) : 0;
 const CRATE = useCerxes ? path.resolve(CER, "../cerxes") : CER;
 
 /** The array or set literal that follows `marker` in the test source. */
@@ -185,4 +189,8 @@ if (asJson) {
       console.log(`  ${g}/${n}: want ${JSON.stringify(want).slice(0, 60)} got ${JSON.stringify(got).slice(0, 80)}`);
     }
   }
+}
+if (cerPass < MIN) {
+  console.error(`\n${cerPass} probes agree with Node, fewer than the ${MIN} required (--min): a regression`);
+  process.exit(1);
 }

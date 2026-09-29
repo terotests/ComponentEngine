@@ -26,10 +26,18 @@ npm run cerxes:conformance                    # CEr's conformance probes, read a
 ```
 
 `tests/cases.txt` holds the syntax cases (a script and the value it
-answers); `tests/syntax.rs` runs them on the cargo build, `bench/cases.mjs`
-on the Ranger builds: JavaScript (`rgrc -es6 -nodemodule src/lib.rs`) and
-C++ / Go (`bench/CerxesMain.rgr` through `rgrc -l=cpp|go`, then g++ / go).
-All of them answer every case as the cargo build does.
+answers). `tests/syntax.rs` runs them on the cargo build, and CEr's own
+cases (`../cer/tests/cases.txt`, plain JavaScript, values from Node) both
+as JavaScript and as TSX; `bench/cases.mjs` runs the same on the Ranger
+builds: JavaScript (`rgrc -es6 -nodemodule src/lib.rs`) and C++ / Go
+(`bench/CerxesMain.rgr` through `rgrc -l=cpp|go`, then g++ / go). All of
+them pass every case.
+
+CI (`.github/workflows/ci.yml`) runs these, CEr's cases on CEr (cargo and
+rgrc JS), and the conformance probes on CEr and CErXes with `--min` (no
+fewer agreeing probes than today); its "All tests" check fails unless all
+of them passed. `.github/rulesets/protect-main.json` is a ruleset that
+requires that check (and a pull request) before anything reaches `main`.
 
 ```rust
 let mut e = cerxes::Engine::new();          // TSX by default
