@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  engine:
+    name: engine (Ranger)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Build and smoke-test the Node module
+        run: npm test
+
+  cer:
+    name: CEr (cargo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --manifest-path cer/Cargo.toml
+      - name: Run a script
+        run: |
+          echo 'var a=[1,2,3];console.log(a.map(function(x){return x*x}).join("-"))' > /tmp/t.js
+          test "$(cer/target/release/cer /tmp/t.js)" = "1-4-9"

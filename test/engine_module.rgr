@@ -1,0 +1,13 @@
+; SPDX-License-Identifier: AGPL-3.0-or-later
+
+; The Node module build of ComponentEngine: `-es6 -nodemodule` of this file
+; exports ComponentEngine and the value types it needs, for test/smoke.mjs
+; and for anyone driving the evaluator from JavaScript.
+
+Import "pkg:componentengine/ComponentEngine.rgr"
+
+class EngineModule {
+    sfn m@(main):void () {
+        print "engine module loaded"
+    }
+}
