@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ComponentEngine Playground</title>
+  <meta name="description" content="ComponentEngine's JavaScript evaluator — in Rust compiled to WebAssembly, in Ranger compiled to C++ and WebAssembly, and as JavaScript — benchmarked against the browser's own engine, QuickJS and other small interpreters.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='9' width='3' height='6' rx='1' fill='%232a78d6'/%3E%3Crect x='6.5' y='5' width='3' height='10' rx='1' fill='%232a78d6'/%3E%3Crect x='12' y='1' width='3' height='14' rx='1' fill='%232a78d6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>ComponentEngine Playground</h1>
+      <p class="lede">One JavaScript evaluator, written in Ranger and again in Rust, built several ways and run
+        in your browser next to the browser's own engine and other small interpreters. Every engine runs in a
+        worker of its own; times are wall-clock in this tab.</p>
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-bench" aria-selected="true" aria-controls="panel-bench">Benchmark</button>
+        <button role="tab" id="tab-editor" aria-selected="false" aria-controls="panel-editor">Editor</button>
+        <button role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about">Engines</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="engines" aria-label="Engines">
+      <h2>Engines</h2>
+      <div id="engine-list" class="engine-list"></div>
+    </section>
+
+    <section id="panel-bench" role="tabpanel" aria-labelledby="tab-bench">
+      <div class="controls">
+        <label>Scale <select id="scale">
+          <option>1</option><option selected>2</option><option>5</option><option>10</option><option>25</option>
+        </select></label>
+        <label>Runs per engine <select id="reps">
+          <option>1</option><option selected>3</option><option>5</option><option>10</option>
+        </select></label>
+        <label>Time limit <select id="limit">
+          <option value="10000">10 s</option><option value="30000" selected>30 s</option><option value="120000">2 min</option>
+        </select></label>
+        <button id="run-bench" class="primary">Run benchmark</button>
+        <button id="stop-bench" disabled>Stop</button>
+        <span id="bench-status" class="status" aria-live="polite"></span>
+      </div>
+      <details class="workloads">
+        <summary>Workloads (<span id="wl-count"></span>)</summary>
+        <div id="workload-list" class="workload-list"></div>
+      </details>
+
+      <div class="viz-root">
+        <h3>Slowdown against the browser's own engine</h3>
+        <p class="note">Geometric mean over the workloads each engine answered correctly, median of the runs.
+          Log scale; 1× is the browser.</p>
+        <div id="summary" class="summary" role="img" aria-label="Slowdown per engine"></div>
+        <div id="tooltip" class="tooltip" hidden></div>
+      </div>
+
+      <h3>Per workload (median ms)</h3>
+      <div class="table-wrap"><table id="results" class="results"></table></div>
+    </section>
+
+    <section id="panel-editor" role="tabpanel" aria-labelledby="tab-editor" hidden>
+      <div class="controls">
+        <button id="run-editor" class="primary">Run in ticked engines</button>
+        <label>Runs <select id="editor-reps"><option selected>1</option><option>3</option><option>5</option></select></label>
+        <label>Load <select id="load-sample"><option value="">…a workload</option></select></label>
+        <span id="editor-status" class="status" aria-live="polite"></span>
+      </div>
+      <textarea id="code" spellcheck="false" aria-label="JavaScript to run"></textarea>
+      <div id="editor-results" class="editor-results"></div>
+    </section>
+
+    <section id="panel-about" role="tabpanel" aria-labelledby="tab-about" hidden>
+      <div id="about" class="about"></div>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <a href="https://github.com/terotests/componentengine">terotests/componentengine</a> ·
+    engines built from <code id="build-rev"></code>
+  </footer>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

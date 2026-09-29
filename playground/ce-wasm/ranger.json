@@ -1,0 +1,18 @@
+{
+  "name": "ce_wasm",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "componentengine": { "path": "../../engine" },
+    "ts_parser": {
+      "git": "https://github.com/terotests/Ranger.git",
+      "rev": "ecedb1622b431aab5e6fef91c406cd04307da817",
+      "subdir": "gallery/ts_parser"
+    },
+    "evg": {
+      "git": "https://github.com/terotests/evg.git",
+      "rev": "f3d682ad11d1944251b683e5013ee624be421259",
+      "subdir": "storm"
+    }
+  }
+}

@@ -15,9 +15,17 @@
     "cer:test": "cargo test --release --manifest-path cer/Cargo.toml",
     "cer:conformance": "node cer/bench/conformance.mjs",
     "cer:micro": "node cer/bench/micro.mjs",
-    "cer:octane": "node cer/bench/octane.mjs"
+    "cer:octane": "node cer/bench/octane.mjs",
+    "playground:build": "node playground/build.mjs",
+    "playground:smoke": "node playground/smoke.mjs"
   },
   "devDependencies": {
-    "ranger-compiler": "^4.0.0"
+    "@jitl/quickjs-singlefile-browser-release-sync": "^0.32.0",
+    "esbuild": "^0.28.2",
+    "js-interpreter": "^6.0.2",
+    "playwright-core": "^1.62.1",
+    "quickjs-emscripten-core": "^0.32.0",
+    "ranger-compiler": "^4.0.0",
+    "sval": "^0.6.12"
   }
 }

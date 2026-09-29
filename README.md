@@ -9,6 +9,7 @@ and CEr, the same evaluator written again as a strict Rust module.
 | `cer/` | CEr: the evaluator in Rust; builds with cargo, and with `rgrc` into the Ranger targets |
 | `tools/` | the generators of `engine/`'s Unicode and locale tables |
 | `test/` | the Node module build (`engine_module.rgr`) and a smoke test |
+| `playground/` | the browser playground: both engines as WebAssembly and JavaScript, benchmarked against the browser, QuickJS and others — <https://terotests.github.io/ComponentEngine/> |
 
 Both moved here from Ranger (`gallery/game_engine/v2/interp/migrate/src` and
 `gallery/game_engine/v2/cer`) in September 2026. The parts of `interp/` that
