@@ -3,8 +3,9 @@
 // process of its own so the benchmarks can give it a time limit.
 const fs = require("fs");
 const path = require("path");
-const mod = require(path.join(__dirname, "../../bin/engine_module.cjs"));
-const src = fs.readFileSync(process.argv[2], "utf8");
+// argv: the engine module (common.mjs's CE_MODULE), the script.
+const mod = require(path.resolve(process.argv[2]));
+const src = fs.readFileSync(process.argv[3], "utf8");
 const log = (...a) => process.stdout.write(a.map(String).join(" ").replace(/^\[tsx\]\s*/, "") + "\n");
 console.log = log;
 console.warn = log;

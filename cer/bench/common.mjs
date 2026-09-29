@@ -11,8 +11,44 @@ import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 
 export const CER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export { REPO, RANGER, rgrc } from "../../scripts/compiler.mjs";
-import { REPO, rgrc } from "../../scripts/compiler.mjs";
+// Two homes: terotests/componentengine (cer/ beside engine/) and a Ranger
+// checkout, where npm run deps puts this directory at gallery/cer.
+export const IN_RANGER = fs.existsSync(path.join(CER, "../../dist/rgrc.js")) && fs.existsSync(path.join(CER, "../../compiler"));
+/** The componentengine checkout (only when not in Ranger). */
+export const REPO = path.resolve(CER, "..");
+/** A Ranger checkout, for what lives there: the Octane suites
+ * (gallery/game_engine/v2/interp/bench/zoo_octane) and the conformance
+ * probes (tests/runtime-conformance.test.ts). The one this directory is in,
+ * else RANGER_DIR, else ../Ranger beside the componentengine checkout. */
+export const RANGER = IN_RANGER
+  ? path.resolve(CER, "../..")
+  : path.resolve(process.env.RANGER_DIR || path.join(REPO, "../Ranger"));
+/** ComponentEngine's es6 build, the `ce-js` engine. */
+export const CE_MODULE = IN_RANGER
+  ? path.join(RANGER, "gallery/game_engine/v2/interp/bin/engine_module.cjs")
+  : path.join(REPO, "bin/engine_module.cjs");
+
+/** Cargo's arguments before the command's own: in Ranger, the `ranger`
+ * prelude crate is the checkout's runtime/rust/ranger, not the revision
+ * Cargo.toml names, so a change there is tested with CEr at once. */
+export function cargoConfig() {
+  if (!IN_RANGER) return [];
+  const crate = path.join(RANGER, "runtime/rust/ranger");
+  return ["--config", `patch."https://github.com/terotests/Ranger.git".ranger.path=${JSON.stringify(crate)}`];
+}
+
+/** The compiler: RANGER_ROOT/dist/rgrc.js, the ranger-compiler package of
+ * the componentengine checkout, else the Ranger checkout's. */
+export function rgrc() {
+  const cands = [
+    process.env.RANGER_ROOT && path.join(process.env.RANGER_ROOT, "dist/rgrc.js"),
+    !IN_RANGER && path.join(REPO, "node_modules/ranger-compiler/dist/rgrc.js"),
+    path.join(RANGER, "dist/rgrc.js"),
+  ].filter(Boolean);
+  const hit = cands.find((f) => fs.existsSync(f));
+  if (!hit) throw new Error("no Ranger compiler: npm ci, or set RANGER_ROOT / RANGER_DIR");
+  return hit;
+}
 
 export const PRINT_PRELUDE = `
 function print() {
@@ -49,12 +85,12 @@ export function runNode(src) {
   return out;
 }
 
-/** ComponentEngine compiled to JavaScript (engine/, built into bin/),
+/** ComponentEngine compiled to JavaScript (CE_MODULE),
  * in a process of its own with a time limit (CE_TIMEOUT_MS, default 300 s). */
 export function runComponentEngine(src) {
   const f = tmpFile(PRINT_PRELUDE + src);
   const limit = Number(process.env.CE_TIMEOUT_MS || 300000);
-  const r = spawnSync(process.execPath, ["--stack-size=8000", path.join(CER, "bench/ce_runner.cjs"), f], {
+  const r = spawnSync(process.execPath, ["--stack-size=8000", path.join(CER, "bench/ce_runner.cjs"), CE_MODULE, f], {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: limit,
@@ -130,27 +166,28 @@ export function engines(want) {
 /** Builds what the chosen engines need. */
 export function build(want) {
   const run = (cmd, args, cwd) => {
-    const r = spawnSync(cmd, args, { cwd: cwd || REPO, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    const r = spawnSync(cmd, args, { cwd: cwd || (IN_RANGER ? RANGER : REPO), encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
     const log = (r.stdout || "") + (r.stderr || "");
     if (r.status !== 0 || log.includes("[FAIL]")) {
       throw new Error(cmd + " " + args.join(" ") + "\n" + log.slice(-3000));
     }
   };
   if (want.includes("cer-rust")) {
-    run("cargo", ["build", "--release", "--quiet", "--manifest-path", path.join(CER, "Cargo.toml")]);
+    run("cargo", ["build", ...cargoConfig(), "--release", "--quiet", "--manifest-path", path.join(CER, "Cargo.toml")]);
   }
   if (want.includes("cer-js")) {
-    run("node", ["--stack-size=8000", rgrc(), "-es6", "-nodemodule", "cer/src/lib.rs", "-d=cer/bin", "-o=Cer.cjs"]);
+    run("node", ["--stack-size=8000", rgrc(), "-es6", "-nodemodule", path.join(CER, "src/lib.rs"), "-d=" + path.join(CER, "bin"), "-o=Cer.cjs"]);
   }
-  if (want.includes("ce-js") && !fs.existsSync(path.join(REPO, "bin/engine_module.cjs"))) {
-    run("node", ["scripts/build.mjs"]);
+  if (want.includes("ce-js") && !fs.existsSync(CE_MODULE)) {
+    if (IN_RANGER) run("bash", ["scripts/build-engine-module.sh"]);
+    else run("node", ["scripts/build.mjs"]);
   }
   for (const t of ["cpp", "go"]) {
     if (!want.includes("cer-" + t)) continue;
     const dir = path.join(os.tmpdir(), "cer-" + t);
     fs.mkdirSync(dir, { recursive: true });
     const srcName = "cer_main." + t;
-    run("node", ["--stack-size=8000", rgrc(), "-l=" + t, "cer/bench/CerMain.rgr", "-d=" + dir, "-o=" + srcName]);
+    run("node", ["--stack-size=8000", rgrc(), "-l=" + t, path.join(CER, "bench/CerMain.rgr"), "-d=" + dir, "-o=" + srcName]);
     const bin = path.join(CER, "bin", "cer_main_" + t);
     if (t === "cpp") {
       run("g++", ["-std=c++17", "-O2", "-o", bin, path.join(dir, srcName)]);

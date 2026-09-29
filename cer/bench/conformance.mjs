@@ -20,10 +20,10 @@ import os from "os";
 import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
+import { RANGER, cargoConfig } from "./common.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CER = path.resolve(HERE, "..");
-const RANGER = path.resolve(process.env.RANGER_DIR || path.join(CER, "../../Ranger"));
 const TEST = path.join(RANGER, "tests/runtime-conformance.test.ts");
 const args = process.argv.slice(2);
 const useJs = args.includes("--js");
@@ -109,7 +109,7 @@ if (useJs) {
   const recs = PROBES.map(([name, body]) => name + "\u0002" + script(body)).join("\u0001");
   const file = path.join(os.tmpdir(), "cer-probes-" + process.pid + ".txt");
   fs.writeFileSync(file, recs);
-  const r = spawnSync("cargo", ["run", "--release", "--quiet", "--bin", "probe", "--manifest-path", path.join(CER, "Cargo.toml"), "--", file], {
+  const r = spawnSync("cargo", ["run", ...cargoConfig(), "--release", "--quiet", "--bin", "probe", "--manifest-path", path.join(CER, "Cargo.toml"), "--", file], {
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
     env: { ...process.env, CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || path.join(CER, "target") },
