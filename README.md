@@ -7,7 +7,7 @@ and CEr, the same evaluator written again as a strict Rust module.
 | --- | --- |
 | `engine/` | ComponentEngine in Ranger — the Ranger package `componentengine` (entry `ComponentEngine.rgr`) |
 | `cer/` | CEr: the evaluator in Rust; builds with cargo, and with `rgrc` into the Ranger targets |
-| `cerxes/` | CErXes: CEr with TypeScript and JSX — a front-end of its own that builds CEr's syntax tree ([`cerxes/README.md`](cerxes/README.md)) |
+| `cerxes/` | CErXes: CEr with TypeScript and JSX — a front-end of its own that builds CEr's syntax tree; builds with cargo and with `rgrc` ([`cerxes/README.md`](cerxes/README.md)) |
 | `tools/` | the generators of `engine/`'s Unicode and locale tables |
 | `test/` | the Node module build (`engine_module.rgr`) and a smoke test |
 | `playground/` | the browser playground: CEr as WebAssembly (and, as a curiosity, as JavaScript through Ranger), benchmarked against the browser's own engine and QuickJS — <https://terotests.github.io/ComponentEngine/> |

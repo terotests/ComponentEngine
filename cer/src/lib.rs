@@ -71,17 +71,10 @@ impl Engine {
             self.error = p.error.clone();
             return self.error.clone();
         }
-        self.run_ast(p.ast, root)
-    }
-
-    /// Compiles and runs a tree another front-end parsed (`root` is its
-    /// N_PROGRAM node); answers as `eval` does.
-    pub fn run_ast(&mut self, tree: ast::Ast, root: int) -> String {
-        self.error = String::new();
         let atoms = self.vm.atoms.clone();
         let names = self.vm.atom_names.clone();
         let base = self.vm.protos.len() as int;
-        let mut c = compiler::Compiler::new(tree, atoms, names, base);
+        let mut c = compiler::Compiler::new(p.ast, atoms, names, base);
         let entry = c.compile_program(root);
         if !c.error.is_empty() || entry < 0 {
             self.error = if c.error.is_empty() { String::from("SyntaxError") } else { c.error.clone() };
@@ -118,16 +111,10 @@ impl Engine {
         if !p.error.is_empty() {
             return format!("t:{}", p.error);
         }
-        self.run_ast_typed(p.ast, root)
-    }
-
-    /// `run_ast`, answering as `eval_typed` does.
-    pub fn run_ast_typed(&mut self, tree: ast::Ast, root: int) -> String {
-        self.error = String::new();
         let atoms = self.vm.atoms.clone();
         let names = self.vm.atom_names.clone();
         let base = self.vm.protos.len() as int;
-        let mut c = compiler::Compiler::new(tree, atoms, names, base);
+        let mut c = compiler::Compiler::new(p.ast, atoms, names, base);
         let entry = c.compile_program(root);
         if !c.error.is_empty() || entry < 0 {
             return format!("t:{}", c.error);

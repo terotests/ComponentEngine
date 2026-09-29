@@ -1,17 +1,35 @@
 # CErXes — CEr with TypeScript and JSX
 
 [CEr](../cer) reads JavaScript. CErXes reads TypeScript and JSX as well, and
-hands CEr the same syntax tree (`cer::ast`), so CEr's compiler, VM and
+builds the same syntax tree CEr's parser builds, so CEr's compiler, VM and
 built-ins run the result unchanged. Only the front-end is new: CEr's lexer
-and parser, grown. CEr is unchanged apart from `Engine::run_ast` /
-`run_ast_typed`, which run a tree another front-end parsed; its own
-parser, and so its speed on `.js`, are the same.
+and parser, grown. CEr's own files are not changed; its speed on `.js` is
+its own.
+
+Like CEr, CErXes is a strict Rust module (Ranger's
+[PLAN_RUST_SYNTAX](https://github.com/terotests/Ranger/blob/master/docs/plans/PLAN_RUST_SYNTAX.md)):
+the same source builds with cargo and with `rgrc` into the Ranger targets.
+`rgrc` reads the modules of one crate, not a crate's Cargo dependencies, so
+CEr's back-end is in this crate as links to CEr's files (`src/ast.rs`,
+`src/compiler.rs`, `src/vm.rs`, `src/value.rs`, `src/builtins*.rs`,
+`src/regex.rs`, `src/num.rs`, `src/jsstr.rs`, `src/ops.rs`,
+`src/prelude.rs` → `../cer/src`) rather than a dependency on the `cer`
+crate. (A checkout needs symbolic links: on Windows, git's
+`core.symlinks`.)
 
 ```sh
 cargo run --release --bin cerxes -- app.tsx   # .ts TS, .tsx both, .js/.jsx JSX
-npm run cerxes:test                           # the syntax tests (tests/syntax.rs)
+npm run cerxes:build                          # rgrc: bin/Cerxes.cjs
+npm run cerxes:test                           # tests/cases.txt on cargo and on rgrc's JS
+node cerxes/bench/cases.mjs --targets=js,cpp,go --build   # … and C++ and Go
 npm run cerxes:conformance                    # CEr's conformance probes, read as TSX
 ```
+
+`tests/cases.txt` holds the syntax cases (a script and the value it
+answers); `tests/syntax.rs` runs them on the cargo build, `bench/cases.mjs`
+on the Ranger builds: JavaScript (`rgrc -es6 -nodemodule src/lib.rs`) and
+C++ / Go (`bench/CerxesMain.rgr` through `rgrc -l=cpp|go`, then g++ / go).
+All of them answer every case as the cargo build does.
 
 ```rust
 let mut e = cerxes::Engine::new();          // TSX by default
@@ -62,7 +80,7 @@ the value of that name. Text follows React's whitespace rule and takes HTML
 character references (`&amp;`, `&#123;`, `&copy;` …). `/** @jsx h */` and
 `/** @jsxFrag Frag */` name another factory and fragment.
 
-The default runtime (`src/prelude.rs`, three non-enumerable globals a
+The default runtime (`src/jsx_runtime.rs`, three non-enumerable globals a
 script may replace):
 
 - `__jsx`: a host tag becomes `{ type, props, children }` — `children`

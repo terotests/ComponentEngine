@@ -85,7 +85,7 @@ impl Parser {
             return;
         }
         let t = self.text();
-        if self.kind() == T_PUNCT && t.len() > 1 && t.starts_with(">") {
+        if self.kind() == T_PUNCT && t.chars().count() > 1 && t.starts_with(">") {
             let i = self.pos;
             self.splits.push((i, t.clone()));
             let rest = t.chars().skip(1).collect::<String>();

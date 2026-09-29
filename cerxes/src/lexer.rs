@@ -837,12 +837,24 @@ pub fn decode_entities(s: &str) -> String {
             }
             if j < n && cs[j as usize] == ';' && !name.is_empty() {
                 let cp: int;
-                if name.starts_with("#x") || name.starts_with("#X") {
-                    let h = name.chars().skip(2).collect::<String>();
-                    cp = i64::from_str_radix(h.as_str(), 16).unwrap_or(-1) as int;
-                } else if name.starts_with("#") {
-                    let d = name.chars().skip(1).collect::<String>();
-                    cp = d.parse::<i64>().unwrap_or(-1) as int;
+                if name.starts_with("#") {
+                    // `&#123;`, `&#x7B;`
+                    let ds = name.chars().collect::<Vec<char>>();
+                    let hex = ds.len() > 1 && (ds[1] == 'x' || ds[1] == 'X');
+                    let base: int = if hex { 16 } else { 10 };
+                    let mut k: int = if hex { 2 } else { 1 };
+                    let mut v: int = 0;
+                    let mut ok = (k as usize) < ds.len();
+                    while (k as usize) < ds.len() {
+                        let h = hex_val(ds[k as usize]);
+                        if h < 0 || h >= base || v > 0x10ffff {
+                            ok = false;
+                            break;
+                        }
+                        v = v * base + h;
+                        k += 1;
+                    }
+                    cp = if ok { v } else { -1 };
                 } else {
                     cp = entity(name.as_str());
                 }

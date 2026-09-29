@@ -8,7 +8,7 @@
 
 use ranger::prelude::*;
 
-use cer::ast::*;
+use crate::ast::*;
 use crate::lexer::*;
 use crate::parser::Parser;
 

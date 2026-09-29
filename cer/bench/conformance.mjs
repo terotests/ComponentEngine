@@ -15,6 +15,7 @@
 //   node bench/conformance.mjs --list     # also list CEr's failures
 //   node bench/conformance.mjs --json     # one JSON object
 //   node bench/conformance.mjs --cerxes   # CErXes (../cerxes), reading them as TSX
+//   node bench/conformance.mjs --cerxes --js  # CErXes compiled to JS by rgrc
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -97,7 +98,7 @@ const script = (body) => "(function () { " + body + "\n})();";
 const actual = new Map();
 if (useJs) {
   const req = createRequire(import.meta.url);
-  const mod = req(path.join(CER, "bin/Cer.cjs"));
+  const mod = req(useCerxes ? path.join(CRATE, "bin/Cerxes.cjs") : path.join(CER, "bin/Cer.cjs"));
   for (const [name, body] of PROBES) {
     const e = mod.Engine.new_();
     let r;
@@ -163,14 +164,15 @@ const report = {
   both,
   cerOnly,
   componentEngineOnly: ceOnly,
-  build: useJs ? "js" : useCerxes ? "cerxes" : "native",
+  build: useJs ? "js" : "native",
+  engine: useCerxes ? "cerxes" : "cer",
   groups: Object.fromEntries(groups),
 };
 if (asJson) {
   process.stdout.write(JSON.stringify(report) + "\n");
 } else {
   console.log(`probes: ${PROBES.length}`);
-  console.log(`CEr (${report.build}) agrees with Node: ${cerPass}`);
+  console.log(`${useCerxes ? "CErXes" : "CEr"} (${report.build}) agrees with Node: ${cerPass}`);
   console.log(`ComponentEngine agrees with Node:  ${cePass} (all but its KNOWN_GAPS)`);
   console.log(`both: ${both}, only CEr: ${cerOnly}, only ComponentEngine: ${ceOnly}\n`);
   console.log("group".padEnd(16) + "probes".padStart(8) + "CEr".padStart(8) + "CE".padStart(8));

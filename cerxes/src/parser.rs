@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! CEr's parser (../cer/src/parser.rs) with TypeScript and JSX: a
-//! recursive-descent parser from tokens to CEr's arena tree (`cer::ast`),
+//! recursive-descent parser from tokens to CEr's arena tree (`ast`),
 //! so CEr's compiler and VM run the result unchanged.
 //!
 //! TypeScript is erased as it is read: annotations, type parameters and
@@ -18,7 +18,7 @@
 
 use ranger::prelude::*;
 
-use cer::ast::*;
+use crate::ast::*;
 use crate::lexer::*;
 
 /// Which syntax a script is read with.
@@ -1468,7 +1468,7 @@ impl Parser {
     fn key_name(&self, key: int) -> String {
         let k = &self.ast.nodes[key as usize];
         if k.kind == N_NUM {
-            return cer::num::number_to_string(k.num);
+            return crate::num::number_to_string(k.num);
         }
         k.s.clone()
     }

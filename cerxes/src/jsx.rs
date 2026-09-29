@@ -20,7 +20,7 @@
 
 use ranger::prelude::*;
 
-use cer::ast::*;
+use crate::ast::*;
 use crate::lexer::*;
 use crate::parser::{Parser, Syntax};
 
@@ -66,30 +66,58 @@ pub fn read_pragmas(src: &str, sx: &mut Syntax) {
 }
 
 /// React's rule for text between tags (Babel's
-/// `cleanJSXElementLiteralChild`).
+/// `cleanJSXElementLiteralChild`): each line loses its indentation (not the
+/// first) and trailing spaces (not the last), blank lines go, and the rest
+/// are joined by one space. A tab counts as a space.
 fn clean_text(raw: &str) -> String {
-    let lines = raw.split('\n').map(|l| l.trim_end_matches('\r').replace('\t', " ")).collect::<Vec<String>>();
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    let mut cur: Vec<char> = Vec::new();
+    for c in raw.chars() {
+        if c == '\n' {
+            lines.push(cur);
+            cur = Vec::new();
+        } else if c == '\r' {
+            // dropped; `\r\n` ends a line at its `\n`
+        } else if c == '\t' {
+            cur.push(' ');
+        } else {
+            cur.push(c);
+        }
+    }
+    lines.push(cur);
+    let last = (lines.len() as int) - 1;
     let mut last_non_empty: int = -1;
     let mut i: int = 0;
-    while i < lines.len() as int {
-        if lines[i as usize].chars().any(|c| c != ' ') {
-            last_non_empty = i;
+    while i <= last {
+        for c in lines[i as usize].iter() {
+            if *c != ' ' {
+                last_non_empty = i;
+            }
         }
         i += 1;
     }
     let mut out = String::new();
-    let last = (lines.len() as int) - 1;
     let mut k: int = 0;
     while k <= last {
-        let mut t = lines[k as usize].clone();
+        let line = &lines[k as usize];
+        let mut from: int = 0;
+        let mut to: int = line.len() as int;
         if k != 0 {
-            t = String::from(t.trim_start_matches(' '));
+            while from < to && line[from as usize] == ' ' {
+                from += 1;
+            }
         }
         if k != last {
-            t = String::from(t.trim_end_matches(' '));
+            while to > from && line[(to - 1) as usize] == ' ' {
+                to -= 1;
+            }
         }
-        if !t.is_empty() {
-            out.push_str(t.as_str());
+        if to > from {
+            let mut j = from;
+            while j < to {
+                out.push(line[j as usize]);
+                j += 1;
+            }
             if k != last_non_empty {
                 out.push(' ');
             }

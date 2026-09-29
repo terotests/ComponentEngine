@@ -3,17 +3,9 @@
 version = 4
 
 [[package]]
-name = "cer"
-version = "0.1.0"
-dependencies = [
- "ranger",
-]
-
-[[package]]
 name = "cerxes"
 version = "0.1.0"
 dependencies = [
- "cer",
  "ranger",
 ]
 
