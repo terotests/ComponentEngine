@@ -101,6 +101,8 @@ pub struct Compiler {
     tdz_refs: HashMap<int, bool>,
     /// the names a let / const declares (not references)
     decl_idents: HashMap<int, bool>,
+    /// reads of a parameter before it is bound: always a ReferenceError
+    param_tdz: HashMap<int, bool>,
     /// the body being scanned by hoist_vars
     hoist_root: int,
     /// function declarations inside blocks and statements of the body
@@ -109,6 +111,8 @@ pub struct Compiler {
     /// Annex B: such a declaration (sloppy code) → the function-level var
     /// that receives it when the declaration is evaluated
     annex_var: HashMap<int, int>,
+    /// the source text, shared by the functions' protos
+    src_val: Val,
     fs: Vec<FnState>,
     pub error: String,
     /// completion value of the script: slot 0 of the program
@@ -134,9 +138,11 @@ impl Compiler {
             ref_bind: HashMap::new(),
             tdz_refs: HashMap::new(),
             decl_idents: HashMap::new(),
+            param_tdz: HashMap::new(),
             hoist_root: -1,
             nested_funcs: Vec::new(),
             annex_var: HashMap::new(),
+            src_val: Val::Undef,
             fs: Vec::new(),
             error: String::new(),
             keep_completion: true,
@@ -412,6 +418,21 @@ impl Compiler {
         if b >= 0 && !self.binds[b as usize].global {
             self.ref_bind.insert(n, b);
             let kind = self.binds[b as usize].kind;
+            if kind == K_PARAM && !self.binds[b as usize].inited && !self.decl_idents.contains_key(&n) {
+                // a parameter read by an earlier default (not from a closure)
+                let target = self.binds[b as usize].scope;
+                let mut s = scope;
+                let mut crossed = false;
+                while s >= 0 && s != target {
+                    if self.scopes[s as usize].is_func {
+                        crossed = true;
+                    }
+                    s = self.scopes[s as usize].parent;
+                }
+                if !crossed {
+                    self.param_tdz.insert(n, true);
+                }
+            }
             if (kind == K_LET || kind == K_CONST || kind == K_CLASS) && !self.decl_idents.contains_key(&n) {
                 // before the declaration, or in a hoisted function that can
                 // run before it
@@ -525,23 +546,46 @@ impl Compiler {
             }
         }
         let body = self.ast.nodes[n as usize].a;
+        // with defaults or patterns in the parameters, the body's
+        // declarations get a scope of their own, out of the defaults' sight
+        let mut bscope = fscope;
         if (flags & F_EXPR_BODY) == 0 {
+            let mut param_exprs = false;
+            for p in params.iter() {
+                let pk = self.ast.nodes[*p as usize].kind;
+                if pk != N_IDENT && !(pk == N_REST && self.ast.nodes[self.ast.nodes[*p as usize].a as usize].kind == N_IDENT) {
+                    param_exprs = true;
+                }
+            }
+            if param_exprs {
+                bscope = self.new_scope(fscope, body, false, false);
+            }
             let strict = self.scope_strict(fscope);
-            self.hoist_body(body, fscope, strict);
+            self.hoist_body(body, bscope, strict);
         }
         // a named function expression sees its own name
         let name = self.ast.nodes[n as usize].s.clone();
         if !arrow && (flags & (F_DECL | F_METHOD)) == 0 && !name.is_empty() && !self.scopes[fscope as usize].names.contains_key(&name) {
             self.declare(fscope, name.as_str(), K_CALLEE);
         }
+        // a default may read only the parameters before it
         for p in params.iter() {
+            let mut ids: Vec<int> = Vec::new();
+            self.pattern_idents(*p, &mut ids);
+            for i in ids.iter() {
+                self.decl_idents.insert(*i, true);
+            }
             self.visit_pattern(*p, fscope);
+            for i in ids.iter() {
+                let nm = self.ast.nodes[*i as usize].s.clone();
+                self.mark_inited(fscope, nm.as_str());
+            }
         }
         if (flags & F_EXPR_BODY) != 0 {
             self.visit(body, fscope);
         } else {
             let list = self.ast.nodes[body as usize].list.clone();
-            self.visit_list(&list, fscope);
+            self.visit_list(&list, bscope);
         }
     }
 
@@ -906,6 +950,12 @@ impl Compiler {
             self.emit(OP_GET_GLOBAL, a, 0);
             return;
         }
+        if self.param_tdz.contains_key(&n) {
+            self.op(OP_TDZ);
+            let c = self.str_const(name.as_str());
+            self.emit(OP_CHECK_TDZ, c, 0);
+            return;
+        }
         self.load_bind(b);
         if self.tdz_refs.contains_key(&n) {
             let c = self.str_const(name.as_str());
@@ -1104,6 +1154,25 @@ impl Compiler {
         proto.getter_setter = (flags & (F_GETTER | F_SETTER)) != 0;
         proto.generator = (flags & F_GENERATOR) != 0;
         proto.is_async = (flags & F_ASYNC) != 0;
+        let ss = match self.ast.span_start.get(&n) {
+            Some(x) => *x,
+            None => -1,
+        };
+        if let Some(t) = self.ast.span_text.get(&n) {
+            proto.src = string_val(t.clone());
+            proto.src_start = 0;
+            proto.src_end = t.chars().count() as int;
+        } else if ss >= 0 {
+            if matches!(self.src_val, Val::Undef) {
+                self.src_val = string_val(self.ast.source.clone());
+            }
+            proto.src = self.src_val.clone();
+            proto.src_start = ss;
+            proto.src_end = match self.ast.span_end.get(&n) {
+                Some(x) => *x,
+                None => ss,
+            };
+        }
         let params = self.ast.nodes[n as usize].list.clone();
         let saved_scope = self.cur_scope;
         self.fs.push(FnState {
@@ -1205,12 +1274,38 @@ impl Compiler {
             self.expr(body);
             self.op(OP_RETURN);
         } else {
+            let bscope = match self.node_scope.get(&body) {
+                Some(s) => *s,
+                None => -1,
+            };
+            let mut pushed = false;
+            if bscope >= 0 {
+                self.cur_scope = bscope;
+                pushed = self.enter_scope(bscope, false);
+                // a body var named like a parameter starts with its value
+                for b in self.scopes[bscope as usize].binds.clone() {
+                    if self.binds[b as usize].kind != K_VAR {
+                        continue;
+                    }
+                    let nm = self.binds[b as usize].name.clone();
+                    let pb = match self.scopes[scope as usize].names.get(&nm) {
+                        Some(x) => *x,
+                        None => -1,
+                    };
+                    if pb >= 0 && self.binds[pb as usize].kind == K_PARAM {
+                        self.load_bind(pb);
+                        self.store_bind(b, true);
+                        self.op(OP_POP);
+                    }
+                }
+            }
             let list = self.ast.nodes[body as usize].list.clone();
             self.hoist_functions(&list);
             for st in list {
                 self.statement(st);
             }
             self.op(OP_RETURN_UNDEF);
+            self.leave_scope(pushed);
         }
         let fs = self.fs.pop().unwrap();
         let mut p = fs.proto;

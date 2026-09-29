@@ -3121,6 +3121,21 @@ impl Vm {
                 let ns = self.to_string(&n);
                 if self.objs[o as usize].class == C_FUNCTION {
                     let pi = self.objs[o as usize].func;
+                    if let Val::Str(src) = &self.protos[pi as usize].src {
+                        let (a, b) = (self.protos[pi as usize].src_start, self.protos[pi as usize].src_end);
+                        let mut text = String::new();
+                        let mut i: int = 0;
+                        for c in src.chars() {
+                            if i >= b {
+                                break;
+                            }
+                            if i >= a {
+                                text.push(c);
+                            }
+                            i += 1;
+                        }
+                        return string_val(text);
+                    }
                     if self.protos[pi as usize].class_ctor {
                         return string_val(format!("class {} {{ }}", ns));
                     }

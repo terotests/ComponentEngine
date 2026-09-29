@@ -207,7 +207,9 @@ hide(OP, '__lookupSetter__', function __lookupSetter__(name) { return lookup(thi
 // ---- Promise: species, subclassing, the combinators over the native core
 var PP = Promise.prototype;
 var nativeThen = PP.then;
-function isPromise(x) { return isObject(x) && x instanceof Promise; }
+var isPromiseObj = globalThis.__isPromise;
+delete globalThis.__isPromise;
+function isPromise(x) { return isPromiseObj(x); }
 function speciesOf(o, d) {
   var C = o.constructor;
   if (C === undefined) return d;

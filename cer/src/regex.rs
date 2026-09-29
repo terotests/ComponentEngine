@@ -97,6 +97,7 @@ struct RParser {
     unicode: bool,
     /// the capturing groups in the whole pattern
     total_groups: int,
+    ignore_case: bool,
 }
 
 fn is_digit(c: int) -> bool {
@@ -149,6 +150,29 @@ pub fn fold(c: int) -> int {
         }
         None => c,
     }
+}
+
+/// Canonicalize without /u: the upper case, unless that takes a
+/// non-ASCII character to ASCII.
+fn canon(c: int) -> int {
+    let u = upper(c);
+    if c >= 128 && u < 128 {
+        return c;
+    }
+    u
+}
+
+/// Simple case folding (what /iu compares): the lower case of the upper
+/// case, so ſ and K fold with s and k; the Turkish dotted and dotless i
+/// fold to themselves.
+fn fold_u(c: int) -> int {
+    if c < 128 {
+        return fold(c);
+    }
+    if c == 0x130 || c == 0x131 {
+        return c;
+    }
+    fold(upper(c))
 }
 
 fn upper(c: int) -> int {
@@ -478,6 +502,13 @@ impl RParser {
             ranges.push(95);
             ranges.push(97);
             ranges.push(122);
+            if self.unicode && self.ignore_case {
+                // ſ and K fold to word characters under /iu
+                ranges.push(0x17f);
+                ranges.push(0x17f);
+                ranges.push(0x212a);
+                ranges.push(0x212a);
+            }
             return true;
         }
         if c == 115 {
@@ -1042,6 +1073,7 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
         error: String::new(),
         unicode: re.unicode,
         total_groups: 0,
+        ignore_case: re.ignore_case,
     };
     p.total_groups = count_groups(&p.src);
     let root = p.disjunction();
@@ -1095,6 +1127,10 @@ impl Regex {
             let l = fold(c);
             let u = upper(c);
             hit = in_ranges(&cl.ranges, l) || in_ranges(&cl.ranges, u);
+            if !hit && self.unicode {
+                let f = fold_u(c);
+                hit = in_ranges(&cl.ranges, f) || in_ranges(&cl.ranges, upper(f));
+            }
         }
         if cl.negate {
             !hit
@@ -1107,7 +1143,19 @@ impl Regex {
         if a == b {
             return true;
         }
-        ic && fold(a) == fold(b)
+        if !ic {
+            return false;
+        }
+        if self.unicode {
+            return fold_u(a) == fold_u(b);
+        }
+        canon(a) == canon(b)
+    }
+
+    /// A word character; under /iu also what folds to one (ſ, K).
+    fn word_at(&self, input: &Vec<int>, i: int) -> bool {
+        let c = input[i as usize];
+        is_word(c) || (self.unicode && self.ignore_case && c >= 128 && is_word(fold_u(c)))
     }
 
     /// The code point at `pos` (a surrogate pair is one under /u) and its
@@ -1238,8 +1286,8 @@ impl Regex {
                     }
                 }
                 I_WORDB | I_NWORDB => {
-                    let a = pos > 0 && is_word(input[(pos - 1) as usize]);
-                    let b = pos < n && is_word(input[pos as usize]);
+                    let a = pos > 0 && self.word_at(input, pos - 1);
+                    let b = pos < n && self.word_at(input, pos);
                     let at = a != b;
                     if (ins.op == I_WORDB) == at {
                         pc += 1;
