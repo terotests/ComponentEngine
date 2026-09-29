@@ -1,0 +1,32 @@
+{
+  "lockVersion": 1,
+  "packages": {
+    "componentengine": {
+      "path": "../engine"
+    },
+    "ts_parser": {
+      "git": "https://github.com/terotests/Ranger.git",
+      "rev": "ecedb1622b431aab5e6fef91c406cd04307da817",
+      "subdir": "gallery/ts_parser",
+      "sha256": "3f05128a7313056f5c4f8202cf818a59fe71135d5eae905ce7fac8ca79e298d5"
+    },
+    "evg": {
+      "git": "https://github.com/terotests/evg.git",
+      "rev": "f3d682ad11d1944251b683e5013ee624be421259",
+      "subdir": "storm",
+      "sha256": "6d6566d96077b0e4b69804d3b6b65379f49c88f8b6c8ffe2ecde234674973d4e"
+    },
+    "image": {
+      "git": "https://github.com/terotests/evg.git",
+      "rev": "f3d682ad11d1944251b683e5013ee624be421259",
+      "subdir": "image",
+      "sha256": "ab9804949d5564dc802d6f236fff9f701519213add55d2b03b217ee50d369076"
+    },
+    "zip": {
+      "git": "https://github.com/terotests/evg.git",
+      "rev": "f3d682ad11d1944251b683e5013ee624be421259",
+      "subdir": "zip",
+      "sha256": "c9a617acbc94bddbc56eac40ed9947815f1398eb0890fd2932f5d1b5e810a625"
+    }
+  }
+}

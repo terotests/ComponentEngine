@@ -1,0 +1,23 @@
+{
+  "name": "componentengine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ComponentEngine: a JavaScript / TSX evaluator written in Ranger, and CEr, the same evaluator as a strict Rust module",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node test/smoke.mjs",
+    "cer:build": "node scripts/build.mjs --cer",
+    "cer:test": "cargo test --release --manifest-path cer/Cargo.toml",
+    "cer:conformance": "node cer/bench/conformance.mjs",
+    "cer:micro": "node cer/bench/micro.mjs",
+    "cer:octane": "node cer/bench/octane.mjs"
+  },
+  "devDependencies": {
+    "ranger-compiler": "^4.0.0"
+  }
+}
