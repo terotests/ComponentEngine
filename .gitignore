@@ -7,3 +7,4 @@ playground/dist/
 playground/cer-wasm/target/
 playground/ce-wasm/build/
 playground/src/stubs/
+cerxes/target/

@@ -14,6 +14,7 @@
 //   node bench/conformance.mjs --js       # CEr compiled to JS by rgrc
 //   node bench/conformance.mjs --list     # also list CEr's failures
 //   node bench/conformance.mjs --json     # one JSON object
+//   node bench/conformance.mjs --cerxes   # CErXes (../cerxes), reading them as TSX
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -29,6 +30,8 @@ const args = process.argv.slice(2);
 const useJs = args.includes("--js");
 const list = args.includes("--list");
 const asJson = args.includes("--json");
+const useCerxes = args.includes("--cerxes");
+const CRATE = useCerxes ? path.resolve(CER, "../cerxes") : CER;
 
 /** The array or set literal that follows `marker` in the test source. */
 function literalAfter(src, marker, open, close) {
@@ -109,10 +112,10 @@ if (useJs) {
   const recs = PROBES.map(([name, body]) => name + "\u0002" + script(body)).join("\u0001");
   const file = path.join(os.tmpdir(), "cer-probes-" + process.pid + ".txt");
   fs.writeFileSync(file, recs);
-  const r = spawnSync("cargo", ["run", ...cargoConfig(), "--release", "--quiet", "--bin", "probe", "--manifest-path", path.join(CER, "Cargo.toml"), "--", file], {
+  const r = spawnSync("cargo", ["run", ...cargoConfig(), "--release", "--quiet", "--bin", "probe", "--manifest-path", path.join(CRATE, "Cargo.toml"), "--", file], {
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
-    env: { ...process.env, CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || path.join(CER, "target") },
+    env: { ...process.env, CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || path.join(CRATE, "target") },
   });
   fs.unlinkSync(file);
   if (r.status !== 0) {
@@ -160,7 +163,7 @@ const report = {
   both,
   cerOnly,
   componentEngineOnly: ceOnly,
-  build: useJs ? "js" : "native",
+  build: useJs ? "js" : useCerxes ? "cerxes" : "native",
   groups: Object.fromEntries(groups),
 };
 if (asJson) {
