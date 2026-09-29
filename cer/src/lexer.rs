@@ -125,7 +125,14 @@ pub fn push_code_point(out: &mut String, cp: int) {
 
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
-        Lexer { src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new() }
+        let mut lx = Lexer { src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new() };
+        // a hashbang line at the very start is a comment
+        if lx.src.len() >= 2 && lx.src[0] == '#' && lx.src[1] == '!' {
+            while (lx.pos as usize) < lx.src.len() && lx.src[lx.pos as usize] != '\n' && lx.src[lx.pos as usize] != '\r' {
+                lx.pos += 1;
+            }
+        }
+        lx
     }
 
     fn at(&self, i: int) -> char {

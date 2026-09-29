@@ -72,6 +72,19 @@ impl Vm {
         self.iterator_proto = itp;
         let ip = self.iter_proto;
         self.objs[ip as usize].proto = itp;
+        self.objs[ip as usize].add(a_tag, str_val("Array Iterator"), P_HIDDEN | P_READONLY);
+        // the other built-in iterators: the same machinery, own prototypes
+        let mut made: Vec<int> = Vec::new();
+        for tagname in vec!["Map Iterator", "Set Iterator", "String Iterator"] {
+            let p = self.alloc(C_OBJECT, itp);
+            self.roots.push(p);
+            self.method(p, "next", NF_ITER_NEXT, 0);
+            self.objs[p as usize].add(a_tag, str_val(tagname), P_HIDDEN | P_READONLY);
+            made.push(p);
+        }
+        self.map_iter_proto = made[0];
+        self.set_iter_proto = made[1];
+        self.string_iter_proto = made[2];
         // %GeneratorPrototype%
         let gp = self.alloc(C_OBJECT, itp);
         self.roots.push(gp);

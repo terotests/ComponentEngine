@@ -1485,6 +1485,17 @@ impl Compiler {
         let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
         let of = self.ast.nodes[n as usize].op.as_str() == "of";
         let labels = self.take_labels();
+        if !of && a >= 0 && self.ast.nodes[a as usize].kind == N_VAR {
+            // Annex B: `for (var x = init in o)` assigns init first
+            let decl = self.ast.nodes[a as usize].list[0];
+            let init = self.ast.nodes[decl as usize].b;
+            let tgt = self.ast.nodes[decl as usize].a;
+            if init >= 0 && self.ast.nodes[tgt as usize].kind == N_IDENT {
+                self.expr(init);
+                self.store_name(tgt, false);
+                self.op(OP_POP);
+            }
+        }
         self.expr(b);
         let mut t: int = -1;
         if of {

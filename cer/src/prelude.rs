@@ -1106,7 +1106,6 @@ hide(RP, Symbol.split, function (s, lim) { needRegExp(this, 'Symbol.split'); ret
 [['match', Symbol.match, sMatch, 1], ['matchAll', Symbol.matchAll, sMatchAll, 1], ['replace', Symbol.replace, sReplace, 2],
  ['replaceAll', Symbol.replaceAll, sReplaceAll, 2], ['search', Symbol.search, sSearch, 1], ['split', Symbol.split, sSplit, 2]].forEach(function (e) {
   var name = e[0], sym = e[1], nat = e[2];
-  if (sym === undefined) sym = Symbol.replace;
   var f = function (x, y) {
     if (this === undefined || this === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
     if (x !== undefined && x !== null && typeof x !== 'string' && !(x instanceof RegExp && getPrototypeOf(x) === RP)) {
@@ -1135,6 +1134,103 @@ function isRegExpLike(x) {
   };
   defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
   hide(SP, name, setLength(f, 1));
+});
+
+// ---- smaller pieces: unscopables, Date's @@toPrimitive, Number.parseFloat,
+// the Annex B String HTML methods, RegExp flags and RegExp.escape
+var unscop = create(null);
+['at', 'copyWithin', 'entries', 'fill', 'find', 'findIndex', 'findLast', 'findLastIndex', 'flat', 'flatMap', 'includes',
+ 'keys', 'toReversed', 'toSorted', 'toSpliced', 'values'].forEach(function (k) { unscop[k] = true; });
+defineProperty(AP, Symbol.unscopables, { value: unscop, writable: false, enumerable: false, configurable: true });
+defineProperty(Date.prototype, Symbol.toPrimitive, { value: function (hint) {
+  if (!isObject(this)) throw new TypeError('Date.prototype[Symbol.toPrimitive] called on non-object');
+  var order = hint === 'number' ? ['valueOf', 'toString'] : hint === 'string' || hint === 'default' ? ['toString', 'valueOf'] : null;
+  if (order === null) throw new TypeError('Invalid hint: ' + String(hint));
+  for (var i = 0; i < 2; i++) {
+    var f = this[order[i]];
+    if (isCallable(f)) { var r = f.call(this); if (!isObject(r)) return r; }
+  }
+  throw new TypeError('Cannot convert object to primitive value');
+}, writable: false, enumerable: false, configurable: true });
+hide(Number, 'parseFloat', parseFloat);
+hide(Number, 'parseInt', parseInt);
+function html(tag, attr) {
+  return function (v) {
+    if (this === undefined || this === null) throw new TypeError('String.prototype method called on null or undefined');
+    var s = String(this), open = '<' + tag;
+    if (attr) open += ' ' + attr + '="' + String(v).replace(/"/g, '&quot;') + '"';
+    return open + '>' + s + '</' + tag + '>';
+  };
+}
+[['anchor', 'a', 'name'], ['big', 'big'], ['blink', 'blink'], ['bold', 'b'], ['fixed', 'tt'], ['fontcolor', 'font', 'color'],
+ ['fontsize', 'font', 'size'], ['italics', 'i'], ['link', 'a', 'href'], ['small', 'small'], ['strike', 'strike'], ['sub', 'sub'], ['sup', 'sup']].forEach(function (e) {
+  var f = html(e[1], e[2]);
+  defineProperty(f, 'name', { value: e[0], writable: false, enumerable: false, configurable: true });
+  hide(SP, e[0], setLength(f, e[2] ? 1 : 0));
+});
+hide(Object, 'getOwnPropertyDescriptors', function getOwnPropertyDescriptors(o) {
+  var O = Object(o), out = {}, keys = reflectOwnKeys(O);
+  for (var i = 0; i < keys.length; i++) {
+    var d = gopd(O, keys[i]);
+    if (d !== undefined) defineProperty(out, keys[i], { value: d, writable: true, enumerable: true, configurable: true });
+  }
+  return out;
+});
+// includes on array-likes reads only what it looks at
+var nativeIncludes = AP.includes;
+hide(AP, 'includes', setLength(function includes(x, from) {
+  if (Array.isArray(this)) return nativeIncludes.call(this, x, from);
+  var O = Object(this), n = toLength(O.length);
+  if (n === 0) return false;
+  for (var i = relIndex(from, n, 0); i < n; i++) { var v = O[i]; if (v === x || (v !== v && x !== x)) return true; }
+  return false;
+}, 1));
+var nativeFlags = gopd(RP, 'flags').get;
+var flagNames = [['hasIndices', 'd'], ['global', 'g'], ['ignoreCase', 'i'], ['multiline', 'm'], ['dotAll', 's'], ['unicode', 'u'], ['unicodeSets', 'v'], ['sticky', 'y']];
+flagNames.forEach(function (e) {
+  if (gopd(RP, e[0]) !== undefined) return;
+  getter(RP, e[0], function () {
+    if (this === RP) return undefined;
+    if (!(this instanceof RegExp)) throw new TypeError('RegExp.prototype.' + e[0] + ' getter called on non-RegExp');
+    return String(nativeFlags.call(this)).indexOf(e[1]) >= 0;
+  });
+});
+getter(RP, 'flags', function () {
+  if (!isObject(this)) throw new TypeError('RegExp.prototype.flags getter called on non-object');
+  var r = '';
+  for (var i = 0; i < flagNames.length; i++) if (this[flagNames[i][0]]) r += flagNames[i][1];
+  return r;
+});
+hide(RegExp, 'escape', function escape(s) {
+  if (typeof s !== 'string') throw new TypeError('RegExp.escape requires a string');
+  var out = '';
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charAt(i), code = s.charCodeAt(i);
+    if (i === 0 && /[0-9A-Za-z]/.test(c)) { out += '\\x' + code.toString(16); continue; }
+    if ('^$\\.*+?()[]{}|/'.indexOf(c) >= 0) { out += '\\' + c; continue; }
+    if (',-=<>#&!%:;@~\'`"'.indexOf(c) >= 0 || /[\t\n\v\f\r    -     　﻿]/.test(c)) {
+      var h = code.toString(16);
+      out += code <= 0xff ? '\\x' + (h.length < 2 ? '0' + h : h) : '\\u' + ('0000' + h).slice(-4);
+      continue;
+    }
+    out += c;
+  }
+  return out;
+});
+var reSplit = RP[Symbol.split];
+hide(RP, Symbol.split, function (s, lim) {
+  needRegExp(this, 'Symbol.split');
+  var C = speciesOf(this, RegExp);
+  var rx = this;
+  if (C !== RegExp) rx = new C(this, String(this.flags));
+  return sSplit.call(String(s), rx instanceof RegExp ? rx : this, lim);
+});
+['__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__'].forEach(function (name) {
+  var nat = OP[name];
+  hide(OP, name, setLength(function (a, b) {
+    if (this === undefined || this === null) throw new TypeError('Object.prototype.' + name + ' called on null or undefined');
+    return nat.call(this, a, b);
+  }, nat.length));
 });
 
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs

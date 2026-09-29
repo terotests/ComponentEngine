@@ -605,6 +605,11 @@ impl Vm {
         self.value_prop(symc, "toStringTag", Val::Obj(tag_sym));
         self.value_prop(symc, "species", Val::Obj(species_sym));
         self.value_prop(symc, "unscopables", Val::Obj(unscop_sym));
+        for (name, desc) in vec![("match", "Symbol.match"), ("matchAll", "Symbol.matchAll"), ("replace", "Symbol.replace"), ("search", "Symbol.search"), ("split", "Symbol.split"), ("isConcatSpreadable", "Symbol.isConcatSpreadable")] {
+            let a = self.intern(format!("@@{}", name).as_str());
+            let s = self.well_known_symbol(a, desc);
+            self.value_prop(symc, name, Val::Obj(s));
+        }
         self.method(symp, "toString", NF_SYMP_TOSTRING, 0);
         self.getter(symp, "description", NF_SYMP_DESCRIPTION);
 
@@ -1446,7 +1451,7 @@ impl Vm {
             i += 1;
         }
         let arr = self.new_array(items);
-        let ip = self.iter_proto;
+        let ip = if is_set { self.set_iter_proto } else { self.map_iter_proto };
         let it = self.alloc(C_ITER, ip);
         self.objs[it as usize].env = arr;
         self.objs[it as usize].func = 0;
@@ -2605,6 +2610,9 @@ impl Vm {
         if id >= 930 && id < 940 {
             return self.call_native_proxy(id, args, construct);
         }
+        if id >= 944 && id < 950 {
+            return self.call_native_dynamic_this(id, this, args);
+        }
         if id >= 940 && id < 950 {
             return self.call_native_dynamic(id, args, new_target);
         }
@@ -3004,11 +3012,16 @@ impl Vm {
                 Val::Undef
             }
             NF_SYMP_TOSTRING => {
-                let s = self.display(&this);
+                let t = self.this_symbol(&this);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let s = self.display(&t);
                 string_val(s)
             }
             NF_SYMP_DESCRIPTION => {
-                let o = obj_of(&this);
+                let t = self.this_symbol(&this);
+                let o = obj_of(&t);
                 if o >= 0 && self.objs[o as usize].class == C_SYMBOL {
                     return self.objs[o as usize].prim.clone();
                 }

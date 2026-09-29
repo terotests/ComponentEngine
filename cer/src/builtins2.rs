@@ -930,7 +930,7 @@ impl Vm {
                     items.push(string_val(t));
                 }
                 let arr = self.new_array(items);
-                let ip = self.iter_proto;
+                let ip = self.string_iter_proto;
                 let it = self.alloc(C_ITER, ip);
                 self.objs[it as usize].env = arr;
                 self.objs[it as usize].func = 0;

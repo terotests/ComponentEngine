@@ -1046,7 +1046,14 @@ impl Parser {
     fn method(&mut self, flags: int, name: &str) -> int {
         let f = self.node(N_FUNC);
         self.ast.nodes[f as usize].flags = flags | F_METHOD;
-        self.ast.nodes[f as usize].s = String::from(name);
+        let full = if (flags & F_GETTER) != 0 && !name.is_empty() {
+            format!("get {}", name)
+        } else if (flags & F_SETTER) != 0 && !name.is_empty() {
+            format!("set {}", name)
+        } else {
+            String::from(name)
+        };
+        self.ast.nodes[f as usize].s = full;
         self.function_rest(f);
         f
     }

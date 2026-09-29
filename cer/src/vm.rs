@@ -122,6 +122,10 @@ pub struct Vm {
     /// %IteratorPrototype%, %GeneratorPrototype%, the prototypes of
     /// generator and async functions
     pub iterator_proto: int,
+    /// %MapIteratorPrototype%, %SetIteratorPrototype%, %StringIteratorPrototype%
+    pub map_iter_proto: int,
+    pub set_iter_proto: int,
+    pub string_iter_proto: int,
     pub generator_proto: int,
     pub generator_function_proto: int,
     pub async_function_proto: int,
@@ -178,8 +182,11 @@ pub fn quick_eq(a: &Val, b: &Val, strict: bool) -> int {
         (Val::Obj(x), Val::Obj(y)) => {
             if x == y {
                 1
-            } else {
+            } else if strict {
                 0
+            } else {
+                // a Symbol object == its symbol: loose_equals decides
+                -1
             }
         }
         (Val::Null, Val::Null) | (Val::Undef, Val::Undef) => 1,
@@ -238,6 +245,9 @@ impl Vm {
             iter_proto: -1,
             promise_proto: -1,
             iterator_proto: -1,
+            map_iter_proto: -1,
+            set_iter_proto: -1,
+            string_iter_proto: -1,
             generator_proto: -1,
             generator_function_proto: -1,
             async_function_proto: -1,
@@ -412,7 +422,7 @@ impl Vm {
             if self.throwing {
                 return Val::Undef;
             }
-            if is_obj(&r) {
+            if (is_obj(&r) && self.class_of(&r) != C_SYMBOL) {
                 self.throw_type("Cannot convert object to primitive value");
                 return Val::Undef;
             }
@@ -429,7 +439,7 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
-                if !is_obj(&r) {
+                if !(is_obj(&r) && self.class_of(&r) != C_SYMBOL) {
                     return r;
                 }
             }
@@ -493,7 +503,16 @@ impl Vm {
 
     pub fn to_object(&mut self, v: &Val) -> int {
         match v {
-            Val::Obj(o) => *o,
+            Val::Obj(o) => {
+                if self.objs[*o as usize].class == C_SYMBOL {
+                    // a Symbol object: the symbol in prim
+                    let p = self.symbol_proto;
+                    let b = self.alloc(C_OBJECT, p);
+                    self.objs[b as usize].prim = v.clone();
+                    return b;
+                }
+                *o
+            }
             Val::Undef | Val::Null => {
                 self.throw_type("Cannot convert undefined or null to object");
                 -1
@@ -561,7 +580,23 @@ impl Vm {
             (Val::Num(x), Val::Num(y)) => return x == y,
             (Val::Str(x), Val::Str(y)) => return x.as_str() == y.as_str(),
             (Val::Bool(x), Val::Bool(y)) => return x == y,
-            (Val::Obj(x), Val::Obj(y)) => return x == y,
+            (Val::Obj(x), Val::Obj(y)) => {
+                if x == y {
+                    return true;
+                }
+                // a Symbol object and a symbol: the object's primitive
+                let (cx, cy) = (self.objs[*x as usize].class, self.objs[*y as usize].class);
+                if (cx == C_SYMBOL) != (cy == C_SYMBOL) {
+                    let obj = if cx == C_SYMBOL { b } else { a };
+                    let sym = if cx == C_SYMBOL { a } else { b };
+                    let p = self.to_primitive(obj, "default");
+                    if self.throwing {
+                        return false;
+                    }
+                    return self.strict_equals(&p, sym);
+                }
+                return false;
+            }
             _ => {}
         }
         if let Val::Bool(x) = a {
@@ -747,10 +782,6 @@ impl Vm {
                     }
                 }
             }
-            if atom == A_PROTO {
-                let p = self.objs[o as usize].proto;
-                return if p >= 0 { Val::Obj(p) } else { Val::Null };
-            }
             cur = self.objs[cur as usize].proto;
             hops += 1;
             if hops > 10000 {
@@ -932,15 +963,8 @@ impl Vm {
             self.set_length(o, n);
             return;
         }
-        if atom == A_PROTO {
-            match v {
-                Val::Obj(p) => self.objs[o as usize].proto = p,
-                Val::Null => self.objs[o as usize].proto = -1,
-                _ => {}
-            }
-            return;
-        }
-        if self.any_setter && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
+        // __proto__: Object.prototype's accessor, when the chain has it
+        if (self.any_setter || atom == A_PROTO) && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
             return;
         }
         if !self.objs[o as usize].extensible {
@@ -2427,6 +2451,30 @@ impl Vm {
         }
     }
 
+    /// An anonymous function stored under a computed key takes the key as
+    /// its name (a symbol's as "[description]").
+    pub fn name_by_key(&mut self, f: &Val, k: &Val) {
+        let fo = obj_of(f);
+        if fo < 0 || self.objs[fo as usize].class != C_FUNCTION || self.objs[fo as usize].find(A_NAME) >= 0 {
+            return;
+        }
+        let pi = self.objs[fo as usize].func;
+        if !self.protos[pi as usize].name.is_empty() || self.protos[pi as usize].class_ctor {
+            return;
+        }
+        let name = if self.class_of(k) == C_SYMBOL {
+            let d = self.objs[obj_of(k) as usize].prim.clone();
+            if matches!(d, Val::Undef) {
+                String::new()
+            } else {
+                format!("[{}]", self.to_string(&d))
+            }
+        } else {
+            self.to_string(k)
+        };
+        self.objs[fo as usize].add(A_NAME, string_val(name), P_HIDDEN | P_READONLY);
+    }
+
     pub fn freeze_obj(&mut self, o: int) {
         self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, vec![Val::Obj(o)], false, Val::Undef);
     }
@@ -3066,6 +3114,7 @@ impl Vm {
                 let v = self.pop();
                 let k = self.pop();
                 let o = obj_of(self.top());
+                self.name_by_key(&v, &k);
                 self.define_elem(o, &k, v, 0);
             }
             OP_DEFINE_FIELD => {
@@ -3131,6 +3180,7 @@ impl Vm {
                 let f = self.pop();
                 let k = self.pop();
                 let o = obj_of(self.top());
+                self.name_by_key(&f, &k);
                 self.objs[obj_of(&f) as usize].home = o;
                 let hidden = self.is_class_proto(o) || self.is_class_ctor(o);
                 self.define_elem(o, &k, f, if hidden { P_HIDDEN } else { 0 });
