@@ -1,0 +1,85 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Serves playground/dist, opens it in Chromium (playwright-core), runs the
+// benchmark at scale 1 once, and checks that every engine in the build
+// loaded and answered what the browser answers, but for the known gaps of
+// the third-party interpreters in EXPECTED_GAPS: JS-Interpreter is ES5 (no
+// classes, no Map) and its sort is too slow for the time limit; Sval reads
+// a getter through `super` as NaN.
+//
+//   node playground/smoke.mjs [--shot=out.png]
+
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
+const shot = (process.argv.find((a) => a.startsWith("--shot=")) || "").slice(7);
+const EXPECTED_GAPS = { "js-interpreter": ["classes", "Map/Set", "sort"], sval: ["classes"] };
+
+const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
+const server = http.createServer((req, res) => {
+  const rel = decodeURIComponent(new URL(req.url, "http://x").pathname).replace(/^\/+/, "") || "index.html";
+  const file = path.join(DIST, rel);
+  if (!file.startsWith(DIST) || !fs.existsSync(file)) {
+    res.writeHead(404);
+    res.end();
+    return;
+  }
+  res.writeHead(200, { "content-type": TYPES[path.extname(file)] || "application/octet-stream" });
+  fs.createReadStream(file).pipe(res);
+});
+await new Promise((r) => server.listen(0, "127.0.0.1", r));
+const url = `http://127.0.0.1:${server.address().port}/`;
+
+const { chromium } = await import("playwright-core");
+const exe = process.env.CHROMIUM || ["/opt/pw-browsers/chromium", "/usr/bin/chromium"].find((p) => fs.existsSync(p));
+const browser = await chromium.launch(exe && !fs.statSync(exe).isDirectory() ? { executablePath: exe } : {});
+const page = await browser.newPage({ viewport: { width: 1280, height: 1400 } });
+const errors = [];
+page.on("pageerror", (e) => errors.push(String(e)));
+page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+
+await page.goto(url);
+await page.waitForSelector(".engine");
+await page.selectOption("#scale", "1");
+await page.selectOption("#reps", "1");
+await page.click("#run-bench");
+await page.waitForFunction(() => document.getElementById("bench-status").textContent === "done", null, { timeout: 15 * 60 * 1000 });
+
+const table = await page.evaluate(() => {
+  const t = document.getElementById("results");
+  const heads = [...t.querySelectorAll("thead th")].map((th) => th.textContent);
+  return [...t.querySelectorAll("tbody tr")].map((tr) => {
+    const cells = [...tr.children].map((td) => ({ text: td.textContent, cls: td.className, title: td.title }));
+    return { workload: cells[0].text, cells: cells.slice(1).map((c, i) => ({ engine: heads[i + 1], ...c })) };
+  });
+});
+const manifest = JSON.parse(fs.readFileSync(path.join(DIST, "engines.json"), "utf8"));
+const idOf = Object.fromEntries(manifest.engines.map((e) => [e.name, e.id]));
+
+let bad = 0;
+for (const row of table) {
+  const line = [row.workload.padEnd(10)];
+  for (const c of row.cells) {
+    const failed = c.cls === "err" || c.cls === "wrong";
+    const gap = (EXPECTED_GAPS[idOf[c.engine]] || []).includes(row.workload);
+    if (failed && !gap) {
+      bad++;
+      console.log(`FAIL ${row.workload} · ${c.engine}: ${c.text} ${c.title}`);
+    }
+    line.push(c.text.padStart(18));
+  }
+  console.log(line.join(""));
+}
+if (shot) await page.screenshot({ path: shot, fullPage: true });
+if (errors.length) {
+  console.log("page errors:\n  " + errors.join("\n  "));
+  bad += errors.length;
+}
+await browser.close();
+server.close();
+console.log(bad ? `${bad} problem(s)` : "ALL PASS");
+process.exit(bad ? 1 : 0);

@@ -3,3 +3,7 @@ node_modules/
 cer/target/
 cer/bin/
 test/vendor/
+playground/dist/
+playground/cer-wasm/target/
+playground/ce-wasm/build/
+playground/src/stubs/
