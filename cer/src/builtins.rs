@@ -777,6 +777,7 @@ impl Vm {
         self.method(pp, "then", NF_PR_THEN, 2);
         self.method(pp, "catch", NF_PR_CATCH, 1);
         self.method(pp, "finally", NF_PR_FINALLY, 1);
+        self.setup_coroutines();
     }
 
     // ---- helpers
@@ -2592,6 +2593,9 @@ impl Vm {
     // ---- the dispatch
 
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>, construct: bool, new_target: Val) -> Val {
+        if id >= 900 && id < 1000 {
+            return self.call_native_co(id, fobj, this, args);
+        }
         if id >= NF_MATH && id < NF_MATH + 40 {
             return self.math(id - NF_MATH, &args);
         }

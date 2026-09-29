@@ -49,6 +49,8 @@ pub const C_MAP: int = 15;
 pub const C_SET: int = 16;
 pub const C_SYMBOL: int = 17;
 pub const C_PROMISE: int = 18;
+/// a generator object, or the coroutine of an async call
+pub const C_GENERATOR: int = 19;
 
 // property attributes
 pub const P_HIDDEN: int = 1;
@@ -214,9 +216,16 @@ pub struct Proto {
     pub derived: bool,
     pub method: bool,
     pub getter_setter: bool,
+    pub generator: bool,
+    pub is_async: bool,
 }
 
 impl Proto {
+    /// `new` may call it
+    pub fn constructible(&self) -> bool {
+        !self.arrow && !(self.method && !self.class_ctor) && !self.getter_setter && !self.generator && !self.is_async
+    }
+
     pub fn new(name: &str) -> Proto {
         Proto {
             code: Vec::new(),
@@ -234,6 +243,8 @@ impl Proto {
             derived: false,
             method: false,
             getter_setter: false,
+            generator: false,
+            is_async: false,
         }
     }
 }
@@ -252,6 +263,8 @@ pub struct Frame {
     pub args_obj: int,
     /// a constructor call: an object result replaces `this`
     pub construct: bool,
+    /// the coroutine this frame runs for, -1 for none
+    pub gen: int,
 }
 
 pub struct Handler {

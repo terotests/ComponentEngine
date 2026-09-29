@@ -118,6 +118,17 @@ pub struct Vm {
     pub set_proto: int,
     pub iter_proto: int,
     pub promise_proto: int,
+    /// %IteratorPrototype%, %GeneratorPrototype%, the prototypes of
+    /// generator and async functions
+    pub iterator_proto: int,
+    pub generator_proto: int,
+    pub generator_function_proto: int,
+    pub async_function_proto: int,
+    /// set by OP_YIELD for the resumer: the frame yielded (not returned),
+    /// the value is an iterator result already; the coroutine finished
+    pub gen_yielded: bool,
+    pub gen_raw: bool,
+    pub gen_done: bool,
     pub array_values_fn: int,
     pub roots: Vec<int>,
     pub throwing: bool,
@@ -223,6 +234,13 @@ impl Vm {
             set_proto: -1,
             iter_proto: -1,
             promise_proto: -1,
+            iterator_proto: -1,
+            generator_proto: -1,
+            generator_function_proto: -1,
+            async_function_proto: -1,
+            gen_yielded: false,
+            gen_raw: false,
+            gen_done: false,
             array_values_fn: -1,
             roots: Vec::new(),
             throwing: false,
@@ -636,10 +654,15 @@ impl Vm {
     // ---- property access
 
     fn function_prototype(&mut self, f: int) -> Val {
-        // made on first use
-        let proto = self.object_proto;
+        // made on first use; a generator's instances inherit from it and it
+        // from %GeneratorPrototype%, with no `constructor`
+        let pi = self.objs[f as usize].func;
+        let generator = self.objs[f as usize].class == C_FUNCTION && self.protos[pi as usize].generator;
+        let proto = if generator { self.generator_proto } else { self.object_proto };
         let p = self.alloc(C_OBJECT, proto);
-        self.objs[p as usize].add(A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
+        if !generator {
+            self.objs[p as usize].add(A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
+        }
         self.objs[f as usize].add(A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_FIXED);
         self.objs[f as usize].has_proto_obj = true;
         Val::Obj(p)
@@ -658,7 +681,7 @@ impl Vm {
             }
             if atom == A_PROTOTYPE && !self.objs[f as usize].has_proto_obj {
                 let p = &self.protos[pi as usize];
-                if !p.arrow && !(p.method && !p.class_ctor) && !p.getter_setter {
+                if p.generator || p.constructible() {
                     return self.function_prototype(f);
                 }
             }
@@ -764,7 +787,8 @@ impl Vm {
                     if i < ob.elems.len() as int {
                         return ob.elems[i as usize].clone();
                     }
-                    if ob.class == C_ARRAY {
+                    // an index far past the end is a property (set_index)
+                    if ob.class == C_ARRAY && ob.keys.is_empty() {
                         return Val::Undef;
                     }
                 }
@@ -1522,7 +1546,7 @@ impl Vm {
             return self.construct(Val::Obj(target), all, nt);
         }
         let pi = self.objs[fo as usize].func;
-        if self.protos[pi as usize].arrow || (self.protos[pi as usize].method && !self.protos[pi as usize].class_ctor) {
+        if !self.protos[pi as usize].constructible() {
             self.throw_type("value is not a constructor");
             return Val::Undef;
         }
@@ -1639,6 +1663,7 @@ impl Vm {
             new_target: nt,
             args_obj: args_obj,
             construct: construct,
+            gen: -1,
         });
         if construct && class_ctor && !derived {
             self.run_fields(fo, &this_val);
@@ -1693,7 +1718,7 @@ impl Vm {
     }
 
     fn closure(&mut self, pi: int) -> int {
-        let fp = self.function_proto;
+        let fp = self.closure_proto(pi);
         let f = self.alloc(C_FUNCTION, fp);
         let fi = self.frames.len() - 1;
         let env = self.frames[fi].env;
@@ -2491,7 +2516,7 @@ impl Vm {
         let class = self.objs[fo as usize].class;
         if class == C_FUNCTION {
             let pi = self.objs[fo as usize].func;
-            if self.protos[pi as usize].arrow || (self.protos[pi as usize].method && !self.protos[pi as usize].class_ctor) || self.protos[pi as usize].getter_setter {
+            if !self.protos[pi as usize].constructible() {
                 self.throw_type("value is not a constructor");
                 return false;
             }
@@ -2517,6 +2542,34 @@ impl Vm {
     /// The rarer operations; true when the current frame changed.
     fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
         match op.code {
+            OP_GEN_START => {
+                self.gen_start(fi, *pc);
+                return true;
+            }
+            OP_YIELD => {
+                let v = self.pop();
+                self.gen_yield(fi, *pc, v, op.a == 1);
+                return true;
+            }
+            OP_GEN_RESUME => {
+                let mode = self.pop();
+                if let Val::Num(m) = mode {
+                    if m == 1.0 {
+                        *pc = op.a;
+                    } else if m == 2.0 {
+                        let e = self.pop();
+                        self.throw_val(e);
+                    }
+                }
+            }
+            OP_YIELD_STAR => {
+                let r = self.yield_star_step();
+                if r == 1 {
+                    *pc = op.a;
+                } else if r == 2 {
+                    *pc = op.b;
+                }
+            }
             OP_UNDEF => self.stack.push(Val::Undef),
             OP_NULL => self.stack.push(Val::Null),
             OP_TRUE => self.stack.push(Val::Bool(true)),
@@ -3318,10 +3371,11 @@ impl Vm {
         let nf = self.frames.len();
         let mut k: usize = 0;
         while k < nf {
-            let (fo, env, t, nt, ao) = {
+            let (fo, env, t, nt, ao, gen) = {
                 let f = &self.frames[k];
-                (f.fobj, f.env, f.this_val.clone(), f.new_target.clone(), f.args_obj)
+                (f.fobj, f.env, f.this_val.clone(), f.new_target.clone(), f.args_obj, f.gen)
             };
+            self.mark_obj(gen, &mut work);
             self.mark_obj(fo, &mut work);
             self.mark_obj(env, &mut work);
             self.mark_val(&t, &mut work);

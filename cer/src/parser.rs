@@ -19,6 +19,9 @@ pub struct Parser {
     no_in: bool,
     in_function: bool,
     in_class: bool,
+    /// `yield` and `await` are operators here
+    in_generator: bool,
+    in_async: bool,
 }
 
 fn binary_prec(op: &str) -> int {
@@ -131,6 +134,8 @@ impl Parser {
             no_in: false,
             in_function: false,
             in_class: false,
+            in_generator: false,
+            in_async: false,
         };
         if !lx.error.is_empty() {
             p.error = lx.error.clone();
@@ -752,6 +757,10 @@ impl Parser {
 
     fn function_body(&mut self, owner: int) -> int {
         let saved = self.in_function;
+        let (saved_gen, saved_async) = (self.in_generator, self.in_async);
+        let flags = self.ast.nodes[owner as usize].flags;
+        self.in_generator = (flags & F_GENERATOR) != 0;
+        self.in_async = (flags & F_ASYNC) != 0;
         self.in_function = true;
         let n = self.node(N_BLOCK);
         self.expect("{");
@@ -764,6 +773,8 @@ impl Parser {
         self.expect("}");
         self.ast.nodes[n as usize].list = body;
         self.in_function = saved;
+        self.in_generator = saved_gen;
+        self.in_async = saved_async;
         n
     }
 
@@ -855,11 +866,16 @@ impl Parser {
             self.ast.nodes[n as usize].a = b;
         } else {
             let saved = self.in_function;
+            let (saved_gen, saved_async) = (self.in_generator, self.in_async);
+            self.in_generator = false;
+            self.in_async = (flags & F_ASYNC) != 0;
             self.in_function = true;
             let saved_no_in = self.no_in;
             let e = self.assign();
             self.no_in = saved_no_in;
             self.in_function = saved;
+            self.in_generator = saved_gen;
+            self.in_async = saved_async;
             self.ast.nodes[n as usize].a = e;
             self.ast.nodes[n as usize].flags |= F_EXPR_BODY;
         }
@@ -1141,9 +1157,19 @@ impl Parser {
         if self.arrow_ahead() {
             return self.arrow();
         }
-        if self.is("yield") && self.in_function {
-            self.fail("generators are not supported");
-            return self.node(N_UNDEF);
+        if self.is("yield") && self.in_generator && !self.toks[self.pos as usize].escaped {
+            let n = self.node(N_YIELD);
+            self.next();
+            self.ast.nodes[n as usize].a = -1;
+            if !self.nl_before() && self.eat("*") {
+                self.ast.nodes[n as usize].flags = 1;
+                let a = self.assign();
+                self.ast.nodes[n as usize].a = a;
+            } else if !self.nl_before() && !self.is(")") && !self.is("]") && !self.is("}") && !self.is(",") && !self.is(";") && !self.is(":") && self.kind() != T_EOF && !(self.kind() == T_IDENT && self.is("in")) {
+                let a = self.assign();
+                self.ast.nodes[n as usize].a = a;
+            }
+            return n;
         }
         let line = self.line();
         let left = self.conditional();
@@ -1250,7 +1276,7 @@ impl Parser {
         if self.kind() == T_IDENT && !self.toks[self.pos as usize].escaped {
             let op = self.text();
             let s = op.as_str();
-            if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_function) {
+            if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_async) {
                 self.next();
                 let a = self.unary();
                 let n = self.ast.add(N_UNARY, line);

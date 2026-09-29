@@ -1298,6 +1298,8 @@ impl Vm {
                     return Val::Undef;
                 }
                 let p = self.new_promise();
+                let proto = self.proto_from(&new_target, self.promise_proto);
+                self.objs[p as usize].proto = proto;
                 let (res, rej) = self.resolving_functions(p);
                 self.temp_roots.push(Val::Obj(p));
                 self.call_value(a0, Val::Undef, vec![Val::Obj(res), Val::Obj(rej)]);

@@ -69,9 +69,7 @@ hide(SetProto, 'isDisjointFrom', function isDisjointFrom(other) {
 // ---- Iterator (ES2025): the prototype every built-in iterator shares, and
 // its helpers
 var ArrayIteratorProto = getPrototypeOf([][Symbol.iterator]());
-var IteratorProto = create(Object.prototype);
-hide(IteratorProto, Symbol.iterator, function () { return this; });
-Object.setPrototypeOf(ArrayIteratorProto, IteratorProto);
+var IteratorProto = getPrototypeOf(ArrayIteratorProto);
 function Iterator() {
   if (new.target === undefined || new.target === Iterator) throw new TypeError('Abstract class Iterator not directly constructable');
 }
@@ -203,7 +201,85 @@ function lookup(o, name, which) {
 hide(OP, '__lookupGetter__', function __lookupGetter__(name) { return lookup(this, name, 'get'); });
 hide(OP, '__lookupSetter__', function __lookupSetter__(name) { return lookup(this, name, 'set'); });
 
-// ---- Promise statics
+// ---- Promise: species, subclassing, the combinators over the native core
+var PP = Promise.prototype;
+var nativeThen = PP.then;
+function isPromise(x) { return isObject(x) && x instanceof Promise; }
+function speciesOf(o, d) {
+  var C = o.constructor;
+  if (C === undefined) return d;
+  if (!isObject(C)) throw new TypeError('object.constructor is not an object');
+  var S = C[Symbol.species];
+  if (S === undefined || S === null) return d;
+  if (isCallable(S)) return S;
+  throw new TypeError('object.constructor[Symbol.species] is not a constructor');
+}
+function capability(C) {
+  if (!isCallable(C)) throw new TypeError('Promise resolver is not a constructor');
+  var res, rej;
+  var p = new C(function (a, b) {
+    if (res !== undefined || rej !== undefined) throw new TypeError('Promise executor has already been invoked');
+    res = a; rej = b;
+  });
+  if (!isCallable(res) || !isCallable(rej)) throw new TypeError('Promise resolve or reject function is not callable');
+  return { promise: p, resolve: res, reject: rej };
+}
+defineProperty(Promise, Symbol.species, { get: function () { return this; }, enumerable: false, configurable: true });
+hide(PP, 'then', function then(ok, err) {
+  if (!isPromise(this)) throw new TypeError('Promise.prototype.then called on incompatible receiver');
+  var C = speciesOf(this, Promise);
+  var d = nativeThen.call(this, ok, err);
+  if (C === Promise) return d;
+  var cap = capability(C);
+  nativeThen.call(d, cap.resolve, cap.reject);
+  return cap.promise;
+});
+hide(PP, 'catch', function (err) { return this.then(undefined, err); });
+hide(PP, 'finally', function (f) {
+  if (!isObject(this)) throw new TypeError('Promise.prototype.finally called on a non-object');
+  var C = speciesOf(this, Promise);
+  if (!isCallable(f)) return this.then(f, f);
+  return this.then(
+    function (v) { return C.resolve(f()).then(function () { return v; }); },
+    function (e) { return C.resolve(f()).then(function () { throw e; }); });
+});
+hide(Promise, 'resolve', function resolve(x) {
+  if (!isObject(this)) throw new TypeError('PromiseResolve called on non-object');
+  if (isPromise(x) && x.constructor === this) return x;
+  var cap = capability(this); cap.resolve(x); return cap.promise;
+});
+hide(Promise, 'reject', function reject(e) {
+  var cap = capability(this); cap.reject(e); return cap.promise;
+});
+hide(Promise, 'all', function all(items) {
+  var C = this; var cap = capability(C);
+  try {
+    var resolveFn = C.resolve; if (!isCallable(resolveFn)) throw new TypeError('Promise.resolve is not a function');
+    var out = [], left = 1, i = 0;
+    for (var v of items) {
+      (function (k) {
+        left++; out[k] = undefined; var called = false;
+        resolveFn.call(C, v).then(function (x) { if (called) return; called = true; out[k] = x; if (--left === 0) cap.resolve(out); }, cap.reject);
+      })(i++);
+    }
+    if (--left === 0) cap.resolve(out);
+  } catch (e) { cap.reject(e); }
+  return cap.promise;
+});
+hide(Promise, 'race', function race(items) {
+  var C = this; var cap = capability(C);
+  try {
+    var resolveFn = C.resolve;
+    for (var v of items) resolveFn.call(C, v).then(cap.resolve, cap.reject);
+  } catch (e) { cap.reject(e); }
+  return cap.promise;
+});
+hide(Promise, 'try', function (f) {
+  var cap = capability(this); var args = [];
+  for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
+  try { cap.resolve(f.apply(undefined, args)); } catch (e) { cap.reject(e); }
+  return cap.promise;
+});
 hide(Promise, 'allSettled', function allSettled(items) {
   var C = this;
   return new C(function (resolve, reject) {
@@ -235,10 +311,6 @@ hide(Promise, 'withResolvers', function withResolvers() {
   var out = {};
   out.promise = new this(function (res, rej) { out.resolve = res; out.reject = rej; });
   return out;
-});
-if (typeof Promise.race !== 'function') hide(Promise, 'race', function race(items) {
-  var C = this;
-  return new C(function (resolve, reject) { for (var v of items) C.resolve(v).then(resolve, reject); });
 });
 
 // ---- Array.prototype.toSpliced (ES2023)

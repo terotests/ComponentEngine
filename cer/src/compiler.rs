@@ -904,6 +904,8 @@ impl Compiler {
         proto.class_ctor = (flags & F_CTOR) != 0;
         proto.derived = (flags & F_DERIVED) != 0;
         proto.getter_setter = (flags & (F_GETTER | F_SETTER)) != 0;
+        proto.generator = (flags & F_GENERATOR) != 0;
+        proto.is_async = (flags & F_ASYNC) != 0;
         let params = self.ast.nodes[n as usize].list.clone();
         let saved_scope = self.cur_scope;
         self.fs.push(FnState {
@@ -995,6 +997,10 @@ impl Compiler {
                 }
             }
             pi += 1;
+        }
+        if (flags & (F_GENERATOR | F_ASYNC)) != 0 {
+            // parameters are bound at the call; the body runs as a coroutine
+            self.op(OP_GEN_START);
         }
         let body = self.ast.nodes[n as usize].a;
         if (flags & F_EXPR_BODY) != 0 {
@@ -1661,9 +1667,56 @@ impl Compiler {
         }
     }
 
+    /// After OP_YIELD: [value, mode] → [value], a `return` resumed here
+    /// leaves through the enclosing `finally` blocks.
+    fn resume_point(&mut self) {
+        let r = self.emit(OP_GEN_RESUME, 0, 0);
+        let j = self.emit(OP_JUMP, 0, 0);
+        self.patch(r);
+        self.unwind_to(-1, false);
+        self.op(OP_RETURN);
+        self.patch(j);
+    }
+
+    fn yield_expr(&mut self, n: int) {
+        let a = self.ast.nodes[n as usize].a;
+        let delegate = (self.ast.nodes[n as usize].flags & 1) != 0;
+        if !delegate {
+            if a >= 0 {
+                self.expr(a);
+            } else {
+                self.op(OP_UNDEF);
+            }
+            self.emit(OP_YIELD, 0, 0);
+            self.resume_point();
+            return;
+        }
+        // yield*: [iter, received, mode] around the loop
+        self.expr(a);
+        self.op(OP_ITER_VALUES);
+        self.op(OP_UNDEF);
+        self.emit(OP_INT, 0, 0);
+        let top = self.pc();
+        let step = self.emit(OP_YIELD_STAR, 0, 0);
+        self.emit(OP_YIELD, 1, 0);
+        self.emit(OP_JUMP, top, 0);
+        let ret = self.pc();
+        self.unwind_to(-1, false);
+        self.op(OP_RETURN);
+        let done = self.pc();
+        let i = step as usize;
+        let fi = self.fs.len() - 1;
+        self.fs[fi].proto.code[i].a = done;
+        self.fs[fi].proto.code[i].b = ret;
+    }
+
     fn expr(&mut self, n: int) {
         let k = self.ast.nodes[n as usize].kind;
         let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
+        if k == N_YIELD {
+            self.yield_expr(n);
+            return;
+        }
         if k == N_NUM {
             let v = self.ast.nodes[n as usize].num;
             self.push_num(v);
@@ -2115,6 +2168,10 @@ impl Compiler {
         }
         if o == "await" {
             self.expr(a);
+            if self.f().proto.is_async {
+                self.emit(OP_YIELD, 2, 0);
+                self.resume_point();
+            }
             return;
         }
         if o == "-" && self.ast.nodes[a as usize].kind == N_NUM {
