@@ -42,7 +42,7 @@ page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 
 await page.goto(url);
 await page.waitForSelector(".engine");
-await page.selectOption("#scale", "1");
+await page.selectOption("#scale", process.env.SCALE || "1");
 await page.selectOption("#reps", "1");
 await page.click("#run-bench");
 await page.waitForFunction(() => document.getElementById("bench-status").textContent === "done", null, { timeout: 15 * 60 * 1000 });

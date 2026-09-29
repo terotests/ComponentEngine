@@ -41,7 +41,10 @@ npm run cer:octane           # the Octane suites of Ranger's interp/bench/zoo_oc
   value is an index (`value.rs`); strings are shared `Rc<String>`. Property
   reads and writes carry an inline cache of the slot found last time, method
   calls one for the prototype's slot. Property names are interned atoms.
-  `f.call` / `f.apply` run inside the loop. A mark-and-sweep collector runs
+  `f.call` / `f.apply` run inside the loop. `x += v;` on a local appends to x's
+  string in place when nothing else holds it (`OP_ADD_LOCAL_POP`), so
+  building a string in a loop is linear; the other targets, whose strings
+  are immutable, take the ordinary path (`#[ranger::target]`). A mark-and-sweep collector runs
   at calls and backward jumps.
 - `builtins.rs`, `builtins2.rs`: Object, Function, Array, String, Number,
   Boolean, Symbol, the Error family, Math, JSON, Reflect, RegExp, Date

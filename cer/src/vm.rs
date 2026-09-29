@@ -1862,6 +1862,20 @@ impl Vm {
                     OP_POP => {
                         self.stack.pop();
                     }
+                    OP_ADD_LOCAL_POP => {
+                        let b = self.pop();
+                        let i = (bp + op.a) as usize;
+                        let mut done = false;
+                        if let Val::Str(bs) = &b {
+                            done = append_in_place(&mut self.stack[i], bs.as_str());
+                        }
+                        if !done {
+                            let a = self.stack[i].clone();
+                            self.frames[fi].pc = pc;
+                            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+                            self.stack[i] = r;
+                        }
+                    }
                     OP_INC_LOCAL => {
                         let i = (bp + op.a) as usize;
                         if let Val::Num(n) = self.stack[i] {
@@ -3361,4 +3375,25 @@ pub fn arith_num(code: int, x: double, y: double) -> double {
         OP_USHR => (to_uint32(x) / pow2(to_int32(y) & 31)).floor(),
         _ => nan(),
     }
+}
+
+/// Appends `b` to the string in `slot` when nothing else holds that string,
+/// so `s += …` does not copy `s`; answers false (and changes nothing) when
+/// it cannot, and the caller adds the two the ordinary way.
+#[ranger::target(rust)]
+fn append_in_place(slot: &mut Val, b: &str) -> bool {
+    if let Val::Str(rc) = slot {
+        if let Some(s) = Rc::get_mut(rc) {
+            s.push_str(b);
+            return true;
+        }
+    }
+    false
+}
+
+/// The other targets' strings are immutable values (and their engines
+/// concatenate without copying where they can): always the ordinary way.
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn append_in_place(_slot: &mut Val, _b: &str) -> bool {
+    false
 }

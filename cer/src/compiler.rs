@@ -1286,6 +1286,41 @@ impl Compiler {
         self.cur_scope = saved;
     }
 
+    /// Whether evaluating the expression `n` might assign to a variable:
+    /// an assignment or an update anywhere under it. A tree too large to
+    /// look through counts as yes.
+    fn may_assign(&self, n: int) -> bool {
+        let mut todo: Vec<int> = Vec::new();
+        todo.push(n);
+        let mut seen: int = 0;
+        let count = self.ast.nodes.len() as int;
+        while !todo.is_empty() {
+            let i = todo.pop().unwrap();
+            if i < 0 || i >= count {
+                continue;
+            }
+            seen += 1;
+            if seen > 256 {
+                return true;
+            }
+            let nd = &self.ast.nodes[i as usize];
+            if nd.kind == N_ASSIGN || nd.kind == N_UPDATE {
+                return true;
+            }
+            todo.push(nd.a);
+            todo.push(nd.b);
+            todo.push(nd.c);
+            todo.push(nd.d);
+            for x in nd.list.iter() {
+                todo.push(*x);
+            }
+            for x in nd.list2.iter() {
+                todo.push(*x);
+            }
+        }
+        false
+    }
+
     fn expr_statement(&mut self, e: int) {
         let k = self.ast.nodes[e as usize].kind;
         // `i++` / `i += 1` on a local: in place
@@ -1305,6 +1340,25 @@ impl Compiler {
             }
         }
         let is_program_top = self.fs.len() == 1 && self.fs[0].is_program && self.f().ctl.is_empty() && self.keep_completion;
+        // `x += v;` on a local: the value is not used, so the VM can append
+        // to x's string in place. Only when v cannot assign to anything
+        // (a local not in an environment is reachable by nothing else).
+        if k == N_ASSIGN && !is_program_top && self.ast.nodes[e as usize].op.as_str() == "+=" {
+            let t = self.ast.nodes[e as usize].a;
+            let v = self.ast.nodes[e as usize].b;
+            if self.ast.nodes[t as usize].kind == N_IDENT {
+                let b = match self.ref_bind.get(&t) {
+                    Some(x) => *x,
+                    None => -1,
+                };
+                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.may_assign(v) {
+                    let slot = self.binds[b as usize].slot;
+                    self.expr(v);
+                    self.emit(OP_ADD_LOCAL_POP, slot, 0);
+                    return;
+                }
+            }
+        }
         if k == N_ASSIGN && self.ast.nodes[e as usize].op.as_str() == "define" {
             self.define_field(e);
             self.op(OP_POP);

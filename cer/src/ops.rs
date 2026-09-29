@@ -222,3 +222,7 @@ pub const OP_SET_PROP_POP: int = 131;
 pub const OP_SET_ELEM_POP: int = 132;
 /// [obj] → [obj.<private atom a>]: a TypeError when obj does not have it
 pub const OP_GET_PRIVATE: int = 133;
+/// `x += v;` as a statement on local a: [v] → []. When x and v are strings
+/// and nothing else holds x's text, v is appended in place instead of both
+/// being copied into a new string (`s += …` in a loop is then linear).
+pub const OP_ADD_LOCAL_POP: int = 134;
