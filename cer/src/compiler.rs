@@ -36,6 +36,11 @@ pub struct Binding {
     pub scope: int,
     pub global: bool,
     pub placed: bool,
+    /// a let / const / class read that may run before the declaration:
+    /// the binding starts out holding the uninitialized marker
+    pub tdz: bool,
+    /// the resolver has passed the declaration
+    pub inited: bool,
 }
 
 pub struct Scope {
@@ -92,6 +97,18 @@ pub struct Compiler {
     pub binds: Vec<Binding>,
     node_scope: HashMap<int, int>,
     ref_bind: HashMap<int, int>,
+    /// the references that check for the uninitialized marker
+    tdz_refs: HashMap<int, bool>,
+    /// the names a let / const declares (not references)
+    decl_idents: HashMap<int, bool>,
+    /// the body being scanned by hoist_vars
+    hoist_root: int,
+    /// function declarations inside blocks and statements of the body
+    /// being scanned
+    nested_funcs: Vec<int>,
+    /// Annex B: such a declaration (sloppy code) → the function-level var
+    /// that receives it when the declaration is evaluated
+    annex_var: HashMap<int, int>,
     fs: Vec<FnState>,
     pub error: String,
     /// completion value of the script: slot 0 of the program
@@ -115,6 +132,11 @@ impl Compiler {
             binds: Vec::new(),
             node_scope: HashMap::new(),
             ref_bind: HashMap::new(),
+            tdz_refs: HashMap::new(),
+            decl_idents: HashMap::new(),
+            hoist_root: -1,
+            nested_funcs: Vec::new(),
+            annex_var: HashMap::new(),
             fs: Vec::new(),
             error: String::new(),
             keep_completion: true,
@@ -184,6 +206,8 @@ impl Compiler {
             scope: scope,
             global: global,
             placed: false,
+            tdz: false,
+            inited: false,
         });
         let id = (self.binds.len() as int) - 1;
         self.scopes[scope as usize].names.insert(String::from(name), id);
@@ -218,6 +242,10 @@ impl Compiler {
         }
         let k = self.ast.nodes[n as usize].kind;
         if k == N_FUNC || k == N_CLASS {
+            let f = self.ast.nodes[n as usize].flags;
+            if k == N_FUNC && (f & F_DECL) != 0 && (f & (F_ASYNC | F_GENERATOR)) == 0 && self.hoist_root >= 0 && !self.ast.nodes[self.hoist_root as usize].list.contains(&n) {
+                self.nested_funcs.push(n);
+            }
             return;
         }
         if k == N_VAR {
@@ -272,6 +300,52 @@ impl Compiler {
             self.hoist_vars(c, scope);
             self.hoist_vars(d, scope);
         }
+    }
+
+    /// Scans `body` for vars, then declares the function-level lexical
+    /// names, then (sloppy code, Annex B) a var for each function declared
+    /// in a block whose name no lexical or parameter binding takes.
+    fn hoist_body(&mut self, body: int, scope: int, strict: bool) {
+        let saved_root = self.hoist_root;
+        let saved_nested = self.nested_funcs.clone();
+        self.hoist_root = body;
+        self.nested_funcs = Vec::new();
+        self.hoist_vars(body, scope);
+        let list = self.ast.nodes[body as usize].list.clone();
+        self.declare_lexical(&list, scope);
+        if !strict {
+            let nested = self.nested_funcs.clone();
+            for f in nested {
+                let nm = self.ast.nodes[f as usize].s.clone();
+                let existing = match self.scopes[scope as usize].names.get(&nm) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if existing >= 0 {
+                    let ek = self.binds[existing as usize].kind;
+                    if ek != K_VAR && ek != K_FUNC {
+                        continue;
+                    }
+                }
+                let b = self.declare(scope, nm.as_str(), K_VAR);
+                self.annex_var.insert(f, b);
+            }
+        }
+        self.hoist_root = saved_root;
+        self.nested_funcs = saved_nested;
+    }
+
+    /// Whether code in `scope` is strict.
+    fn scope_strict(&self, scope: int) -> bool {
+        let mut s = scope;
+        while s >= 0 {
+            let n = self.scopes[s as usize].node;
+            if n >= 0 && (self.ast.nodes[n as usize].flags & (F_STRICT | F_METHOD)) != 0 && (self.scopes[s as usize].is_func || self.scopes[s as usize].is_program) {
+                return true;
+            }
+            s = self.scopes[s as usize].parent;
+        }
+        false
     }
 
     /// let / const / class / function declarations directly in `list`.
@@ -337,6 +411,61 @@ impl Compiler {
         let b = self.lookup(scope, name.as_str());
         if b >= 0 && !self.binds[b as usize].global {
             self.ref_bind.insert(n, b);
+            let kind = self.binds[b as usize].kind;
+            if (kind == K_LET || kind == K_CONST || kind == K_CLASS) && !self.decl_idents.contains_key(&n) {
+                // before the declaration, or in a hoisted function that can
+                // run before it
+                let mut early = !self.binds[b as usize].inited;
+                let target = self.binds[b as usize].scope;
+                let mut s = scope;
+                while !early && s >= 0 && s != target {
+                    let sn = self.scopes[s as usize].node;
+                    if self.scopes[s as usize].is_func && sn >= 0 && (self.ast.nodes[sn as usize].flags & F_DECL) != 0 {
+                        early = true;
+                    }
+                    s = self.scopes[s as usize].parent;
+                }
+                if early {
+                    self.tdz_refs.insert(n, true);
+                    self.binds[b as usize].tdz = true;
+                }
+            }
+        }
+    }
+
+    fn pattern_idents(&self, p: int, out: &mut Vec<int>) {
+        if p < 0 {
+            return;
+        }
+        let k = self.ast.nodes[p as usize].kind;
+        if k == N_IDENT {
+            out.push(p);
+        } else if k == N_PAT_DEFAULT || k == N_REST {
+            self.pattern_idents(self.ast.nodes[p as usize].a, out);
+        } else if k == N_ARRAY {
+            for e in self.ast.nodes[p as usize].list.iter() {
+                self.pattern_idents(*e, out);
+            }
+        } else if k == N_OBJECT {
+            for pr in self.ast.nodes[p as usize].list.iter() {
+                self.pattern_idents(self.ast.nodes[*pr as usize].b, out);
+            }
+        }
+    }
+
+    /// The resolver passed the declaration of `name` in `scope` (none in a
+    /// switch, whose cases can be jumped into past it).
+    fn mark_inited(&mut self, scope: int, name: &str) {
+        let sn = self.scopes[scope as usize].node;
+        if sn >= 0 && self.ast.nodes[sn as usize].kind == N_SWITCH {
+            return;
+        }
+        let b = match self.scopes[scope as usize].names.get(name) {
+            Some(x) => *x,
+            None => -1,
+        };
+        if b >= 0 {
+            self.binds[b as usize].inited = true;
         }
     }
 
@@ -397,9 +526,8 @@ impl Compiler {
         }
         let body = self.ast.nodes[n as usize].a;
         if (flags & F_EXPR_BODY) == 0 {
-            self.hoist_vars(body, fscope);
-            let list = self.ast.nodes[body as usize].list.clone();
-            self.declare_lexical(&list, fscope);
+            let strict = self.scope_strict(fscope);
+            self.hoist_body(body, fscope, strict);
         }
         // a named function expression sees its own name
         let name = self.ast.nodes[n as usize].s.clone();
@@ -451,6 +579,9 @@ impl Compiler {
                 }
                 let v = self.ast.nodes[m as usize].b;
                 self.visit(v, inner);
+            }
+            if !name.is_empty() {
+                self.mark_inited(inner, name.as_str());
             }
             return;
         }
@@ -527,12 +658,24 @@ impl Compiler {
             return;
         }
         if k == N_VAR {
+            let lexical = self.ast.nodes[n as usize].op.as_str() != "var";
             let decls = self.ast.nodes[n as usize].list.clone();
             for dcl in decls {
                 let t = self.ast.nodes[dcl as usize].a;
                 let init = self.ast.nodes[dcl as usize].b;
-                self.visit_pattern(t, scope);
+                let mut ids: Vec<int> = Vec::new();
+                if lexical {
+                    self.pattern_idents(t, &mut ids);
+                    for i in ids.iter() {
+                        self.decl_idents.insert(*i, true);
+                    }
+                }
                 self.visit(init, scope);
+                self.visit_pattern(t, scope);
+                for i in ids.iter() {
+                    let nm = self.ast.nodes[*i as usize].s.clone();
+                    self.mark_inited(scope, nm.as_str());
+                }
             }
             return;
         }
@@ -695,12 +838,21 @@ impl Compiler {
         }
         self.scopes[scope as usize].env_size = env_size;
         self.scopes[scope as usize].has_env = env_size > 0;
+        let mut pushed = false;
         if env_size > 0 && !is_fn {
             self.emit(OP_PUSH_ENV, env_size, 0);
             self.f().ctl.push(Ctl { kind: CT_ENV, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
-            return true;
+            pushed = true;
         }
-        false
+        // bindings read before their declaration start out uninitialized
+        for b in binds.iter() {
+            if self.binds[*b as usize].tdz && !self.binds[*b as usize].global {
+                self.op(OP_TDZ);
+                self.store_bind(*b, true);
+                self.op(OP_POP);
+            }
+        }
+        pushed
     }
 
     fn leave_scope(&mut self, pushed: bool) {
@@ -740,6 +892,10 @@ impl Compiler {
             return;
         }
         self.load_bind(b);
+        if self.tdz_refs.contains_key(&n) {
+            let c = self.str_const(name.as_str());
+            self.emit(OP_CHECK_TDZ, c, 0);
+        }
     }
 
     fn load_bind(&mut self, b: int) {
@@ -807,6 +963,12 @@ impl Compiler {
             self.emit(OP_SET_GLOBAL, a, 0);
             return;
         }
+        if !init && self.tdz_refs.contains_key(&n) {
+            self.load_bind(b);
+            let c = self.str_const(name.as_str());
+            self.emit(OP_CHECK_TDZ, c, 0);
+            self.op(OP_POP);
+        }
         self.store_bind(b, init);
     }
 
@@ -825,9 +987,9 @@ impl Compiler {
     pub fn compile_program(&mut self, root: int) -> int {
         let s = self.new_scope(-1, root, true, false);
         self.scopes[s as usize].is_program = true;
-        self.hoist_vars(root, s);
+        let strict = self.scope_strict(s);
+        self.hoist_body(root, s, strict);
         let list = self.ast.nodes[root as usize].list.clone();
-        self.declare_lexical(&list, s);
         self.visit(root, s);
         if !self.error.is_empty() {
             return -1;
@@ -1063,7 +1225,28 @@ impl Compiler {
             return;
         }
         if k == N_FUNC {
-            return; // hoisted
+            // hoisted to the top of its block; Annex B also copies it to the
+            // function's var of that name here
+            let vb = match self.annex_var.get(&n) {
+                Some(b) => *b,
+                None => -1,
+            };
+            if vb >= 0 {
+                let name = self.ast.nodes[n as usize].s.clone();
+                let here = match self.scopes[self.cur_scope as usize].names.get(&name) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if here >= 0 && here != vb && self.binds[here as usize].kind == K_FUNC {
+                    self.load_bind(here);
+                } else {
+                    let p = self.function(n);
+                    self.emit(OP_CLOSURE, p, 0);
+                }
+                self.store_bind(vb, true);
+                self.op(OP_POP);
+            }
+            return;
         }
         if k == N_CLASS {
             self.class(n);
@@ -1375,7 +1558,7 @@ impl Compiler {
                     Some(x) => *x,
                     None => -1,
                 };
-                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST {
+                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) {
                     let slot = self.binds[b as usize].slot;
                     let delta = if self.ast.nodes[e as usize].op.as_str() == "++" { 1 } else { -1 };
                     self.emit(OP_INC_LOCAL, slot, delta);
@@ -1395,7 +1578,7 @@ impl Compiler {
                     Some(x) => *x,
                     None => -1,
                 };
-                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.may_assign(v) {
+                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) && !self.may_assign(v) {
                     let slot = self.binds[b as usize].slot;
                     self.expr(v);
                     self.emit(OP_ADD_LOCAL_POP, slot, 0);
@@ -2060,7 +2243,7 @@ impl Compiler {
                     Some(x) => *x,
                     None => -1,
                 };
-                if bnd >= 0 && !self.binds[bnd as usize].in_env && !self.binds[bnd as usize].global {
+                if bnd >= 0 && !self.binds[bnd as usize].in_env && !self.binds[bnd as usize].global && !self.tdz_refs.contains_key(&a) {
                     let slot = self.binds[bnd as usize].slot;
                     let at = self.atom(s.as_str());
                     self.emit(OP_GET_LOCAL_PROP, slot, at);
@@ -2369,7 +2552,7 @@ impl Compiler {
                 Some(x) => *x,
                 None => -1,
             };
-            if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST {
+            if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) {
                 let slot = self.binds[b as usize].slot;
                 let delta = if op.as_str() == "++" { 1 } else { -1 };
                 self.emit(if prefix { OP_PREINC_LOCAL } else { OP_POSTINC_LOCAL }, slot, delta);
@@ -2784,15 +2967,6 @@ impl Compiler {
             self.op(OP_SWAP);
         }
         self.emit(OP_CLASS, if derived { 1 } else { 0 }, 0);
-        // [ctor, proto]: the name is bound before any method runs
-        if !name.is_empty() {
-            let b = self.lookup_here(name.as_str());
-            if b >= 0 {
-                self.op(OP_OVER);
-                self.store_bind(b, true);
-                self.op(OP_POP);
-            }
-        }
         let members = self.ast.nodes[n as usize].list.clone();
         for m in members {
             let f = self.ast.nodes[m as usize].flags;
@@ -2818,6 +2992,16 @@ impl Compiler {
                 self.emit(if computed { OP_DEFINE_METHOD_ELEM } else { OP_DEFINE_METHOD }, at, 0);
             }
             self.op(OP_POP);
+        }
+        // [ctor, proto]: the name is bound once the methods are defined
+        // (computed keys still see it uninitialized), before the fields
+        if !name.is_empty() {
+            let b = self.lookup_here(name.as_str());
+            if b >= 0 {
+                self.op(OP_OVER);
+                self.store_bind(b, true);
+                self.op(OP_POP);
+            }
         }
         if fields >= 0 {
             self.op(OP_OVER);

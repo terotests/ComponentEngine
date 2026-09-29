@@ -95,6 +95,8 @@ struct RParser {
     name_index: Vec<int>,
     error: String,
     unicode: bool,
+    /// the capturing groups in the whole pattern
+    total_groups: int,
 }
 
 fn is_digit(c: int) -> bool {
@@ -617,16 +619,17 @@ impl RParser {
             }
             return v;
         }
-        if is_digit(c) && in_class {
-            // legacy octal in a class
+        if is_digit(c) && (in_class || !self.unicode) {
+            // a legacy octal escape (up to \377); \8 and \9 are the digits
             let mut v = c - 48;
             if v < 8 {
                 while is_digit(self.cur()) && self.cur() < 56 && v < 32 {
                     v = v * 8 + (self.cur() - 48);
                     self.pos += 1;
                 }
+                return v;
             }
-            return v;
+            return c;
         }
         c
     }
@@ -727,10 +730,19 @@ impl RParser {
         }
         if c >= 49 && c <= 57 {
             // a back reference \1..\99
+            let start = self.pos;
             let mut v: int = 0;
             while is_digit(self.cur()) {
                 v = v * 10 + (self.cur() - 48);
                 self.pos += 1;
+            }
+            if v > self.total_groups && !self.unicode {
+                // no such group: an octal escape (Annex B)
+                self.pos = start;
+                let ch = self.char_escape(false);
+                let n = self.node(R_CHAR);
+                self.nodes[n as usize].c = ch;
+                return n;
             }
             let n = self.node(R_BACKREF);
             self.nodes[n as usize].c = v;
@@ -943,6 +955,35 @@ impl Gen {
     }
 }
 
+/// The capturing groups of a pattern: `(` not followed by `?`, or `(?<name>`.
+fn count_groups(src: &Vec<int>) -> int {
+    let mut n: int = 0;
+    let mut i: usize = 0;
+    let mut in_class = false;
+    while i < src.len() {
+        let c = src[i];
+        if c == 92 {
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if c == 93 {
+                in_class = false;
+            }
+        } else if c == 91 {
+            in_class = true;
+        } else if c == 40 {
+            if i + 1 >= src.len() || src[i + 1] != 63 {
+                n += 1;
+            } else if i + 3 < src.len() && src[i + 2] == 60 && src[i + 3] != 61 && src[i + 3] != 33 {
+                n += 1;
+            }
+        }
+        i += 1;
+    }
+    n
+}
+
 pub fn compile(pattern: &str, flags: &str) -> Regex {
     let mut re = Regex {
         code: Vec::new(),
@@ -1000,7 +1041,9 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
         name_index: Vec::new(),
         error: String::new(),
         unicode: re.unicode,
+        total_groups: 0,
     };
+    p.total_groups = count_groups(&p.src);
     let root = p.disjunction();
     if p.error.is_empty() && p.cur() >= 0 {
         p.error = String::from("Invalid regular expression: unmatched )");

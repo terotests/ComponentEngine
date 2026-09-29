@@ -144,6 +144,8 @@ pub struct Vm {
     pub proxy_hooks: int,
     /// %ThrowTypeError%
     pub thrower: int,
+    /// the marker of a binding in its temporal dead zone
+    pub tdz_obj: int,
     /// BigInt values by their decimal text, and BigInt.prototype
     pub bigints: HashMap<String, int>,
     pub bigint_proto: int,
@@ -271,6 +273,7 @@ impl Vm {
             async_from_sync: -1,
             proxy_hooks: -1,
             thrower: -1,
+            tdz_obj: -1,
             bigints: HashMap::new(),
             bigint_proto: -1,
             array_values_fn: -1,
@@ -2841,6 +2844,19 @@ impl Vm {
     /// The rarer operations; true when the current frame changed.
     fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
         match op.code {
+            OP_TDZ => {
+                self.stack.push(Val::Obj(self.tdz_obj));
+            }
+            OP_CHECK_TDZ => {
+                let t = self.top().clone();
+                if let Val::Obj(o) = t {
+                    if o == self.tdz_obj {
+                        let n = self.protos[pi].consts[op.a as usize].clone();
+                        let ns = self.to_string(&n);
+                        self.throw_ref(format!("Cannot access '{}' before initialization", ns).as_str());
+                    }
+                }
+            }
             OP_BIGINT => {
                 let v = self.pop();
                 let s = self.to_string(&v);

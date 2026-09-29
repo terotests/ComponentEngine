@@ -42,6 +42,9 @@ impl Vm {
         let th = self.native_fn("", NF_THROWER, 0);
         self.roots.push(th);
         self.thrower = th;
+        let tz = self.alloc(C_OBJECT, -1);
+        self.roots.push(tz);
+        self.tdz_obj = tz;
         let fp = self.function_proto;
         let cg = self.native_fn("caller", NF_FN_CALLER, 0);
         let a_caller = self.intern("caller");

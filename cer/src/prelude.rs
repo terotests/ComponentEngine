@@ -1232,6 +1232,7 @@ hide(RP, Symbol.split, function (s, lim) {
 ['__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__'].forEach(function (name) {
   var nat = OP[name];
   hide(OP, name, setLength(function (a, b) {
+    'use strict';
     if (this === undefined || this === null) throw new TypeError('Object.prototype.' + name + ' called on null or undefined');
     return nat.call(this, a, b);
   }, nat.length));

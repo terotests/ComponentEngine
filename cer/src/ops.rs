@@ -251,3 +251,8 @@ pub const OP_ITER_CLOSE_AT: int = 140;
 pub const OP_ASYNC_ITER: int = 141;
 /// [decimal text] → [the BigInt]
 pub const OP_BIGINT: int = 142;
+/// [] → [the uninitialized marker a let / const / class binding holds
+/// before its declaration runs]
+pub const OP_TDZ: int = 143;
+/// [v] → [v]; a ReferenceError naming const `a` when v is the marker
+pub const OP_CHECK_TDZ: int = 144;

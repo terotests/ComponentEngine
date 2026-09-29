@@ -154,7 +154,7 @@ impl Lexer {
 
     /// Skips spaces and comments; true when a line break was passed.
     fn skip_space(&mut self) -> bool {
-        let mut nl = false;
+        let mut nl = self.pos == 0;
         let n = self.src.len() as int;
         while self.pos < n {
             let c = self.cur();
@@ -188,7 +188,7 @@ impl Lexer {
                 if !closed {
                     self.fail("unterminated comment");
                 }
-            } else if c == '<' && self.at(self.pos + 1) == '!' && self.at(self.pos + 2) == '-' && self.at(self.pos + 3) == '-' {
+            } else if (c == '<' && self.at(self.pos + 1) == '!' && self.at(self.pos + 2) == '-' && self.at(self.pos + 3) == '-') || (nl && c == '-' && self.at(self.pos + 1) == '-' && self.at(self.pos + 2) == '>') {
                 // an HTML-like comment, as a script allows
                 while self.pos < n && self.cur() != '\n' {
                     self.pos += 1;
