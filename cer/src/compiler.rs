@@ -94,6 +94,9 @@ pub struct Compiler {
     pub error: String,
     /// completion value of the script: slot 0 of the program
     keep_completion: bool,
+    /// strict eval code: the script's own `var`s and functions are its
+    /// locals, not the global object's
+    pub local_program: bool,
     /// the innermost scope entered by the code being written
     cur_scope: int,
 }
@@ -113,6 +116,7 @@ impl Compiler {
             fs: Vec::new(),
             error: String::new(),
             keep_completion: true,
+            local_program: false,
             cur_scope: -1,
         }
     }
@@ -168,7 +172,7 @@ impl Compiler {
             }
             return existing;
         }
-        let global = self.scopes[scope as usize].is_program;
+        let global = self.scopes[scope as usize].is_program && !self.local_program;
         self.binds.push(Binding {
             name: String::from(name),
             kind: kind,
@@ -830,11 +834,16 @@ impl Compiler {
             is_program: true,
         });
         self.cur_scope = s;
+        if self.local_program {
+            self.enter_scope(s, true);
+            let es = self.scopes[s as usize].env_size;
+            self.f().proto.env_size = es;
+        }
         // top-level vars exist before the code runs
         let binds = self.scopes[s as usize].binds.clone();
         for b in binds {
             let k = self.binds[b as usize].kind;
-            if k == K_VAR {
+            if k == K_VAR && !self.local_program {
                 let nm = self.binds[b as usize].name.clone();
                 let a = self.atom(nm.as_str());
                 self.emit(OP_DECL_GLOBAL, a, 0);

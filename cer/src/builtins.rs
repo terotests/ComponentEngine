@@ -780,6 +780,7 @@ impl Vm {
         self.setup_coroutines();
         self.setup_typed();
         self.setup_proxy();
+        self.setup_dynamic();
     }
 
     // ---- helpers
@@ -2605,6 +2606,9 @@ impl Vm {
         if id >= 930 && id < 940 {
             return self.call_native_proxy(id, args, construct);
         }
+        if id >= 940 && id < 950 {
+            return self.call_native_dynamic(id, args, new_target);
+        }
         if self.proxy_hooks >= 0 {
             let p = if id == NF_OP_HASOWN || id == NF_OP_PROPENUM { obj_of(&this) } else if args.is_empty() { -1 } else { obj_of(&args[0]) };
             if p >= 0 && self.objs[p as usize].class == C_PROXY {
@@ -2875,10 +2879,7 @@ impl Vm {
                 self.jobs.push(Val::Undef);
                 Val::Undef
             }
-            NF_FUNCTION => {
-                self.throw_type("Function constructor is not supported");
-                Val::Undef
-            }
+            NF_FUNCTION => self.call_native_dynamic(NF_FUNCTION, args, new_target),
             NF_STRING => {
                 let s = if args.is_empty() {
                     Rc::new(String::new())

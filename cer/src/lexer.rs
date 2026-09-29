@@ -62,11 +62,12 @@ pub struct Lexer {
 }
 
 fn is_id_start(c: char) -> bool {
-    c.is_alphabetic() || c == '_' || c == '$'
+    // U+2E2F VERTICAL TILDE is a letter (Lm) but Pattern_Syntax
+    (c.is_alphabetic() && c != '\u{2e2f}') || c == '_' || c == '$'
 }
 
 fn is_id_part(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '$' || c == '\u{200c}' || c == '\u{200d}'
+    (c.is_alphanumeric() && c != '\u{2e2f}') || c == '_' || c == '$' || c == '\u{200c}' || c == '\u{200d}'
 }
 
 fn hex_val(c: char) -> int {

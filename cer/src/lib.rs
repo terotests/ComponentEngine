@@ -21,6 +21,7 @@ pub mod builtins;
 pub mod builtins2;
 pub mod compiler;
 pub mod coroutine;
+pub mod dynamic;
 pub mod jsstr;
 pub mod lexer;
 pub mod num;
