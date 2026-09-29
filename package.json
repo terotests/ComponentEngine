@@ -24,6 +24,6 @@
     "esbuild": "^0.28.2",
     "playwright-core": "^1.62.1",
     "quickjs-emscripten-core": "^0.32.0",
-    "ranger-compiler": "^4.0.0"
+    "ranger-compiler": "^4.0.1"
   }
 }

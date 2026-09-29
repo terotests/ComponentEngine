@@ -5,18 +5,20 @@
 //
 //   wasm/cer.wasm      CEr (cer/) by cargo, --target wasm32-wasip1
 //   workers/<id>.js    one worker per engine (esbuild): the browser's own
-//                      engine, CEr and QuickJS
+//                      engine, CEr, QuickJS, and CEr compiled by rgrc to
+//                      JavaScript (cer/bin/Cer.cjs) as a curiosity
 //   engines.json       which engines this build has, and why one is missing
 //
 // A step whose toolchain is missing is skipped and its engine marked
 // unavailable, unless --strict (CI) makes that a failure.
 //
-//   node playground/build.mjs [--strict] [--skip=cer-wasm]
+//   node playground/build.mjs [--strict] [--skip=cer-wasm,cer-js]
 
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { REPO, rgrc } from "../scripts/compiler.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(HERE, "src");
@@ -25,8 +27,7 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "quickjs"];
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ENGINES = ["native", "cer-wasm", "quickjs", "cer-js"];
 const status = {}; // id -> { available, reason, size }
 
 function log(s) {
@@ -71,6 +72,17 @@ step("cer-wasm", () => {
   const crate = path.join(HERE, "cer-wasm");
   run("cargo", ["build", "--release", "--quiet", "--target", "wasm32-wasip1", "--manifest-path", path.join(crate, "Cargo.toml")]);
   fs.copyFileSync(path.join(crate, "target/wasm32-wasip1/release/cer_wasm.wasm"), path.join(DIST, "wasm/cer.wasm"));
+});
+
+// ---- CEr as JavaScript, through Ranger -------------------------------------
+// rgrc reads cer/src/lib.rs as a strict Rust module and writes JavaScript.
+// Needs ranger-compiler 4.0.1 or later (the Rust-syntax fixes CEr uses).
+
+step("cer-js", () => {
+  fs.mkdirSync(path.join(REPO, "cer/bin"), { recursive: true });
+  fs.rmSync(path.join(REPO, "cer/bin/Cer.cjs"), { force: true });
+  run(process.execPath, ["--stack-size=8000", rgrc(), "-es6", "-nodemodule", "cer/src/lib.rs", "-d=cer/bin", "-o=Cer.cjs"], { cwd: REPO });
+  if (!fs.existsSync(path.join(REPO, "cer/bin/Cer.cjs"))) throw new Error("rgrc wrote no cer/bin/Cer.cjs");
 });
 
 // ---- the page and one worker per engine -----------------------------------

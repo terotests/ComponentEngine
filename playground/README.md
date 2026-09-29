@@ -13,6 +13,7 @@ your own script in all of them.
 | Browser JS | the page's own engine (V8, SpiderMonkey, JavaScriptCore), through `new Function`: the reference |
 | CEr · Rust → WASM | `cer/` compiled by cargo for `wasm32-wasip1` (`cer-wasm/`, a C ABI) |
 | QuickJS · C → WASM | Fabrice Bellard's QuickJS, from `quickjs-emscripten` (MIT) |
+| CEr · Rust → Ranger → JS | a curiosity: the same `cer/src/lib.rs` read by the Ranger compiler as a strict Rust module and written out as JavaScript |
 
 Each engine runs in a Web Worker of its own, one engine at a time, so no two
 compete for the CPU; a run past the time limit ends its worker. Times are
@@ -33,9 +34,10 @@ node playground/smoke.mjs          # Chromium: runs the benchmark, checks the an
 npx serve playground/dist          # or any static server
 ```
 
-`build.mjs` needs `rustup target add wasm32-wasip1` for CEr. Without it the
-engine is greyed out on the page with the reason; `--strict` (CI) fails
-instead.
+`build.mjs` needs `rustup target add wasm32-wasip1` for CEr · WASM, and
+ranger-compiler 4.0.1 or later (the devDependency) for CEr · JS. An engine
+whose build fails is greyed out on the page with the reason; `--strict` (CI)
+fails instead.
 
 ## Publishing
 
