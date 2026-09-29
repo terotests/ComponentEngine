@@ -602,8 +602,13 @@ impl Parser {
     fn for_stmt(&mut self) -> int {
         let line = self.line();
         self.next();
+        let mut is_await = false;
         if self.is("await") {
-            self.fail("for await is not supported");
+            if !self.in_async {
+                self.fail("for await is only valid in async functions");
+            }
+            self.next();
+            is_await = true;
         }
         self.expect("(");
         let mut init: int = -1;
@@ -643,6 +648,12 @@ impl Parser {
                     }
                 }
                 let body = self.sub_statement();
+                if is_await {
+                    if op.as_str() != "of" {
+                        self.fail("for await needs 'of'");
+                    }
+                    self.ast.nodes[n as usize].flags = 1;
+                }
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = init;
                 self.ast.nodes[n as usize].b = obj;
@@ -654,6 +665,9 @@ impl Parser {
                 self.ast.nodes[e as usize].a = init;
                 init = e;
             }
+        }
+        if is_await {
+            self.fail("for await needs 'of'");
         }
         let n = self.ast.add(N_FOR, line);
         self.expect(";");

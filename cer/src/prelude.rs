@@ -1233,6 +1233,27 @@ hide(RP, Symbol.split, function (s, lim) {
   }, nat.length));
 });
 
+// ---- CreateAsyncFromSyncIterator, for `for await` over a sync iterable
+var setAsyncFromSync = globalThis.__setAsyncFromSync; delete globalThis.__setAsyncFromSync;
+var AsyncIteratorProto = getPrototypeOf(getPrototypeOf(getPrototypeOf((async function* () {})())));
+setAsyncFromSync(function (sync) {
+  var it = create(AsyncIteratorProto);
+  function step(r) {
+    if (!isObject(r)) throw new TypeError('Iterator result is not an object');
+    return Promise.resolve(r.value).then(function (v) { return { value: v, done: !!r.done }; });
+  }
+  hide(it, 'next', function (v) { try { return step(sync.next(v)); } catch (e) { return Promise.reject(e); } });
+  hide(it, 'return', function (v) {
+    try { var m = sync.return; if (m === undefined || m === null) return Promise.resolve({ value: v, done: true }); return step(m.call(sync, v)); }
+    catch (e) { return Promise.reject(e); }
+  });
+  hide(it, 'throw', function (v) {
+    try { var m = sync.throw; if (m === undefined || m === null) throw v; return step(m.call(sync, v)); }
+    catch (e) { return Promise.reject(e); }
+  });
+  return it;
+});
+
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs
 // a callback, so a held object simply stays
 function WeakRef(target) {

@@ -247,3 +247,5 @@ pub const OP_YIELD_STAR: int = 138;
 pub const OP_ITER_CLOSE: int = 139;
 /// closes the iterator `a` items below the top, leaving the stack
 pub const OP_ITER_CLOSE_AT: int = 140;
+/// [iterable] → [async iterator] (`for await`)
+pub const OP_ASYNC_ITER: int = 141;

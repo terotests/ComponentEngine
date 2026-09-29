@@ -47,6 +47,14 @@ impl Vm {
         if let Val::Obj(f) = fc {
             self.objs[gf as usize].proto = f;
         }
+        let agfp = self.async_generator_function_proto;
+        let agf = self.native_fn("AsyncGeneratorFunction", NF_ASYNC_GENERATOR_FUNCTION, 1);
+        self.objs[agf as usize].add(A_PROTOTYPE, Val::Obj(agfp), P_HIDDEN | P_READONLY | P_FIXED);
+        self.objs[agf as usize].has_proto_obj = true;
+        self.objs[agfp as usize].add(A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
+        if let Val::Obj(f) = fc {
+            self.objs[agf as usize].proto = f;
+        }
         let afp = self.async_function_proto;
         let af = self.native_fn("AsyncFunction", NF_ASYNC_FUNCTION, 1);
         self.objs[af as usize].add(A_PROTOTYPE, Val::Obj(afp), P_HIDDEN | P_READONLY | P_FIXED);

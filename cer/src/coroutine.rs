@@ -34,15 +34,23 @@ const G_NEW_TARGET: usize = 2;
 const G_FOBJ: usize = 3;
 const G_ENV: usize = 4;
 const G_ARGS: usize = 5;
-/// an async call's promise
+/// an async call's promise; an async generator's queue of requests
 const G_PROMISE: usize = 6;
-const G_HANDLERS: usize = 7;
+/// an async generator waiting on an `await` (true), not on a request
+const G_AWAIT: usize = 7;
+const G_HANDLERS: usize = 8;
 
 pub const NF_GEN_NEXT: int = 900;
 pub const NF_GEN_RETURN: int = 901;
 pub const NF_GEN_THROW: int = 902;
 pub const NF_ASYNC_OK: int = 903;
 pub const NF_ASYNC_ERR: int = 904;
+pub const NF_AGEN_NEXT: int = 905;
+pub const NF_AGEN_RETURN: int = 906;
+pub const NF_AGEN_THROW: int = 907;
+pub const NF_AGEN_AWAIT_OK: int = 908;
+pub const NF_AGEN_AWAIT_ERR: int = 909;
+pub const NF_ASYNC_FROM_SYNC: int = 910;
 
 fn obj_val(o: int) -> Val {
     if o >= 0 {
@@ -94,6 +102,25 @@ impl Vm {
         self.objs[gp as usize].add(a_tag, str_val("Generator"), P_HIDDEN | P_READONLY);
         self.generator_proto = gp;
         // %GeneratorFunction.prototype%
+        // %AsyncIteratorPrototype%, %AsyncGeneratorPrototype% and the
+        // async generator functions' prototype
+        let a_async_iter = self.intern("@@asyncIterator");
+        let aip = self.alloc(C_OBJECT, op);
+        self.roots.push(aip);
+        self.sym_method(aip, a_async_iter, "[Symbol.asyncIterator]", NF_ITER_SELF, 0);
+        let agp = self.alloc(C_OBJECT, aip);
+        self.roots.push(agp);
+        self.method(agp, "next", NF_AGEN_NEXT, 1);
+        self.method(agp, "return", NF_AGEN_RETURN, 1);
+        self.method(agp, "throw", NF_AGEN_THROW, 1);
+        self.objs[agp as usize].add(a_tag, str_val("AsyncGenerator"), P_HIDDEN | P_READONLY);
+        self.async_generator_proto = agp;
+        let agfp = self.alloc(C_OBJECT, fp);
+        self.roots.push(agfp);
+        self.objs[agfp as usize].add(A_PROTOTYPE, Val::Obj(agp), P_HIDDEN | P_READONLY);
+        self.objs[agp as usize].add(A_CONSTRUCTOR, Val::Obj(agfp), P_HIDDEN | P_READONLY);
+        self.objs[agfp as usize].add(a_tag, str_val("AsyncGeneratorFunction"), P_HIDDEN | P_READONLY);
+        self.async_generator_function_proto = agfp;
         let gfp = self.alloc(C_OBJECT, fp);
         self.roots.push(gfp);
         self.objs[gfp as usize].add(A_PROTOTYPE, Val::Obj(gp), P_HIDDEN | P_READONLY);
@@ -105,12 +132,16 @@ impl Vm {
         self.roots.push(afp);
         self.objs[afp as usize].add(a_tag, str_val("AsyncFunction"), P_HIDDEN | P_READONLY);
         self.async_function_proto = afp;
+        let g = self.global;
+        self.method(g, "__setAsyncFromSync", NF_ASYNC_FROM_SYNC, 1);
     }
 
     /// The prototype a closure of `pi` gets.
     pub fn closure_proto(&self, pi: int) -> int {
         let p = &self.protos[pi as usize];
-        if p.generator {
+        if p.generator && p.is_async {
+            self.async_generator_function_proto
+        } else if p.generator {
             self.generator_function_proto
         } else if p.is_async {
             self.async_function_proto
@@ -125,8 +156,9 @@ impl Vm {
     pub fn gen_start(&mut self, fi: usize, pc: int) {
         let fo = self.frames[fi].fobj;
         let pi = self.frames[fi].proto;
-        let is_async = self.protos[pi as usize].is_async;
-        let mut proto = self.generator_proto;
+        let is_async = self.protos[pi as usize].is_async && !self.protos[pi as usize].generator;
+        let async_gen = self.protos[pi as usize].is_async && self.protos[pi as usize].generator;
+        let mut proto = if async_gen { self.async_generator_proto } else { self.generator_proto };
         if !is_async {
             let p = self.get_obj(fo, A_PROTOTYPE, &Val::Obj(fo));
             if let Val::Obj(po) = p {
@@ -139,6 +171,10 @@ impl Vm {
         self.frames[fi].pc = pc;
         self.gen_save(g);
         self.objs[g as usize].pos = GS_START;
+        if async_gen {
+            let q = self.new_array(Vec::new());
+            self.objs[g as usize].elems2[G_PROMISE] = Val::Obj(q);
+        }
         if !is_async {
             self.stack.push(Val::Obj(g));
             return;
@@ -165,6 +201,7 @@ impl Vm {
         }
         self.stack.truncate(start);
         let promise = if self.objs[g as usize].elems2.len() > G_PROMISE { self.objs[g as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
+        let awaiting = if self.objs[g as usize].elems2.len() > G_AWAIT { self.objs[g as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
         let mut rest: Vec<Val> = Vec::new();
         {
             let f = &self.frames[fi];
@@ -176,6 +213,7 @@ impl Vm {
             rest.push(obj_val(f.args_obj));
         }
         rest.push(promise);
+        rest.push(awaiting);
         // the frame's handlers, innermost last
         let depth = fi as int;
         let mut first = self.handlers.len();
@@ -285,13 +323,14 @@ impl Vm {
 
     /// OP_YIELD in the frame `fi` stopped at `pc`: saves the coroutine and
     /// hands `v` to its resumer.
-    pub fn gen_yield(&mut self, fi: usize, pc: int, v: Val, raw: bool) {
+    pub fn gen_yield(&mut self, fi: usize, pc: int, v: Val, kind: int) {
         let g = self.frames[fi].gen;
         self.frames[fi].pc = pc;
         self.gen_save(g);
         self.stack.push(v);
         self.gen_yielded = true;
-        self.gen_raw = raw;
+        self.gen_raw = kind == 1;
+        self.gen_awaiting = kind == 2;
     }
 
     pub fn iter_result(&mut self, v: Val, done: bool) -> Val {
@@ -410,8 +449,111 @@ impl Vm {
         self.promise_then(awaited, Val::Obj(ok), Val::Obj(err));
     }
 
+    /// Runs an async generator through its queued requests: each resumes
+    /// it, an `await` suspends the run until the awaited promise settles,
+    /// a yield or the end answers the first request.
+    pub fn agen_run(&mut self, g: int, mode0: int, v0: Val, after_await: bool) {
+        let mut mode = mode0;
+        let mut v = v0;
+        let mut resuming = after_await;
+        loop {
+            let q = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+            if q < 0 {
+                return;
+            }
+            if !resuming {
+                if self.objs[q as usize].elems.is_empty() {
+                    return;
+                }
+                let req = obj_of(&self.objs[q as usize].elems[0].clone());
+                mode = num_of(&self.objs[req as usize].elems[0].clone());
+                v = self.objs[req as usize].elems[1].clone();
+            }
+            resuming = false;
+            self.temp_roots.push(Val::Obj(g));
+            let r = self.gen_resume(g, mode, v.clone());
+            self.temp_roots.pop();
+            let q2 = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+            if q2 < 0 || self.objs[q2 as usize].elems.is_empty() {
+                return;
+            }
+            let req = obj_of(&self.objs[q2 as usize].elems[0].clone());
+            let p = obj_of(&self.objs[req as usize].elems[2].clone());
+            if self.throwing {
+                self.throwing = false;
+                let e = self.exc.clone();
+                self.exc = Val::Undef;
+                self.objs[q2 as usize].elems.remove(0);
+                self.settle(p, 2, e);
+                continue;
+            }
+            if !self.gen_done && self.gen_awaiting {
+                self.gen_awaiting = false;
+                self.objs[g as usize].elems2[G_AWAIT] = Val::Bool(true);
+                let awaited = if self.class_of(&r) == C_PROMISE {
+                    obj_of(&r)
+                } else {
+                    let w = self.new_promise();
+                    self.settle(w, 1, r);
+                    w
+                };
+                let ok = self.native_fn("", NF_AGEN_AWAIT_OK, 1);
+                self.objs[ok as usize].env = g;
+                let err = self.native_fn("", NF_AGEN_AWAIT_ERR, 1);
+                self.objs[err as usize].env = g;
+                self.promise_then(awaited, Val::Obj(ok), Val::Obj(err));
+                return;
+            }
+            let done = self.gen_done;
+            self.objs[q2 as usize].elems.remove(0);
+            let res = self.iter_result(r, done);
+            self.settle(p, 1, res);
+        }
+    }
+
     pub fn call_native_co(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
+        if id == NF_AGEN_AWAIT_OK || id == NF_AGEN_AWAIT_ERR {
+            let g = self.objs[fobj as usize].env;
+            self.objs[g as usize].elems2[G_AWAIT] = Val::Bool(false);
+            self.agen_run(g, if id == NF_AGEN_AWAIT_OK { GM_NEXT } else { GM_THROW }, a0, true);
+            return Val::Undef;
+        }
+        if id == NF_ASYNC_FROM_SYNC {
+            self.async_from_sync = obj_of(&a0);
+            if self.async_from_sync >= 0 {
+                self.roots.push(self.async_from_sync);
+            }
+            return Val::Undef;
+        }
+        if id == NF_AGEN_NEXT || id == NF_AGEN_RETURN || id == NF_AGEN_THROW {
+            let p = self.new_promise();
+            let g = obj_of(&this);
+            let ok = g >= 0 && self.objs[g as usize].class == C_GENERATOR && {
+                let pi = self.objs[g as usize].func as usize;
+                self.protos[pi].is_async && self.protos[pi].generator
+            };
+            if !ok {
+                let e = self.new_error(self.type_error_proto, "AsyncGenerator method called on incompatible receiver");
+                self.settle(p, 2, Val::Obj(e));
+                return Val::Obj(p);
+            }
+            let mode = if id == NF_AGEN_RETURN {
+                GM_RETURN
+            } else if id == NF_AGEN_THROW {
+                GM_THROW
+            } else {
+                GM_NEXT
+            };
+            let req = self.new_array(vec![Val::Num(mode as double), a0, Val::Obj(p)]);
+            let q = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+            self.objs[q as usize].elems.push(Val::Obj(req));
+            let idle = self.objs[g as usize].pos != GS_RUNNING && !truthy(&self.objs[g as usize].elems2[G_AWAIT].clone());
+            if idle && self.objs[q as usize].elems.len() == 1 {
+                self.agen_run(g, GM_NEXT, Val::Undef, false);
+            }
+            return Val::Obj(p);
+        }
         if id == NF_ASYNC_OK || id == NF_ASYNC_ERR {
             let g = self.objs[fobj as usize].env;
             self.async_step(g, if id == NF_ASYNC_OK { GM_NEXT } else { GM_THROW }, a0);

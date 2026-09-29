@@ -1481,7 +1481,69 @@ impl Compiler {
         self.cur_scope = saved;
     }
 
+    /// `for await (x of y)`: each step awaits `it.next()`.
+    fn for_await_statement(&mut self, n: int) {
+        let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
+        let labels = self.take_labels();
+        self.expr(b);
+        self.op(OP_ASYNC_ITER);
+        self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
+        let top = self.pc();
+        // [it] → [it, await it.next()]
+        self.op(OP_DUP);
+        let a_next = self.atom("next");
+        self.emit(OP_GET_METHOD, a_next, 0);
+        self.emit(OP_CALL, 0, 0);
+        self.emit(OP_YIELD, 2, 0);
+        self.resume_point();
+        self.op(OP_DUP);
+        let a_done = self.atom("done");
+        self.emit(OP_GET_PROP, a_done, 0);
+        let exit = self.emit(OP_JT, 0, 0);
+        let a_value = self.atom("value");
+        self.emit(OP_GET_PROP, a_value, 0);
+        self.push_loop(labels);
+        let scope = match self.node_scope.get(&n) {
+            Some(s) => *s,
+            None => -1,
+        };
+        let saved = self.cur_scope;
+        self.cur_scope = scope;
+        for bi in self.scopes[scope as usize].binds.clone() {
+            self.binds[bi as usize].placed = false;
+        }
+        let pushed = self.enter_scope(scope, false);
+        let target = if a >= 0 && self.ast.nodes[a as usize].kind == N_VAR {
+            let decl = self.ast.nodes[a as usize].list[0];
+            self.ast.nodes[decl as usize].a
+        } else {
+            a
+        };
+        self.assign_pattern(target, true);
+        self.statement(c);
+        self.leave_scope(pushed);
+        self.cur_scope = saved;
+        let ctl = self.f().ctl.pop().unwrap();
+        let cont = self.pc();
+        for x in ctl.conts.iter() {
+            self.patch_to(*x, cont);
+        }
+        self.emit(OP_JUMP, top, 0);
+        // done: [it, result]
+        self.patch(exit);
+        self.op(OP_POP);
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        self.f().ctl.pop();
+        self.op(OP_POP);
+    }
+
     fn forin_statement(&mut self, n: int) {
+        if (self.ast.nodes[n as usize].flags & 1) != 0 {
+            self.for_await_statement(n);
+            return;
+        }
         let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
         let of = self.ast.nodes[n as usize].op.as_str() == "of";
         let labels = self.take_labels();
@@ -1751,6 +1813,11 @@ impl Compiler {
                 self.expr(a);
             } else {
                 self.op(OP_UNDEF);
+            }
+            if self.f().proto.is_async {
+                // an async generator yields the awaited value
+                self.emit(OP_YIELD, 2, 0);
+                self.resume_point();
             }
             self.emit(OP_YIELD, 0, 0);
             self.resume_point();

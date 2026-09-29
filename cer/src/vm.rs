@@ -134,6 +134,12 @@ pub struct Vm {
     pub gen_yielded: bool,
     pub gen_raw: bool,
     pub gen_done: bool,
+    /// the last OP_YIELD was an `await`
+    pub gen_awaiting: bool,
+    pub async_generator_proto: int,
+    pub async_generator_function_proto: int,
+    /// the prelude's CreateAsyncFromSyncIterator, for `for await`
+    pub async_from_sync: int,
     /// the prelude's proxy hooks (an array), -1 before
     pub proxy_hooks: int,
     pub array_values_fn: int,
@@ -254,6 +260,10 @@ impl Vm {
             gen_yielded: false,
             gen_raw: false,
             gen_done: false,
+            gen_awaiting: false,
+            async_generator_proto: -1,
+            async_generator_function_proto: -1,
+            async_from_sync: -1,
             proxy_hooks: -1,
             array_values_fn: -1,
             roots: Vec::new(),
@@ -697,7 +707,13 @@ impl Vm {
         // from %GeneratorPrototype%, with no `constructor`
         let pi = self.objs[f as usize].func;
         let generator = self.objs[f as usize].class == C_FUNCTION && self.protos[pi as usize].generator;
-        let proto = if generator { self.generator_proto } else { self.object_proto };
+        let proto = if generator && self.protos[pi as usize].is_async {
+            self.async_generator_proto
+        } else if generator {
+            self.generator_proto
+        } else {
+            self.object_proto
+        };
         let p = self.alloc(C_OBJECT, proto);
         if !generator {
             self.objs[p as usize].add(A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
@@ -2711,8 +2727,33 @@ impl Vm {
             }
             OP_YIELD => {
                 let v = self.pop();
-                self.gen_yield(fi, *pc, v, op.a == 1);
+                self.gen_yield(fi, *pc, v, op.a);
                 return true;
+            }
+            OP_ASYNC_ITER => {
+                // GetIterator(v, async): @@asyncIterator, else the sync
+                // iterator wrapped
+                let v = self.pop();
+                let a = self.intern("@@asyncIterator");
+                let m = self.get(&v, a);
+                if self.throwing {
+                    return false;
+                }
+                if !matches!(m, Val::Undef) && !matches!(m, Val::Null) {
+                    let it = self.call_value(m, v, Vec::new());
+                    if !self.throwing && !is_obj(&it) {
+                        self.throw_type("Result of the Symbol.asyncIterator method is not an object");
+                    }
+                    self.stack.push(it);
+                    return false;
+                }
+                let sync = self.iter_values(&v);
+                if self.throwing {
+                    return false;
+                }
+                let wrap = self.async_from_sync;
+                let it = self.call_value(Val::Obj(wrap), Val::Undef, vec![sync]);
+                self.stack.push(it);
             }
             OP_GEN_RESUME => {
                 let mode = self.pop();
