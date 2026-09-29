@@ -32,6 +32,7 @@ pub mod prelude;
 pub mod proxy;
 pub mod regex;
 pub mod typed;
+pub mod uniprops;
 pub mod value;
 pub mod vm;
 
