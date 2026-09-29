@@ -1212,7 +1212,7 @@ hide(RegExp, 'escape', function escape(s) {
     var c = s.charAt(i), code = s.charCodeAt(i);
     if (i === 0 && /[0-9A-Za-z]/.test(c)) { out += '\\x' + code.toString(16); continue; }
     if ('^$\\.*+?()[]{}|/'.indexOf(c) >= 0) { out += '\\' + c; continue; }
-    if (',-=<>#&!%:;@~\'`"'.indexOf(c) >= 0 || /[\t\n\v\f\r    -     　﻿]/.test(c)) {
+    if (',-=<>#&!%:;@~\'`"'.indexOf(c) >= 0 || /[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]/.test(c)) {
       var h = code.toString(16);
       out += code <= 0xff ? '\\x' + (h.length < 2 ? '0' + h : h) : '\\u' + ('0000' + h).slice(-4);
       continue;

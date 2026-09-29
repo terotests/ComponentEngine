@@ -439,7 +439,7 @@ impl Vm {
             if self.throwing {
                 return Val::Undef;
             }
-            if (is_obj(&r) && self.class_of(&r) != C_SYMBOL && self.class_of(&r) != C_BIGINT) {
+            if is_obj(&r) && self.class_of(&r) != C_SYMBOL && self.class_of(&r) != C_BIGINT {
                 self.throw_type("Cannot convert object to primitive value");
                 return Val::Undef;
             }

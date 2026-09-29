@@ -178,10 +178,12 @@ impl Vm {
         let a2 = if args.len() < 3 { Val::Undef } else { args[2].clone() };
         let pv = Val::Obj(p);
         if id == NF_O_GETPROTO || id == NF_REFLECT_GETPROTO {
-            return Some(self.proxy_call(p, PH_GETPROTO, Vec::new()));
+            let rv = self.proxy_call(p, PH_GETPROTO, Vec::new());
+            return Some(rv);
         }
         if id == NF_O_SETPROTO {
-            let ok = self.proxy_bool(p, PH_SETPROTO, vec![a1]);
+            let va1: Vec<Val> = vec![a1];
+            let ok = self.proxy_bool(p, PH_SETPROTO, va1);
             if !ok && !self.throwing {
                 self.throw_type("'setPrototypeOf' on proxy: trap returned falsish");
             }
@@ -192,7 +194,8 @@ impl Vm {
             if self.throwing {
                 return Some(Val::Undef);
             }
-            let ok = self.proxy_bool(p, PH_DEFINE, vec![k.clone(), a2]);
+            let va2: Vec<Val> = vec![k.clone(), a2];
+            let ok = self.proxy_bool(p, PH_DEFINE, va2);
             if id == NF_REFLECT_DEFPROP {
                 return Some(Val::Bool(ok));
             }
@@ -207,10 +210,13 @@ impl Vm {
             if self.throwing {
                 return Some(Val::Undef);
             }
-            return Some(self.proxy_call(p, PH_GOPD, vec![k]));
+            let va3: Vec<Val> = vec![k];
+            let rv = self.proxy_call(p, PH_GOPD, va3);
+            return Some(rv);
         }
         if id == NF_O_ISEXT {
-            return Some(Val::Bool(self.proxy_bool(p, PH_ISEXT, Vec::new())));
+            let rb = self.proxy_bool(p, PH_ISEXT, Vec::new());
+            return Some(Val::Bool(rb));
         }
         if id == NF_O_PREVENTEXT {
             let ok = self.proxy_bool(p, PH_PREVENTEXT, Vec::new());
@@ -225,7 +231,8 @@ impl Vm {
             if self.throwing {
                 return Some(Val::Undef);
             }
-            let d = self.proxy_call(p, PH_GOPD, vec![k]);
+            let va4: Vec<Val> = vec![k];
+            let d = self.proxy_call(p, PH_GOPD, va4);
             if self.throwing {
                 return Some(Val::Undef);
             }
@@ -240,21 +247,29 @@ impl Vm {
         }
         if id == NF_REFLECT_HAS {
             let k = self.prop_key(&a1);
-            return Some(Val::Bool(self.proxy_bool(p, PH_HAS, vec![k])));
+            let va5: Vec<Val> = vec![k];
+            let rb = self.proxy_bool(p, PH_HAS, va5);
+            return Some(Val::Bool(rb));
         }
         if id == NF_REFLECT_GET {
             let k = self.prop_key(&a1);
             let r = if args.len() > 2 { a2 } else { pv };
-            return Some(self.proxy_call(p, PH_GET, vec![k, r]));
+            let va6: Vec<Val> = vec![k, r];
+            let rv = self.proxy_call(p, PH_GET, va6);
+            return Some(rv);
         }
         if id == NF_REFLECT_SET {
             let k = self.prop_key(&a1);
             let r = if args.len() > 3 { args[3].clone() } else { pv };
-            return Some(Val::Bool(self.proxy_bool(p, PH_SET, vec![k, a2, r])));
+            let va7: Vec<Val> = vec![k, a2, r];
+            let rb = self.proxy_bool(p, PH_SET, va7);
+            return Some(Val::Bool(rb));
         }
         if id == NF_REFLECT_DELETE {
             let k = self.prop_key(&a1);
-            return Some(Val::Bool(self.proxy_bool(p, PH_DELETE, vec![k])));
+            let va8: Vec<Val> = vec![k];
+            let rb = self.proxy_bool(p, PH_DELETE, va8);
+            return Some(Val::Bool(rb));
         }
         if id == NF_A_ISARRAY {
             return Some(Val::Bool(self.is_array_val(&pv)));

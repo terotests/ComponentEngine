@@ -653,41 +653,30 @@ impl Vm {
     pub fn big_less(&mut self, a: &Val, b: &Val) -> int {
         let xa = self.big_side(a);
         let xb = self.big_side(b);
-        match (xa, xb) {
-            (Some(p), Some(q)) => {
-                if compare(p.as_str(), q.as_str()) < 0 {
-                    1
-                } else {
-                    0
-                }
-            }
-            _ => {
-                let na = if self.is_bigint(a) { to_double(self.big_text(a).as_str()) } else { self.to_number(a) };
-                let nb = if self.is_bigint(b) { to_double(self.big_text(b).as_str()) } else { self.to_number(b) };
-                if na != na || nb != nb {
-                    -1
-                } else if na < nb {
-                    1
-                } else {
-                    0
-                }
-            }
+        if !xa.is_empty() && !xb.is_empty() {
+            return if compare(xa.as_str(), xb.as_str()) < 0 { 1 } else { 0 };
+        }
+        let na = if self.is_bigint(a) { to_double(self.big_text(a).as_str()) } else { self.to_number(a) };
+        let nb = if self.is_bigint(b) { to_double(self.big_text(b).as_str()) } else { self.to_number(b) };
+        if na != na || nb != nb {
+            -1
+        } else if na < nb {
+            1
+        } else {
+            0
         }
     }
 
-    /// A BigInt's text, or a string's as a BigInt; None for other values
+    /// A BigInt's text, or a string's as a BigInt; "" for other values
     /// (and for a string that is not one).
-    fn big_side(&mut self, v: &Val) -> Option<String> {
+    fn big_side(&mut self, v: &Val) -> String {
         if self.is_bigint(v) {
-            return Some(self.big_text(v));
+            return self.big_text(v);
         }
         if let Val::Str(s) = v {
-            let t = from_string(s.as_str());
-            if !t.is_empty() {
-                return Some(t);
-            }
+            return from_string(s.as_str());
         }
-        None
+        String::new()
     }
 
     /// `==` with a BigInt on one side (the other primitive).

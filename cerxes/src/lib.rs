@@ -21,9 +21,12 @@
 use ranger::prelude::*;
 
 pub mod ast;
+pub mod bigint;
 pub mod builtins;
 pub mod builtins2;
 pub mod compiler;
+pub mod coroutine;
+pub mod dynamic;
 pub mod jsstr;
 pub mod jsx;
 pub mod jsx_runtime;
@@ -32,8 +35,10 @@ pub mod num;
 pub mod ops;
 pub mod parser;
 pub mod prelude;
+pub mod proxy;
 pub mod regex;
 pub mod ts;
+pub mod typed;
 pub mod types;
 pub mod value;
 pub mod vm;
