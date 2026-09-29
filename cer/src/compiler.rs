@@ -756,6 +756,16 @@ impl Compiler {
 
     /// Stores the top of the stack in the binding, keeping it on the stack.
     fn store_bind(&mut self, b: int, init: bool) {
+        if self.binds[b as usize].kind == K_CALLEE && !init {
+            // a function expression's own name: read-only (an error when
+            // strict, else the write is dropped)
+            if self.f().proto.strict {
+                let nm = self.binds[b as usize].name.clone();
+                let c = self.str_const(nm.as_str());
+                self.emit(OP_CONST_ERROR, c, 0);
+            }
+            return;
+        }
         let bd = &self.binds[b as usize];
         if bd.kind == K_CONST && !init {
             let nm = bd.name.clone();
@@ -845,7 +855,7 @@ impl Compiler {
         let binds = self.scopes[s as usize].binds.clone();
         for b in binds {
             let k = self.binds[b as usize].kind;
-            if k == K_VAR && !self.local_program {
+            if (k == K_VAR || k == K_FUNC) && !self.local_program {
                 let nm = self.binds[b as usize].name.clone();
                 let a = self.atom(nm.as_str());
                 self.emit(OP_DECL_GLOBAL, a, 0);

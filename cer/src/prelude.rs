@@ -1258,6 +1258,95 @@ setAsyncFromSync(function (sync) {
   return it;
 });
 
+// ---- the mutating Array methods on array-likes, as the specification
+// writes them (arrays keep the native ones)
+function genericOnly(name, len, f) {
+  var nat = AP[name];
+  var w = function () { return Array.isArray(this) ? nat.apply(this, arguments) : f.apply(Object(this), arguments); };
+  defineProperty(w, 'name', { value: name, writable: false, enumerable: false, configurable: true });
+  hide(AP, name, setLength(w, len));
+}
+function moveTo(O, from, to) { if (from in O) O[to] = O[from]; else delete O[to]; }
+genericOnly('reverse', 0, function () {
+  var n = toLength(this.length);
+  for (var lo = 0, hi = n - 1; lo < hi; lo++, hi--) {
+    var hasLo = lo in this, hasHi = hi in this, a = this[lo], b = this[hi];
+    if (hasHi) this[lo] = b; else delete this[lo];
+    if (hasLo) this[hi] = a; else delete this[hi];
+  }
+  return this;
+});
+genericOnly('shift', 0, function () {
+  var n = toLength(this.length);
+  if (n === 0) { this.length = 0; return undefined; }
+  var first = this[0];
+  for (var k = 1; k < n; k++) moveTo(this, k, k - 1);
+  delete this[n - 1];
+  this.length = n - 1;
+  return first;
+});
+genericOnly('unshift', 1, function () {
+  var n = toLength(this.length), c = arguments.length;
+  if (c > 0) {
+    for (var k = n; k > 0; k--) moveTo(this, k - 1, k + c - 1);
+    for (var j = 0; j < c; j++) this[j] = arguments[j];
+  }
+  this.length = n + c;
+  return n + c;
+});
+genericOnly('splice', 2, function (start, count) {
+  var n = toLength(this.length);
+  var s = relIndex(start, n, 0);
+  var del = arguments.length === 0 ? 0 : arguments.length === 1 ? n - s : Math.min(Math.max(toIntegerOrInfinity(count), 0), n - s);
+  var removed = [];
+  for (var i = 0; i < del; i++) if ((s + i) in this) removed[i] = this[s + i];
+  removed.length = del;
+  var items = [];
+  for (var a = 2; a < arguments.length; a++) items.push(arguments[a]);
+  var c = items.length;
+  if (c < del) {
+    for (var k = s; k < n - del; k++) moveTo(this, k + del, k + c);
+    for (var d = n; d > n - del + c; d--) delete this[d - 1];
+  } else if (c > del) {
+    for (var k2 = n - del; k2 > s; k2--) moveTo(this, k2 + del - 1, k2 + c - 1);
+  }
+  for (var j = 0; j < c; j++) this[s + j] = items[j];
+  this.length = n - del + c;
+  return removed;
+});
+
+// ---- Date string forms the built-ins lack (the time zone is UTC)
+var DP = Date.prototype;
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+function dateOk(d, what) {
+  var t = DP.getTime.call(d);
+  return t === t;
+}
+if (!DP.toDateString || DP.toDateString.call(new Date(0)).length > 15) hide(DP, 'toDateString', function toDateString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  var y = this.getFullYear();
+  return DAYS[this.getDay()] + ' ' + MONTHS[this.getMonth()] + ' ' + pad2(this.getDate()) + ' ' + (y < 0 ? '-' + ('00000' + -y).slice(-6) : ('000' + y).slice(-4));
+});
+if (!DP.toTimeString) hide(DP, 'toTimeString', function toTimeString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  return pad2(this.getHours()) + ':' + pad2(this.getMinutes()) + ':' + pad2(this.getSeconds()) + ' GMT+0000 (Coordinated Universal Time)';
+});
+if (!DP.toLocaleDateString) hide(DP, 'toLocaleDateString', function toLocaleDateString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  return (this.getMonth() + 1) + '/' + this.getDate() + '/' + this.getFullYear();
+});
+if (!DP.toLocaleTimeString) hide(DP, 'toLocaleTimeString', function toLocaleTimeString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  var h = this.getHours();
+  return ((h + 11) % 12 + 1) + ':' + pad2(this.getMinutes()) + ':' + pad2(this.getSeconds()) + (h < 12 ? ' AM' : ' PM');
+});
+if (!DP.toLocaleString) hide(DP, 'toLocaleString', function toLocaleString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  return this.toLocaleDateString() + ', ' + this.toLocaleTimeString();
+});
+
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs
 // a callback, so a held object simply stays
 function WeakRef(target) {

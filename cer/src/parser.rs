@@ -87,6 +87,11 @@ fn is_assign_op(op: &str) -> bool {
         || op == "??="
 }
 
+/// Not a binding name in strict code.
+pub fn is_strict_reserved(w: &str) -> bool {
+    w == "implements" || w == "interface" || w == "let" || w == "package" || w == "private" || w == "protected" || w == "public" || w == "static" || w == "yield" || w == "eval" || w == "arguments"
+}
+
 pub fn is_reserved(w: &str) -> bool {
     w == "break"
         || w == "case"
@@ -271,7 +276,7 @@ impl Parser {
     fn binding_ident(&mut self) -> String {
         if self.kind() == T_IDENT {
             let s = self.text();
-            if is_reserved(s.as_str()) {
+            if is_reserved(s.as_str()) || (self.strict && is_strict_reserved(s.as_str())) {
                 self.fail(format!("unexpected reserved word '{}'", s).as_str());
                 return s;
             }
@@ -829,13 +834,22 @@ impl Parser {
         if !simple && own_strict && self.strict_directive_in(n) {
             self.fail("Illegal 'use strict' directive in function with non-simple parameter list");
         }
-        let unique = !simple || (flags & (F_ARROW | F_METHOD)) != 0 || own_strict;
+        let strict_here = own_strict || self.strict;
+        let unique = !simple || (flags & (F_ARROW | F_METHOD)) != 0 || strict_here;
         if !unique {
             return;
         }
         let mut names: Vec<String> = Vec::new();
         for p in params.iter() {
             self.pattern_idents(*p, &mut names);
+        }
+        if strict_here {
+            for nm in names.iter() {
+                if is_strict_reserved(nm.as_str()) {
+                    self.fail("Unexpected eval or arguments in strict mode");
+                    return;
+                }
+            }
         }
         let mut i: usize = 0;
         while i < names.len() {
@@ -1335,6 +1349,7 @@ impl Parser {
                 } else if !(lk == N_IDENT || lk == N_MEMBER || lk == N_INDEX || lk == N_SUPER_MEMBER) {
                     self.fail("invalid assignment target");
                 }
+                self.check_strict_target(target);
                 let right = self.assign();
                 let n = self.ast.add(N_ASSIGN, line);
                 self.ast.nodes[n as usize].op = op;
@@ -1417,6 +1432,7 @@ impl Parser {
                 if !(k == N_IDENT || k == N_MEMBER || k == N_INDEX || k == N_SUPER_MEMBER) {
                     self.fail("invalid update target");
                 }
+                self.check_strict_target(a);
                 let n = self.ast.add(N_UPDATE, line);
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = a;
@@ -1430,6 +1446,9 @@ impl Parser {
             if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_async) {
                 self.next();
                 let a = self.unary();
+                if s == "delete" && self.strict && self.ast.kind(a) == N_IDENT {
+                    self.fail("Delete of an unqualified identifier in strict mode.");
+                }
                 let n = self.ast.add(N_UNARY, line);
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = a;
@@ -1442,6 +1461,7 @@ impl Parser {
             if !(k == N_IDENT || k == N_MEMBER || k == N_INDEX || k == N_SUPER_MEMBER) {
                 self.fail("invalid update target");
             }
+            self.check_strict_target(e);
             let op = self.text();
             self.next();
             let n = self.ast.add(N_UPDATE, line);
@@ -1450,6 +1470,16 @@ impl Parser {
             return n;
         }
         e
+    }
+
+    /// Strict code may not assign `eval` or `arguments`.
+    fn check_strict_target(&mut self, t: int) {
+        if self.strict && self.ast.kind(t) == N_IDENT {
+            let s = self.ast.nodes[t as usize].s.clone();
+            if s.as_str() == "eval" || s.as_str() == "arguments" {
+                self.fail("Unexpected eval or arguments in strict mode");
+            }
+        }
     }
 
     fn arguments(&mut self) -> Vec<int> {
@@ -1701,6 +1731,9 @@ impl Parser {
         let k = self.kind();
         if k == T_NUM {
             let raw = self.toks[self.pos as usize].text.clone();
+            if self.strict && raw.as_str() == "octal" {
+                self.fail("Octal literals are not allowed in strict mode.");
+            }
             if raw.starts_with("n:") {
                 let n = self.node(N_BIGINT);
                 let digits: String = String::from(&raw[2..]);
@@ -1715,6 +1748,9 @@ impl Parser {
             return n;
         }
         if k == T_STR {
+            if self.strict && self.toks[self.pos as usize].escaped {
+                self.fail("Octal escape sequences are not allowed in strict mode.");
+            }
             let n = self.node(N_STR);
             let s = self.text();
             self.ast.nodes[n as usize].s = s;

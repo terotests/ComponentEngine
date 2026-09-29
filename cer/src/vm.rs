@@ -142,6 +142,8 @@ pub struct Vm {
     pub async_from_sync: int,
     /// the prelude's proxy hooks (an array), -1 before
     pub proxy_hooks: int,
+    /// %ThrowTypeError%
+    pub thrower: int,
     /// BigInt values by their decimal text, and BigInt.prototype
     pub bigints: HashMap<String, int>,
     pub bigint_proto: int,
@@ -268,6 +270,7 @@ impl Vm {
             async_generator_function_proto: -1,
             async_from_sync: -1,
             proxy_hooks: -1,
+            thrower: -1,
             bigints: HashMap::new(),
             bigint_proto: -1,
             array_values_fn: -1,
@@ -1030,19 +1033,32 @@ impl Vm {
     }
 
     pub fn set_length(&mut self, o: int, n: double) {
-        let len = n as int;
-        if (len as double) != n || len < 0 {
+        if n != n || n < 0.0 || n > 4294967295.0 || n.floor() != n {
             self.throw_range("Invalid array length");
             return;
         }
+        let len = n as int;
         let cur = self.objs[o as usize].elems.len() as int;
+        if len > cur + 100000000 {
+            // elements are stored densely: a length this far out is refused
+            self.throw_range("Invalid array length");
+            return;
+        }
         if len < cur {
             self.objs[o as usize].elems.truncate(len as usize);
+            if self.objs[o as usize].elems2.len() > len as usize {
+                self.objs[o as usize].elems2.truncate(len as usize);
+            }
         } else {
             let mut i = cur;
             while i < len {
                 self.objs[o as usize].elems.push(Val::Undef);
                 i += 1;
+            }
+            let mut h = cur;
+            while h < len {
+                self.mark_hole(o, h);
+                h += 1;
             }
         }
     }
@@ -1081,6 +1097,9 @@ impl Vm {
                     return;
                 }
                 self.objs[o as usize].elems[i as usize] = v;
+                if class == C_ARRAY && !self.objs[o as usize].elems2.is_empty() {
+                    self.clear_hole(o, i);
+                }
                 return;
             }
             if class == C_ARRAY && self.objs[o as usize].extensible && i < len + 50000000 {
@@ -1090,6 +1109,13 @@ impl Vm {
                     k += 1;
                 }
                 self.objs[o as usize].elems.push(v);
+                if i > len {
+                    let mut h = len;
+                    while h < i {
+                        self.mark_hole(o, h);
+                        h += 1;
+                    }
+                }
                 return;
             }
         }
@@ -1181,7 +1207,7 @@ impl Vm {
         let (i, a) = self.to_key(k);
         if i >= 0 {
             let class = self.objs[o as usize].class;
-            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int {
+            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int && !self.is_hole(o, i) {
                 return true;
             }
             if class == C_TYPED {
@@ -1232,7 +1258,7 @@ impl Vm {
         let (i, a) = self.to_key(k);
         let class = self.objs[o as usize].class;
         if i >= 0 {
-            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int {
+            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int && !self.is_hole(o, i) {
                 return true;
             }
             if class == C_TYPED {
@@ -1284,6 +1310,9 @@ impl Vm {
                     self.objs[o as usize].elems.pop();
                 } else {
                     self.objs[o as usize].elems[i as usize] = Val::Undef;
+                    if class == C_ARRAY {
+                        self.mark_hole(o, i);
+                    }
                 }
             }
             return true;
@@ -1315,7 +1344,9 @@ impl Vm {
             let n = self.objs[o as usize].elems.len();
             let mut i: usize = 0;
             while i < n {
-                out.push(string_val(format!("{}", i)));
+                if !self.is_hole(o, i as int) {
+                    out.push(string_val(format!("{}", i)));
+                }
                 i += 1;
             }
         }
@@ -1776,7 +1807,14 @@ impl Vm {
             let p = self.object_proto;
             args_obj = self.alloc(C_ARGUMENTS, p);
             self.objs[args_obj as usize].elems = items;
-            self.objs[args_obj as usize].add(A_CALLEE, Val::Obj(fo), P_HIDDEN);
+            if strict {
+                // a strict function's arguments.callee throws
+                let th = self.thrower;
+                self.define_accessor(args_obj, A_CALLEE, Val::Obj(th), 0, true);
+                self.define_accessor(args_obj, A_CALLEE, Val::Obj(th), 1, true);
+            } else {
+                self.objs[args_obj as usize].add(A_CALLEE, Val::Obj(fo), P_HIDDEN);
+            }
             let values = self.array_values_fn;
             self.objs[args_obj as usize].add(A_ITERATOR, Val::Obj(values), P_HIDDEN);
         }
@@ -2555,6 +2593,41 @@ impl Vm {
         (Val::Num(n), Val::Num(n + (delta as double)))
     }
 
+    /// An array's missing element. An array keeps holes (elisions,
+    /// writes past the end, deleted elements, a longer length) as markers in
+    /// `elems2` beside `undefined` in `elems`; an array without holes has
+    /// none.
+    pub fn is_hole(&self, o: int, i: int) -> bool {
+        let ob = &self.objs[o as usize];
+        ob.class == C_ARRAY && i >= 0 && (i as usize) < ob.elems2.len() && matches!(ob.elems2[i as usize], Val::Bool(true))
+    }
+
+    pub fn mark_hole(&mut self, o: int, i: int) {
+        let n = self.objs[o as usize].elems.len();
+        while self.objs[o as usize].elems2.len() < n {
+            self.objs[o as usize].elems2.push(Val::Bool(false));
+        }
+        if (i as usize) < n {
+            self.objs[o as usize].elems2[i as usize] = Val::Bool(true);
+        }
+    }
+
+    fn clear_hole(&mut self, o: int, i: int) {
+        if (i as usize) < self.objs[o as usize].elems2.len() {
+            self.objs[o as usize].elems2[i as usize] = Val::Bool(false);
+        }
+    }
+
+    /// HasProperty(o, i) for an index, holes counted as missing.
+    pub fn has_index(&mut self, o: int, i: int) -> bool {
+        let class = self.objs[o as usize].class;
+        if class == C_ARRAY && (i as usize) < self.objs[o as usize].elems.len() && !self.is_hole(o, i) {
+            return true;
+        }
+        let k = Val::Num(i as double);
+        self.has_property(o, &k)
+    }
+
     pub fn freeze_obj(&mut self, o: int) {
         self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, vec![Val::Obj(o)], false, Val::Undef);
     }
@@ -2619,7 +2692,7 @@ impl Vm {
                         let weak = self.objs[tobj as usize].func == 1;
                         let mut r = Val::Undef;
                         let mut hit = false;
-                        if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible {
+                        if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.objs[tobj as usize].elems2.is_empty() {
                             let a = self.stack[bp as usize].clone();
                             self.objs[tobj as usize].elems.push(a);
                             r = Val::Num(self.objs[tobj as usize].elems.len() as double);
@@ -3334,6 +3407,8 @@ impl Vm {
             OP_ARRAY_HOLE => {
                 let a = obj_of(self.top());
                 self.objs[a as usize].elems.push(Val::Undef);
+                let i = (self.objs[a as usize].elems.len() as int) - 1;
+                self.mark_hole(a, i);
             }
             OP_ARRAY_SPREAD => {
                 let src = self.pop();
