@@ -518,7 +518,6 @@ impl Vm {
         self.array_values_fn = values;
         self.objs[ap as usize].add(A_ITERATOR, Val::Obj(values), P_HIDDEN);
         self.method(ip, "next", NF_ITER_NEXT, 0);
-        self.sym_method(ip, A_ITERATOR, "[Symbol.iterator]", NF_ITER_SELF, 0);
 
         // String
         let sc = self.ctor("String", NF_STRING, 1, sp);

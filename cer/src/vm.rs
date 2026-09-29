@@ -1687,6 +1687,8 @@ impl Vm {
             args_obj = self.alloc(C_ARGUMENTS, p);
             self.objs[args_obj as usize].elems = items;
             self.objs[args_obj as usize].add(A_CALLEE, Val::Obj(fo), P_HIDDEN);
+            let values = self.array_values_fn;
+            self.objs[args_obj as usize].add(A_ITERATOR, Val::Obj(values), P_HIDDEN);
         }
         if rest >= 0 {
             let mut items: Vec<Val> = Vec::new();
@@ -1810,7 +1812,7 @@ impl Vm {
         f
     }
 
-    fn iter_values(&mut self, v: &Val) -> Val {
+    pub fn iter_values(&mut self, v: &Val) -> Val {
         // arrays, strings, and anything with a Symbol.iterator method
         if let Val::Obj(o) = v {
             let class = self.objs[*o as usize].class;
@@ -2638,6 +2640,23 @@ impl Vm {
     /// The rarer operations; true when the current frame changed.
     fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
         match op.code {
+            OP_ITER_CLOSE => {
+                let it = self.pop();
+                if op.b == 1 {
+                    let e = self.exc.clone();
+                    let was = self.throwing;
+                    self.iter_close(&it);
+                    self.throwing = was;
+                    self.exc = e;
+                } else {
+                    self.iter_close(&it);
+                }
+            }
+            OP_ITER_CLOSE_AT => {
+                let n = self.stack.len();
+                let it = self.stack[n - 1 - (op.a as usize)].clone();
+                self.iter_close(&it);
+            }
             OP_GEN_START => {
                 self.gen_start(fi, *pc);
                 return true;

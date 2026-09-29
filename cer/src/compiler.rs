@@ -57,6 +57,8 @@ const CT_BLOCK: int = 2;
 const CT_TRY: int = 3;
 const CT_ENV: int = 4;
 const CT_ITEM: int = 5;
+/// a for-of loop's iterator on the stack, under a handler that closes it
+const CT_ITER: int = 6;
 
 struct Ctl {
     kind: int,
@@ -1239,8 +1241,25 @@ impl Compiler {
         let top = (self.f().ctl.len() as int) - 1;
         let mut i = top;
         let ret = target < 0;
+        // for a return: the stack items above the next iterator down
+        let mut above: int = 1;
         while i > target {
             let kind = self.f().ctl[i as usize].kind;
+            if kind == CT_ITER {
+                // leaving a for-of early closes its iterator
+                self.op(OP_END_TRY);
+                if ret {
+                    self.emit(OP_ITER_CLOSE_AT, above, 0);
+                    above += 1;
+                } else {
+                    self.emit(OP_ITER_CLOSE, 0, 0);
+                }
+                i -= 1;
+                continue;
+            }
+            if kind == CT_ITEM && ret {
+                above += 1;
+            }
             if kind == CT_TRY {
                 if self.f().ctl[i as usize].installed {
                     self.op(OP_END_TRY);
@@ -1467,12 +1486,16 @@ impl Compiler {
         let of = self.ast.nodes[n as usize].op.as_str() == "of";
         let labels = self.take_labels();
         self.expr(b);
+        let mut t: int = -1;
         if of {
             self.op(OP_ITER_VALUES);
+            // an exception out of the body closes the iterator
+            t = self.emit(OP_TRY, 0, 0);
+            self.f().ctl.push(Ctl { kind: CT_ITER, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: true });
         } else {
             self.op(OP_ITER_KEYS);
+            self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
         }
-        self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
         let top = self.pc();
         let next = self.emit(OP_ITER_NEXT, 0, 0);
         self.push_loop(labels);
@@ -1504,11 +1527,33 @@ impl Compiler {
         }
         self.emit(OP_JUMP, top, 0);
         self.patch(next);
+        if !of {
+            for x in ctl.breaks.iter() {
+                self.patch(*x);
+            }
+            self.f().ctl.pop();
+            self.op(OP_POP);
+            return;
+        }
+        // done: the iterator is spent
+        self.op(OP_END_TRY);
+        self.op(OP_POP);
+        let j_done = self.emit(OP_JUMP, 0, 0);
+        // break: closed
         for x in ctl.breaks.iter() {
             self.patch(*x);
         }
+        self.op(OP_END_TRY);
+        self.emit(OP_ITER_CLOSE, 0, 0);
+        let j_break = self.emit(OP_JUMP, 0, 0);
+        // throw: [iter, exception] → closed, errors of return() ignored
+        self.patch(t);
+        self.op(OP_SWAP);
+        self.emit(OP_ITER_CLOSE, 0, 1);
+        self.op(OP_THROW);
+        self.patch(j_done);
+        self.patch(j_break);
         self.f().ctl.pop();
-        self.op(OP_POP);
     }
 
     fn try_statement(&mut self, n: int) {

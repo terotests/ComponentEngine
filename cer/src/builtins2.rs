@@ -1208,6 +1208,26 @@ impl Vm {
                     self.objs[m as usize].func = 1;
                 }
                 if !matches!(a0, Val::Undef) && !matches!(a0, Val::Null) {
+                    // the adder, as the constructor reads it: a replaced
+                    // set / add is called for each entry
+                    let adder_atom = self.intern(if is_map { "set" } else { "add" });
+                    let adder = self.get_obj(m, adder_atom, &Val::Obj(m));
+                    if !self.is_callable(&adder) {
+                        self.throw_type("'set' / 'add' of the new collection is not a function");
+                        return Val::Undef;
+                    }
+                    let ao = obj_of(&adder);
+                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET || self.objs[ao as usize].func == NF_SETP_ADD);
+                    let plain = self.class_of(&a0) == C_ARRAY && obj_of(&self.get(&a0, A_ITERATOR)) == self.array_values_fn;
+                    if !native_adder || !plain {
+                        self.temp_roots.push(Val::Obj(m));
+                        self.fill_collection(m, &a0, adder, is_map);
+                        self.temp_roots.pop();
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        return Val::Obj(m);
+                    }
                     self.temp_roots.push(Val::Obj(m));
                     let items = self.iterable_to_vec(&a0);
                     self.temp_roots.pop();

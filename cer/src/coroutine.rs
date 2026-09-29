@@ -427,3 +427,56 @@ impl Vm {
         self.iter_result(r, done)
     }
 }
+
+impl Vm {
+    /// Closes `it` after an exception, which stays the one thrown.
+    pub fn iter_close_on_throw(&mut self, it: &Val) {
+        let e = self.exc.clone();
+        self.throwing = false;
+        self.exc = Val::Undef;
+        self.temp_roots.push(e.clone());
+        self.iter_close(it);
+        self.temp_roots.pop();
+        self.throwing = true;
+        self.exc = e;
+    }
+
+    /// `new Map(iterable)` / `new Set(iterable)` the general way: each
+    /// entry through `adder`, the iterator closed when one fails.
+    pub fn fill_collection(&mut self, m: int, src: &Val, adder: Val, is_map: bool) {
+        let it = self.iter_values(src);
+        if self.throwing {
+            return;
+        }
+        self.temp_roots.push(it.clone());
+        loop {
+            let next = self.iter_next(&it);
+            if self.throwing {
+                break;
+            }
+            let v = match next {
+                Some(x) => x,
+                None => break,
+            };
+            if is_map {
+                if !is_obj(&v) {
+                    self.throw_type("Iterator value is not an entry object");
+                    self.iter_close_on_throw(&it);
+                    break;
+                }
+                let k = self.get_index(&v, 0);
+                let val = if self.throwing { Val::Undef } else { self.get_index(&v, 1) };
+                if !self.throwing {
+                    self.call_value(adder.clone(), Val::Obj(m), vec![k, val]);
+                }
+            } else {
+                self.call_value(adder.clone(), Val::Obj(m), vec![v]);
+            }
+            if self.throwing {
+                self.iter_close_on_throw(&it);
+                break;
+            }
+        }
+        self.temp_roots.pop();
+    }
+}

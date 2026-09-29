@@ -242,4 +242,8 @@ pub const OP_GEN_RESUME: int = 137;
 /// or [value] and a jump to `a` when the inner iterator is done, or a jump
 /// to `b` (return) with [iter, value]
 pub const OP_YIELD_STAR: int = 138;
-
+/// [iter] → []: an iterator left early, its `return()` called; b 1: after
+/// an exception, whose errors are ignored
+pub const OP_ITER_CLOSE: int = 139;
+/// closes the iterator `a` items below the top, leaving the stack
+pub const OP_ITER_CLOSE_AT: int = 140;

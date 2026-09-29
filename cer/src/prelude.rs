@@ -989,6 +989,154 @@ if (!Reflect.preventExtensions) hide(Reflect, 'preventExtensions', function prev
   if (!isObject(t)) throw new TypeError('Reflect.preventExtensions called on non-object'); Object.preventExtensions(t); return !isExt(t);
 });
 
+// ---- Symbol.species and the methods that honour it; the String methods
+// that hand a pattern object to its Symbol.match / replace / search / split
+[Array, Map, Set, RegExp].forEach(function (C) {
+  defineProperty(C, Symbol.species, { get: speciesSelf, enumerable: false, configurable: true });
+});
+function setLength(f, n) { defineProperty(f, 'length', { value: n, writable: false, enumerable: false, configurable: true }); return f; }
+/** ArraySpeciesCreate: null when a plain Array does. */
+function arraySpecies(o, n) {
+  if (!Array.isArray(o)) return null;
+  var C = o.constructor;
+  if (C === Array) return null;
+  if (isObject(C)) { C = C[Symbol.species]; if (C === null) C = undefined; }
+  if (C === undefined || C === Array) return null;
+  if (!isCallable(C)) throw new TypeError('object.constructor[Symbol.species] is not a constructor');
+  return new C(n);
+}
+function copyInto(A, r) {
+  for (var i = 0; i < r.length; i++) defineProperty(A, i, { value: r[i], writable: true, enumerable: true, configurable: true });
+  A.length = r.length;
+  return A;
+}
+var AP = Array.prototype;
+['filter', 'map', 'slice', 'splice', 'flat', 'flatMap'].forEach(function (name) {
+  var nat = AP[name];
+  var f = {
+    filter: function filter(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, 0); return A === null ? r : copyInto(A, r); },
+    map: function map(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, r.length); return A === null ? r : copyInto(A, r); },
+    slice: function slice(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, r.length); return A === null ? r : copyInto(A, r); },
+    splice: function splice(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, r.length); return A === null ? r : copyInto(A, r); },
+    flat: function flat() { var r = nat.apply(this, arguments); var A = arraySpecies(this, 0); return A === null ? r : copyInto(A, r); },
+    flatMap: function flatMap(a) { var r = nat.apply(this, arguments); var A = arraySpecies(this, 0); return A === null ? r : copyInto(A, r); }
+  }[name];
+  hide(AP, name, setLength(f, nat.length));
+});
+var nativeConcat = AP.concat;
+function spreadable(o) {
+  if (!isObject(o)) return false;
+  var s = o[Symbol.isConcatSpreadable];
+  return s !== undefined ? !!s : Array.isArray(o);
+}
+hide(AP, 'concat', setLength(function concat(x) {
+  var plain = this.constructor === Array || !Array.isArray(this);
+  var marked = isObject(this) && this[Symbol.isConcatSpreadable] !== undefined;
+  for (var i = 0; i < arguments.length && !marked; i++) if (isObject(arguments[i]) && arguments[i][Symbol.isConcatSpreadable] !== undefined) marked = true;
+  if (plain && !marked) return nativeConcat.apply(this, arguments);
+  var O = Object(this);
+  var A = arraySpecies(O, 0);
+  if (A === null) A = [];
+  var n = 0, items = [O];
+  for (var j = 0; j < arguments.length; j++) items.push(arguments[j]);
+  for (var k = 0; k < items.length; k++) {
+    var E = items[k];
+    if (spreadable(E)) {
+      var len = toLength(E.length);
+      for (var m = 0; m < len; m++, n++) if (m in E) defineProperty(A, n, { value: E[m], writable: true, enumerable: true, configurable: true });
+    } else {
+      defineProperty(A, n++, { value: E, writable: true, enumerable: true, configurable: true });
+    }
+  }
+  A.length = n;
+  return A;
+}, 1));
+var nativeFrom = Array.from, nativeOf = Array.of;
+hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
+  var C = this;
+  if (mapFn !== undefined && !isCallable(mapFn)) throw new TypeError(String(mapFn) + ' is not a function');
+  var iter = items === undefined || items === null ? undefined : items[Symbol.iterator];
+  if (C === Array && Array.isArray(items) && iter === AP.values && mapFn === undefined) return nativeFrom.call(Array, items);
+  var ctor = isCallable(C) && C !== Array;
+  var A, k = 0;
+  if (iter !== undefined && iter !== null) {
+    if (!isCallable(iter)) throw new TypeError('Symbol.iterator is not a function');
+    A = ctor ? new C() : [];
+    var it = iter.call(items);
+    for (;;) {
+      var r = it.next();
+      if (r.done) break;
+      var v = r.value;
+      if (mapFn) {
+        try { v = mapFn.call(thisArg, v, k); }
+        catch (e) { if (isCallable(it.return)) { try { it.return(); } catch (e2) {} } throw e; }
+      }
+      defineProperty(A, k, { value: v, writable: true, enumerable: true, configurable: true });
+      k++;
+    }
+    A.length = k;
+    return A;
+  }
+  var src = Object(items), len = toLength(src.length);
+  A = ctor ? new C(len) : new Array(len);
+  for (; k < len; k++) {
+    var x = mapFn ? mapFn.call(thisArg, src[k], k) : src[k];
+    defineProperty(A, k, { value: x, writable: true, enumerable: true, configurable: true });
+  }
+  A.length = len;
+  return A;
+}, 1));
+hide(Array, 'of', function of() {
+  var C = this;
+  if (C === Array || !isCallable(C)) return nativeOf.apply(Array, arguments);
+  var A = new C(arguments.length);
+  for (var i = 0; i < arguments.length; i++) defineProperty(A, i, { value: arguments[i], writable: true, enumerable: true, configurable: true });
+  A.length = arguments.length;
+  return A;
+});
+
+var RP = RegExp.prototype, SP = String.prototype;
+var sMatch = SP.match, sReplace = SP.replace, sSearch = SP.search, sSplit = SP.split, sMatchAll = SP.matchAll, sReplaceAll = SP.replaceAll;
+function needRegExp(r, what) { if (!isObject(r)) throw new TypeError('RegExp.prototype[' + what + '] called on incompatible receiver'); }
+hide(RP, Symbol.match, function (s) { needRegExp(this, 'Symbol.match'); return sMatch.call(String(s), this); });
+hide(RP, Symbol.matchAll, function (s) { needRegExp(this, 'Symbol.matchAll'); return sMatchAll.call(String(s), this); });
+hide(RP, Symbol.replace, function (s, r) { needRegExp(this, 'Symbol.replace'); return sReplace.call(String(s), this, r); });
+hide(RP, Symbol.search, function (s) { needRegExp(this, 'Symbol.search'); return sSearch.call(String(s), this); });
+hide(RP, Symbol.split, function (s, lim) { needRegExp(this, 'Symbol.split'); return sSplit.call(String(s), this, lim); });
+[['match', Symbol.match, sMatch, 1], ['matchAll', Symbol.matchAll, sMatchAll, 1], ['replace', Symbol.replace, sReplace, 2],
+ ['replaceAll', Symbol.replaceAll, sReplaceAll, 2], ['search', Symbol.search, sSearch, 1], ['split', Symbol.split, sSplit, 2]].forEach(function (e) {
+  var name = e[0], sym = e[1], nat = e[2];
+  if (sym === undefined) sym = Symbol.replace;
+  var f = function (x, y) {
+    if (this === undefined || this === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
+    if (x !== undefined && x !== null && typeof x !== 'string' && !(x instanceof RegExp && getPrototypeOf(x) === RP)) {
+      var m = x[name === 'replaceAll' ? Symbol.replace : sym];
+      if (m !== undefined && m !== null) {
+        if (name === 'replaceAll' && isObject(x) && x instanceof RegExp && String(x.flags).indexOf('g') < 0) throw new TypeError('replaceAll must be called with a global RegExp');
+        return m.call(x, this, y);
+      }
+    }
+    return nat.call(this, x, y);
+  };
+  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
+  hide(SP, name, setLength(f, e[3]));
+});
+function isRegExpLike(x) {
+  if (!isObject(x)) return false;
+  var m = x[Symbol.match];
+  if (m !== undefined) return !!m;
+  return x instanceof RegExp;
+}
+['startsWith', 'endsWith', 'includes'].forEach(function (name) {
+  var nat = SP[name];
+  var f = function (s, pos) {
+    if (isRegExpLike(s)) throw new TypeError('First argument to String.prototype.' + name + ' must not be a regular expression');
+    return nat.call(this, isObject(s) ? String(s) : s, pos);
+  };
+  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
+  hide(SP, name, setLength(f, 1));
+});
+
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs
 // a callback, so a held object simply stays
 function WeakRef(target) {
