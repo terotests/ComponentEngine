@@ -483,12 +483,20 @@ impl Vm {
             }
             NF_AP_FILL => {
                 let o = self.this_array(&this);
-                let len = self.objs[o as usize].elems.len() as int;
+                let generic = !self.is_array_obj(o);
+                let len = if generic { self.len_of(&Val::Obj(o)) } else { self.objs[o as usize].elems.len() as int };
                 let s = self.rel_index(&a1, len, 0);
                 let e = self.rel_index(&arg(&args, 2), len, len);
                 let mut i = s;
                 while i < e {
-                    self.objs[o as usize].elems[i as usize] = a0.clone();
+                    if generic {
+                        self.set_index(o, i, a0.clone());
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                    } else {
+                        self.objs[o as usize].elems[i as usize] = a0.clone();
+                    }
                     i += 1;
                 }
                 Val::Obj(o)
@@ -500,9 +508,17 @@ impl Vm {
                 let t = self.rel_index(&a0, len, 0);
                 let s = self.rel_index(&a1, len, 0);
                 let e = self.rel_index(&arg(&args, 2), len, len);
+                let generic = !self.is_array_obj(o);
                 let mut i: int = 0;
                 while s + i < e && t + i < len {
-                    self.objs[o as usize].elems[(t + i) as usize] = items[(s + i) as usize].clone();
+                    if generic {
+                        self.set_index(o, t + i, items[(s + i) as usize].clone());
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                    } else {
+                        self.objs[o as usize].elems[(t + i) as usize] = items[(s + i) as usize].clone();
+                    }
                     i += 1;
                 }
                 Val::Obj(o)
@@ -914,7 +930,7 @@ impl Vm {
                     items.push(string_val(t));
                 }
                 let arr = self.new_array(items);
-                let ip = self.iter_proto;
+                let ip = self.string_iter_proto;
                 let it = self.alloc(C_ITER, ip);
                 self.objs[it as usize].env = arr;
                 self.objs[it as usize].func = 0;
@@ -1192,6 +1208,26 @@ impl Vm {
                     self.objs[m as usize].func = 1;
                 }
                 if !matches!(a0, Val::Undef) && !matches!(a0, Val::Null) {
+                    // the adder, as the constructor reads it: a replaced
+                    // set / add is called for each entry
+                    let adder_atom = self.intern(if is_map { "set" } else { "add" });
+                    let adder = self.get_obj(m, adder_atom, &Val::Obj(m));
+                    if !self.is_callable(&adder) {
+                        self.throw_type("'set' / 'add' of the new collection is not a function");
+                        return Val::Undef;
+                    }
+                    let ao = obj_of(&adder);
+                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET || self.objs[ao as usize].func == NF_SETP_ADD);
+                    let plain = self.class_of(&a0) == C_ARRAY && obj_of(&self.get(&a0, A_ITERATOR)) == self.array_values_fn;
+                    if !native_adder || !plain {
+                        self.temp_roots.push(Val::Obj(m));
+                        self.fill_collection(m, &a0, adder, is_map);
+                        self.temp_roots.pop();
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        return Val::Obj(m);
+                    }
                     self.temp_roots.push(Val::Obj(m));
                     let items = self.iterable_to_vec(&a0);
                     self.temp_roots.pop();
@@ -1298,6 +1334,8 @@ impl Vm {
                     return Val::Undef;
                 }
                 let p = self.new_promise();
+                let proto = self.proto_from(&new_target, self.promise_proto);
+                self.objs[p as usize].proto = proto;
                 let (res, rej) = self.resolving_functions(p);
                 self.temp_roots.push(Val::Obj(p));
                 self.call_value(a0, Val::Undef, vec![Val::Obj(res), Val::Obj(rej)]);

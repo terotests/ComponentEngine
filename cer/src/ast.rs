@@ -63,6 +63,10 @@ pub const N_EMPTY: int = 57;
 pub const N_PROGRAM: int = 58;
 pub const N_DEBUGGER: int = 59;
 pub const N_WITH: int = 60;
+/// `yield a` (a -1 for none); flags 1: `yield* a`
+pub const N_YIELD: int = 61;
+/// a BigInt literal: its decimal text in `s`
+pub const N_BIGINT: int = 62;
 
 // flags of N_FUNC / N_PROP
 pub const F_ARROW: int = 1;

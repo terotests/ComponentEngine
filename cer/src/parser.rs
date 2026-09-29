@@ -19,6 +19,13 @@ pub struct Parser {
     no_in: bool,
     in_function: bool,
     in_class: bool,
+    /// `yield` and `await` are operators here
+    in_generator: bool,
+    in_async: bool,
+    /// the expression last closed by `)`: `({a}) = …` is not a pattern
+    last_paren: int,
+    /// inside strict code (a "use strict" directive seen)
+    strict: bool,
 }
 
 fn binary_prec(op: &str) -> int {
@@ -131,6 +138,10 @@ impl Parser {
             no_in: false,
             in_function: false,
             in_class: false,
+            in_generator: false,
+            in_async: false,
+            last_paren: -1,
+            strict: false,
         };
         if !lx.error.is_empty() {
             p.error = lx.error.clone();
@@ -260,7 +271,7 @@ impl Parser {
     fn binding_ident(&mut self) -> String {
         if self.kind() == T_IDENT {
             let s = self.text();
-            if is_reserved(s.as_str()) && !self.toks[self.pos as usize].escaped {
+            if is_reserved(s.as_str()) {
                 self.fail(format!("unexpected reserved word '{}'", s).as_str());
                 return s;
             }
@@ -297,6 +308,7 @@ impl Parser {
         while (k as usize) < self.toks.len() && self.toks[k as usize].kind == T_STR {
             if self.toks[k as usize].text.as_str() == "use strict" && !self.toks[k as usize].escaped {
                 self.ast.nodes[owner as usize].flags |= F_STRICT;
+                self.strict = true;
             }
             k += 1;
             if (k as usize) < self.toks.len() && self.toks[k as usize].kind == T_PUNCT && self.toks[k as usize].text.as_str() == ";" {
@@ -354,7 +366,7 @@ impl Parser {
                 self.expect("(");
                 let t = self.expression();
                 self.expect(")");
-                let b = self.statement();
+                let b = self.sub_statement();
                 self.ast.nodes[n as usize].a = t;
                 self.ast.nodes[n as usize].b = b;
                 return n;
@@ -362,7 +374,7 @@ impl Parser {
             if ws == "do" {
                 let n = self.node(N_DOWHILE);
                 self.next();
-                let b = self.statement();
+                let b = self.sub_statement();
                 if !self.is("while") {
                     self.fail("expected 'while'");
                 }
@@ -448,6 +460,20 @@ impl Parser {
         self.ast.nodes[n as usize].a = e;
         self.semicolon();
         n
+    }
+
+    /// The body of an if, a loop: no lexical declaration there.
+    fn sub_statement(&mut self) -> int {
+        if self.kind() == T_IDENT && !self.toks[self.pos as usize].escaped {
+            let w = self.text();
+            let lexical = w.as_str() == "const"
+                || w.as_str() == "class"
+                || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_kind(1) == T_IDENT && !self.toks[(self.pos + 1) as usize].nl)));
+            if lexical {
+                self.fail("Lexical declaration cannot appear in a single-statement context");
+            }
+        }
+        self.statement()
     }
 
     fn block(&mut self) -> int {
@@ -561,11 +587,11 @@ impl Parser {
         self.expect("(");
         let t = self.expression();
         self.expect(")");
-        let a = self.statement();
+        let a = self.sub_statement();
         let mut b: int = -1;
         if self.is("else") {
             self.next();
-            b = self.statement();
+            b = self.sub_statement();
         }
         self.ast.nodes[n as usize].a = t;
         self.ast.nodes[n as usize].b = a;
@@ -576,8 +602,13 @@ impl Parser {
     fn for_stmt(&mut self) -> int {
         let line = self.line();
         self.next();
+        let mut is_await = false;
         if self.is("await") {
-            self.fail("for await is not supported");
+            if !self.in_async {
+                self.fail("for await is only valid in async functions");
+            }
+            self.next();
+            is_await = true;
         }
         self.expect("(");
         let mut init: int = -1;
@@ -600,8 +631,29 @@ impl Parser {
                 self.expect(")");
                 if !decl {
                     init = self.to_pattern(init);
+                } else {
+                    // an initializer: only `for (var x = … in …)`, sloppy
+                    let decls = self.ast.nodes[init as usize].list.clone();
+                    let kw = self.ast.nodes[init as usize].op.clone();
+                    for d in decls.iter() {
+                        if self.ast.nodes[*d as usize].b >= 0 {
+                            let t = self.ast.nodes[*d as usize].a;
+                            if op.as_str() == "of" || kw.as_str() != "var" || self.strict || self.ast.kind(t) != N_IDENT {
+                                self.fail("for-in or for-of loop variable declaration may not have an initializer");
+                            }
+                        }
+                    }
+                    if decls.len() != 1 {
+                        self.fail("Invalid left-hand side in for-in or for-of loop: must have a single binding");
+                    }
                 }
-                let body = self.statement();
+                let body = self.sub_statement();
+                if is_await {
+                    if op.as_str() != "of" {
+                        self.fail("for await needs 'of'");
+                    }
+                    self.ast.nodes[n as usize].flags = 1;
+                }
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = init;
                 self.ast.nodes[n as usize].b = obj;
@@ -613,6 +665,9 @@ impl Parser {
                 self.ast.nodes[e as usize].a = init;
                 init = e;
             }
+        }
+        if is_await {
+            self.fail("for await needs 'of'");
         }
         let n = self.ast.add(N_FOR, line);
         self.expect(";");
@@ -626,7 +681,7 @@ impl Parser {
             update = self.expression();
         }
         self.expect(")");
-        let body = self.statement();
+        let body = self.sub_statement();
         self.ast.nodes[n as usize].a = init;
         self.ast.nodes[n as usize].b = test;
         self.ast.nodes[n as usize].c = update;
@@ -745,13 +800,104 @@ impl Parser {
             }
         }
         self.expect(")");
-        self.ast.nodes[n as usize].list = params;
+        self.ast.nodes[n as usize].list = params.clone();
+        let flags = self.ast.nodes[n as usize].flags;
+        if (flags & F_SETTER) != 0 && (params.len() != 1 || self.ast.kind(params[0]) == N_REST) {
+            self.fail("Setter must have exactly one formal parameter");
+        }
+        if (flags & F_GETTER) != 0 && !params.is_empty() {
+            self.fail("Getter must not have any formal parameters");
+        }
         let body = self.function_body(n);
         self.ast.nodes[n as usize].a = body;
+        self.check_params(n);
+    }
+
+    /// Early errors of a parameter list: `"use strict"` with non-simple
+    /// parameters, and duplicate names where they are not allowed.
+    fn check_params(&mut self, n: int) {
+        let params = self.ast.nodes[n as usize].list.clone();
+        let flags = self.ast.nodes[n as usize].flags;
+        let mut simple = true;
+        for p in params.iter() {
+            if self.ast.kind(*p) != N_IDENT {
+                simple = false;
+            }
+        }
+        let body = self.ast.nodes[n as usize].a;
+        let own_strict = body >= 0 && (flags & F_STRICT) != 0;
+        if !simple && own_strict && self.strict_directive_in(n) {
+            self.fail("Illegal 'use strict' directive in function with non-simple parameter list");
+        }
+        let unique = !simple || (flags & (F_ARROW | F_METHOD)) != 0 || own_strict;
+        if !unique {
+            return;
+        }
+        let mut names: Vec<String> = Vec::new();
+        for p in params.iter() {
+            self.pattern_idents(*p, &mut names);
+        }
+        let mut i: usize = 0;
+        while i < names.len() {
+            let mut j = i + 1;
+            while j < names.len() {
+                if names[i] == names[j] {
+                    self.fail("Duplicate parameter name not allowed in this context");
+                    return;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+
+    /// The function's own body starts with "use strict" (not inherited).
+    fn strict_directive_in(&self, n: int) -> bool {
+        let body = self.ast.nodes[n as usize].a;
+        if body < 0 || self.ast.kind(body) != N_BLOCK {
+            return false;
+        }
+        let list = &self.ast.nodes[body as usize].list;
+        for st in list.iter() {
+            if self.ast.kind(*st) != N_EXPR {
+                return false;
+            }
+            let e = self.ast.nodes[*st as usize].a;
+            if e < 0 || self.ast.kind(e) != N_STR {
+                return false;
+            }
+            if self.ast.nodes[e as usize].s.as_str() == "use strict" {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn pattern_idents(&self, p: int, out: &mut Vec<String>) {
+        if p < 0 {
+            return;
+        }
+        let k = self.ast.kind(p);
+        if k == N_IDENT {
+            out.push(self.ast.nodes[p as usize].s.clone());
+        } else if k == N_PAT_DEFAULT || k == N_REST || k == N_ASSIGN || k == N_SPREAD {
+            self.pattern_idents(self.ast.nodes[p as usize].a, out);
+        } else if k == N_PROP {
+            self.pattern_idents(self.ast.nodes[p as usize].b, out);
+        } else if k == N_ARRAY || k == N_OBJECT {
+            for c in self.ast.nodes[p as usize].list.iter() {
+                self.pattern_idents(*c, out);
+            }
+        }
     }
 
     fn function_body(&mut self, owner: int) -> int {
         let saved = self.in_function;
+        let (saved_gen, saved_async) = (self.in_generator, self.in_async);
+        let saved_strict = self.strict;
+        let flags = self.ast.nodes[owner as usize].flags;
+        self.in_generator = (flags & F_GENERATOR) != 0;
+        self.in_async = (flags & F_ASYNC) != 0;
         self.in_function = true;
         let n = self.node(N_BLOCK);
         self.expect("{");
@@ -764,6 +910,9 @@ impl Parser {
         self.expect("}");
         self.ast.nodes[n as usize].list = body;
         self.in_function = saved;
+        self.in_generator = saved_gen;
+        self.in_async = saved_async;
+        self.strict = saved_strict;
         n
     }
 
@@ -777,7 +926,7 @@ impl Parser {
             k = 1;
         }
         if self.peek_kind(k) == T_IDENT && !self.peek_is(k, "(") {
-            return self.peek_is(k + 1, "=>") && k == 0;
+            return self.peek_is(k + 1, "=>") && k == 0 && !self.toks[(self.pos + 1) as usize].nl;
         }
         if !self.peek_is(k, "(") {
             return false;
@@ -855,11 +1004,16 @@ impl Parser {
             self.ast.nodes[n as usize].a = b;
         } else {
             let saved = self.in_function;
+            let (saved_gen, saved_async) = (self.in_generator, self.in_async);
+            self.in_generator = false;
+            self.in_async = (flags & F_ASYNC) != 0;
             self.in_function = true;
             let saved_no_in = self.no_in;
             let e = self.assign();
             self.no_in = saved_no_in;
             self.in_function = saved;
+            self.in_generator = saved_gen;
+            self.in_async = saved_async;
             self.ast.nodes[n as usize].a = e;
             self.ast.nodes[n as usize].flags |= F_EXPR_BODY;
         }
@@ -906,7 +1060,14 @@ impl Parser {
     fn method(&mut self, flags: int, name: &str) -> int {
         let f = self.node(N_FUNC);
         self.ast.nodes[f as usize].flags = flags | F_METHOD;
-        self.ast.nodes[f as usize].s = String::from(name);
+        let full = if (flags & F_GETTER) != 0 && !name.is_empty() {
+            format!("get {}", name)
+        } else if (flags & F_SETTER) != 0 && !name.is_empty() {
+            format!("set {}", name)
+        } else {
+            String::from(name)
+        };
+        self.ast.nodes[f as usize].s = full;
         self.function_rest(f);
         f
     }
@@ -982,6 +1143,9 @@ impl Parser {
                 let is_ctor = !computed && (flags & F_STATIC) == 0 && kname.as_str() == "constructor" && self.ast.kind(key) == N_STR;
                 let mut mf = fflags | (flags & (F_GETTER | F_SETTER | F_STATIC));
                 if is_ctor {
+                    if (fflags & (F_GENERATOR | F_ASYNC)) != 0 || (flags & (F_GETTER | F_SETTER)) != 0 {
+                        self.fail("Class constructor may not be a generator, an async method or an accessor");
+                    }
                     mf |= F_CTOR;
                 }
                 let f = self.method(mf, kname.as_str());
@@ -1141,9 +1305,19 @@ impl Parser {
         if self.arrow_ahead() {
             return self.arrow();
         }
-        if self.is("yield") && self.in_function {
-            self.fail("generators are not supported");
-            return self.node(N_UNDEF);
+        if self.is("yield") && self.in_generator && !self.toks[self.pos as usize].escaped {
+            let n = self.node(N_YIELD);
+            self.next();
+            self.ast.nodes[n as usize].a = -1;
+            if !self.nl_before() && self.eat("*") {
+                self.ast.nodes[n as usize].flags = 1;
+                let a = self.assign();
+                self.ast.nodes[n as usize].a = a;
+            } else if !self.nl_before() && !self.is(")") && !self.is("]") && !self.is("}") && !self.is(",") && !self.is(";") && !self.is(":") && self.kind() != T_EOF && !(self.kind() == T_IDENT && self.is("in")) {
+                let a = self.assign();
+                self.ast.nodes[n as usize].a = a;
+            }
+            return n;
         }
         let line = self.line();
         let left = self.conditional();
@@ -1154,6 +1328,9 @@ impl Parser {
                 let mut target = left;
                 let lk = self.ast.kind(left);
                 if op.as_str() == "=" && (lk == N_ARRAY || lk == N_OBJECT) {
+                    if left == self.last_paren {
+                        self.fail("Invalid left-hand side in assignment");
+                    }
                     target = self.to_pattern(left);
                 } else if !(lk == N_IDENT || lk == N_MEMBER || lk == N_INDEX || lk == N_SUPER_MEMBER) {
                     self.fail("invalid assignment target");
@@ -1250,7 +1427,7 @@ impl Parser {
         if self.kind() == T_IDENT && !self.toks[self.pos as usize].escaped {
             let op = self.text();
             let s = op.as_str();
-            if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_function) {
+            if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_async) {
                 self.next();
                 let a = self.unary();
                 let n = self.ast.add(N_UNARY, line);
@@ -1416,7 +1593,7 @@ impl Parser {
                 self.ast.nodes[n as usize].list = args;
                 e = n;
             } else if self.kind() == T_TEMPLATE {
-                let t = self.template();
+                let t = self.template(true);
                 let n = self.ast.add(N_TAGGED, l);
                 self.ast.nodes[n as usize].a = e;
                 self.ast.nodes[n as usize].b = t;
@@ -1472,17 +1649,32 @@ impl Parser {
         e
     }
 
-    fn template(&mut self) -> int {
+    /// A template literal: N_STR parts (raw text in `op`, flags 1 when the
+    /// cooked string is undefined) and the substitutions.
+    fn template(&mut self, tagged: bool) -> int {
         let n = self.node(N_TEMPLATE);
         let parts = self.toks[self.pos as usize].parts.clone();
         let exprs = self.toks[self.pos as usize].exprs.clone();
+        let raws = self.toks[self.pos as usize].raws.clone();
+        let oks = self.toks[self.pos as usize].cooked_ok.clone();
         let line = self.line();
         self.next();
         let mut strs: Vec<int> = Vec::new();
+        let mut i: usize = 0;
         for p in parts {
             let s = self.ast.add(N_STR, line);
             self.ast.nodes[s as usize].s = p;
+            if i < raws.len() {
+                self.ast.nodes[s as usize].op = raws[i].clone();
+            }
+            if i < oks.len() && !oks[i] {
+                if !tagged {
+                    self.fail("Invalid escape sequence in template");
+                }
+                self.ast.nodes[s as usize].flags = 1;
+            }
             strs.push(s);
+            i += 1;
         }
         let mut es: Vec<int> = Vec::new();
         for src in exprs {
@@ -1508,6 +1700,14 @@ impl Parser {
         let line = self.line();
         let k = self.kind();
         if k == T_NUM {
+            let raw = self.toks[self.pos as usize].text.clone();
+            if raw.starts_with("n:") {
+                let n = self.node(N_BIGINT);
+                let digits: String = String::from(&raw[2..]);
+                self.ast.nodes[n as usize].s = digits;
+                self.next();
+                return n;
+            }
             let n = self.node(N_NUM);
             let v = self.toks[self.pos as usize].num;
             self.ast.nodes[n as usize].num = v;
@@ -1522,7 +1722,7 @@ impl Parser {
             return n;
         }
         if k == T_TEMPLATE {
-            return self.template();
+            return self.template(false);
         }
         if k == T_REGEX {
             let n = self.node(N_REGEX);
@@ -1593,6 +1793,7 @@ impl Parser {
             let e = self.expression();
             self.no_in = saved;
             self.expect(")");
+            self.last_paren = e;
             return e;
         }
         if self.is("[") {
@@ -1641,6 +1842,7 @@ impl Parser {
         let mut props: Vec<int> = Vec::new();
         let saved = self.no_in;
         self.no_in = false;
+        let mut protos = 0;
         while !self.is("}") && self.kind() != T_EOF {
             let p = self.node(N_PROP);
             if self.eat("...") {
@@ -1686,6 +1888,12 @@ impl Parser {
             } else if (flags & (F_GETTER | F_SETTER)) != 0 {
                 self.fail("getter or setter without a body");
             } else if self.eat(":") {
+                if !computed && key_text.as_str() == "__proto__" {
+                    protos += 1;
+                    if protos > 1 {
+                        self.fail("Duplicate __proto__ fields are not allowed in object literals");
+                    }
+                }
                 let v = self.assign();
                 self.ast.nodes[p as usize].b = v;
             } else if key_tok_ident && !computed {

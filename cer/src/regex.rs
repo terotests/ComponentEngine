@@ -24,6 +24,9 @@ const R_NWORDB: int = 11;
 const R_BACKREF: int = 12;
 const R_LOOK: int = 13;
 const R_NAMEDREF: int = 14;
+/// `(?ims-ims:…)`: c holds the flags added (bits 1 i, 2 m, 4 s) and, << 3,
+/// the flags removed
+const R_MODS: int = 15;
 
 const I_CHAR: int = 1;
 const I_ANY: int = 2;
@@ -273,6 +276,7 @@ impl RParser {
             self.pos += 1;
             let mut cap: int = -1;
             let mut name = String::new();
+            let mut mods: int = -1;
             if self.cur() == 63 && self.peek(1) == 58 {
                 self.pos += 2;
             } else if self.cur() == 63 && self.peek(1) == 60 {
@@ -286,6 +290,43 @@ impl RParser {
                 cap = self.ngroups;
                 self.names.push(name.clone());
                 self.name_index.push(cap);
+            } else if self.cur() == 63 && (self.peek(1) == 105 || self.peek(1) == 109 || self.peek(1) == 115 || self.peek(1) == 45) {
+                // (?ims-ims: …) pattern modifiers
+                self.pos += 1;
+                let mut add: int = 0;
+                let mut remove: int = 0;
+                let mut minus = false;
+                loop {
+                    let f = self.cur();
+                    let bit = if f == 105 { 1 } else if f == 109 { 2 } else if f == 115 { 4 } else { 0 };
+                    if f == 45 && !minus {
+                        minus = true;
+                    } else if bit != 0 && ((add | remove) & bit) == 0 {
+                        if minus {
+                            remove |= bit;
+                        } else {
+                            add |= bit;
+                        }
+                    } else {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                if self.cur() != 58 || (add == 0 && remove == 0) {
+                    self.fail("Invalid regular expression: invalid group");
+                    return -1;
+                }
+                self.pos += 1;
+                let inner = self.disjunction();
+                if self.cur() != 41 {
+                    self.fail("Invalid regular expression: missing )");
+                    return -1;
+                }
+                self.pos += 1;
+                let n = self.node(R_MODS);
+                self.nodes[n as usize].c = add | (remove << 3);
+                self.nodes[n as usize].list = vec![inner];
+                mods = n;
             } else if self.cur() == 63 {
                 self.fail("Invalid regular expression: invalid group");
                 return -1;
@@ -293,17 +334,21 @@ impl RParser {
                 self.ngroups += 1;
                 cap = self.ngroups;
             }
-            let inner = self.disjunction();
-            if self.cur() != 41 {
-                self.fail("Invalid regular expression: missing )");
-                return -1;
+            if mods >= 0 {
+                atom = mods;
+            } else {
+                let inner = self.disjunction();
+                if self.cur() != 41 {
+                    self.fail("Invalid regular expression: missing )");
+                    return -1;
+                }
+                self.pos += 1;
+                let n = self.node(R_GROUP);
+                self.nodes[n as usize].c = cap;
+                self.nodes[n as usize].list = vec![inner];
+                self.nodes[n as usize].name = name;
+                atom = n;
             }
-            self.pos += 1;
-            let n = self.node(R_GROUP);
-            self.nodes[n as usize].c = cap;
-            self.nodes[n as usize].list = vec![inner];
-            self.nodes[n as usize].name = name;
-            atom = n;
         } else if c == 46 {
             self.pos += 1;
             atom = self.node(R_ANY);
@@ -721,22 +766,30 @@ impl Gen {
         (self.code.len() as int) - 1
     }
 
-    fn gen(&mut self, p: &RParser, n: int, dot_all: bool, backward: bool) {
+    fn gen(&mut self, p: &RParser, n: int, flags: int, backward: bool) {
         let nd = &p.nodes[n as usize];
         let k = nd.kind;
         if k == R_EMPTY {
             return;
         }
+        let ic = flags & 1;
         if k == R_CHAR {
-            self.emit(I_CHAR, nd.c, 0);
+            self.emit(I_CHAR, nd.c, ic);
             return;
         }
         if k == R_ANY {
-            self.emit(if dot_all { I_ANYNL } else { I_ANY }, 0, 0);
+            self.emit(if (flags & 4) != 0 { I_ANYNL } else { I_ANY }, 0, 0);
             return;
         }
         if k == R_CLASS {
-            self.emit(I_CLASS, nd.c, 0);
+            self.emit(I_CLASS, nd.c, ic);
+            return;
+        }
+        if k == R_MODS {
+            let add = nd.c & 7;
+            let remove = (nd.c >> 3) & 7;
+            let inner = nd.list[0];
+            self.gen(p, inner, (flags | add) & (7 - remove), backward);
             return;
         }
         if k == R_SEQ {
@@ -744,12 +797,12 @@ impl Gen {
             if backward {
                 let mut i = (list.len() as int) - 1;
                 while i >= 0 {
-                    self.gen(p, list[i as usize], dot_all, backward);
+                    self.gen(p, list[i as usize], flags, backward);
                     i -= 1;
                 }
             } else {
                 for x in list {
-                    self.gen(p, x, dot_all, backward);
+                    self.gen(p, x, flags, backward);
                 }
             }
             return;
@@ -763,13 +816,13 @@ impl Gen {
                 if i + 1 < cnt {
                     let split = self.emit(I_SPLIT, 0, 0);
                     self.code[split as usize].a = split + 1;
-                    self.gen(p, x, dot_all, backward);
+                    self.gen(p, x, flags, backward);
                     let j = self.emit(I_JMP, 0, 0);
                     ends.push(j);
                     let here = self.code.len() as int;
                     self.code[split as usize].b = here;
                 } else {
-                    self.gen(p, x, dot_all, backward);
+                    self.gen(p, x, flags, backward);
                 }
                 i += 1;
             }
@@ -785,7 +838,7 @@ impl Gen {
             if cap >= 0 {
                 self.emit(I_SAVE, if backward { cap * 2 + 1 } else { cap * 2 }, 0);
             }
-            self.gen(p, inner, dot_all, backward);
+            self.gen(p, inner, flags, backward);
             if cap >= 0 {
                 self.emit(I_SAVE, if backward { cap * 2 } else { cap * 2 + 1 }, 0);
             }
@@ -796,7 +849,7 @@ impl Gen {
             let (min, max, greedy) = (nd.min, nd.max, nd.greedy);
             let mut i = 0;
             while i < min {
-                self.gen(p, inner, dot_all, backward);
+                self.gen(p, inner, flags, backward);
                 i += 1;
             }
             if max < 0 {
@@ -805,7 +858,7 @@ impl Gen {
                 let top = self.emit(I_SPLIT, 0, 0);
                 let body = self.code.len() as int;
                 self.emit(I_SETPOS, reg, 0);
-                self.gen(p, inner, dot_all, backward);
+                self.gen(p, inner, flags, backward);
                 self.emit(I_CHKPOS, reg, 0);
                 self.emit(I_JMP, top, 0);
                 let end = self.code.len() as int;
@@ -824,7 +877,7 @@ impl Gen {
                 let s = self.emit(I_SPLIT, 0, 0);
                 splits.push(s);
                 let body = self.code.len() as int;
-                self.gen(p, inner, dot_all, backward);
+                self.gen(p, inner, flags, backward);
                 if greedy {
                     self.code[s as usize].a = body;
                 } else {
@@ -843,11 +896,11 @@ impl Gen {
             return;
         }
         if k == R_BOL {
-            self.emit(I_BOL, 0, 0);
+            self.emit(I_BOL, (flags >> 1) & 1, 0);
             return;
         }
         if k == R_EOL {
-            self.emit(I_EOL, 0, 0);
+            self.emit(I_EOL, (flags >> 1) & 1, 0);
             return;
         }
         if k == R_WORDB {
@@ -859,7 +912,7 @@ impl Gen {
             return;
         }
         if k == R_BACKREF {
-            self.emit(I_BACKREF, nd.c, if backward { 1 } else { 0 });
+            self.emit(I_BACKREF, nd.c, (if backward { 1 } else { 0 }) + 2 * ic);
             return;
         }
         if k == R_NAMEDREF {
@@ -871,7 +924,7 @@ impl Gen {
                 }
                 i += 1;
             }
-            self.emit(I_BACKREF, idx, if backward { 1 } else { 0 });
+            self.emit(I_BACKREF, idx, (if backward { 1 } else { 0 }) + 2 * ic);
             return;
         }
         if k == R_LOOK {
@@ -880,7 +933,7 @@ impl Gen {
             let look = self.emit(I_LOOK, kind, 0);
             let jmp = self.emit(I_JMP, 0, 0);
             let start = self.code.len() as int;
-            self.gen(p, inner, dot_all, kind >= 2);
+            self.gen(p, inner, flags, kind >= 2);
             self.emit(I_MATCH, 0, 0);
             let after = self.code.len() as int;
             self.code[look as usize].b = start;
@@ -974,11 +1027,12 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
     }
     let mut g = Gen { code: Vec::new(), nregs: 0 };
     g.emit(I_SAVE, 0, 0);
-    g.gen(&p, root, re.dot_all, false);
+    let flags0 = (if re.ignore_case { 1 } else { 0 }) + (if re.multiline { 2 } else { 0 }) + (if re.dot_all { 4 } else { 0 });
+    g.gen(&p, root, flags0, false);
     g.emit(I_SAVE, 1, 0);
     g.emit(I_MATCH, 0, 0);
     // a literal first unit lets the search skip ahead
-    if g.code.len() > 1 && g.code[1].op == I_CHAR && !re.ignore_case && g.code[1].a < 0x10000 {
+    if g.code.len() > 1 && g.code[1].op == I_CHAR && g.code[1].b == 0 && g.code[1].a < 0x10000 {
         re.first = g.code[1].a;
     }
     re.code = g.code;
@@ -991,10 +1045,10 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
 }
 
 impl Regex {
-    fn class_has(&self, ci: int, c: int) -> bool {
+    fn class_has(&self, ci: int, c: int, ic: bool) -> bool {
         let cl = &self.classes[ci as usize];
         let mut hit = in_ranges(&cl.ranges, c);
-        if !hit && self.ignore_case {
+        if !hit && ic {
             let l = fold(c);
             let u = upper(c);
             hit = in_ranges(&cl.ranges, l) || in_ranges(&cl.ranges, u);
@@ -1006,11 +1060,11 @@ impl Regex {
         }
     }
 
-    fn eq(&self, a: int, b: int) -> bool {
+    fn eq(&self, a: int, b: int, ic: bool) -> bool {
         if a == b {
             return true;
         }
-        self.ignore_case && fold(a) == fold(b)
+        ic && fold(a) == fold(b)
     }
 
     /// The code point at `pos` (a surrogate pair is one under /u) and its
@@ -1044,7 +1098,7 @@ impl Regex {
             match ins.op {
                 I_CHAR => {
                     if back {
-                        if pos > 0 && self.eq(input[(pos - 1) as usize], ins.a) {
+                        if pos > 0 && self.eq(input[(pos - 1) as usize], ins.a, ins.b != 0) {
                             pos -= 1;
                             pc += 1;
                         } else {
@@ -1052,7 +1106,7 @@ impl Regex {
                         }
                     } else if pos < n {
                         let (c, w) = self.unit_at(input, pos, n);
-                        if self.eq(c, ins.a) {
+                        if self.eq(c, ins.a, ins.b != 0) {
                             pos += w;
                             pc += 1;
                         } else {
@@ -1084,7 +1138,7 @@ impl Regex {
                 }
                 I_CLASS => {
                     if back {
-                        if pos > 0 && self.class_has(ins.a, input[(pos - 1) as usize]) {
+                        if pos > 0 && self.class_has(ins.a, input[(pos - 1) as usize], ins.b != 0) {
                             pos -= 1;
                             pc += 1;
                         } else {
@@ -1092,7 +1146,7 @@ impl Regex {
                         }
                     } else if pos < n {
                         let (c, w) = self.unit_at(input, pos, n);
-                        if self.class_has(ins.a, c) {
+                        if self.class_has(ins.a, c, ins.b != 0) {
                             pos += w;
                             pc += 1;
                         } else {
@@ -1127,14 +1181,14 @@ impl Regex {
                     }
                 }
                 I_BOL => {
-                    if pos == 0 || (self.multiline && is_line_term(input[(pos - 1) as usize])) {
+                    if pos == 0 || (ins.a != 0 && is_line_term(input[(pos - 1) as usize])) {
                         pc += 1;
                     } else {
                         ok = false;
                     }
                 }
                 I_EOL => {
-                    if pos == n || (self.multiline && is_line_term(input[pos as usize])) {
+                    if pos == n || (ins.a != 0 && is_line_term(input[pos as usize])) {
                         pc += 1;
                     } else {
                         ok = false;
@@ -1157,13 +1211,13 @@ impl Regex {
                         pc += 1;
                     } else {
                         let len = e - s;
-                        if ins.b == 1 {
+                        if (ins.b & 1) == 1 {
                             if pos - len < 0 {
                                 ok = false;
                             } else {
                                 let mut k: int = 0;
                                 while k < len {
-                                    if !self.eq(input[(s + k) as usize], input[(pos - len + k) as usize]) {
+                                    if !self.eq(input[(s + k) as usize], input[(pos - len + k) as usize], (ins.b & 2) != 0) {
                                         ok = false;
                                         break;
                                     }
@@ -1179,7 +1233,7 @@ impl Regex {
                         } else {
                             let mut k: int = 0;
                             while k < len {
-                                if !self.eq(input[(s + k) as usize], input[(pos + k) as usize]) {
+                                if !self.eq(input[(s + k) as usize], input[(pos + k) as usize], (ins.b & 2) != 0) {
                                     ok = false;
                                     break;
                                 }

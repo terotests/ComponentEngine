@@ -518,7 +518,6 @@ impl Vm {
         self.array_values_fn = values;
         self.objs[ap as usize].add(A_ITERATOR, Val::Obj(values), P_HIDDEN);
         self.method(ip, "next", NF_ITER_NEXT, 0);
-        self.sym_method(ip, A_ITERATOR, "[Symbol.iterator]", NF_ITER_SELF, 0);
 
         // String
         let sc = self.ctor("String", NF_STRING, 1, sp);
@@ -606,6 +605,11 @@ impl Vm {
         self.value_prop(symc, "toStringTag", Val::Obj(tag_sym));
         self.value_prop(symc, "species", Val::Obj(species_sym));
         self.value_prop(symc, "unscopables", Val::Obj(unscop_sym));
+        for (name, desc) in vec![("match", "Symbol.match"), ("matchAll", "Symbol.matchAll"), ("replace", "Symbol.replace"), ("search", "Symbol.search"), ("split", "Symbol.split"), ("isConcatSpreadable", "Symbol.isConcatSpreadable")] {
+            let a = self.intern(format!("@@{}", name).as_str());
+            let s = self.well_known_symbol(a, desc);
+            self.value_prop(symc, name, Val::Obj(s));
+        }
         self.method(symp, "toString", NF_SYMP_TOSTRING, 0);
         self.getter(symp, "description", NF_SYMP_DESCRIPTION);
 
@@ -777,6 +781,11 @@ impl Vm {
         self.method(pp, "then", NF_PR_THEN, 2);
         self.method(pp, "catch", NF_PR_CATCH, 1);
         self.method(pp, "finally", NF_PR_FINALLY, 1);
+        self.setup_coroutines();
+        self.setup_typed();
+        self.setup_proxy();
+        self.setup_dynamic();
+        self.setup_bigint();
     }
 
     // ---- helpers
@@ -876,6 +885,9 @@ impl Vm {
                     let d = self.objs[*o as usize].prim.clone();
                     let ds = if let Val::Str(s) = d { s.as_ref().clone() } else { String::new() };
                     return format!("Symbol({})", ds);
+                }
+                if c == C_BIGINT {
+                    return format!("{}n", self.big_text(v));
                 }
                 let s = self.to_string(v);
                 if self.throwing {
@@ -1443,7 +1455,7 @@ impl Vm {
             i += 1;
         }
         let arr = self.new_array(items);
-        let ip = self.iter_proto;
+        let ip = if is_set { self.set_iter_proto } else { self.map_iter_proto };
         let it = self.alloc(C_ITER, ip);
         self.objs[it as usize].env = arr;
         self.objs[it as usize].func = 0;
@@ -1832,6 +1844,10 @@ impl Vm {
                 if self.is_callable(&v) || self.objs[o as usize].class == C_SYMBOL {
                     return false;
                 }
+                if self.objs[o as usize].class == C_BIGINT {
+                    self.throw_type("Do not know how to serialize a BigInt");
+                    return false;
+                }
                 for s in stack.iter() {
                     if *s == o {
                         self.throw_type("Converting circular structure to JSON");
@@ -1841,7 +1857,7 @@ impl Vm {
                 stack.push(o);
                 let inner = format!("{}{}", indent, gap);
                 let class = self.objs[o as usize].class;
-                if class == C_ARRAY {
+                if class == C_ARRAY || (class == C_PROXY && self.is_array_val(&v)) {
                     let n = self.len_of(&v);
                     out.push('[');
                     let mut i: int = 0;
@@ -2592,6 +2608,36 @@ impl Vm {
     // ---- the dispatch
 
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>, construct: bool, new_target: Val) -> Val {
+        if id >= NF_AP_PUSH && id <= NF_AP_WITH && (matches!(this, Val::Undef) || matches!(this, Val::Null)) {
+            self.throw_type("Array.prototype method called on null or undefined");
+            return Val::Undef;
+        }
+        if id >= 920 && id < 930 {
+            return self.call_native_typed(id, args);
+        }
+        if id >= 930 && id < 940 {
+            return self.call_native_proxy(id, args, construct);
+        }
+        if id >= 950 && id < 960 {
+            return self.call_native_bigint(id, this, args, construct);
+        }
+        if id >= 944 && id < 950 {
+            return self.call_native_dynamic_this(id, this, args);
+        }
+        if id >= 940 && id < 950 {
+            return self.call_native_dynamic(id, args, new_target);
+        }
+        if self.proxy_hooks >= 0 {
+            let p = if id == NF_OP_HASOWN || id == NF_OP_PROPENUM { obj_of(&this) } else if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            if p >= 0 && self.objs[p as usize].class == C_PROXY {
+                if let Some(v) = self.proxy_native(id, p, &args) {
+                    return v;
+                }
+            }
+        }
+        if id >= 900 && id < 1000 {
+            return self.call_native_co(id, fobj, this, args);
+        }
         if id >= NF_MATH && id < NF_MATH + 40 {
             return self.math(id - NF_MATH, &args);
         }
@@ -2851,10 +2897,7 @@ impl Vm {
                 self.jobs.push(Val::Undef);
                 Val::Undef
             }
-            NF_FUNCTION => {
-                self.throw_type("Function constructor is not supported");
-                Val::Undef
-            }
+            NF_FUNCTION => self.call_native_dynamic(NF_FUNCTION, args, new_target),
             NF_STRING => {
                 let s = if args.is_empty() {
                     Rc::new(String::new())
@@ -2872,7 +2915,14 @@ impl Vm {
                 Val::Str(s)
             }
             NF_NUMBER => {
-                let n = if args.is_empty() { 0.0 } else { self.to_number(&a0) };
+                let prim = if is_obj(&a0) { self.to_primitive(&a0, "number") } else { a0.clone() };
+                let n = if args.is_empty() {
+                    0.0
+                } else if self.class_of(&prim) == C_BIGINT {
+                    crate::bigint::to_double(self.big_text(&prim).as_str())
+                } else {
+                    self.to_number(&prim)
+                };
                 if construct {
                     let proto = self.proto_from(&new_target, self.number_proto);
                     let o = self.alloc(C_NUMBER, proto);
@@ -2980,11 +3030,16 @@ impl Vm {
                 Val::Undef
             }
             NF_SYMP_TOSTRING => {
-                let s = self.display(&this);
+                let t = self.this_symbol(&this);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let s = self.display(&t);
                 string_val(s)
             }
             NF_SYMP_DESCRIPTION => {
-                let o = obj_of(&this);
+                let t = self.this_symbol(&this);
+                let o = obj_of(&t);
                 if o >= 0 && self.objs[o as usize].class == C_SYMBOL {
                     return self.objs[o as usize].prim.clone();
                 }
@@ -3475,6 +3530,20 @@ impl Vm {
             }
             NF_REFLECT_GET => {
                 let k = arg(&args, 1);
+                let o = obj_of(&a0);
+                if o < 0 {
+                    self.throw_type("Reflect.get called on non-object");
+                    return Val::Undef;
+                }
+                if args.len() > 2 {
+                    // a getter sees the receiver
+                    let (i, a) = self.to_key(&k);
+                    let atom = if i >= 0 { self.index_atom(i) } else { a };
+                    if i >= 0 && self.objs[o as usize].class != C_OBJECT {
+                        return self.get_elem(&a0, &k);
+                    }
+                    return self.get_obj(o, atom, &args[2]);
+                }
                 self.get_elem(&a0, &k)
             }
             NF_REFLECT_SET => {
@@ -3601,7 +3670,7 @@ impl Vm {
             23 => x.asinh(),
             24 => x.acosh(),
             25 => x.atanh(),
-            26 => (x as f32) as double,
+            26 => crate::typed::fround(x),
             27 => {
                 let mut u = to_uint32(x) as int;
                 let mut n: int = 32;

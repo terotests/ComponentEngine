@@ -226,3 +226,28 @@ pub const OP_GET_PRIVATE: int = 133;
 /// and nothing else holds x's text, v is appended in place instead of both
 /// being copied into a new string (`s += …` in a loop is then linear).
 pub const OP_ADD_LOCAL_POP: int = 134;
+
+// ---- generators and async functions (a coroutine: the frame, its stack
+// and its handlers saved in a C_GENERATOR object between runs)
+/// after the parameters: the frame becomes a suspended coroutine; a
+/// generator's call answers the generator, an async function's call runs it
+/// to its first `await` and answers its promise
+pub const OP_GEN_START: int = 135;
+/// [v] → suspends, handing v to the resumer; a 1: v is an iterator result
+/// already (`yield*`), 2: an `await`. Resumed as [value, mode]
+pub const OP_YIELD: int = 136;
+/// [value, mode] → [value]; mode 1 (return) jumps to `a`, 2 (throw) throws
+pub const OP_GEN_RESUME: int = 137;
+/// one step of `yield*`: [iter, received, mode] → [iter, result] to yield,
+/// or [value] and a jump to `a` when the inner iterator is done, or a jump
+/// to `b` (return) with [iter, value]
+pub const OP_YIELD_STAR: int = 138;
+/// [iter] → []: an iterator left early, its `return()` called; b 1: after
+/// an exception, whose errors are ignored
+pub const OP_ITER_CLOSE: int = 139;
+/// closes the iterator `a` items below the top, leaving the stack
+pub const OP_ITER_CLOSE_AT: int = 140;
+/// [iterable] → [async iterator] (`for await`)
+pub const OP_ASYNC_ITER: int = 141;
+/// [decimal text] → [the BigInt]
+pub const OP_BIGINT: int = 142;

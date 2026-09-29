@@ -43,12 +43,13 @@ jobs:
         run: |
           npx playwright-core install chromium
           node playground/smoke.mjs --shot=playground-smoke.png
+          node playground/smoke.mjs --zoo=conf --shot=playground-zoo.png
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: playground-smoke
-          path: playground-smoke.png
+          path: playground-*.png
           if-no-files-found: ignore
 
       - uses: actions/upload-pages-artifact@v3

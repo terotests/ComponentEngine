@@ -17,16 +17,21 @@
 use ranger::prelude::*;
 
 pub mod ast;
+pub mod bigint;
 pub mod builtins;
 pub mod builtins2;
 pub mod compiler;
+pub mod coroutine;
+pub mod dynamic;
 pub mod jsstr;
 pub mod lexer;
 pub mod num;
 pub mod ops;
 pub mod parser;
 pub mod prelude;
+pub mod proxy;
 pub mod regex;
+pub mod typed;
 pub mod value;
 pub mod vm;
 

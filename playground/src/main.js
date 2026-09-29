@@ -4,6 +4,7 @@
 // one worker per engine, the benchmark and the editor.
 
 import { WORKLOADS, SAMPLE, wrap } from "./workloads.js";
+import { setupZoo } from "./zoo.js";
 
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -58,8 +59,12 @@ class Runner {
     if (this.worker) this.worker.terminate();
     this.worker = null;
   }
-  /** Runs `src` `reps` times; a run past `limit` ms ends the worker. */
-  run(src, reps, limit) {
+  /** Runs `src` `reps` times; a run past `limit` ms ends the worker.
+   * opts.fresh: a new realm first; opts.settle: drain the job queue after. */
+  run(src, reps, limit, opts = {}) {
+    // The browser's engine has no second realm inside a worker: a fresh
+    // worker is its fresh realm.
+    if (opts.fresh && this.info.id === "native") this.stop();
     if (!this.worker) this.start();
     const id = ++this.seq;
     return new Promise((resolve) => {
@@ -69,7 +74,7 @@ class Runner {
         resolve({ ok: false, timeout: true, error: true, out: ["no answer in " + limit / 1000 + " s"], times: [] });
       }, limit);
       this.pending = { id, resolve, timer };
-      this.worker.postMessage({ cmd: "run", id, src, reps });
+      this.worker.postMessage({ cmd: "run", id, src, reps, fresh: !!opts.fresh, settle: !!opts.settle });
     });
   }
   cancel() {
@@ -382,7 +387,7 @@ function esc(s) {
 }
 
 function tabs() {
-  const ids = ["bench", "editor", "about"];
+  const ids = ["bench", "zoo", "editor", "about"];
   const show = (id) => {
     for (const t of ids) {
       $("tab-" + t).setAttribute("aria-selected", String(t === id));
@@ -412,6 +417,7 @@ async function main() {
   renderWorkloadList();
   renderAbout();
   tabs();
+  setupZoo({ chosen, runnerFor, store, rev: manifest.rev || manifest.built, setEngineState });
   renderSummary([], []);
 
   const code = $("code");

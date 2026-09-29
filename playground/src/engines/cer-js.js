@@ -7,8 +7,11 @@ export default {
   name: "CEr · Rust → Ranger → JS",
   about: "A curiosity: the same Rust source as CEr · WASM, read by the Ranger compiler as a strict Rust module and written out as JavaScript — an interpreter running inside the browser's JIT.",
   async load() {
-    const e = mod.Engine.new_();
+    let e = mod.Engine.new_();
     return {
+      reset() {
+        e = mod.Engine.new_();
+      },
       run(src) {
         e.clear_output();
         const r = e.eval(src);

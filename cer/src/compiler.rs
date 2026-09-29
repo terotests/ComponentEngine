@@ -57,6 +57,8 @@ const CT_BLOCK: int = 2;
 const CT_TRY: int = 3;
 const CT_ENV: int = 4;
 const CT_ITEM: int = 5;
+/// a for-of loop's iterator on the stack, under a handler that closes it
+const CT_ITER: int = 6;
 
 struct Ctl {
     kind: int,
@@ -94,6 +96,9 @@ pub struct Compiler {
     pub error: String,
     /// completion value of the script: slot 0 of the program
     keep_completion: bool,
+    /// strict eval code: the script's own `var`s and functions are its
+    /// locals, not the global object's
+    pub local_program: bool,
     /// the innermost scope entered by the code being written
     cur_scope: int,
 }
@@ -113,6 +118,7 @@ impl Compiler {
             fs: Vec::new(),
             error: String::new(),
             keep_completion: true,
+            local_program: false,
             cur_scope: -1,
         }
     }
@@ -168,7 +174,7 @@ impl Compiler {
             }
             return existing;
         }
-        let global = self.scopes[scope as usize].is_program;
+        let global = self.scopes[scope as usize].is_program && !self.local_program;
         self.binds.push(Binding {
             name: String::from(name),
             kind: kind,
@@ -830,11 +836,16 @@ impl Compiler {
             is_program: true,
         });
         self.cur_scope = s;
+        if self.local_program {
+            self.enter_scope(s, true);
+            let es = self.scopes[s as usize].env_size;
+            self.f().proto.env_size = es;
+        }
         // top-level vars exist before the code runs
         let binds = self.scopes[s as usize].binds.clone();
         for b in binds {
             let k = self.binds[b as usize].kind;
-            if k == K_VAR {
+            if k == K_VAR && !self.local_program {
                 let nm = self.binds[b as usize].name.clone();
                 let a = self.atom(nm.as_str());
                 self.emit(OP_DECL_GLOBAL, a, 0);
@@ -904,6 +915,8 @@ impl Compiler {
         proto.class_ctor = (flags & F_CTOR) != 0;
         proto.derived = (flags & F_DERIVED) != 0;
         proto.getter_setter = (flags & (F_GETTER | F_SETTER)) != 0;
+        proto.generator = (flags & F_GENERATOR) != 0;
+        proto.is_async = (flags & F_ASYNC) != 0;
         let params = self.ast.nodes[n as usize].list.clone();
         let saved_scope = self.cur_scope;
         self.fs.push(FnState {
@@ -995,6 +1008,10 @@ impl Compiler {
                 }
             }
             pi += 1;
+        }
+        if (flags & (F_GENERATOR | F_ASYNC)) != 0 {
+            // parameters are bound at the call; the body runs as a coroutine
+            self.op(OP_GEN_START);
         }
         let body = self.ast.nodes[n as usize].a;
         if (flags & F_EXPR_BODY) != 0 {
@@ -1224,8 +1241,25 @@ impl Compiler {
         let top = (self.f().ctl.len() as int) - 1;
         let mut i = top;
         let ret = target < 0;
+        // for a return: the stack items above the next iterator down
+        let mut above: int = 1;
         while i > target {
             let kind = self.f().ctl[i as usize].kind;
+            if kind == CT_ITER {
+                // leaving a for-of early closes its iterator
+                self.op(OP_END_TRY);
+                if ret {
+                    self.emit(OP_ITER_CLOSE_AT, above, 0);
+                    above += 1;
+                } else {
+                    self.emit(OP_ITER_CLOSE, 0, 0);
+                }
+                i -= 1;
+                continue;
+            }
+            if kind == CT_ITEM && ret {
+                above += 1;
+            }
             if kind == CT_TRY {
                 if self.f().ctl[i as usize].installed {
                     self.op(OP_END_TRY);
@@ -1447,17 +1481,94 @@ impl Compiler {
         self.cur_scope = saved;
     }
 
+    /// `for await (x of y)`: each step awaits `it.next()`.
+    fn for_await_statement(&mut self, n: int) {
+        let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
+        let labels = self.take_labels();
+        self.expr(b);
+        self.op(OP_ASYNC_ITER);
+        self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
+        let top = self.pc();
+        // [it] → [it, await it.next()]
+        self.op(OP_DUP);
+        let a_next = self.atom("next");
+        self.emit(OP_GET_METHOD, a_next, 0);
+        self.emit(OP_CALL, 0, 0);
+        self.emit(OP_YIELD, 2, 0);
+        self.resume_point();
+        self.op(OP_DUP);
+        let a_done = self.atom("done");
+        self.emit(OP_GET_PROP, a_done, 0);
+        let exit = self.emit(OP_JT, 0, 0);
+        let a_value = self.atom("value");
+        self.emit(OP_GET_PROP, a_value, 0);
+        self.push_loop(labels);
+        let scope = match self.node_scope.get(&n) {
+            Some(s) => *s,
+            None => -1,
+        };
+        let saved = self.cur_scope;
+        self.cur_scope = scope;
+        for bi in self.scopes[scope as usize].binds.clone() {
+            self.binds[bi as usize].placed = false;
+        }
+        let pushed = self.enter_scope(scope, false);
+        let target = if a >= 0 && self.ast.nodes[a as usize].kind == N_VAR {
+            let decl = self.ast.nodes[a as usize].list[0];
+            self.ast.nodes[decl as usize].a
+        } else {
+            a
+        };
+        self.assign_pattern(target, true);
+        self.statement(c);
+        self.leave_scope(pushed);
+        self.cur_scope = saved;
+        let ctl = self.f().ctl.pop().unwrap();
+        let cont = self.pc();
+        for x in ctl.conts.iter() {
+            self.patch_to(*x, cont);
+        }
+        self.emit(OP_JUMP, top, 0);
+        // done: [it, result]
+        self.patch(exit);
+        self.op(OP_POP);
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        self.f().ctl.pop();
+        self.op(OP_POP);
+    }
+
     fn forin_statement(&mut self, n: int) {
+        if (self.ast.nodes[n as usize].flags & 1) != 0 {
+            self.for_await_statement(n);
+            return;
+        }
         let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
         let of = self.ast.nodes[n as usize].op.as_str() == "of";
         let labels = self.take_labels();
+        if !of && a >= 0 && self.ast.nodes[a as usize].kind == N_VAR {
+            // Annex B: `for (var x = init in o)` assigns init first
+            let decl = self.ast.nodes[a as usize].list[0];
+            let init = self.ast.nodes[decl as usize].b;
+            let tgt = self.ast.nodes[decl as usize].a;
+            if init >= 0 && self.ast.nodes[tgt as usize].kind == N_IDENT {
+                self.expr(init);
+                self.store_name(tgt, false);
+                self.op(OP_POP);
+            }
+        }
         self.expr(b);
+        let mut t: int = -1;
         if of {
             self.op(OP_ITER_VALUES);
+            // an exception out of the body closes the iterator
+            t = self.emit(OP_TRY, 0, 0);
+            self.f().ctl.push(Ctl { kind: CT_ITER, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: true });
         } else {
             self.op(OP_ITER_KEYS);
+            self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
         }
-        self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
         let top = self.pc();
         let next = self.emit(OP_ITER_NEXT, 0, 0);
         self.push_loop(labels);
@@ -1489,11 +1600,33 @@ impl Compiler {
         }
         self.emit(OP_JUMP, top, 0);
         self.patch(next);
+        if !of {
+            for x in ctl.breaks.iter() {
+                self.patch(*x);
+            }
+            self.f().ctl.pop();
+            self.op(OP_POP);
+            return;
+        }
+        // done: the iterator is spent
+        self.op(OP_END_TRY);
+        self.op(OP_POP);
+        let j_done = self.emit(OP_JUMP, 0, 0);
+        // break: closed
         for x in ctl.breaks.iter() {
             self.patch(*x);
         }
+        self.op(OP_END_TRY);
+        self.emit(OP_ITER_CLOSE, 0, 0);
+        let j_break = self.emit(OP_JUMP, 0, 0);
+        // throw: [iter, exception] → closed, errors of return() ignored
+        self.patch(t);
+        self.op(OP_SWAP);
+        self.emit(OP_ITER_CLOSE, 0, 1);
+        self.op(OP_THROW);
+        self.patch(j_done);
+        self.patch(j_break);
         self.f().ctl.pop();
-        self.op(OP_POP);
     }
 
     fn try_statement(&mut self, n: int) {
@@ -1661,9 +1794,67 @@ impl Compiler {
         }
     }
 
+    /// After OP_YIELD: [value, mode] → [value], a `return` resumed here
+    /// leaves through the enclosing `finally` blocks.
+    fn resume_point(&mut self) {
+        let r = self.emit(OP_GEN_RESUME, 0, 0);
+        let j = self.emit(OP_JUMP, 0, 0);
+        self.patch(r);
+        self.unwind_to(-1, false);
+        self.op(OP_RETURN);
+        self.patch(j);
+    }
+
+    fn yield_expr(&mut self, n: int) {
+        let a = self.ast.nodes[n as usize].a;
+        let delegate = (self.ast.nodes[n as usize].flags & 1) != 0;
+        if !delegate {
+            if a >= 0 {
+                self.expr(a);
+            } else {
+                self.op(OP_UNDEF);
+            }
+            if self.f().proto.is_async {
+                // an async generator yields the awaited value
+                self.emit(OP_YIELD, 2, 0);
+                self.resume_point();
+            }
+            self.emit(OP_YIELD, 0, 0);
+            self.resume_point();
+            return;
+        }
+        // yield*: [iter, received, mode] around the loop
+        self.expr(a);
+        self.op(OP_ITER_VALUES);
+        self.op(OP_UNDEF);
+        self.emit(OP_INT, 0, 0);
+        let top = self.pc();
+        let step = self.emit(OP_YIELD_STAR, 0, 0);
+        self.emit(OP_YIELD, 1, 0);
+        self.emit(OP_JUMP, top, 0);
+        let ret = self.pc();
+        self.unwind_to(-1, false);
+        self.op(OP_RETURN);
+        let done = self.pc();
+        let i = step as usize;
+        let fi = self.fs.len() - 1;
+        self.fs[fi].proto.code[i].a = done;
+        self.fs[fi].proto.code[i].b = ret;
+    }
+
     fn expr(&mut self, n: int) {
         let k = self.ast.nodes[n as usize].kind;
         let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
+        if k == N_YIELD {
+            self.yield_expr(n);
+            return;
+        }
+        if k == N_BIGINT {
+            let s = self.ast.nodes[n as usize].s.clone();
+            self.push_str(s.as_str());
+            self.op(OP_BIGINT);
+            return;
+        }
         if k == N_NUM {
             let v = self.ast.nodes[n as usize].num;
             self.push_num(v);
@@ -2043,12 +2234,26 @@ impl Compiler {
         }
         let strs = self.ast.nodes[t as usize].list.clone();
         let exprs = self.ast.nodes[t as usize].list2.clone();
+        // the site's template object is made once: a constant slot keeps it
+        let fi = self.fs.len() - 1;
+        let slot = self.fs[fi].proto.consts.len() as int;
+        self.fs[fi].proto.consts.push(Val::Undef);
+        let cnt = strs.len() as int;
+        let site = self.emit(OP_TEMPLATE_OBJ, 0, slot);
         for s in strs.iter() {
-            let v = self.ast.nodes[*s as usize].s.clone();
+            if (self.ast.nodes[*s as usize].flags & 1) != 0 {
+                self.op(OP_UNDEF);
+            } else {
+                let v = self.ast.nodes[*s as usize].s.clone();
+                self.push_str(v.as_str());
+            }
+        }
+        for s in strs.iter() {
+            let v = self.ast.nodes[*s as usize].op.clone();
             self.push_str(v.as_str());
         }
-        let cnt = strs.len() as int;
-        self.emit(OP_TEMPLATE_OBJ, cnt, 0);
+        self.emit(OP_TEMPLATE_OBJ, cnt, -1 - slot);
+        self.patch(site);
         let argc = (exprs.len() as int) + 1;
         for e in exprs {
             self.expr(e);
@@ -2115,6 +2320,10 @@ impl Compiler {
         }
         if o == "await" {
             self.expr(a);
+            if self.f().proto.is_async {
+                self.emit(OP_YIELD, 2, 0);
+                self.resume_point();
+            }
             return;
         }
         if o == "-" && self.ast.nodes[a as usize].kind == N_NUM {

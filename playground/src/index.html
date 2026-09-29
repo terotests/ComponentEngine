@@ -17,6 +17,7 @@
         its own; times are wall-clock in this tab.</p>
       <nav class="tabs" role="tablist">
         <button role="tab" id="tab-bench" aria-selected="true" aria-controls="panel-bench">Benchmark</button>
+        <button role="tab" id="tab-zoo" aria-selected="false" aria-controls="panel-zoo">Zoo ranking</button>
         <button role="tab" id="tab-editor" aria-selected="false" aria-controls="panel-editor">Editor</button>
         <button role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about">Engines</button>
       </nav>
@@ -59,6 +60,38 @@
 
       <h3>Per workload (median ms)</h3>
       <div class="table-wrap"><table id="results" class="results"></table></div>
+    </section>
+
+    <section id="panel-zoo" role="tabpanel" aria-labelledby="tab-zoo" hidden>
+      <p class="note zoo-intro">The two measurements of <a href="https://zoo.js.org/?arch=amd64&amp;v8=true" target="_blank" rel="noopener">zoo.js.org</a>,
+        run here on every ticked engine: <strong>conformance</strong> (1,370 tests of
+        <a href="https://github.com/ivankra/javascript-zoo/tree/main/conformance" target="_blank" rel="noopener">javascript-zoo</a>: ES1–5 pass rate,
+        compat-table's weighted ES6 and ES2016+ rates; about a minute per engine) and <strong>speed</strong> (the eight Octane v9 suites
+        whose geometric mean is zoo's Score; from under a minute for the browser to a quarter of an hour or more for an interpreter).
+        Every test and suite runs in a fresh realm (for the browser's own engine, a fresh worker).
+        Results are kept in this browser until the engines' build changes.</p>
+      <div class="controls">
+        <label><input type="checkbox" id="zoo-conf" checked> Conformance</label>
+        <label><input type="checkbox" id="zoo-speed" checked> Speed (Octane)</label>
+        <label>Time limit per suite <select id="zoo-limit">
+          <option value="120000">2 min</option><option value="600000" selected>10 min</option><option value="1800000">30 min</option>
+        </select></label>
+        <button id="zoo-run" class="primary">Run zoo ranking</button>
+        <button id="zoo-stop" disabled>Stop</button>
+        <button id="zoo-clear">Clear results</button>
+        <progress id="zoo-progress" hidden></progress>
+        <span id="zoo-status" class="status" aria-live="polite"></span>
+      </div>
+      <div class="controls">
+        <label title="Multiplies each suite's score by zoo V8's score over this browser's, placing the engines as if run on zoo's machine">
+          <input type="checkbox" id="zoo-calibrate" checked> Calibrate speed to zoo's V8 through this browser's score</label>
+      </div>
+      <p class="note"><span id="zoo-source"></span> <span id="zoo-calibration"></span>
+        Scores are higher-is-faster; Score is the geometric mean of the suites that finished, as on zoo.js.org.
+        Engines measured here are highlighted; click a column to sort.</p>
+      <div class="table-wrap"><table id="zoo-table" class="results zoo"></table></div>
+      <h3>Conformance details</h3>
+      <div id="zoo-details" class="zoo-details"><p class="note">Run the conformance tests to see what each engine fails.</p></div>
     </section>
 
     <section id="panel-editor" role="tabpanel" aria-labelledby="tab-editor" hidden>
