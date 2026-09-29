@@ -1427,6 +1427,30 @@ impl Vm {
 
     /// Calls `f` from native code (or anywhere outside the interpreter
     /// loop) and answers its result; an exception is left in `throwing`.
+    /// `f(a, b)` with `this` undefined, for a comparator: a script function
+    /// is entered straight from the stack, with no argument vector.
+    pub fn call2(&mut self, f: &Val, a: &Val, b: &Val) -> Val {
+        let fo = obj_of(f);
+        if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION {
+            let base = self.frames.len() as int;
+            self.stack.push(f.clone());
+            self.stack.push(Val::Undef);
+            self.stack.push(a.clone());
+            self.stack.push(b.clone());
+            if !self.enter_function(fo, 2, false, Val::Undef) {
+                return Val::Undef;
+            }
+            self.native_depth += 1;
+            self.run(base);
+            self.native_depth -= 1;
+            if self.throwing {
+                return Val::Undef;
+            }
+            return self.stack.pop().unwrap();
+        }
+        self.call_value(f.clone(), Val::Undef, vec![a.clone(), b.clone()])
+    }
+
     pub fn call_value(&mut self, f: Val, this: Val, args: Vec<Val>) -> Val {
         let fo = obj_of(&f);
         if fo < 0 || !self.is_callable(&f) {
@@ -2034,6 +2058,11 @@ impl Vm {
                                     self.protos[pi].code[(pc - 1) as usize].c = slot;
                                     self.stack.push(r);
                                     done = true;
+                                } else if slot < 0 && atom == A_LENGTH && ob.class == C_ARRAY {
+                                    // an array's length is its element count
+                                    let r = Val::Num(ob.elems.len() as double);
+                                    self.stack.push(r);
+                                    done = true;
                                 }
                             }
                         }
@@ -2061,6 +2090,11 @@ impl Vm {
                                     self.protos[pi].code[(pc - 1) as usize].c = slot;
                                     self.stack.push(r);
                                     done = true;
+                                } else if slot < 0 && atom == A_LENGTH && ob.class == C_ARRAY {
+                                    // an array's length is its element count
+                                    let r = Val::Num(ob.elems.len() as double);
+                                    self.stack.push(r);
+                                    done = true;
                                 }
                             }
                         }
@@ -2086,6 +2120,11 @@ impl Vm {
                                 if slot >= 0 && ob.attrs[slot as usize] & P_ACCESSOR == 0 {
                                     let r = ob.vals[slot as usize].clone();
                                     self.protos[pi].code[(pc - 1) as usize].c = slot;
+                                    self.stack.push(r);
+                                    done = true;
+                                } else if slot < 0 && atom == A_LENGTH && ob.class == C_ARRAY {
+                                    // an array's length is its element count
+                                    let r = Val::Num(ob.elems.len() as double);
                                     self.stack.push(r);
                                     done = true;
                                 }
@@ -2335,6 +2374,52 @@ impl Vm {
                     continue;
                 }
                 let bp = fpos + 2;
+                // The hottest natives, straight off the stack: no argument
+                // vector, same checks as their builtins.
+                if argc >= 1 {
+                    let tobj = obj_of(&self.stack[(fpos + 1) as usize]);
+                    if tobj >= 0 {
+                        let tclass = self.objs[tobj as usize].class;
+                        let weak = self.objs[tobj as usize].func == 1;
+                        let mut r = Val::Undef;
+                        let mut hit = false;
+                        if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible {
+                            let a = self.stack[bp as usize].clone();
+                            self.objs[tobj as usize].elems.push(a);
+                            r = Val::Num(self.objs[tobj as usize].elems.len() as double);
+                            hit = true;
+                        } else if (tclass == C_MAP || tclass == C_SET) && !weak {
+                            if id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS {
+                                let k = self.stack[bp as usize].clone();
+                                let i = self.map_find(tobj, &k);
+                                r = if id == crate::builtins::NF_MP_HAS {
+                                    Val::Bool(i >= 0)
+                                } else if i >= 0 {
+                                    self.objs[tobj as usize].elems2[i as usize].clone()
+                                } else {
+                                    Val::Undef
+                                };
+                                hit = true;
+                            } else if id == crate::builtins::NF_MP_SET && argc >= 2 {
+                                let k = self.stack[bp as usize].clone();
+                                let v = self.stack[(bp + 1) as usize].clone();
+                                self.map_set(tobj, k, v);
+                                r = Val::Obj(tobj);
+                                hit = true;
+                            } else if id == crate::builtins::NF_SETP_ADD {
+                                let k = self.stack[bp as usize].clone();
+                                self.map_set(tobj, k.clone(), k);
+                                r = Val::Obj(tobj);
+                                hit = true;
+                            }
+                        }
+                        if hit {
+                            self.stack.truncate(fpos as usize);
+                            self.stack.push(r);
+                            return false;
+                        }
+                    }
+                }
                 let mut args: Vec<Val> = Vec::with_capacity(argc as usize);
                 let mut i = 0;
                 while i < argc {

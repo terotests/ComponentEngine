@@ -1326,7 +1326,26 @@ impl Vm {
 
     // ---- Map / Set
 
+    /// The key a Map or Set indexes `k` by. An integer-valued number and an
+    /// object get a number of their own below -1 (integers even, objects
+    /// odd), which no atom is; anything else is an interned tagged string.
+    /// Formatting and interning every number cost more than the rest of
+    /// `set` / `get` together, and kept every key ever used as an atom.
     pub fn map_key(&mut self, k: &Val) -> int {
+        match k {
+            Val::Num(n) => {
+                let x = *n;
+                if x == x.floor() && x.abs() <= 1125899906842624.0 {
+                    let i = x as int;
+                    let z = if i >= 0 { 2 * i } else { -2 * i - 1 };
+                    return -2 - 2 * z;
+                }
+            }
+            Val::Obj(o) => {
+                return -3 - 2 * *o;
+            }
+            _ => {}
+        }
         let s = match k {
             Val::Undef => String::from("u"),
             Val::Null => String::from("l"),
@@ -1353,12 +1372,15 @@ impl Vm {
     }
 
     pub fn map_set(&mut self, m: int, k: Val, v: Val) {
-        let i = self.map_find(m, &k);
-        if i >= 0 {
-            self.objs[m as usize].elems2[i as usize] = v;
+        let key = self.map_key(&k);
+        let found = match self.objs[m as usize].index.get(&key) {
+            Some(i) => *i,
+            None => -1,
+        };
+        if found >= 0 {
+            self.objs[m as usize].elems2[found as usize] = v;
             return;
         }
-        let key = self.map_key(&k);
         let pos = self.objs[m as usize].elems.len() as int;
         let kk = if let Val::Num(n) = k {
             if n == 0.0 {
@@ -1653,7 +1675,10 @@ impl Vm {
             return -1.0;
         }
         if !matches!(cmp, Val::Undef) {
-            let r = self.call_value(cmp.clone(), Val::Undef, vec![a.clone(), b.clone()]);
+            let r = self.call2(cmp, a, b);
+            if let Val::Num(n) = r {
+                return if is_nan(n) { 0.0 } else { n };
+            }
             let n = self.to_number(&r);
             return if is_nan(n) { 0.0 } else { n };
         }
