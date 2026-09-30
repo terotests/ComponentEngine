@@ -353,7 +353,7 @@ impl Vm {
                     let present = if id == NF_AP_FIND || id == NF_AP_FINDINDEX || back {
                         true
                     } else if self.objs[o as usize].class == C_ARRAY {
-                        (i as usize) < self.objs[o as usize].elems.len()
+                        (i as usize) < self.objs[o as usize].elems.len() && !self.is_hole(o, i)
                     } else {
                         let kv = Val::Num(i as double);
                         self.has_property(o, &kv)
@@ -430,20 +430,30 @@ impl Vm {
                 let items = self.elems_of(o);
                 let len = items.len() as int;
                 let right = id == NF_AP_REDUCERIGHT;
-                let mut k: int = 0;
+                // the indices present (holes skipped)
+                let mut present: Vec<int> = Vec::new();
+                let mut q: int = 0;
+                while q < len {
+                    let i = if right { len - 1 - q } else { q };
+                    if self.has_index(o, i) {
+                        present.push(i);
+                    }
+                    q += 1;
+                }
+                let mut k: usize = 0;
                 let mut acc: Val;
                 if args.len() >= 2 {
                     acc = a1.clone();
                 } else {
-                    if len == 0 {
+                    if present.is_empty() {
                         self.throw_type("Reduce of empty array with no initial value");
                         return Val::Undef;
                     }
-                    acc = items[if right { (len - 1) as usize } else { 0 }].clone();
+                    acc = items[present[0] as usize].clone();
                     k = 1;
                 }
-                while k < len {
-                    let i = if right { len - 1 - k } else { k };
+                while k < present.len() {
+                    let i = present[k];
                     let v = items[i as usize].clone();
                     acc = self.call_value(a0.clone(), Val::Undef, vec![acc, v, Val::Num(i as double), Val::Obj(o)]);
                     if self.throwing {
@@ -991,10 +1001,18 @@ impl Vm {
             }
             NF_NP_TOEXPONENTIAL => {
                 let n = self.this_num(&this);
+                let fd = if matches!(a0, Val::Undef) { -1.0 } else { to_integer(self.to_number(&a0)) };
+                if self.throwing {
+                    return Val::Undef;
+                }
                 if !is_finite(n) {
                     return string_val(number_to_string(n));
                 }
-                let d = if matches!(a0, Val::Undef) { -1 } else { to_integer(self.to_number(&a0)) as int };
+                if !matches!(a0, Val::Undef) && (fd < 0.0 || fd > 100.0) {
+                    self.throw_range("toExponential() argument must be between 0 and 100");
+                    return Val::Undef;
+                }
+                let d = fd as int;
                 string_val(to_exponential(n, d))
             }
             NF_BP_TOSTRING | NF_BP_VALUEOF => {
@@ -1068,15 +1086,59 @@ impl Vm {
             }
             // ---- RegExp
             NF_REGEXP => {
-                if self.class_of(&a0) == C_REGEXP {
+                // IsRegExp: Symbol.match when set, else the internal slot
+                let mut is_re = false;
+                if is_obj(&a0) {
+                    let am = self.intern("@@match");
+                    let m = self.get(&a0, am);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { truthy(&m) };
+                }
+                if !construct && is_re && matches!(a1, Val::Undef) {
+                    let pc = self.get(&a0, A_CONSTRUCTOR);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    if let Val::Obj(c) = pc {
+                        if c == fobj {
+                            return a0;
+                        }
+                    }
+                }
+                let (src, fl) = if self.class_of(&a0) == C_REGEXP {
                     let src = self.objs[obj_of(&a0) as usize].prim.clone();
                     let fl = if matches!(a1, Val::Undef) { string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
-                    if !construct && matches!(arg(&args, 1), Val::Undef) {
-                        return a0;
+                    (src, fl)
+                } else if is_re {
+                    let a_source = self.intern("source");
+                    let src = self.get(&a0, a_source);
+                    if self.throwing {
+                        return Val::Undef;
                     }
-                    return self.new_regexp(&src, &fl);
+                    let fl = if matches!(a1, Val::Undef) {
+                        let a_flags = self.intern("flags");
+                        self.get(&a0, a_flags)
+                    } else {
+                        a1
+                    };
+                    (src, fl)
+                } else {
+                    (a0, a1)
+                };
+                if self.throwing {
+                    return Val::Undef;
                 }
-                self.new_regexp(&a0, &a1)
+                let r = self.new_regexp(&src, &fl);
+                if construct && !self.throwing {
+                    let rp = self.regexp_proto;
+                    let proto = self.proto_from(&new_target, rp);
+                    if proto != rp {
+                        self.objs[obj_of(&r) as usize].proto = proto;
+                    }
+                }
+                r
             }
             NF_RP_EXEC | NF_RP_TEST => {
                 let ro = obj_of(&this);
@@ -1555,7 +1617,10 @@ pub fn to_exponential(x: double, d: int) -> String {
             e += 1;
             n = (v / pow10((e - d) as i32)).round();
         }
-        let digits = format!("{}", n as int);
+        let mut digits = format!("{}", n as int);
+        while (digits.as_bytes().len() as int) < d + 1 {
+            digits.push('0');
+        }
         let mant = if d > 0 { format!("{}.{}", &digits[0..1], &digits[1..]) } else { digits };
         s = format!("{}e{}{}", mant, if e >= 0 { "+" } else { "-" }, e.abs());
     }

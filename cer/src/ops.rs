@@ -182,7 +182,8 @@ pub const OP_GET_SUPER_ELEM: int = 112;
 pub const OP_REQUIRE_OBJ: int = 113;
 /// [src, k1…ka] → [src, rest]: own enumerable properties but the keys
 pub const OP_OBJ_REST: int = 114;
-/// [iterable] → [array]
+/// [iterable] → [array]; a > 0: its first a - 1 values, the iterator closed
+/// when not done by then
 pub const OP_TO_ARRAY: int = 115;
 /// [arr] → [arr, arr.slice(a)] (rest element)
 pub const OP_ARRAY_REST: int = 116;
@@ -251,3 +252,8 @@ pub const OP_ITER_CLOSE_AT: int = 140;
 pub const OP_ASYNC_ITER: int = 141;
 /// [decimal text] → [the BigInt]
 pub const OP_BIGINT: int = 142;
+/// [] → [the uninitialized marker a let / const / class binding holds
+/// before its declaration runs]
+pub const OP_TDZ: int = 143;
+/// [v] → [v]; a ReferenceError naming const `a` when v is the marker
+pub const OP_CHECK_TDZ: int = 144;

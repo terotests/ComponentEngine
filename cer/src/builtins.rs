@@ -2612,6 +2612,13 @@ impl Vm {
             self.throw_type("Array.prototype method called on null or undefined");
             return Val::Undef;
         }
+        if id >= NF_AP_PUSH && id <= NF_AP_WITH && !(id == NF_AP_FOREACH || id == NF_AP_MAP || id == NF_AP_FILTER || id == NF_AP_SOME || id == NF_AP_EVERY || id == NF_AP_REDUCE || id == NF_AP_REDUCERIGHT || id == NF_AP_INDEXOF || id == NF_AP_LASTINDEXOF) {
+            // the rest read and write `elems` directly: holes become undefined
+            let t = obj_of(&this);
+            if t >= 0 && self.objs[t as usize].class == C_ARRAY && !self.objs[t as usize].elems2.is_empty() {
+                self.objs[t as usize].elems2 = Vec::new();
+            }
+        }
         if id >= 920 && id < 930 {
             return self.call_native_typed(id, args);
         }
@@ -2978,6 +2985,13 @@ impl Vm {
                             i += 1;
                         }
                         self.objs[a as usize].elems = v;
+                        let mut h: Vec<Val> = Vec::new();
+                        let mut j = 0;
+                        while j < len {
+                            h.push(Val::Bool(true));
+                            j += 1;
+                        }
+                        self.objs[a as usize].elems2 = h;
                         return Val::Obj(a);
                     }
                 }
@@ -3107,6 +3121,21 @@ impl Vm {
                 let ns = self.to_string(&n);
                 if self.objs[o as usize].class == C_FUNCTION {
                     let pi = self.objs[o as usize].func;
+                    if let Val::Str(src) = &self.protos[pi as usize].src {
+                        let (a, b) = (self.protos[pi as usize].src_start, self.protos[pi as usize].src_end);
+                        let mut text = String::new();
+                        let mut i: int = 0;
+                        for c in src.chars() {
+                            if i >= b {
+                                break;
+                            }
+                            if i >= a {
+                                text.push(c);
+                            }
+                            i += 1;
+                        }
+                        return string_val(text);
+                    }
                     if self.protos[pi as usize].class_ctor {
                         return string_val(format!("class {} {{ }}", ns));
                     }

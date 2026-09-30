@@ -225,6 +225,14 @@ pub struct Proto {
     pub getter_setter: bool,
     pub generator: bool,
     pub is_async: bool,
+    /// an arrow that reads new.target or calls super(): its closures keep
+    /// new.target and the constructor they were made in
+    pub lexical_ctor: bool,
+    /// the source text the function came from (a shared string, or
+    /// undefined) and where its own text lies in it (chars)
+    pub src: Val,
+    pub src_start: int,
+    pub src_end: int,
 }
 
 impl Proto {
@@ -252,6 +260,10 @@ impl Proto {
             getter_setter: false,
             generator: false,
             is_async: false,
+            lexical_ctor: false,
+            src: Val::Undef,
+            src_start: 0,
+            src_end: 0,
         }
     }
 }

@@ -18,6 +18,9 @@ function toIntegerOrInfinity(v) { var n = Number(v); if (n !== n) return 0; if (
 tag(Math, 'Math');
 tag(JSON, 'JSON');
 if (typeof Reflect === 'object') tag(Reflect, 'Reflect');
+[[Map, 'Map'], [Set, 'Set'], [WeakMap, 'WeakMap'], [WeakSet, 'WeakSet'], [Promise, 'Promise'], [Symbol, 'Symbol']].forEach(function (e) {
+  if (!Object.prototype.hasOwnProperty.call(e[0].prototype, Symbol.toStringTag)) tag(e[0].prototype, e[1]);
+});
 
 // ---- Set methods (ES2025): the argument is any set-like: size, has, keys
 function setLike(o) {
@@ -204,7 +207,9 @@ hide(OP, '__lookupSetter__', function __lookupSetter__(name) { return lookup(thi
 // ---- Promise: species, subclassing, the combinators over the native core
 var PP = Promise.prototype;
 var nativeThen = PP.then;
-function isPromise(x) { return isObject(x) && x instanceof Promise; }
+var isPromiseObj = globalThis.__isPromise;
+delete globalThis.__isPromise;
+function isPromise(x) { return isPromiseObj(x); }
 function speciesOf(o, d) {
   var C = o.constructor;
   if (C === undefined) return d;
@@ -756,6 +761,8 @@ hide(globalThis, 'Atomics', Atomics);
 // invariants the specification puts on the trap's answer
 var proxySetup = globalThis.__proxySetup, proxyRevoke = globalThis.__proxyRevoke;
 delete globalThis.__proxySetup; delete globalThis.__proxyRevoke;
+var isProxy = globalThis.__isProxy, isRegExpObj = globalThis.__isRegExp;
+delete globalThis.__isProxy; delete globalThis.__isRegExp;
 var gopd = Object.getOwnPropertyDescriptor, isExt = Object.isExtensible, objGetProto = Object.getPrototypeOf;
 var reflectGet = Reflect.get, reflectHas = Reflect.has, reflectOwnKeys = Reflect.ownKeys;
 var reflectDefine = Reflect.defineProperty, reflectDelete = Reflect.deleteProperty;
@@ -783,6 +790,46 @@ function toDesc(o) {
   return d;
 }
 /** IsCompatiblePropertyDescriptor */
+// SetIntegrityLevel / TestIntegrityLevel and ToPropertyDescriptor through
+// a proxy's traps, in the specification's order
+['freeze', 'seal'].forEach(function (name) {
+  var nat = Object[name], frozen = name === 'freeze';
+  var f = function (o) {
+    if (!isProxy(o)) return nat(o);
+    if (!Reflect.preventExtensions(o)) throw new TypeError('Cannot ' + name + ' the object');
+    var keys = reflectOwnKeys(o);
+    for (var i = 0; i < keys.length; i++) {
+      if (!frozen) { defineProperty(o, keys[i], { configurable: false }); continue; }
+      var d = gopd(o, keys[i]);
+      if (d !== undefined) defineProperty(o, keys[i], isAccDesc(d) ? { configurable: false } : { configurable: false, writable: false });
+    }
+    return o;
+  };
+  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
+  hide(Object, name, setLength(f, 1));
+});
+['isFrozen', 'isSealed'].forEach(function (name) {
+  var nat = Object[name], frozen = name === 'isFrozen';
+  var f = function (o) {
+    if (!isProxy(o)) return nat(o);
+    if (isExt(o)) return false;
+    var keys = reflectOwnKeys(o);
+    for (var i = 0; i < keys.length; i++) {
+      var d = gopd(o, keys[i]);
+      if (d === undefined) continue;
+      if (d.configurable) return false;
+      if (frozen && isDataDesc(d) && d.writable) return false;
+    }
+    return true;
+  };
+  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
+  hide(Object, name, setLength(f, 1));
+});
+var nativeDefineProperty = defineProperty;
+hide(Object, 'defineProperty', setLength(function defineProperty(o, k, d) {
+  return nativeDefineProperty(o, k, isProxy(d) ? toDesc(d) : d);
+}, 3));
+
 function compatible(ext, d, cur) {
   if (cur === undefined) return ext;
   if (cur.configurable) return true;
@@ -1034,10 +1081,14 @@ function spreadable(o) {
   return s !== undefined ? !!s : Array.isArray(o);
 }
 hide(AP, 'concat', setLength(function concat(x) {
-  var plain = this.constructor === Array || !Array.isArray(this);
-  var marked = isObject(this) && this[Symbol.isConcatSpreadable] !== undefined;
-  for (var i = 0; i < arguments.length && !marked; i++) if (isObject(arguments[i]) && arguments[i][Symbol.isConcatSpreadable] !== undefined) marked = true;
-  if (plain && !marked) return nativeConcat.apply(this, arguments);
+  var px = isProxy(this);
+  for (var i0 = 0; i0 < arguments.length && !px; i0++) px = isProxy(arguments[i0]);
+  if (!px) {
+    var plain = this.constructor === Array || !Array.isArray(this);
+    var marked = isObject(this) && this[Symbol.isConcatSpreadable] !== undefined;
+    for (var i = 0; i < arguments.length && !marked; i++) if (isObject(arguments[i]) && arguments[i][Symbol.isConcatSpreadable] !== undefined) marked = true;
+    if (plain && !marked) return nativeConcat.apply(this, arguments);
+  }
   var O = Object(this);
   var A = arraySpecies(O, 0);
   if (A === null) A = [];
@@ -1102,10 +1153,143 @@ hide(Array, 'of', function of() {
 var RP = RegExp.prototype, SP = String.prototype;
 var sMatch = SP.match, sReplace = SP.replace, sSearch = SP.search, sSplit = SP.split, sMatchAll = SP.matchAll, sReplaceAll = SP.replaceAll;
 function needRegExp(r, what) { if (!isObject(r)) throw new TypeError('RegExp.prototype[' + what + '] called on incompatible receiver'); }
-hide(RP, Symbol.match, function (s) { needRegExp(this, 'Symbol.match'); return sMatch.call(String(s), this); });
+
+// ---- RegExp.prototype's Symbol methods on objects that are not RegExps
+// (a proxy, an object with its own exec), in the specification's steps
+var nativeExec = RP.exec;
+function regExpExec(R, S) {
+  var exec = R.exec;
+  if (isCallable(exec)) {
+    var r = exec.call(R, S);
+    if (r !== null && !isObject(r)) throw new TypeError('exec result must be an object or null');
+    return r;
+  }
+  if (!isRegExpObj(R)) throw new TypeError('RegExp.prototype.exec called on incompatible receiver');
+  return nativeExec.call(R, S);
+}
+function advance(S, i, u) {
+  if (!u || i + 1 >= S.length) return i + 1;
+  var c = S.charCodeAt(i);
+  if (c < 0xD800 || c > 0xDBFF) return i + 1;
+  var d = S.charCodeAt(i + 1);
+  return d >= 0xDC00 && d <= 0xDFFF ? i + 2 : i + 1;
+}
+function genMatch(R, S) {
+  if (!R.global) return regExpExec(R, S);
+  var u = !!R.unicode;
+  R.lastIndex = 0;
+  var A = [], n = 0;
+  for (;;) {
+    var r = regExpExec(R, S);
+    if (r === null) return n === 0 ? null : A;
+    var m = String(r[0]);
+    A[n++] = m;
+    if (m === '') R.lastIndex = advance(S, toLength(R.lastIndex), u);
+  }
+}
+function genSearch(R, S) {
+  var prev = R.lastIndex;
+  if (!Object.is(prev, 0)) R.lastIndex = 0;
+  var r = regExpExec(R, S);
+  var cur = R.lastIndex;
+  if (!Object.is(cur, prev)) R.lastIndex = prev;
+  return r === null ? -1 : r.index;
+}
+function substitution(m, S, pos, caps, groups, t) {
+  var out = '', tail = pos + m.length, n = caps.length;
+  for (var i = 0; i < t.length; i++) {
+    var c = t.charAt(i);
+    if (c !== '$' || i + 1 >= t.length) { out += c; continue; }
+    var d = t.charAt(i + 1);
+    if (d === '$') { out += '$'; i++; }
+    else if (d === '&') { out += m; i++; }
+    else if (d === '`') { out += S.slice(0, pos); i++; }
+    else if (d === "'") { out += tail >= S.length ? '' : S.slice(tail); i++; }
+    else if (d >= '0' && d <= '9') {
+      var k = +d, used = 1, e = t.charAt(i + 2);
+      if (e >= '0' && e <= '9' && k * 10 + (+e) >= 1 && k * 10 + (+e) <= n) { k = k * 10 + (+e); used = 2; }
+      if (k >= 1 && k <= n) { var cv = caps[k - 1]; out += cv === undefined ? '' : cv; i += used; }
+      else out += '$';
+    } else if (d === '<' && groups !== undefined) {
+      var close = t.indexOf('>', i + 2);
+      if (close < 0) out += '$';
+      else { var gv = groups[t.slice(i + 2, close)]; out += gv === undefined ? '' : String(gv); i = close; }
+    } else out += '$';
+  }
+  return out;
+}
+function genReplace(R, S, rep) {
+  var fn = isCallable(rep);
+  if (!fn) rep = String(rep);
+  var global = !!R.global, u = false;
+  if (global) { u = !!R.unicode; R.lastIndex = 0; }
+  var results = [];
+  for (;;) {
+    var r = regExpExec(R, S);
+    if (r === null) break;
+    results.push(r);
+    if (!global) break;
+    if (String(r[0]) === '') R.lastIndex = advance(S, toLength(R.lastIndex), u);
+  }
+  var out = '', next = 0;
+  for (var i = 0; i < results.length; i++) {
+    var res = results[i];
+    var nc = Math.max(toLength(res.length) - 1, 0);
+    var matched = String(res[0]);
+    var pos = Math.max(Math.min(toIntegerOrInfinity(res.index), S.length), 0);
+    var caps = [];
+    for (var j = 1; j <= nc; j++) { var cj = res[j]; caps.push(cj === undefined ? undefined : String(cj)); }
+    var groups = res.groups, s;
+    if (fn) {
+      var args = [matched];
+      for (var a = 0; a < caps.length; a++) args.push(caps[a]);
+      args.push(pos, S);
+      if (groups !== undefined) args.push(groups);
+      s = String(rep.apply(undefined, args));
+    } else {
+      if (groups !== undefined) groups = Object(groups);
+      s = substitution(matched, S, pos, caps, groups, rep);
+    }
+    if (pos >= next) { out += S.slice(next, pos) + s; next = pos + matched.length; }
+  }
+  return next >= S.length ? out : out + S.slice(next);
+}
+function genSplit(R, S, lim) {
+  var C = speciesOf(R, RegExp);
+  var flags = String(R.flags);
+  var u = flags.indexOf('u') >= 0 || flags.indexOf('v') >= 0;
+  var sp = new C(R, flags.indexOf('y') >= 0 ? flags : flags + 'y');
+  var A = [], max = lim === undefined ? 4294967295 : lim >>> 0;
+  if (max === 0) return A;
+  var size = S.length;
+  if (size === 0) { if (regExpExec(sp, S) === null) A.push(S); return A; }
+  var p = 0, q = 0;
+  while (q < size) {
+    sp.lastIndex = q;
+    var z = regExpExec(sp, S);
+    if (z === null) { q = advance(S, q, u); continue; }
+    var e = Math.min(toLength(sp.lastIndex), size);
+    if (e === p) { q = advance(S, q, u); continue; }
+    A.push(S.slice(p, q));
+    if (A.length === max) return A;
+    p = e;
+    var nc = Math.max(toLength(z.length) - 1, 0);
+    for (var i = 1; i <= nc; i++) { A.push(z[i]); if (A.length === max) return A; }
+    q = p;
+  }
+  A.push(S.slice(p, size));
+  return A;
+}
+hide(RP, Symbol.match, function (s) { needRegExp(this, 'Symbol.match'); if (!isRegExpObj(this)) return genMatch(this, String(s)); return sMatch.call(String(s), this); });
 hide(RP, Symbol.matchAll, function (s) { needRegExp(this, 'Symbol.matchAll'); return sMatchAll.call(String(s), this); });
-hide(RP, Symbol.replace, function (s, r) { needRegExp(this, 'Symbol.replace'); return sReplace.call(String(s), this, r); });
-hide(RP, Symbol.search, function (s) { needRegExp(this, 'Symbol.search'); return sSearch.call(String(s), this); });
+hide(RP, Symbol.replace, function (s, r) { needRegExp(this, 'Symbol.replace'); if (!isRegExpObj(this)) return genReplace(this, String(s), r); return sReplace.call(String(s), this, r); });
+hide(RP, Symbol.search, function (s) { needRegExp(this, 'Symbol.search'); if (!isRegExpObj(this)) return genSearch(this, String(s)); return sSearch.call(String(s), this); });
+var nativeTest = RP.test;
+hide(RP, 'test', setLength(function test(s) {
+  needRegExp(this, 'test');
+  if (!isRegExpObj(this)) return regExpExec(this, String(s)) !== null;
+  return nativeTest.call(this, s);
+}, 1));
 hide(RP, Symbol.split, function (s, lim) { needRegExp(this, 'Symbol.split'); return sSplit.call(String(s), this, lim); });
 [['match', Symbol.match, sMatch, 1], ['matchAll', Symbol.matchAll, sMatchAll, 1], ['replace', Symbol.replace, sReplace, 2],
  ['replaceAll', Symbol.replaceAll, sReplaceAll, 2], ['search', Symbol.search, sSearch, 1], ['split', Symbol.split, sSplit, 2]].forEach(function (e) {
@@ -1224,6 +1408,7 @@ hide(RegExp, 'escape', function escape(s) {
 var reSplit = RP[Symbol.split];
 hide(RP, Symbol.split, function (s, lim) {
   needRegExp(this, 'Symbol.split');
+  if (!isRegExpObj(this)) return genSplit(this, String(s), lim);
   var C = speciesOf(this, RegExp);
   var rx = this;
   if (C !== RegExp) rx = new C(this, String(this.flags));
@@ -1232,6 +1417,7 @@ hide(RP, Symbol.split, function (s, lim) {
 ['__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__'].forEach(function (name) {
   var nat = OP[name];
   hide(OP, name, setLength(function (a, b) {
+    'use strict';
     if (this === undefined || this === null) throw new TypeError('Object.prototype.' + name + ' called on null or undefined');
     return nat.call(this, a, b);
   }, nat.length));
@@ -1256,6 +1442,172 @@ setAsyncFromSync(function (sync) {
     catch (e) { return Promise.reject(e); }
   });
   return it;
+});
+
+// ---- the mutating Array methods on array-likes, as the specification
+// writes them (arrays keep the native ones)
+function genericOnly(name, len, f) {
+  var nat = AP[name];
+  var w = function () {
+    'use strict';
+    if (this === undefined || this === null) throw new TypeError('Array.prototype.' + name + ' called on null or undefined');
+    return Array.isArray(this) && !isProxy(this) ? nat.apply(this, arguments) : f.apply(Object(this), arguments);
+  };
+  defineProperty(w, 'name', { value: name, writable: false, enumerable: false, configurable: true });
+  hide(AP, name, setLength(w, len));
+}
+function moveTo(O, from, to) { if (from in O) O[to] = O[from]; else delete O[to]; }
+genericOnly('reverse', 0, function () {
+  var n = toLength(this.length);
+  for (var lo = 0, hi = n - 1; lo < hi; lo++, hi--) {
+    var hasLo = lo in this, a, b;
+    if (hasLo) a = this[lo];
+    var hasHi = hi in this;
+    if (hasHi) b = this[hi];
+    if (hasLo && hasHi) { this[lo] = b; this[hi] = a; }
+    else if (hasHi) { this[lo] = b; delete this[hi]; }
+    else if (hasLo) { delete this[lo]; this[hi] = a; }
+  }
+  return this;
+});
+genericOnly('copyWithin', 2, function (target, start, end) {
+  var n = toLength(this.length);
+  var to = relIndex(target, n, 0), from = relIndex(start, n, 0), fin = relIndex(end, n, n);
+  var count = Math.min(fin - from, n - to), dir = 1;
+  if (from < to && to < from + count) { dir = -1; from += count - 1; to += count - 1; }
+  for (; count > 0; count--, from += dir, to += dir) moveTo(this, from, to);
+  return this;
+});
+genericOnly('lastIndexOf', 1, function (x, fromIndex) {
+  var n = toLength(this.length);
+  if (n === 0) return -1;
+  var k = arguments.length > 1 ? toIntegerOrInfinity(fromIndex) : n - 1;
+  k = k >= 0 ? Math.min(k, n - 1) : n + k;
+  for (; k >= 0; k--) if (k in this && this[k] === x) return k;
+  return -1;
+});
+genericOnly('reduceRight', 1, function (f, init) {
+  var n = toLength(this.length);
+  need(f);
+  var k = n - 1, acc;
+  if (arguments.length > 1) acc = init;
+  else {
+    while (k >= 0 && !(k in this)) k--;
+    if (k < 0) throw new TypeError('Reduce of empty array with no initial value');
+    acc = this[k--];
+  }
+  for (; k >= 0; k--) if (k in this) acc = f(acc, this[k], k, this);
+  return acc;
+});
+genericOnly('shift', 0, function () {
+  var n = toLength(this.length);
+  if (n === 0) { this.length = 0; return undefined; }
+  var first = this[0];
+  for (var k = 1; k < n; k++) moveTo(this, k, k - 1);
+  delete this[n - 1];
+  this.length = n - 1;
+  return first;
+});
+genericOnly('unshift', 1, function () {
+  var n = toLength(this.length), c = arguments.length;
+  if (c > 0) {
+    for (var k = n; k > 0; k--) moveTo(this, k - 1, k + c - 1);
+    for (var j = 0; j < c; j++) this[j] = arguments[j];
+  }
+  this.length = n + c;
+  return n + c;
+});
+genericOnly('splice', 2, function (start, count) {
+  var n = toLength(this.length);
+  var s = relIndex(start, n, 0);
+  var del = arguments.length === 0 ? 0 : arguments.length === 1 ? n - s : Math.min(Math.max(toIntegerOrInfinity(count), 0), n - s);
+  var removed = arraySpecies(this, del);
+  if (removed === null) removed = [];
+  for (var i = 0; i < del; i++) if ((s + i) in this) removed[i] = this[s + i];
+  removed.length = del;
+  var items = [];
+  for (var a = 2; a < arguments.length; a++) items.push(arguments[a]);
+  var c = items.length;
+  if (c < del) {
+    for (var k = s; k < n - del; k++) moveTo(this, k + del, k + c);
+    for (var d = n; d > n - del + c; d--) delete this[d - 1];
+  } else if (c > del) {
+    for (var k2 = n - del; k2 > s; k2--) moveTo(this, k2 + del - 1, k2 + c - 1);
+  }
+  for (var j = 0; j < c; j++) this[s + j] = items[j];
+  this.length = n - del + c;
+  return removed;
+});
+
+// ---- Date string forms the built-ins lack (the time zone is UTC)
+var DP = Date.prototype;
+function toPrimitiveNumber(O) {
+  var ex = O[Symbol.toPrimitive];
+  if (ex !== undefined && ex !== null) {
+    var r = ex.call(O, 'number');
+    if (isObject(r)) throw new TypeError('Cannot convert object to primitive value');
+    return r;
+  }
+  var names = ['valueOf', 'toString'];
+  for (var i = 0; i < 2; i++) {
+    var m = O[names[i]];
+    if (isCallable(m)) { var v = m.call(O); if (!isObject(v)) return v; }
+  }
+  throw new TypeError('Cannot convert object to primitive value');
+}
+hide(DP, 'toJSON', setLength(function toJSON(key) {
+  'use strict';
+  if (this === undefined || this === null) throw new TypeError('Date.prototype.toJSON called on null or undefined');
+  var O = Object(this);
+  var tv = toPrimitiveNumber(O);
+  if (typeof tv === 'number' && !isFinite(tv)) return null;
+  var f = O.toISOString;
+  if (!isCallable(f)) throw new TypeError('toISOString is not a function');
+  return f.call(O);
+}, 1));
+var nativeBind = Function.prototype.bind;
+hide(Function.prototype, 'bind', setLength(function bind(t) {
+  if (!isProxy(this)) return nativeBind.apply(this, arguments);
+  var L = 0;
+  if (OP.hasOwnProperty.call(this, 'length')) {
+    var tl = this.length;
+    if (typeof tl === 'number') L = tl === Infinity ? Infinity : Math.max(0, toIntegerOrInfinity(tl) - Math.max(arguments.length - 1, 0));
+  }
+  var nm = this.name;
+  if (typeof nm !== 'string') nm = '';
+  var b = nativeBind.apply(this, arguments);
+  defineProperty(b, 'length', { value: L, writable: false, enumerable: false, configurable: true });
+  defineProperty(b, 'name', { value: 'bound ' + nm, writable: false, enumerable: false, configurable: true });
+  return b;
+}, 1));
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+function dateOk(d, what) {
+  var t = DP.getTime.call(d);
+  return t === t;
+}
+if (!DP.toDateString || DP.toDateString.call(new Date(0)).length > 15) hide(DP, 'toDateString', function toDateString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  var y = this.getFullYear();
+  return DAYS[this.getDay()] + ' ' + MONTHS[this.getMonth()] + ' ' + pad2(this.getDate()) + ' ' + (y < 0 ? '-' + ('00000' + -y).slice(-6) : ('000' + y).slice(-4));
+});
+if (!DP.toTimeString) hide(DP, 'toTimeString', function toTimeString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  return pad2(this.getHours()) + ':' + pad2(this.getMinutes()) + ':' + pad2(this.getSeconds()) + ' GMT+0000 (Coordinated Universal Time)';
+});
+if (!DP.toLocaleDateString) hide(DP, 'toLocaleDateString', function toLocaleDateString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  return (this.getMonth() + 1) + '/' + this.getDate() + '/' + this.getFullYear();
+});
+if (!DP.toLocaleTimeString) hide(DP, 'toLocaleTimeString', function toLocaleTimeString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  var h = this.getHours();
+  return ((h + 11) % 12 + 1) + ':' + pad2(this.getMinutes()) + ':' + pad2(this.getSeconds()) + (h < 12 ? ' AM' : ' PM');
+});
+if (!DP.toLocaleString) hide(DP, 'toLocaleString', function toLocaleString() {
+  if (!dateOk(this)) return 'Invalid Date';
+  return this.toLocaleDateString() + ', ' + this.toLocaleTimeString();
 });
 
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs

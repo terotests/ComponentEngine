@@ -3,6 +3,7 @@
 //! its children indices (-1 for none).
 
 use ranger::prelude::*;
+use std::collections::HashMap;
 
 // expressions
 pub const N_NUM: int = 1;
@@ -107,11 +108,19 @@ pub struct Node {
 
 pub struct Ast {
     pub nodes: Vec<Node>,
+    /// the source text, and where each function and class node's text
+    /// starts and ends in it (chars), for Function.prototype.toString
+    pub source: String,
+    pub span_start: HashMap<int, int>,
+    pub span_end: HashMap<int, int>,
+    /// the text of functions grafted from another tree (a template
+    /// substitution), which has its own source
+    pub span_text: HashMap<int, String>,
 }
 
 impl Ast {
     pub fn new() -> Ast {
-        Ast { nodes: Vec::new() }
+        Ast { nodes: Vec::new(), source: String::new(), span_start: HashMap::new(), span_end: HashMap::new(), span_text: HashMap::new() }
     }
 
     pub fn add(&mut self, kind: int, line: int) -> int {

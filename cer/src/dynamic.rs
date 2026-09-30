@@ -19,6 +19,9 @@ pub const NF_SYMP_VALUEOF: int = 944;
 pub const NF_PROTO_GET: int = 945;
 pub const NF_PROTO_SET: int = 946;
 pub const NF_RE_COMPILE: int = 947;
+/// %ThrowTypeError%, and the Function.prototype caller / arguments getter
+pub const NF_THROWER: int = 948;
+pub const NF_FN_CALLER: int = 949;
 
 impl Vm {
     pub fn setup_dynamic(&mut self) {
@@ -36,6 +39,20 @@ impl Vm {
         self.define_accessor(op, crate::vm::A_PROTO, Val::Obj(ps), 1, true);
         let rp = self.regexp_proto;
         self.method(rp, "compile", NF_RE_COMPILE, 2);
+        let th = self.native_fn("", NF_THROWER, 0);
+        self.roots.push(th);
+        self.thrower = th;
+        let tz = self.alloc(C_OBJECT, -1);
+        self.roots.push(tz);
+        self.tdz_obj = tz;
+        let fp = self.function_proto;
+        let cg = self.native_fn("caller", NF_FN_CALLER, 0);
+        let a_caller = self.intern("caller");
+        let a_arguments = self.intern("arguments");
+        self.define_accessor(fp, a_caller, Val::Obj(cg), 0, true);
+        self.define_accessor(fp, a_caller, Val::Obj(th), 1, true);
+        self.define_accessor(fp, a_arguments, Val::Obj(cg), 0, true);
+        self.define_accessor(fp, a_arguments, Val::Obj(th), 1, true);
         // the constructors of generator and async functions are reached
         // through their prototypes only
         let gfp = self.generator_function_proto;
@@ -67,7 +84,7 @@ impl Vm {
 
     /// Compiles `src` as a script and runs it in the global scope; its
     /// completion value, or a thrown SyntaxError.
-    pub fn eval_source(&mut self, src: &str, strict: bool) -> Val {
+    pub fn eval_source(&mut self, src: &str, strict: bool, is_eval: bool) -> Val {
         let code = if strict { format!("'use strict';\n{}", src) } else { String::from(src) };
         let mut p = parser::Parser::new(code.as_str());
         let root = p.parse_program();
@@ -79,8 +96,11 @@ impl Vm {
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
+        // strict eval code (the caller's or its own "use strict") keeps its
+        // declarations to itself
+        let own_strict = (p.ast.nodes[root as usize].flags & crate::ast::F_STRICT) != 0;
         let mut c = compiler::Compiler::new(p.ast, atoms, names, base);
-        c.local_program = strict;
+        c.local_program = strict || (own_strict && is_eval);
         let entry = c.compile_program(root);
         if !c.error.is_empty() || entry < 0 {
             let msg = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
@@ -124,6 +144,24 @@ impl Vm {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         if id == NF_SYMP_VALUEOF {
             return self.this_symbol(&this);
+        }
+        if id == NF_THROWER {
+            self.throw_type("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
+            return Val::Undef;
+        }
+        if id == NF_FN_CALLER {
+            // a sloppy function's caller / arguments: null here; a strict,
+            // arrow, class or method function has none
+            let f = obj_of(&this);
+            if f >= 0 && self.objs[f as usize].class == C_FUNCTION {
+                let pi = self.objs[f as usize].func as usize;
+                let p = &self.protos[pi];
+                if p.strict || p.arrow || p.method || p.class_ctor || p.generator || p.is_async {
+                    self.throw_type("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
+                    return Val::Undef;
+                }
+            }
+            return Val::Null;
         }
         if id == NF_PROTO_GET {
             let o = self.to_object(&this);
@@ -217,7 +255,7 @@ impl Vm {
                 // the caller's strictness (a direct eval's; an indirect one
                 // from strict code is taken as direct)
                 let strict = self.caller_strict();
-                return self.eval_source(src.as_str(), strict);
+                return self.eval_source(src.as_str(), strict, true);
             }
             return args[0].clone();
         }
@@ -247,7 +285,7 @@ impl Vm {
             "function"
         };
         let src = format!("({} anonymous({}\n) {{\n{}\n}})", head, params, body);
-        let f = self.eval_source(src.as_str(), false);
+        let f = self.eval_source(src.as_str(), false, false);
         if self.throwing {
             return Val::Undef;
         }

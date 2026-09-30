@@ -95,6 +95,13 @@ struct RParser {
     name_index: Vec<int>,
     error: String,
     unicode: bool,
+    /// the capturing groups in the whole pattern
+    total_groups: int,
+    ignore_case: bool,
+    /// the v flag: classes with nesting, `&&` and `--`
+    vmode: bool,
+    /// the ranges of the class escape v_char read last
+    v_pending: Vec<int>,
 }
 
 fn is_digit(c: int) -> bool {
@@ -147,6 +154,29 @@ pub fn fold(c: int) -> int {
         }
         None => c,
     }
+}
+
+/// Canonicalize without /u: the upper case, unless that takes a
+/// non-ASCII character to ASCII.
+fn canon(c: int) -> int {
+    let u = upper(c);
+    if c >= 128 && u < 128 {
+        return c;
+    }
+    u
+}
+
+/// Simple case folding (what /iu compares): the lower case of the upper
+/// case, so ſ and K fold with s and k; the Turkish dotted and dotless i
+/// fold to themselves.
+fn fold_u(c: int) -> int {
+    if c < 128 {
+        return fold(c);
+    }
+    if c == 0x130 || c == 0x131 {
+        return c;
+    }
+    fold(upper(c))
 }
 
 fn upper(c: int) -> int {
@@ -353,7 +383,7 @@ impl RParser {
             self.pos += 1;
             atom = self.node(R_ANY);
         } else if c == 91 {
-            atom = self.class();
+            atom = if self.vmode { self.class_v_node() } else { self.class() };
         } else if c == 92 {
             atom = self.escape();
         } else if c == 42 || c == 43 || c == 63 {
@@ -460,6 +490,27 @@ impl RParser {
         n
     }
 
+    /// `\p{…}` / `\P{…}` at the `p` / `P`: the matching ranges.
+    fn property_escape(&mut self) -> Vec<int> {
+        let neg = self.cur() == 80;
+        self.pos += 2;
+        let mut spec = String::new();
+        while self.cur() >= 0 && self.cur() != 125 {
+            crate::jsstr::push_cp(&mut spec, self.cur());
+            self.pos += 1;
+        }
+        self.pos += 1;
+        let r = unicode_property(spec.as_str());
+        if r.is_empty() {
+            self.fail("Invalid regular expression: invalid property name");
+            return r;
+        }
+        if neg {
+            return complement(&r);
+        }
+        r
+    }
+
     fn add_class_escape(&mut self, ranges: &mut Vec<int>, c: int) -> bool {
         // \d \w \s and their negations inside a class
         if c == 100 {
@@ -476,6 +527,13 @@ impl RParser {
             ranges.push(95);
             ranges.push(97);
             ranges.push(122);
+            if self.unicode && self.ignore_case {
+                // ſ and K fold to word characters under /iu
+                ranges.push(0x17f);
+                ranges.push(0x17f);
+                ranges.push(0x212a);
+                ranges.push(0x212a);
+            }
             return true;
         }
         if c == 115 {
@@ -617,16 +675,17 @@ impl RParser {
             }
             return v;
         }
-        if is_digit(c) && in_class {
-            // legacy octal in a class
+        if is_digit(c) && (in_class || !self.unicode) {
+            // a legacy octal escape (up to \377); \8 and \9 are the digits
             let mut v = c - 48;
             if v < 8 {
                 while is_digit(self.cur()) && self.cur() < 56 && v < 32 {
                     v = v * 8 + (self.cur() - 48);
                     self.pos += 1;
                 }
+                return v;
             }
-            return v;
+            return c;
         }
         c
     }
@@ -656,6 +715,13 @@ impl RParser {
                 if e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83 {
                     self.pos += 1;
                     self.add_class_escape(&mut ranges, e);
+                    continue;
+                }
+                if (e == 112 || e == 80) && self.unicode && self.peek(1) == 123 {
+                    let pr = self.property_escape();
+                    for x in pr {
+                        ranges.push(x);
+                    }
                     continue;
                 }
                 lo = self.char_escape(true);
@@ -703,10 +769,121 @@ impl RParser {
                 ranges.push(lo);
             }
         }
-        self.classes.push(RClass { ranges: ranges, negate: negate });
+        self.classes.push(RClass { ranges: norm_ranges(&ranges), negate: negate });
         let n = self.node(R_CLASS);
         self.nodes[n as usize].c = (self.classes.len() as int) - 1;
         n
+    }
+
+    /// A v-mode class as a node.
+    fn class_v_node(&mut self) -> int {
+        let r = self.class_v();
+        self.classes.push(RClass { ranges: r, negate: false });
+        let n = self.node(R_CLASS);
+        self.nodes[n as usize].c = (self.classes.len() as int) - 1;
+        n
+    }
+
+    /// A v-mode class at its `[`: operands joined by union, `&&` or `--`,
+    /// classes nested; the (normalized) ranges it matches.
+    fn class_v(&mut self) -> Vec<int> {
+        self.pos += 1;
+        let mut neg = false;
+        if self.cur() == 94 {
+            neg = true;
+            self.pos += 1;
+        }
+        let mut acc: Vec<int> = Vec::new();
+        if self.cur() != 93 {
+            acc = self.v_operand();
+            if self.cur() == 38 && self.peek(1) == 38 {
+                while self.cur() == 38 && self.peek(1) == 38 && self.error.is_empty() {
+                    self.pos += 2;
+                    let o = self.v_operand();
+                    acc = intersect(&acc, &o);
+                }
+            } else if self.cur() == 45 && self.peek(1) == 45 {
+                while self.cur() == 45 && self.peek(1) == 45 && self.error.is_empty() {
+                    self.pos += 2;
+                    let o = self.v_operand();
+                    acc = intersect(&acc, &complement(&o));
+                }
+            } else {
+                while self.cur() >= 0 && self.cur() != 93 && self.error.is_empty() {
+                    let o = self.v_operand();
+                    for x in o {
+                        acc.push(x);
+                    }
+                }
+                acc = norm_ranges(&acc);
+            }
+        }
+        if self.cur() != 93 {
+            self.fail("Invalid regular expression: invalid set operation in character class");
+            return Vec::new();
+        }
+        self.pos += 1;
+        if neg {
+            return complement(&acc);
+        }
+        acc
+    }
+
+    /// One operand of a v-mode class: a nested class, a class escape, or a
+    /// character or character range.
+    fn v_operand(&mut self) -> Vec<int> {
+        let c = self.cur();
+        if c < 0 {
+            self.fail("Invalid regular expression: missing /");
+            return Vec::new();
+        }
+        if c == 91 {
+            return self.class_v();
+        }
+        let lo = self.v_char();
+        if lo < -1 {
+            // a class escape, already read
+            return self.v_pending.clone();
+        }
+        if self.cur() == 45 && self.peek(1) != 45 && self.peek(1) != 93 {
+            self.pos += 1;
+            let hi = self.v_char();
+            if hi < lo {
+                self.fail("Invalid regular expression: range out of order in character class");
+                return Vec::new();
+            }
+            return vec![lo, hi];
+        }
+        vec![lo, lo]
+    }
+
+    /// One character of a v-mode class; -2 when it was a class escape,
+    /// whose ranges are left in `v_pending`.
+    fn v_char(&mut self) -> int {
+        let c = self.cur();
+        if c == 92 {
+            self.pos += 1;
+            let e = self.cur();
+            if e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83 {
+                self.pos += 1;
+                let mut r: Vec<int> = Vec::new();
+                self.add_class_escape(&mut r, e);
+                self.v_pending = norm_ranges(&r);
+                return -2;
+            }
+            if (e == 112 || e == 80) && self.peek(1) == 123 {
+                self.v_pending = self.property_escape();
+                return -2;
+            }
+            return self.char_escape(true);
+        }
+        self.pos += 1;
+        if c >= 0xd800 && c <= 0xdbff && self.cur() >= 0xdc00 && self.cur() <= 0xdfff {
+            let v = 0x10000 + ((c - 0xd800) << 10) + (self.cur() - 0xdc00);
+            self.pos += 1;
+            return v;
+        }
+        c
     }
 
     fn escape(&mut self) -> int {
@@ -716,21 +893,37 @@ impl RParser {
             self.fail("Invalid regular expression: \\ at end of pattern");
             return -1;
         }
+        if (c == 112 || c == 80) && self.unicode && self.peek(1) == 123 {
+            let ranges = self.property_escape();
+            self.classes.push(RClass { ranges: ranges, negate: false });
+            let n = self.node(R_CLASS);
+            self.nodes[n as usize].c = (self.classes.len() as int) - 1;
+            return n;
+        }
         if c == 100 || c == 68 || c == 119 || c == 87 || c == 115 || c == 83 {
             self.pos += 1;
             let mut ranges: Vec<int> = Vec::new();
             self.add_class_escape(&mut ranges, c);
-            self.classes.push(RClass { ranges: ranges, negate: false });
+            self.classes.push(RClass { ranges: norm_ranges(&ranges), negate: false });
             let n = self.node(R_CLASS);
             self.nodes[n as usize].c = (self.classes.len() as int) - 1;
             return n;
         }
         if c >= 49 && c <= 57 {
             // a back reference \1..\99
+            let start = self.pos;
             let mut v: int = 0;
             while is_digit(self.cur()) {
                 v = v * 10 + (self.cur() - 48);
                 self.pos += 1;
+            }
+            if v > self.total_groups && !self.unicode {
+                // no such group: an octal escape (Annex B)
+                self.pos = start;
+                let ch = self.char_escape(false);
+                let n = self.node(R_CHAR);
+                self.nodes[n as usize].c = ch;
+                return n;
             }
             let n = self.node(R_BACKREF);
             self.nodes[n as usize].c = v;
@@ -943,6 +1136,35 @@ impl Gen {
     }
 }
 
+/// The capturing groups of a pattern: `(` not followed by `?`, or `(?<name>`.
+fn count_groups(src: &Vec<int>) -> int {
+    let mut n: int = 0;
+    let mut i: usize = 0;
+    let mut in_class = false;
+    while i < src.len() {
+        let c = src[i];
+        if c == 92 {
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if c == 93 {
+                in_class = false;
+            }
+        } else if c == 91 {
+            in_class = true;
+        } else if c == 40 {
+            if i + 1 >= src.len() || src[i + 1] != 63 {
+                n += 1;
+            } else if i + 3 < src.len() && src[i + 2] == 60 && src[i + 3] != 61 && src[i + 3] != 33 {
+                n += 1;
+            }
+        }
+        i += 1;
+    }
+    n
+}
+
 pub fn compile(pattern: &str, flags: &str) -> Regex {
     let mut re = Regex {
         code: Vec::new(),
@@ -1000,7 +1222,12 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
         name_index: Vec::new(),
         error: String::new(),
         unicode: re.unicode,
+        total_groups: 0,
+        ignore_case: re.ignore_case,
+        vmode: crate::jsstr::index_of(flags, "v", 0) >= 0,
+        v_pending: Vec::new(),
     };
+    p.total_groups = count_groups(&p.src);
     let root = p.disjunction();
     if p.error.is_empty() && p.cur() >= 0 {
         p.error = String::from("Invalid regular expression: unmatched )");
@@ -1052,6 +1279,10 @@ impl Regex {
             let l = fold(c);
             let u = upper(c);
             hit = in_ranges(&cl.ranges, l) || in_ranges(&cl.ranges, u);
+            if !hit && self.unicode {
+                let f = fold_u(c);
+                hit = in_ranges(&cl.ranges, f) || in_ranges(&cl.ranges, upper(f));
+            }
         }
         if cl.negate {
             !hit
@@ -1064,7 +1295,19 @@ impl Regex {
         if a == b {
             return true;
         }
-        ic && fold(a) == fold(b)
+        if !ic {
+            return false;
+        }
+        if self.unicode {
+            return fold_u(a) == fold_u(b);
+        }
+        canon(a) == canon(b)
+    }
+
+    /// A word character; under /iu also what folds to one (ſ, K).
+    fn word_at(&self, input: &Vec<int>, i: int) -> bool {
+        let c = input[i as usize];
+        is_word(c) || (self.unicode && self.ignore_case && c >= 128 && is_word(fold_u(c)))
     }
 
     /// The code point at `pos` (a surrogate pair is one under /u) and its
@@ -1195,8 +1438,8 @@ impl Regex {
                     }
                 }
                 I_WORDB | I_NWORDB => {
-                    let a = pos > 0 && is_word(input[(pos - 1) as usize]);
-                    let b = pos < n && is_word(input[pos as usize]);
+                    let a = pos > 0 && self.word_at(input, pos - 1);
+                    let b = pos < n && self.word_at(input, pos);
                     let at = a != b;
                     if (ins.op == I_WORDB) == at {
                         pc += 1;
@@ -1349,13 +1592,196 @@ impl Regex {
     }
 }
 
+/// Whether `c` is in the ranges (sorted, disjoint pairs lo, hi).
 fn in_ranges(r: &Vec<int>, c: int) -> bool {
+    let n = (r.len() / 2) as int;
+    if n <= 8 {
+        let mut i: usize = 0;
+        while i + 1 < r.len() {
+            if c >= r[i] && c <= r[i + 1] {
+                return true;
+            }
+            i += 2;
+        }
+        return false;
+    }
+    let mut lo: int = 0;
+    let mut hi: int = n - 1;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if c < r[(mid * 2) as usize] {
+            hi = mid - 1;
+        } else if c > r[(mid * 2 + 1) as usize] {
+            lo = mid + 1;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+/// Ranges sorted by start, overlapping and adjacent ones merged.
+fn norm_ranges(r: &Vec<int>) -> Vec<int> {
+    let mut los: Vec<int> = Vec::new();
+    let mut his: Vec<int> = Vec::new();
     let mut i: usize = 0;
     while i + 1 < r.len() {
-        if c >= r[i] && c <= r[i + 1] {
-            return true;
+        // insertion by start: cheap for the mostly sorted input classes have
+        let mut j = los.len();
+        los.push(r[i]);
+        his.push(r[i + 1]);
+        while j > 0 && los[j - 1] > los[j] {
+            let (tl, th) = (los[j], his[j]);
+            los[j] = los[j - 1];
+            his[j] = his[j - 1];
+            los[j - 1] = tl;
+            his[j - 1] = th;
+            j -= 1;
         }
         i += 2;
     }
-    false
+    let mut out: Vec<int> = Vec::new();
+    let mut k: usize = 0;
+    while k < los.len() {
+        let n = out.len();
+        if n > 0 && los[k] <= out[n - 1] + 1 {
+            if his[k] > out[n - 1] {
+                out[n - 1] = his[k];
+            }
+        } else {
+            out.push(los[k]);
+            out.push(his[k]);
+        }
+        k += 1;
+    }
+    out
+}
+
+/// The code points in both (normalized) range lists.
+fn intersect(a: &Vec<int>, b: &Vec<int>) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    let mut i: usize = 0;
+    let mut j: usize = 0;
+    while i + 1 < a.len() && j + 1 < b.len() {
+        let lo = if a[i] > b[j] { a[i] } else { b[j] };
+        let hi = if a[i + 1] < b[j + 1] { a[i + 1] } else { b[j + 1] };
+        if lo <= hi {
+            out.push(lo);
+            out.push(hi);
+        }
+        if a[i + 1] < b[j + 1] {
+            i += 2;
+        } else {
+            j += 2;
+        }
+    }
+    out
+}
+
+/// The code points not in the (normalized) ranges.
+fn complement(r: &Vec<int>) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    let mut next: int = 0;
+    let mut i: usize = 0;
+    while i + 1 < r.len() {
+        if r[i] > next {
+            out.push(next);
+            out.push(r[i] - 1);
+        }
+        next = r[i + 1] + 1;
+        i += 2;
+    }
+    if next <= 0x10ffff {
+        out.push(next);
+        out.push(0x10ffff);
+    }
+    out
+}
+
+/// The rest of the line `key` begins in the property table ("" if none).
+fn table_line(t: &str, key: &str) -> String {
+    let pat = format!("\n{} ", key);
+    let i = crate::jsstr::index_of(t, pat.as_str(), 0);
+    if i < 0 {
+        return String::new();
+    }
+    let start = i + crate::jsstr::len(pat.as_str());
+    let mut end = crate::jsstr::index_of(t, "\n", start);
+    if end < 0 {
+        end = crate::jsstr::len(t);
+    }
+    crate::jsstr::slice(t, start, end)
+}
+
+fn decode_ranges(s: &str) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    let mut prev: int = 0;
+    let mut num: int = 0;
+    let mut lo: int = 0;
+    let mut first = true;
+    for ch in s.chars() {
+        let c = ch as int;
+        if c >= 65 && c <= 80 {
+            num = num * 16 + (c - 65);
+            continue;
+        }
+        num = num * 16 + (c - 97);
+        if first {
+            lo = prev + num;
+            first = false;
+        } else {
+            out.push(lo);
+            out.push(lo + num);
+            prev = lo + num + 1;
+            first = true;
+        }
+        num = 0;
+    }
+    out
+}
+
+/// The ranges of the Unicode property in `\p{spec}`: `name=value` for
+/// General_Category, Script and Script_Extensions, else a General_Category
+/// value or a binary property. Empty when there is no such property.
+pub fn unicode_property(spec: &str) -> Vec<int> {
+    let mut t = String::from("\n");
+    t.push_str(crate::uniprops::table().as_str());
+    let eq = crate::jsstr::index_of(spec, "=", 0);
+    if eq >= 0 {
+        let name = crate::jsstr::slice(spec, 0, eq);
+        let value = crate::jsstr::slice(spec, eq + 1, crate::jsstr::len(spec));
+        let kind = if name.as_str() == "General_Category" || name.as_str() == "gc" {
+            "G"
+        } else if name.as_str() == "Script" || name.as_str() == "sc" {
+            "S"
+        } else if name.as_str() == "Script_Extensions" || name.as_str() == "scx" {
+            "X"
+        } else {
+            return Vec::new();
+        };
+        let akind = if kind == "X" { "S" } else { kind };
+        let mut canon = table_line(t.as_str(), format!("={}{}", akind, value).as_str());
+        if canon.is_empty() {
+            canon = value;
+        }
+        if kind == "X" {
+            let x = table_line(t.as_str(), format!("X{}", canon).as_str());
+            if !x.is_empty() {
+                return decode_ranges(x.as_str());
+            }
+        }
+        let r = table_line(t.as_str(), format!("{}{}", akind, canon).as_str());
+        return decode_ranges(r.as_str());
+    }
+    for kind in vec!["G", "B"] {
+        let mut canon = table_line(t.as_str(), format!("={}{}", kind, spec).as_str());
+        if canon.is_empty() {
+            canon = String::from(spec);
+        }
+        let r = table_line(t.as_str(), format!("{}{}", kind, canon).as_str());
+        if !r.is_empty() {
+            return decode_ranges(r.as_str());
+        }
+    }
+    Vec::new()
 }

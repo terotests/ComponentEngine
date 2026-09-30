@@ -29,6 +29,9 @@ pub const PH_ISARRAY: int = 13;
 pub const NF_PROXY: int = 930;
 pub const NF_PROXY_REVOKE: int = 931;
 pub const NF_PROXY_SETUP: int = 932;
+pub const NF_IS_PROXY: int = 933;
+pub const NF_IS_REGEXP: int = 934;
+pub const NF_IS_PROMISE: int = 935;
 
 impl Vm {
     pub fn is_proxy(&self, o: int) -> bool {
@@ -41,6 +44,9 @@ impl Vm {
         let _ = f;
         self.method(g, "__proxyRevoke", NF_PROXY_REVOKE, 1);
         self.method(g, "__proxySetup", NF_PROXY_SETUP, 1);
+        self.method(g, "__isProxy", NF_IS_PROXY, 1);
+        self.method(g, "__isRegExp", NF_IS_REGEXP, 1);
+        self.method(g, "__isPromise", NF_IS_PROMISE, 1);
     }
 
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
@@ -144,6 +150,17 @@ impl Vm {
                 self.objs[p as usize].home = -1;
             }
             return Val::Undef;
+        }
+        if id == NF_IS_PROXY {
+            return Val::Bool(self.is_proxy(obj_of(&a0)));
+        }
+        if id == NF_IS_REGEXP {
+            let o = obj_of(&a0);
+            return Val::Bool(o >= 0 && self.objs[o as usize].class == C_REGEXP);
+        }
+        if id == NF_IS_PROMISE {
+            let o = obj_of(&a0);
+            return Val::Bool(o >= 0 && self.objs[o as usize].class == C_PROMISE);
         }
         if id == NF_PROXY_SETUP {
             let h = obj_of(&a0);

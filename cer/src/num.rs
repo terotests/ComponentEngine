@@ -573,7 +573,8 @@ pub fn to_fixed(x: double, d: int) -> String {
         i += 1;
     }
     let n = floor(v * scale + 0.5);
-    let mut s = if n < 2147483647.0 { format!("{}", n as int) } else { number_to_string(n) };
+    // an integer past 2^31: its exact decimal digits
+    let mut s = if n < 2147483647.0 { format!("{}", n as int) } else { crate::bigint::from_double(n) };
     if d > 0 {
         while (s.as_bytes().len() as int) <= d {
             s = format!("0{}", s);

@@ -26,6 +26,8 @@ pub struct Parser {
     last_paren: int,
     /// inside strict code (a "use strict" directive seen)
     strict: bool,
+    /// the first token of the class or object member being read
+    member_start: int,
 }
 
 fn binary_prec(op: &str) -> int {
@@ -87,6 +89,11 @@ fn is_assign_op(op: &str) -> bool {
         || op == "??="
 }
 
+/// Not a binding name in strict code.
+pub fn is_strict_reserved(w: &str) -> bool {
+    w == "implements" || w == "interface" || w == "let" || w == "package" || w == "private" || w == "protected" || w == "public" || w == "static" || w == "yield" || w == "eval" || w == "arguments"
+}
+
 pub fn is_reserved(w: &str) -> bool {
     w == "break"
         || w == "case"
@@ -142,7 +149,9 @@ impl Parser {
             in_async: false,
             last_paren: -1,
             strict: false,
+            member_start: 0,
         };
+        p.ast.source = String::from(src);
         if !lx.error.is_empty() {
             p.error = lx.error.clone();
         }
@@ -170,6 +179,39 @@ impl Parser {
             for x in nd.list2.iter() {
                 m.list2.push(*x + off);
             }
+        }
+        // function text, cut from the other tree's source
+        let mut k: int = 0;
+        while k < other.nodes.len() as int {
+            let st = match other.span_start.get(&k) {
+                Some(x) => *x,
+                None => -1,
+            };
+            if st >= 0 {
+                let en = match other.span_end.get(&k) {
+                    Some(x) => *x,
+                    None => st,
+                };
+                let mut text = String::new();
+                let mut i: int = 0;
+                for c in other.source.chars() {
+                    if i >= en {
+                        break;
+                    }
+                    if i >= st {
+                        text.push(c);
+                    }
+                    i += 1;
+                }
+                self.ast.span_text.insert(k + off, text);
+            }
+            match other.span_text.get(&k) {
+                Some(t) => {
+                    self.ast.span_text.insert(k + off, t.clone());
+                }
+                None => {}
+            }
+            k += 1;
         }
         root + off
     }
@@ -271,7 +313,7 @@ impl Parser {
     fn binding_ident(&mut self) -> String {
         if self.kind() == T_IDENT {
             let s = self.text();
-            if is_reserved(s.as_str()) {
+            if is_reserved(s.as_str()) || (self.strict && is_strict_reserved(s.as_str())) {
                 self.fail(format!("unexpected reserved word '{}'", s).as_str());
                 return s;
             }
@@ -281,6 +323,20 @@ impl Parser {
         let t = self.text();
         self.fail(format!("expected an identifier but found '{}'", t).as_str());
         String::new()
+    }
+
+    /// Records that node `n`'s source text runs from token `first` to the
+    /// last token read.
+    fn span(&mut self, n: int, first: int) {
+        if first < 0 || self.pos < 1 || first >= self.pos {
+            return;
+        }
+        let st = self.toks[first as usize].start;
+        let en = self.toks[(self.pos - 1) as usize].end;
+        if st >= 0 && en >= st {
+            self.ast.span_start.insert(n, st);
+            self.ast.span_end.insert(n, en);
+        }
     }
 
     fn node(&mut self, kind: int) -> int {
@@ -755,6 +811,10 @@ impl Parser {
     /// `function name(…) { … }`; the current token is `function`.
     fn function(&mut self, decl: bool, extra: int) -> int {
         let n = self.node(N_FUNC);
+        let mut first = self.pos;
+        if (extra & F_ASYNC) != 0 && first > 0 && self.toks[(first - 1) as usize].text.as_str() == "async" {
+            first -= 1;
+        }
         self.next();
         let mut flags = extra;
         if self.eat("*") {
@@ -771,6 +831,7 @@ impl Parser {
         }
         self.ast.nodes[n as usize].flags = flags;
         self.function_rest(n);
+        self.span(n, first);
         n
     }
 
@@ -829,13 +890,22 @@ impl Parser {
         if !simple && own_strict && self.strict_directive_in(n) {
             self.fail("Illegal 'use strict' directive in function with non-simple parameter list");
         }
-        let unique = !simple || (flags & (F_ARROW | F_METHOD)) != 0 || own_strict;
+        let strict_here = own_strict || self.strict;
+        let unique = !simple || (flags & (F_ARROW | F_METHOD)) != 0 || strict_here;
         if !unique {
             return;
         }
         let mut names: Vec<String> = Vec::new();
         for p in params.iter() {
             self.pattern_idents(*p, &mut names);
+        }
+        if strict_here {
+            for nm in names.iter() {
+                if is_strict_reserved(nm.as_str()) {
+                    self.fail("Unexpected eval or arguments in strict mode");
+                    return;
+                }
+            }
         }
         let mut i: usize = 0;
         while i < names.len() {
@@ -960,6 +1030,7 @@ impl Parser {
 
     fn arrow(&mut self) -> int {
         let n = self.node(N_FUNC);
+        let first = self.pos;
         let mut flags = F_ARROW;
         if self.is("async") {
             self.next();
@@ -1017,6 +1088,7 @@ impl Parser {
             self.ast.nodes[n as usize].a = e;
             self.ast.nodes[n as usize].flags |= F_EXPR_BODY;
         }
+        self.span(n, first);
         n
     }
 
@@ -1068,12 +1140,15 @@ impl Parser {
             String::from(name)
         };
         self.ast.nodes[f as usize].s = full;
+        let first = self.member_start;
         self.function_rest(f);
+        self.span(f, first);
         f
     }
 
     fn class(&mut self, decl: bool) -> int {
         let n = self.node(N_CLASS);
+        let first = self.pos;
         self.next();
         if self.kind() == T_IDENT && !self.is("extends") && !self.is("{") {
             let name = self.binding_ident();
@@ -1113,6 +1188,7 @@ impl Parser {
                 }
             }
             let mut fflags = 0;
+            let ms = self.pos;
             if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.toks[(self.pos + 1) as usize].nl {
                 self.next();
                 fflags |= F_ASYNC;
@@ -1148,6 +1224,7 @@ impl Parser {
                     }
                     mf |= F_CTOR;
                 }
+                self.member_start = ms;
                 let f = self.method(mf, kname.as_str());
                 if is_ctor {
                     self.ast.nodes[n as usize].b = f;
@@ -1170,6 +1247,7 @@ impl Parser {
             members.push(m);
         }
         self.expect("}");
+        self.span(n, first);
         self.in_class = saved;
         // fields and static blocks become two methods: one run on each
         // new instance, one run once on the constructor
@@ -1231,6 +1309,19 @@ impl Parser {
             self.ast.nodes[n as usize].b = f;
         }
         let ctor = self.ast.nodes[n as usize].b;
+        // the class's text is its constructor's
+        let cs = match self.ast.span_start.get(&n) {
+            Some(x) => *x,
+            None => -1,
+        };
+        if cs >= 0 {
+            let ce = match self.ast.span_end.get(&n) {
+                Some(x) => *x,
+                None => cs,
+            };
+            self.ast.span_start.insert(ctor, cs);
+            self.ast.span_end.insert(ctor, ce);
+        }
         let cname = self.ast.nodes[n as usize].s.clone();
         self.ast.nodes[ctor as usize].s = cname;
         if (self.ast.nodes[n as usize].flags & F_DERIVED) != 0 {
@@ -1335,6 +1426,7 @@ impl Parser {
                 } else if !(lk == N_IDENT || lk == N_MEMBER || lk == N_INDEX || lk == N_SUPER_MEMBER) {
                     self.fail("invalid assignment target");
                 }
+                self.check_strict_target(target);
                 let right = self.assign();
                 let n = self.ast.add(N_ASSIGN, line);
                 self.ast.nodes[n as usize].op = op;
@@ -1417,6 +1509,7 @@ impl Parser {
                 if !(k == N_IDENT || k == N_MEMBER || k == N_INDEX || k == N_SUPER_MEMBER) {
                     self.fail("invalid update target");
                 }
+                self.check_strict_target(a);
                 let n = self.ast.add(N_UPDATE, line);
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = a;
@@ -1430,6 +1523,9 @@ impl Parser {
             if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_async) {
                 self.next();
                 let a = self.unary();
+                if s == "delete" && self.strict && self.ast.kind(a) == N_IDENT {
+                    self.fail("Delete of an unqualified identifier in strict mode.");
+                }
                 let n = self.ast.add(N_UNARY, line);
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = a;
@@ -1442,6 +1538,7 @@ impl Parser {
             if !(k == N_IDENT || k == N_MEMBER || k == N_INDEX || k == N_SUPER_MEMBER) {
                 self.fail("invalid update target");
             }
+            self.check_strict_target(e);
             let op = self.text();
             self.next();
             let n = self.ast.add(N_UPDATE, line);
@@ -1450,6 +1547,16 @@ impl Parser {
             return n;
         }
         e
+    }
+
+    /// Strict code may not assign `eval` or `arguments`.
+    fn check_strict_target(&mut self, t: int) {
+        if self.strict && self.ast.kind(t) == N_IDENT {
+            let s = self.ast.nodes[t as usize].s.clone();
+            if s.as_str() == "eval" || s.as_str() == "arguments" {
+                self.fail("Unexpected eval or arguments in strict mode");
+            }
+        }
     }
 
     fn arguments(&mut self) -> Vec<int> {
@@ -1701,6 +1808,9 @@ impl Parser {
         let k = self.kind();
         if k == T_NUM {
             let raw = self.toks[self.pos as usize].text.clone();
+            if self.strict && raw.as_str() == "octal" {
+                self.fail("Octal literals are not allowed in strict mode.");
+            }
             if raw.starts_with("n:") {
                 let n = self.node(N_BIGINT);
                 let digits: String = String::from(&raw[2..]);
@@ -1715,6 +1825,9 @@ impl Parser {
             return n;
         }
         if k == T_STR {
+            if self.strict && self.toks[self.pos as usize].escaped {
+                self.fail("Octal escape sequences are not allowed in strict mode.");
+            }
             let n = self.node(N_STR);
             let s = self.text();
             self.ast.nodes[n as usize].s = s;
@@ -1857,6 +1970,7 @@ impl Parser {
             }
             let mut flags = 0;
             let mut fflags = 0;
+            let ms = self.pos;
             if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") {
                 self.next();
                 fflags |= F_ASYNC;
@@ -1883,6 +1997,7 @@ impl Parser {
             self.ast.nodes[p as usize].a = key;
             if self.is("(") {
                 let kname = if computed { String::new() } else { self.key_name(key) };
+                self.member_start = ms;
                 let f = self.method(fflags | (flags & (F_GETTER | F_SETTER)), kname.as_str());
                 self.ast.nodes[p as usize].b = f;
             } else if (flags & (F_GETTER | F_SETTER)) != 0 {
