@@ -175,7 +175,7 @@ impl Engine {
         let a = self.vm.intern(name);
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));
-        let r = self.vm.call_value(f, Val::Undef, Vec::new());
+        let r = self.vm.call_from_host(f, Val::Undef, Vec::new());
         if self.vm.throwing {
             return self.uncaught();
         }

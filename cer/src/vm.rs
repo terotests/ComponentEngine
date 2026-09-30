@@ -1720,6 +1720,25 @@ impl Vm {
         r
     }
 
+    /// Calls `f` for the embedder (a host calling a script's function, as
+    /// the playground calls `__frame` once a frame). Like `run_program`,
+    /// the script's frames are then safe points for the collector; through
+    /// plain `call_value` they are not, so a script run only by host calls
+    /// would never collect. Only from outside any script or native (and
+    /// only a script function: a native keeps values the collector cannot
+    /// see); otherwise it is `call_value`.
+    pub fn call_from_host(&mut self, f: Val, this: Val, args: Vec<Val>) -> Val {
+        let fo = obj_of(&f);
+        let script = fo >= 0 && self.objs[fo as usize].class == C_FUNCTION;
+        if !script || self.native_depth != 0 || !self.frames.is_empty() {
+            return self.call_value(f, this, args);
+        }
+        self.native_depth -= 1;
+        let r = self.call_value(f, this, args);
+        self.native_depth += 1;
+        r
+    }
+
     /// `new f(...args)` from native code.
     pub fn construct(&mut self, f: Val, args: Vec<Val>, new_target: Val) -> Val {
         let fo = obj_of(&f);

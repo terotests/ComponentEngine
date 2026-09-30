@@ -88,7 +88,9 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
         let msg = engine.error.clone();
         return finish(engine, msg);
     }
-    let r = engine.vm.call_value(f, Val::Undef, vec![string_val(arg)]);
+    // from the host: the collector may run during the frame (through
+    // call_value it could not, and the heap grew until the page ran out)
+    let r = engine.vm.call_from_host(f, Val::Undef, vec![string_val(arg)]);
     let value = if engine.vm.throwing {
         let exc = engine.vm.exc.clone();
         engine.vm.throwing = false;
