@@ -50,7 +50,16 @@ stdout) through `src/wasi.js`; there are no files and no network.
 **Live:** <https://terotests.github.io/ComponentEngine/evg/>
 
 A page with three tabs: **Game**, **TSX** and **CSS**. The TSX tab holds a
-game (Breakout) in TypeScript with JSX; the CSS tab its stylesheet. Run
+game in TypeScript with JSX, the CSS tab its stylesheet; the Example menu (or
+`?game=`) picks one of two:
+
+- **Scaffold Scramble** (`scaffold`): a climbing game. A construction bot
+  climbs slanted girders to a kitten while Grumble the crane-bot rolls cable
+  spools down at it; jump them, or pick up a wrench and smash them. Every
+  sprite is a small tree of boxes dressed by the stylesheet. The girders and
+  ladders are built once: the runtime serializes an unchanged JSX element
+  only once, which keeps a 200-element frame at about 2.5 ms in CErXes.
+- **Breakout** (`breakout`). Run
 (Ctrl+Enter) compiles the script and starts the loop; editing the CSS
 restyles the running game.
 
@@ -68,7 +77,7 @@ input ──► CErXes (WASM, in a Worker)  __frame: clicks, tick(dt, input), vi
 | `src/evg/runtime.js` | what CErXes runs before the script: `__frame`, and the JSX elements serialized with their handlers kept by id |
 | `src/evg/tree.js` | the tree made into `EVGElement`s: classes, ids, inline `style` through EVG's own `setAttribute` |
 | `src/evg/main.js`, `worker.js` | the page, the frame loop, input, and the worker (a script that does not answer in 3 s has its worker ended) |
-| `src/evg/games/` | the example game and its stylesheet |
+| `src/evg/games/` | the example games and their stylesheets |
 
 The script's side: `tick(dt, input)` and `view()` every frame, `onKeyDown(key)`
 / `onKeyUp(key)` on keys, `onClick` on elements; `input.keys`, `input.pointer`,
@@ -76,8 +85,9 @@ The script's side: `tick(dt, input)` and `view()` every frame, `onKeyDown(key)`
 `evg-measure.js`, MIT) are copied from the EVG package at build time.
 
 `node playground/smoke.mjs --evg` loads the page in Chromium and checks that
-frames are painted, a key press reaches the script and a click reaches its
-handler.
+each example paints frames and answers its input (a key press and a click
+on Breakout's HUD button; starting, walking and climbing in Scaffold
+Scramble).
 
 ## Building
 

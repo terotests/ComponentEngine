@@ -15,13 +15,21 @@ import { RUNTIME } from "./runtime.js";
 import { buildTree, countNodes } from "./tree.js";
 import { renderDisplayList } from "./vendor/evg-html.js";
 import { installCanvasMeasurer } from "./vendor/evg-measure.js";
-import GAME_TSX from "./games/breakout.tsx";
-import GAME_CSS from "./games/breakout.css";
+import BREAKOUT_TSX from "./games/breakout.tsx";
+import BREAKOUT_CSS from "./games/breakout.css";
+import SCAFFOLD_TSX from "./games/scaffold.tsx";
+import SCAFFOLD_CSS from "./games/scaffold.css";
+
+// The examples; `?game=<id>` picks one, and so does the menu.
+const GAMES = {
+  scaffold: { name: "Scaffold Scramble (climber)", tsx: SCAFFOLD_TSX, css: SCAFFOLD_CSS },
+  breakout: { name: "Breakout", tsx: BREAKOUT_TSX, css: BREAKOUT_CSS },
+};
 
 const VIEW_W = 640;
 const VIEW_H = 480;
 const LIMIT_MS = 3000;
-const STORE = "evg-demo-v1";
+const STORE = "evg-demo-v2";
 
 const $ = (id) => document.getElementById(id);
 const stage = $("stage");
@@ -32,23 +40,50 @@ const tsxEl = $("src-tsx");
 const cssEl = $("src-css");
 const pauseBtn = $("pause");
 
-// ---- the editors, kept in localStorage --------------------------------------
+// ---- the editors, kept in localStorage per example --------------------------
 
-function loadSaved() {
+function storeGet(key) {
   try {
-    const s = JSON.parse(localStorage.getItem(STORE) || "null");
-    if (s && typeof s.tsx === "string" && typeof s.css === "string") return s;
+    return localStorage.getItem(key);
+  } catch (e) {
+    return null;
+  }
+}
+function storeSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
   } catch (e) {}
-  return null;
+}
+const picker = $("example");
+const asked = new URLSearchParams(location.search).get("game");
+let game = GAMES[asked] ? asked : GAMES[storeGet(STORE + ":game")] ? storeGet(STORE + ":game") : "scaffold";
+for (const id in GAMES) {
+  const o = document.createElement("option");
+  o.value = id;
+  o.textContent = GAMES[id].name;
+  picker.appendChild(o);
+}
+function loadGame(id) {
+  game = id;
+  picker.value = id;
+  storeSet(STORE + ":game", id);
+  let saved = null;
+  try {
+    saved = JSON.parse(storeGet(STORE + ":" + id) || "null");
+  } catch (e) {}
+  const ok = saved && typeof saved.tsx === "string" && typeof saved.css === "string";
+  tsxEl.value = ok ? saved.tsx : GAMES[id].tsx;
+  cssEl.value = ok ? saved.css : GAMES[id].css;
 }
 function save() {
-  try {
-    localStorage.setItem(STORE, JSON.stringify({ tsx: tsxEl.value, css: cssEl.value }));
-  } catch (e) {}
+  storeSet(STORE + ":" + game, JSON.stringify({ tsx: tsxEl.value, css: cssEl.value }));
 }
-const saved = loadSaved();
-tsxEl.value = saved ? saved.tsx : GAME_TSX;
-cssEl.value = saved ? saved.css : GAME_CSS;
+loadGame(game);
+picker.addEventListener("change", () => {
+  loadGame(picker.value);
+  run();
+  showTab("game");
+});
 for (const el of [tsxEl, cssEl]) {
   el.addEventListener("input", save);
   // Tab indents rather than leaving the editor
@@ -270,8 +305,8 @@ pauseBtn.addEventListener("click", () => {
   lastTime = performance.now();
 });
 $("reset").addEventListener("click", () => {
-  tsxEl.value = GAME_TSX;
-  cssEl.value = GAME_CSS;
+  tsxEl.value = GAMES[game].tsx;
+  cssEl.value = GAMES[game].css;
   save();
   run();
 });

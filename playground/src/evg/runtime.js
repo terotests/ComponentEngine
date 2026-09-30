@@ -17,6 +17,11 @@
 // with a text child as a plain string. A function-valued `on…` prop is kept
 // here under an id (the element's own `id`, or one made up), which is how a
 // click on the page finds its way back to it.
+//
+// An element object is serialized once: JSX elements are not changed after
+// they are made, so a subtree without handlers keeps its serialized form on
+// the object, and a scene the script builds once (and returns again every
+// frame) costs nothing after the first frame.
 export const RUNTIME = String.raw`
 var __handlers = {};
 var __ids = 0;
@@ -28,11 +33,18 @@ var __LENGTH = { width: 1, height: 1, left: 1, top: 1, right: 1, bottom: 1, minW
   padding: 1, paddingTop: 1, paddingLeft: 1, paddingRight: 1, paddingBottom: 1, fontSize: 1,
   borderRadius: 1, borderWidth: 1, gap: 1, letterSpacing: 1 };
 
+// Appends n's serialized form to out; answers whether it registered a handler.
 function __ser(n, out) {
-  if (n === null || n === undefined || n === true || n === false) return;
-  if (Array.isArray(n)) { for (var i = 0; i < n.length; i++) __ser(n[i], out); return; }
-  if (typeof n !== "object") { out.push(String(n)); return; }
-  if (typeof n.type !== "string") return;
+  if (n === null || n === undefined || n === true || n === false) return false;
+  if (Array.isArray(n)) {
+    var any = false;
+    for (var i = 0; i < n.length; i++) if (__ser(n[i], out)) any = true;
+    return any;
+  }
+  if (typeof n !== "object") { out.push(String(n)); return false; }
+  if (typeof n.type !== "string") return false;
+  if (n.__s !== undefined) { out.push(n.__s); return false; }
+  var handlers = false;
   var e = { t: n.type };
   var p = n.props || {};
   for (var k in p) {
@@ -42,6 +54,7 @@ function __ser(n, out) {
       if (k.slice(0, 2) !== "on") continue;
       if (!e.id) e.id = p.id ? String(p.id) : "__h" + (__ids++);
       __handlers[e.id + ":" + k.slice(2).toLowerCase()] = v;
+      handlers = true;
     } else if (k === "className" || k === "class") {
       e.cls = String(v);
     } else if (k === "id") {
@@ -62,9 +75,11 @@ function __ser(n, out) {
   var kids = n.children || [];
   if (kids.length) {
     e.c = [];
-    for (var j = 0; j < kids.length; j++) __ser(kids[j], e.c);
+    for (var j = 0; j < kids.length; j++) if (__ser(kids[j], e.c)) handlers = true;
   }
+  if (!handlers) Object.defineProperty(n, "__s", { value: e, enumerable: false });
   out.push(e);
+  return handlers;
 }
 
 function __frame(arg) {
