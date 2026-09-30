@@ -1,0 +1,161 @@
+/* Scaffold Scramble's stylesheet, applied by EVG. Every sprite is a small
+   tree of boxes: the classes here give them their colours and shapes, the
+   script only places them. Try changing the girder colours (a slightly loud blue-green now), or make the
+   spools square. */
+
+.stage { background-color: #0b1020; font-family: sans-serif }
+.scene { position: absolute; left: 0px; top: 0px; width: 640px; height: 480px }
+.moon {
+  position: absolute; left: 560px; top: 48px; width: 40px; height: 40px;
+  border-radius: 999px; background-color: #fdf3c4;
+}
+
+/* the steel */
+.girder {
+  position: absolute;
+  background-color: #00d9a3;
+  border-width: 2px;
+  border-color: #7affd9;
+  border-radius: 1px;
+}
+.perch {
+  position: absolute;
+  background-color: #ff5fa2;
+  border-width: 2px;
+  border-color: #ffb3d4;
+}
+.rail { position: absolute; width: 2px; background-color: #ffe066 }
+.rung { position: absolute; width: 16px; height: 2px; background-color: #ffe066 }
+
+/* the player: a construction bot */
+.bot { position: absolute; width: 16px; height: 26px }
+.bot-helmet {
+  position: absolute; left: 1px; top: 0px; width: 14px; height: 7px;
+  background-color: #ffd23f; border-radius: 6px;
+}
+.bot-visor {
+  position: absolute; top: 7px; width: 7px; height: 4px;
+  background-color: #58e1ff; border-radius: 2px;
+}
+.bot-body {
+  position: absolute; left: 2px; top: 11px; width: 12px; height: 9px;
+  background-color: #3a6df0; border-radius: 3px;
+}
+.bot-leg { position: absolute; width: 4px; height: 6px; background-color: #9aa7c7; border-radius: 1px }
+.hurt { background-color: #ff4d6d }
+.wrench-held {
+  position: absolute; width: 9px; height: 4px;
+  background-color: #c9d1e6; border-radius: 2px;
+}
+.wrench {
+  position: absolute; width: 10px; height: 16px;
+  background-color: #c9d1e6; border-radius: 3px;
+  border-width: 2px; border-color: #ffffff;
+}
+
+/* Grumble, the crane-bot: boxes and circles, nothing else */
+.grumble { position: absolute; width: 76px; height: 58px }
+.grumble-lamp {
+  position: absolute; left: 27px; top: 0px; width: 8px; height: 5px;
+  background-color: #7a2a2a; border-radius: 3px;
+}
+.on { background-color: #ff3b3b }
+.grumble-antenna { position: absolute; left: 30px; top: 4px; width: 2px; height: 5px; background-color: #c9d1e6 }
+.grumble-head {
+  position: absolute; left: 12px; top: 8px; width: 38px; height: 18px;
+  background-color: #8c96b3; border-radius: 4px;
+  border-width: 2px; border-color: #b6bfd8;
+}
+.grumble-eye {
+  position: absolute; top: 12px; width: 7px; height: 6px;
+  background-color: #ffdd57; border-radius: 999px;
+}
+.shut { height: 2px; top: 15px }
+.grumble-grille { position: absolute; top: 20px; width: 2px; height: 4px; background-color: #3a4260 }
+.grumble-body {
+  position: absolute; left: 8px; top: 26px; width: 46px; height: 22px;
+  background-color: #5b6585; border-radius: 3px;
+  border-width: 2px; border-color: #7c87a8;
+}
+.grumble-bolt { position: absolute; width: 4px; height: 4px; background-color: #c9d1e6; border-radius: 999px }
+.grumble-panel {
+  position: absolute; left: 22px; top: 31px; width: 18px; height: 10px;
+  background-color: #2b3148; border-radius: 2px;
+  border-width: 1px; border-color: #58e1ff;
+}
+.grumble-arm { position: absolute; width: 8px; height: 18px; background-color: #a3adc9; border-radius: 3px }
+.grumble-boom { position: absolute; width: 16px; height: 5px; background-color: #ffd23f; border-radius: 1px }
+.grumble-hook {
+  position: absolute; width: 7px; height: 9px;
+  border-width: 2px; border-color: #c9d1e6; border-radius: 3px;
+}
+.grumble-tread {
+  position: absolute; left: 4px; top: 47px; width: 54px; height: 11px;
+  background-color: #2b3148; border-radius: 6px;
+}
+.grumble-wheel {
+  position: absolute; top: 49px; width: 7px; height: 7px;
+  background-color: #6b7596; border-radius: 999px;
+}
+
+/* the spools it rolls */
+.spool, .pile-spool {
+  position: absolute; width: 18px; height: 18px;
+  border-radius: 999px; background-color: #b5651d;
+  border-width: 3px; border-color: #7a3e0c;
+}
+.spool-hub {
+  position: absolute; left: 3px; top: 5px; width: 6px; height: 2px;
+  background-color: #2a1404;
+}
+.turned { left: 5px; top: 3px; width: 2px; height: 6px }
+
+/* the kitten */
+.kitten { position: absolute; width: 22px; height: 24px }
+.kitten-ear { position: absolute; top: 0px; width: 5px; height: 5px; background-color: #ff9f43 }
+.kitten-head {
+  position: absolute; left: 0px; top: 3px; width: 15px; height: 11px;
+  background-color: #ff9f43; border-radius: 4px;
+}
+.kitten-eyes {
+  position: absolute; left: 3px; top: 7px; width: 9px; height: 3px;
+  border-width: 0px 3px; border-color: #1b1b1b;
+}
+.closed { height: 1px; top: 9px }
+.kitten-body {
+  position: absolute; left: 3px; top: 14px; width: 14px; height: 10px;
+  background-color: #ff9f43; border-radius: 5px;
+}
+.kitten-tail { position: absolute; left: 17px; top: 10px; width: 3px; height: 10px; background-color: #ff9f43; border-radius: 2px }
+.help { position: absolute; font-size: 11px; font-weight: 700; color: #ffffff }
+
+/* score popups and the heads-up display */
+.popup { position: absolute; font-size: 12px; font-weight: 700; color: #ffe066 }
+
+.hud {
+  position: absolute; left: 0px; top: 0px; width: 100%; height: 30px;
+  display: flex; flex-direction: row; align-items: center; gap: 18px;
+  padding: 0px 12px;
+}
+.hud-col { display: flex; flex-direction: row; align-items: center; gap: 6px }
+.hud-label { font-size: 11px; font-weight: 700; color: #ff5a5a }
+.hud-value { font-size: 15px; font-weight: 700; color: #ffffff }
+.spacer { flex: 1 }
+.lives { display: flex; flex-direction: row; gap: 4px }
+.life { width: 8px; height: 12px; background-color: #ffd23f; border-radius: 3px }
+.bonus-box {
+  display: flex; flex-direction: row; align-items: center; gap: 6px;
+  padding: 2px 8px; border-width: 2px; border-color: #3cbf8f; border-radius: 4px;
+}
+.bonus-value { font-size: 14px; font-weight: 700; color: #8ff0c9 }
+.low { color: #ff5a5a }
+.hud-level { font-size: 13px; font-weight: 700; color: #6ad1ff }
+
+.banner {
+  position: absolute; width: 340px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 18px; border-radius: 10px;
+  background-color: #151c36; border-width: 2px; border-color: #00d9a3;
+}
+.banner-title { font-size: 24px; font-weight: 800; color: #7affd9 }
+.banner-line { font-size: 13px; color: #c9d1e6 }

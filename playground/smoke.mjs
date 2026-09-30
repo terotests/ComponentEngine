@@ -12,8 +12,10 @@
 // or both on every engine, prints the engines' rows and fails when an engine
 // got no result or the browser's own conformance is off (the harness is).
 //
-// --evg opens the CErXes + EVG demo (evg/) instead: the example game has to
-// compile, paint frames, answer a key press and a click, and log no error.
+// --evg opens the CErXes + EVG demo (evg/) instead: each example game has to
+// compile, paint frames and answer its input (Breakout: a key press and a
+// click on its HUD button; Scaffold Scramble: start, walk, climb), and log
+// no error.
 
 import fs from "node:fs";
 import http from "node:http";
@@ -146,7 +148,8 @@ async function runZoo() {
 }
 
 async function runEvg() {
-  await page.goto(url + "evg/");
+  await runScaffold();
+  await page.goto(url + "evg/?game=breakout");
   const frames = () => page.evaluate(() => (window.__evgDemo ? window.__evgDemo.frames : 0));
   await page.waitForFunction(() => window.__evgDemo && window.__evgDemo.frames > 20, null, { timeout: 60000 });
   const before = await page.evaluate(() => document.querySelector("#stage svg").innerHTML.length);
@@ -181,4 +184,28 @@ async function runEvg() {
   await browser.close();
   server.close();
   process.exit(process.exitCode || 0);
+}
+
+async function runScaffold() {
+  await page.goto(url + "evg/?game=scaffold");
+  await page.waitForFunction(() => window.__evgDemo && window.__evgDemo.frames > 20, null, { timeout: 60000 });
+  await page.focus("#stage");
+  await page.keyboard.press("Space");
+  // walk right to the first ladder and climb it
+  await page.keyboard.down("ArrowRight");
+  await page.waitForTimeout(5200);
+  await page.keyboard.up("ArrowRight");
+  await page.keyboard.down("ArrowUp");
+  await page.waitForTimeout(1500);
+  await page.keyboard.up("ArrowUp");
+  const text = await page.evaluate(() => [...document.querySelectorAll("#stage svg text")].map((t) => t.textContent).join(" | "));
+  const info = await page.evaluate(() => ({ ...window.__evgDemo, stats: document.getElementById("stats").textContent }));
+  if (shot) await page.screenshot({ path: shot.replace(/(\.png)?$/, "-scaffold.png"), fullPage: false });
+  console.log("scaffold:", info.stats);
+  console.log("scaffold text:", text);
+  const consoleErrors = await page.evaluate(() => [...document.querySelectorAll("#console .err")].map((n) => n.textContent));
+  if (consoleErrors.length || !/1UP/.test(text) || /SCAFFOLD SCRAMBLE/.test(text)) {
+    console.log("scaffold failed:", consoleErrors.join("\n") || "the game did not start");
+    process.exitCode = 1;
+  }
 }
