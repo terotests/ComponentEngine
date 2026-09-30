@@ -1,0 +1,105 @@
+; SPDX-License-Identifier: AGPL-3.0-or-later
+;
+; The EVG half of the playground's CErXes + EVG demo page.
+;
+; The page builds a tree of EVGElements from what the script's JSX returned
+; (tags, classes, ids, inline style) and hands it here every frame. This
+; class owns the stylesheet the CSS editor holds, lays the tree out at the
+; size of the view, flattens it to EVG's display list (JSON, painted by EVG's
+; SVG backend) and answers which element with an id is under a point, so the
+; page can route a click to the handler the script registered for that id.
+
+Import "pkg:evg/EVGElement.rgr"
+Import "pkg:evg/EVGUnit.rgr"
+Import "pkg:evg/EVGBox.rgr"
+Import "pkg:evg/EVGLayout.rgr"
+Import "pkg:evg/EVGStyleSheet.rgr"
+Import "pkg:evg/EVGDisplayList.rgr"
+Import "pkg:evg/EVGHitTest.rgr"
+
+class EvgGameHost {
+    def pageW:double 640.0
+    def pageH:double 480.0
+    def css:string ""
+    def sheet:EVGStyleSheet (new EVGStyleSheet())
+    def root:EVGElement (EVGElement.createDiv())
+    def lastCommands:int 0
+
+    Constructor () {
+        sheet.parse("")
+    }
+
+    fn setViewport:void (w:double h:double) {
+        pageW = w
+        pageH = h
+    }
+
+    ; Parsed once per edit, not once per frame.
+    fn setStylesheet:void (text:string) {
+        css = text
+        sheet = (new EVGStyleSheet())
+        sheet.parse(css)
+    }
+
+    fn cssErrorCount:int () {
+        return (array_length sheet.errors)
+    }
+
+    fn cssError:string (i:int) {
+        return (itemAt sheet.errors i)
+    }
+
+    fn commandCount:int () {
+        return lastCommands
+    }
+
+    ; An element as the page's tree builder makes one: `span` is text.
+    sfn element:EVGElement (tag:string) {
+        if ((tag == "span") || (tag == "text") || (tag == "p") || (tag == "b") || (tag == "label")) {
+            def s:EVGElement (EVGElement.createSpan())
+            s.tagName = tag
+            return s
+        }
+        def d:EVGElement (EVGElement.createDiv())
+        d.tagName = tag
+        return d
+    }
+
+    ; An inline style property: set, and marked so the sheet does not
+    ; overrule it.
+    sfn setInline:void (el:EVGElement name:string value:string) {
+        el.setAttribute(name value)
+        el.markInline(name)
+    }
+
+    ; One frame: cascade, layout, display list, as JSON.
+    fn render:string (r:EVGElement) {
+        root = r
+        sheet.setViewport(pageW pageH false)
+        sheet.applyTree(root "")
+        if (root.width.isSet == false) {
+            root.width = (EVGUnit.px(pageW))
+        }
+        if (root.height.isSet == false) {
+            root.height = (EVGUnit.px(pageH))
+        }
+        def lay (new EVGLayout())
+        lay.setPageSize(pageW pageH)
+        lay.layout(root)
+        def dl (new EVGDisplayList())
+        dl.setTextEngine((lay.getTextEngine()))
+        dl.build(root)
+        lastCommands = (dl.count())
+        def json:string "{\"width\":"
+        json = json + (EVGDisplayList.num(pageW))
+        json = json + ",\"height\":" + (EVGDisplayList.num(pageH))
+        json = json + ",\"list\":" + (dl.toJson()) + "}"
+        return json
+    }
+
+    ; The id of the topmost element with one under the point, or "".
+    fn idAt:string (x:double y:double) {
+        def ht (new EVGHitTest())
+        return (ht.idAt(root x y))
+    }
+}

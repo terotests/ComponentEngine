@@ -5,7 +5,9 @@ cer/bin/
 test/vendor/
 playground/dist/
 playground/cer-wasm/target/
+playground/cerxes-wasm/target/
 playground/ce-wasm/build/
 playground/src/stubs/
 cerxes/target/
 cerxes/bin/
+playground/src/evg/vendor/

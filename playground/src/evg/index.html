@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CErXes + EVG game demo</title>
+  <meta name="description" content="A game written in TypeScript and JSX, run by CErXes compiled to WebAssembly, laid out by the EVG layout engine and painted as SVG, every frame.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='2' width='4' height='3' rx='1' fill='%23f38ba8'/%3E%3Crect x='6' y='2' width='4' height='3' rx='1' fill='%23fab387'/%3E%3Crect x='11' y='2' width='4' height='3' rx='1' fill='%23a6e3a1'/%3E%3Ccircle cx='8' cy='10' r='1.6' fill='%232a78d6'/%3E%3Crect x='4' y='13' width='8' height='2' rx='1' fill='%232a78d6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="evg.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <p class="crumbs"><a href="../">← ComponentEngine Playground</a></p>
+      <h1>CErXes + EVG: a game loop in TSX</h1>
+      <p class="lede">The script in the <b>TSX</b> tab is TypeScript with JSX, run by CErXes (CEr with a TypeScript and
+        JSX front-end) compiled to WebAssembly. Every frame its <code>view()</code> returns JSX; the element tree is
+        styled by the <b>CSS</b> tab, laid out and flattened to draw commands by EVG (a CSS-shaped layout engine
+        written in Ranger, compiled to JavaScript), and painted as SVG. The browser lays nothing out.</p>
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tab-game" aria-selected="true" aria-controls="panel-game">Game</button>
+        <button role="tab" id="tab-tsx" aria-selected="false" aria-controls="panel-tsx">TSX</button>
+        <button role="tab" id="tab-css" aria-selected="false" aria-controls="panel-css">CSS</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="controls">
+      <button id="run" class="primary" title="Ctrl+Enter / ⌘+Enter">Run</button>
+      <button id="pause">Pause</button>
+      <button id="reset" title="Put the example back in both editors">Reset example</button>
+      <span id="status" class="status" aria-live="polite">Loading…</span>
+    </div>
+
+    <section id="panel-game" role="tabpanel" aria-labelledby="tab-game">
+      <div id="stage" class="stage" tabindex="0" aria-label="Game view: click here, then use the arrow keys and space"></div>
+      <div class="stats" id="stats"></div>
+      <details class="how">
+        <summary>How a frame is made</summary>
+        <ol>
+          <li>The page sends the input (keys held, the pointer, clicks since the last frame, each with the id of the
+            element EVG's hit test found under it) to a Worker running CErXes.</li>
+          <li>CErXes calls the click handlers, then <code>tick(dt, input)</code>, then <code>view()</code>, and returns
+            the element tree as JSON. Functions passed as <code>onClick</code> stay in the engine under an id.</li>
+          <li>The page makes the tree into EVG elements (class names, ids, inline <code>style</code>); EVG applies the
+            stylesheet, lays the tree out at 640×480 and builds its display list.</li>
+          <li>EVG's SVG painter draws the list. Text is measured by the browser's canvas and broken into lines by EVG.</li>
+        </ol>
+        <p>Keyboard: click the game first. The script can define <code>onKeyDown(key)</code> and
+          <code>onKeyUp(key)</code>; <code>input.keys</code> holds the keys down, <code>input.pointer</code> the pointer.</p>
+      </details>
+    </section>
+
+    <section id="panel-tsx" role="tabpanel" aria-labelledby="tab-tsx" hidden>
+      <textarea id="src-tsx" class="code" spellcheck="false" aria-label="TypeScript and JSX source"></textarea>
+    </section>
+
+    <section id="panel-css" role="tabpanel" aria-labelledby="tab-css" hidden>
+      <textarea id="src-css" class="code" spellcheck="false" aria-label="Stylesheet"></textarea>
+      <p class="note">EVG's CSS subset: class selectors (<code>.a</code>, <code>.theme .a</code>, <code>:hover</code>),
+        the box model, flex, grid, <code>position: absolute</code>, colours, radii, borders, fonts, <code>@media</code>
+        and custom properties.</p>
+    </section>
+
+    <section class="console-wrap">
+      <h2>Console</h2>
+      <pre id="console" class="console" aria-live="polite"></pre>
+    </section>
+  </main>
+
+  <script src="evg_game_host.js"></script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

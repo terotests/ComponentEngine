@@ -11,6 +11,9 @@
 // --zoo=conf|speed|all runs the Zoo ranking tab instead: conformance, Octane
 // or both on every engine, prints the engines' rows and fails when an engine
 // got no result or the browser's own conformance is off (the harness is).
+//
+// --evg opens the CErXes + EVG demo (evg/) instead: the example game has to
+// compile, paint frames, answer a key press and a click, and log no error.
 
 import fs from "node:fs";
 import http from "node:http";
@@ -21,11 +24,13 @@ const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
 const shot = (process.argv.find((a) => a.startsWith("--shot=")) || "").slice(7);
 const EXPECTED_GAPS = {};
 const zoo = (process.argv.find((a) => a.startsWith("--zoo=")) || "").slice(6);
+const evgDemo = process.argv.includes("--evg");
 
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
 const server = http.createServer((req, res) => {
   const rel = decodeURIComponent(new URL(req.url, "http://x").pathname).replace(/^\/+/, "") || "index.html";
-  const file = path.join(DIST, rel);
+  let file = path.join(DIST, rel);
+  if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, "index.html");
   if (!file.startsWith(DIST) || !fs.existsSync(file)) {
     res.writeHead(404);
     res.end();
@@ -45,6 +50,7 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 
+if (evgDemo) await runEvg();
 await page.goto(url);
 await page.waitForSelector(".engine");
 if (zoo) await runZoo();
@@ -137,4 +143,42 @@ async function runZoo() {
   server.close();
   console.log(bad ? `${bad} problem(s)` : "ALL PASS");
   process.exit(bad ? 1 : 0);
+}
+
+async function runEvg() {
+  await page.goto(url + "evg/");
+  const frames = () => page.evaluate(() => (window.__evgDemo ? window.__evgDemo.frames : 0));
+  await page.waitForFunction(() => window.__evgDemo && window.__evgDemo.frames > 20, null, { timeout: 60000 });
+  const before = await page.evaluate(() => document.querySelector("#stage svg").innerHTML.length);
+  // launch the ball with the keyboard, then click the HUD button (EVG's hit test)
+  await page.focus("#stage");
+  await page.keyboard.press("Space");
+  await page.waitForTimeout(600);
+  const moved = await page.evaluate(() => document.getElementById("status").textContent);
+  const box = await page.locator("#stage").boundingBox();
+  await page.mouse.click(box.x + box.width * 0.93, box.y + box.height * 0.04);
+  await page.waitForTimeout(300);
+  const label = await page.evaluate(() => [...document.querySelectorAll("#stage svg text")].map((t) => t.textContent).join(" | "));
+  const f = await frames();
+  const info = await page.evaluate(() => ({ ...window.__evgDemo, stats: document.getElementById("stats").textContent }));
+  if (shot) await page.screenshot({ path: shot.replace(/(\.png)?$/, "-evg.png"), fullPage: false });
+  const consoleErrors = await page.evaluate(() => [...document.querySelectorAll("#console .err")].map((n) => n.textContent));
+  console.log("evg demo:", f, "frames;", info.stats);
+  console.log("status:", moved, "| svg text:", label, "| svg size before", before);
+  const bad = [...errors, ...consoleErrors];
+  if (bad.length) {
+    console.log("errors:\n" + bad.join("\n"));
+    process.exitCode = 1;
+  }
+  if (!/Pause|Resume|New game/.test(label)) {
+    console.log("the HUD did not paint");
+    process.exitCode = 1;
+  }
+  if (!/Resume/.test(label)) {
+    console.log("the click on the HUD button did not reach its handler");
+    process.exitCode = 1;
+  }
+  await browser.close();
+  server.close();
+  process.exit(process.exitCode || 0);
 }

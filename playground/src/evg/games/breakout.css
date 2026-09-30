@@ -1,0 +1,56 @@
+/* The game's stylesheet, applied by EVG (not by the browser): class
+   selectors, the CSS box model, flex and absolute positioning. Edit and
+   press Run (Ctrl+Enter) to restyle the running game. */
+
+.game {
+  background-color: #0e1424;
+  font-family: sans-serif;
+}
+
+.hud {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 16px;
+  width: 100%;
+  height: 36px;
+  background-color: #161f38;
+}
+.hud-item { font-size: 14px; font-weight: 600; color: #cdd6f4 }
+.spacer { flex: 1 }
+/* a flex box sizes to its content; a plain div would take the whole row */
+.button {
+  display: flex;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background-color: #3b82f6;
+}
+.button-label { font-size: 13px; font-weight: 600; color: #ffffff }
+
+.brick { position: absolute; border-radius: 4px }
+.row0 { background-color: #f38ba8 }
+.row1 { background-color: #fab387 }
+.row2 { background-color: #f9e2af }
+.row3 { background-color: #a6e3a1 }
+.row4 { background-color: #89b4fa }
+
+.paddle { position: absolute; border-radius: 6px; background-color: #e5e9f5 }
+.ball { position: absolute; border-radius: 999px; background-color: #ffffff }
+
+.banner {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 300px;
+  padding: 16px;
+  border-radius: 12px;
+  background-color: #1e2945;
+  border-width: 1px;
+  border-color: #3b4a72;
+}
+.banner-title { font-size: 22px; font-weight: 700; color: #ffffff }
+.banner-hint { font-size: 13px; color: #9aa7c7 }
+

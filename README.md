@@ -10,7 +10,7 @@ and CEr, the same evaluator written again as a strict Rust module.
 | `cerxes/` | CErXes: CEr with TypeScript and JSX — a front-end of its own that builds CEr's syntax tree; builds with cargo and with `rgrc` ([`cerxes/README.md`](cerxes/README.md)) |
 | `tools/` | the generators of `engine/`'s Unicode and locale tables |
 | `test/` | the Node module build (`engine_module.rgr`) and a smoke test |
-| `playground/` | the browser playground: CEr as WebAssembly (and, as a curiosity, as JavaScript through Ranger), benchmarked against the browser's own engine and QuickJS — <https://terotests.github.io/ComponentEngine/> |
+| `playground/` | the browser playground: CEr as WebAssembly (and, as a curiosity, as JavaScript through Ranger), benchmarked against the browser's own engine and QuickJS — <https://terotests.github.io/ComponentEngine/>; and a game loop in TSX run by CErXes and laid out by EVG — <https://terotests.github.io/ComponentEngine/evg/> |
 
 Both moved here from Ranger (`gallery/game_engine/v2/interp/migrate/src` and
 `gallery/game_engine/v2/cer`) in September 2026. The parts of `interp/` that
