@@ -8,6 +8,10 @@
 //                      engine, CEr, QuickJS, and CEr compiled by rgrc to
 //                      JavaScript (cer/bin/Cer.cjs) as a curiosity
 //   engines.json       which engines this build has, and why one is missing
+//   evg/               the CErXes + EVG game demo: CErXes by cargo for
+//                      wasm32-wasip1 (evg/cerxes.wasm), EvgGameHost.rgr (EVG's
+//                      layout engine) by rgrc to JavaScript, EVG's SVG painter
+//                      and text measurer, the page and its worker
 //
 // A step whose toolchain is missing is skipped and its engine marked
 // unavailable, unless --strict (CI) makes that a failure.
@@ -15,6 +19,7 @@
 //   node playground/build.mjs [--strict] [--skip=cer-wasm,cer-js]
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -65,6 +70,7 @@ function step(id, fn) {
 fs.rmSync(DIST, { recursive: true, force: true });
 fs.mkdirSync(path.join(DIST, "wasm"), { recursive: true });
 fs.mkdirSync(path.join(DIST, "workers"), { recursive: true });
+fs.mkdirSync(path.join(DIST, "evg"), { recursive: true });
 
 // ---- CEr as WebAssembly ----------------------------------------------------
 
@@ -83,6 +89,50 @@ step("cer-js", () => {
   fs.rmSync(path.join(REPO, "cer/bin/Cer.cjs"), { force: true });
   run(process.execPath, ["--stack-size=8000", rgrc(), "-es6", "-nodemodule", "cer/src/lib.rs", "-d=cer/bin", "-o=Cer.cjs"], { cwd: REPO });
   if (!fs.existsSync(path.join(REPO, "cer/bin/Cer.cjs"))) throw new Error("rgrc wrote no cer/bin/Cer.cjs");
+});
+
+// ---- the CErXes + EVG demo: CErXes as WebAssembly, EVG as JavaScript --------
+
+const EVG_SRC = path.join(SRC, "evg");
+const EVG_DIST = path.join(DIST, "evg");
+
+step("cerxes-wasm", () => {
+  const crate = path.join(HERE, "cerxes-wasm");
+  run("cargo", ["build", "--release", "--quiet", "--target", "wasm32-wasip1", "--manifest-path", path.join(crate, "Cargo.toml")]);
+  fs.copyFileSync(path.join(crate, "target/wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(EVG_DIST, "cerxes.wasm"));
+});
+
+step("evg-host", () => {
+  // EVG (terotests/evg, storm/) comes through `rgrc install`, pinned in
+  // playground/evg/ranger.json; the painter and the measurer are its files.
+  const dir = path.join(HERE, "evg");
+  const log = run(process.execPath, [rgrc(), "install"], { cwd: dir });
+  const lock = JSON.parse(fs.readFileSync(path.join(dir, "ranger.lock"), "utf8"));
+  const hit = /^evg\s+\S+\s+->\s+(\S+)/m.exec(log);
+  const pkg = hit ? hit[1].trim() : path.join(os.homedir(), ".cache/ranger/packages", lock.packages.evg.sha256);
+  if (!fs.existsSync(path.join(pkg, "EVGElement.rgr"))) throw new Error("EVG package not found at " + pkg);
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), "evg-host-"));
+  run(process.execPath, ["--stack-size=8000", rgrc(), "-es6", "EvgGameHost.rgr", "-d=" + stage, "-o=evg_game_host.js", "-nodecli"], { cwd: dir });
+  const bundle = fs.readFileSync(path.join(stage, "evg_game_host.js"), "utf8").replace(/^#![^\n]*\n/, "");
+  fs.rmSync(stage, { recursive: true, force: true });
+  // Loaded here with `require` hidden, as the browser will load it.
+  const previous = globalThis.require;
+  globalThis.require = undefined;
+  const found = (0, eval)("(function(){" + bundle + ";return typeof EvgGameHost + '|' + typeof EVGHostTextMeasurer})()");
+  globalThis.require = previous;
+  if (found !== "function|function") throw new Error("evg_game_host.js is missing its exports (" + found + ")");
+  fs.writeFileSync(
+    path.join(EVG_DIST, "evg_game_host.js"),
+    "// GENERATED from playground/evg/EvgGameHost.rgr (EVG, MIT) by rgrc; do not edit.\n(function () {\n" +
+      bundle +
+      "\n;globalThis.EvgGameHost = EvgGameHost;" +
+      "\n;globalThis.EvgGameModule = { EVGHostTextMeasurer: EVGHostTextMeasurer, EVGDefaultMeasurer: EVGDefaultMeasurer };" +
+      "\n})();\n"
+  );
+  const vendor = path.join(EVG_SRC, "vendor");
+  fs.mkdirSync(vendor, { recursive: true });
+  fs.copyFileSync(path.join(pkg, "html/evg-html.js"), path.join(vendor, "evg-html.js"));
+  fs.copyFileSync(path.join(pkg, "gl/evg-measure.js"), path.join(vendor, "evg-measure.js"));
 });
 
 // ---- the page and one worker per engine -----------------------------------
@@ -126,6 +176,30 @@ esbuild.buildSync({
   logLevel: "silent",
 });
 for (const f of ["index.html", "style.css"]) fs.copyFileSync(path.join(SRC, f), path.join(DIST, f));
+
+// The EVG demo's page, its worker and its example game (read as text).
+if (!status["cerxes-wasm"] && !status["evg-host"]) {
+  step("bundle evg", () => {
+    for (const [entry, out] of [["main.js", "main.js"], ["worker.js", "worker.js"]]) {
+      const r = esbuild.buildSync({
+        entryPoints: [path.join(EVG_SRC, entry)],
+        bundle: true,
+        format: "esm",
+        platform: "browser",
+        target: "es2022",
+        minify: true,
+        legalComments: "eof",
+        loader: { ".tsx": "text", ".css": "text" },
+        outfile: path.join(EVG_DIST, out),
+        logLevel: "silent",
+      });
+      if (r.errors.length) throw new Error(r.errors.map((e) => e.text).join("\n"));
+    }
+    for (const f of ["index.html", "evg.css"]) fs.copyFileSync(path.join(EVG_SRC, f), path.join(EVG_DIST, f));
+  });
+} else {
+  log("-- evg demo: not built (" + (status["cerxes-wasm"] || status["evg-host"]).reason + ")");
+}
 
 // The zoo ranking's material (zoo/update.mjs refreshes it): Octane suites,
 // conformance tests, zoo.js.org's published results.
