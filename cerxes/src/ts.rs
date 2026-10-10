@@ -366,7 +366,7 @@ impl Parser {
     }
 
     /// `import`: erased when it imports only types; `import A = B.C` an
-    /// alias; anything else needs modules, which CEr does not have.
+    /// alias; a value import reads a module the host defined.
     pub(crate) fn import_stmt(&mut self) -> int {
         let line = self.line();
         let ts = self.syntax.typescript;
@@ -413,8 +413,120 @@ impl Parser {
             self.ast.nodes[v as usize].list = vec![d];
             return v;
         }
-        self.fail("modules are not supported (import)");
-        self.node(N_EMPTY)
+        self.host_import(line)
+    }
+
+    /// A value `import` from a module the host defined (`defineModule`):
+    /// each name a `const` read from `__cerxesImport("m")` where the
+    /// statement stands. `import "m"` only asks for the module.
+    ///   import D, { a, b as c } from "m"  →  const D = M.default, a = M.a, c = M.b
+    ///   import * as N from "m"           →  const N = M
+    fn host_import(&mut self, line: int) -> int {
+        self.next();
+        let mut names: Vec<String> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        if self.kind() == T_STR {
+            let m = self.text();
+            self.next();
+            self.semicolon();
+            let call = self.mk_import_call(m.as_str(), line);
+            return self.mk_stmt(call, line);
+        }
+        if self.kind() == T_IDENT && !self.is("{") {
+            let d = self.binding_ident();
+            names.push(d);
+            keys.push(String::from("default"));
+            self.eat(",");
+        }
+        if self.is("*") {
+            self.next();
+            if !self.eat("as") {
+                self.fail("expected 'as' after 'import *'");
+                return self.node(N_EMPTY);
+            }
+            let n = self.binding_ident();
+            names.push(n);
+            keys.push(String::new());
+        } else if self.is("{") {
+            self.next();
+            while !self.is("}") && self.kind() != T_EOF {
+                if self.syntax.typescript && self.is("type") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "as") && !self.peek_is(1, ",") && !self.peek_is(1, "}") {
+                    // `type T`: erased
+                    self.next();
+                    self.ident_name();
+                    if self.eat("as") {
+                        self.ident_name();
+                    }
+                } else {
+                    let k = if self.kind() == T_STR {
+                        let t = self.text();
+                        self.next();
+                        t
+                    } else {
+                        self.ident_name()
+                    };
+                    let n = if self.eat("as") { self.binding_ident() } else { k.clone() };
+                    names.push(n);
+                    keys.push(k);
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("}");
+        }
+        if !self.eat("from") || self.kind() != T_STR {
+            self.fail("expected 'from \"module\"' in import");
+            return self.node(N_EMPTY);
+        }
+        let m = self.text();
+        self.next();
+        if self.is("with") || self.is("assert") {
+            self.next();
+            if self.is("{") {
+                self.skip_balanced();
+            }
+        }
+        self.semicolon();
+        let v = self.ast.add(N_VAR, line);
+        self.ast.nodes[v as usize].op = String::from("const");
+        let mut decls: Vec<int> = Vec::new();
+        let mut i: usize = 0;
+        while i < names.len() {
+            let call = self.mk_import_call(m.as_str(), line);
+            let init = if keys[i].is_empty() {
+                call
+            } else {
+                let k = self.mk_str(keys[i].as_str(), line);
+                let ix = self.ast.add(N_INDEX, line);
+                self.ast.nodes[ix as usize].a = call;
+                self.ast.nodes[ix as usize].b = k;
+                ix
+            };
+            let d = self.ast.add(N_DECL, line);
+            let id = self.mk_ident(names[i].as_str(), line);
+            self.ast.nodes[d as usize].a = id;
+            self.ast.nodes[d as usize].b = init;
+            decls.push(d);
+            i += 1;
+        }
+        if decls.len() == 0 {
+            // `import {} from "m"`: the module is still asked for
+            let call = self.mk_import_call(m.as_str(), line);
+            return self.mk_stmt(call, line);
+        }
+        self.ast.nodes[v as usize].list = decls;
+        v
+    }
+
+    /// `__cerxesImport("m")`
+    fn mk_import_call(&mut self, module: &str, line: int) -> int {
+        let f = self.mk_ident("__cerxesImport", line);
+        let a = self.mk_str(module, line);
+        let call = self.ast.add(N_CALL, line);
+        self.ast.nodes[call as usize].a = f;
+        self.ast.nodes[call as usize].list = vec![a];
+        call
     }
 
     /// `export`: the declaration stays, the keyword goes; re-exports and

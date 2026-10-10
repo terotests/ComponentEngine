@@ -407,8 +407,42 @@ const f = <T>(a: T) => a; f(3)
 ----
 3
 
-# a value import needs modules
+# a value import reads a module the host defined (defineModule)
 ==== tsx
 import x from 'y'; x
 ----
-SyntaxError: modules are not supported (import) (line 1)
+Uncaught Error: Cannot find module 'y' (no modules are defined here)
+
+==== tsx
+defineModule('Lib', { a: 1, b: 2, default: 'd', f(n: number) { return n * 3; } });
+import D, { a, b as bee, f, type T } from "Lib";
+import * as L from 'Lib';
+D + a + bee + f(2) + L.a
+----
+d1261
+
+==== js
+defineModule('m', { x: 5 });
+import { x } from 'm';
+import 'm';
+x * 2
+----
+10
+
+==== tsx
+defineModule('m', { x: 5 });
+import { x } from 'm'; x = 6
+----
+Uncaught TypeError: Assignment to constant variable.
+
+==== js
+defineModule('m', { x: 5 });
+import { y } from 'm'; typeof y
+----
+undefined
+
+==== js
+defineModule('m', { x: 1 });
+import { x } from 'nope'
+----
+Uncaught Error: Cannot find module 'nope' (modules here: m)

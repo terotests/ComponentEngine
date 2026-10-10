@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Built-ins written in JavaScript: the ones that are only other built-ins
 //! put together (Set methods, iterator helpers, `groupBy`, the Annex B
-//! accessor methods, `Promise.allSettled` / `any` / `withResolvers`, …).
+//! accessor methods, `Promise.allSettled` / `any` / `withResolvers`, …),
+//! and the host's modules (`defineModule`, what `import` reads).
 //! `Engine::new` runs this once, before any script. Every function here is
 //! defined non-enumerable, and reports `[native code]` from `toString`.
 
@@ -1630,4 +1631,21 @@ hide(FinalizationRegistry.prototype, 'register', function register(target, held,
 hide(FinalizationRegistry.prototype, 'unregister', function unregister(token) { return false; });
 tag(FinalizationRegistry.prototype, 'FinalizationRegistry');
 hide(globalThis, 'FinalizationRegistry', FinalizationRegistry);
+
+// ---- modules the host defines: `defineModule("name", exports)`, then a
+// script's `import { a } from "name"` reads exports.a where it stands
+var modules = new Map();
+hide(globalThis, 'defineModule', function defineModule(name, exports) {
+  if (typeof name !== 'string' || name === '') throw new TypeError('defineModule: the module needs a name');
+  if (!isObject(exports)) throw new TypeError("defineModule: module '" + name + "' needs an object of exports");
+  modules.set(name, exports);
+  return exports;
+});
+hide(globalThis, '__cerxesImport', function __cerxesImport(name) {
+  if (!modules.has(name)) {
+    var known = Array.from(modules.keys());
+    throw new Error("Cannot find module '" + name + "'" + (known.length ? ' (modules here: ' + known.join(', ') + ')' : ' (no modules are defined here)'));
+  }
+  return modules.get(name);
+});
 })();"#;

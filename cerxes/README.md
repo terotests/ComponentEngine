@@ -66,8 +66,14 @@ What has a runtime meaning becomes the JavaScript `tsc` emits:
   `this.x = x`, after `super(…)` in a derived class.
 - `import A = B.C`: `var A = B.C`.
 - `export` is dropped from a declaration, `export default e` evaluates `e`,
-  and export lists and re-exports go. A value `import` is an error: CEr has
-  no module system.
+  and export lists and re-exports go.
+- A value `import` reads a module the host defined with
+  `defineModule("name", exports)`: `import D, { a, b as c } from "name"` is
+  `const D = exports.default, a = exports.a, c = exports.b` where the
+  statement stands, `import * as N` the whole object, `import "name"` only
+  asks for it. An undefined module throws `Cannot find module 'x'`, naming
+  the ones there are. There is no file loading: a module is what the host
+  gives (a program's runtime, a library it ships).
 
 Not there: decorators, and type checking — like `tsc --noCheck` or
 Node's type stripping, CErXes runs what a type-correct program would.
