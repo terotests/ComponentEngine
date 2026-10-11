@@ -1891,6 +1891,15 @@ impl Parser {
         let line = self.line();
         let k = self.kind();
         if k == T_NUM {
+            let raw = self.text();
+            if raw.starts_with("n:") {
+                // a BigInt literal: its decimal digits (CEr's N_BIGINT)
+                let n = self.node(N_BIGINT);
+                let digits: String = String::from(&raw[2..]);
+                self.ast.nodes[n as usize].s = digits;
+                self.next();
+                return n;
+            }
             let n = self.node(N_NUM);
             let v = self.tk(self.pos).num;
             self.ast.nodes[n as usize].num = v;

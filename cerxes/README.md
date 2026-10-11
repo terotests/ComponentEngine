@@ -107,6 +107,45 @@ script may replace):
 - `renderToString(node)`: markup for a tree (`className` → `class`, a
   `style` object → CSS).
 
+## JavaScript out
+
+`cerxes::emit` writes a script back out as plain JavaScript, so a browser's
+own engine can run what CErXes runs, with no WebAssembly engine beside it:
+
+```sh
+cargo run --release --bin cerxes -- --emit app.tsx   # the JavaScript
+cargo run --release --bin cerxes -- --runtime        # what it expects defined first
+```
+
+```rust
+let r = cerxes::emit::emit_js_for_path(src, "app.tsx");   // r.js, or r.error
+```
+
+It is CErXes's own reading, printed (`src/emit.rs`): the tree the parser
+builds is already JavaScript (types erased, JSX as `__jsx(…)` calls, `enum`
+and `namespace` as objects, parameter properties as `this.x = x`, a value
+`import` as a `const` read from `__cerxesImport("m")`), so the output means
+what CErXes runs, with the same syntax errors. Statements stay on the lines
+they were on, so an error's line in the output is the line in the `.tsx`;
+comments and indentation are not kept. Class fields go back to being
+fields (the parser turns them into initializer methods).
+
+The output calls what every CErXes script has: `__jsx`, `__jsxFragment`,
+`renderToString`, `defineModule` and `__cerxesImport`. `emit::runtime()`
+(`--runtime`) defines them; run it once before the scripts. The
+WebAssembly build has both: `cx_emit(src, len, path, len)` and
+`cx_runtime()` (`playground/cerxes-wasm`).
+
+Checked two ways: `tests/emit.rs` writes out every syntax case (and CEr's
+cases, as JavaScript and as TSX) and runs the output as plain JavaScript
+in a fresh engine, which must answer what the source answers; and
+`bench/emit.mjs` writes out the 2,143 conformance probes with the rgrc
+JavaScript build and runs the output in Node, which must answer what Node
+answers for the probe itself. All 2,121 probes CErXes reads agree, except 7
+that CErXes itself reads differently from Node (a comment ended by U+2028
+or U+2029, an escaped `"use strict"`, a function's source text), where
+the output means what CErXes read.
+
 ## How it works
 
 - `lexer.rs`: CEr's lexer, reading one token at a time, each with its
@@ -127,4 +166,4 @@ script may replace):
 
 `npm run cerxes:conformance` runs the 2,143 probes of Ranger's
 `tests/runtime-conformance.test.ts` (plain JavaScript) through CErXes,
-reading them as TSX: 1,667 agree with Node, the same probes as CEr.
+reading them as TSX: 1,938 agree with Node.
