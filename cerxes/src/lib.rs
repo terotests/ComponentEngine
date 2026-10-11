@@ -13,7 +13,8 @@
 //! reads tokens on demand (JSX needs the parser to switch to characters and
 //! back), `parser` is CEr's parser with the TypeScript and JSX forms,
 //! `types` the type grammar it skips, `ts` the TypeScript statements, `jsx`
-//! the elements. `jsx_runtime` holds the default JSX runtime.
+//! the elements. `jsx_runtime` holds the default JSX runtime. `emit` writes
+//! the tree back out as plain JavaScript, for an engine of the host's own.
 //!
 //! Like CEr, a strict module: the same source builds with cargo and with
 //! `rgrc` into the Ranger targets.
@@ -27,6 +28,7 @@ pub mod builtins2;
 pub mod compiler;
 pub mod coroutine;
 pub mod dynamic;
+pub mod emit;
 pub mod jsstr;
 pub mod jsx;
 pub mod jsx_runtime;

@@ -446,3 +446,49 @@ defineModule('m', { x: 1 });
 import { x } from 'nope'
 ----
 Uncaught Error: Cannot find module 'nope' (modules here: m)
+
+# BigInt literals (CEr's N_BIGINT): decimal, hex, separators
+==== tsx
+const a: bigint = 9007199254740993n; const b = 0xFFn; const c = 1_000n; typeof a + ' ' + (a + b + c) + ' ' + (2n ** 64n)
+----
+bigint 9007199254742248 18446744073709551616
+
+# forms src/emit.rs writes back with care: class fields in their order,
+# private names, static blocks, accessors, parentheses an operator needs,
+# an object as an arrow's body, a dangling else, new with a call
+==== tsx
+class P {
+  #n: number = 1;
+  a = this.#n + 1;
+  b;
+  static count = 0;
+  static { P.count = 10; }
+  constructor(private k: string) { P.count++; }
+  get n() { return this.#n; }
+  set n(v: number) { this.#n = v; }
+  static #hid() { return 'h'; }
+  static show() { return P.#hid(); }
+  ['x' + 1]() { return 'x1'; }
+}
+const p = new P('k'); p.n = 5;
+[p.n, p.a, 'b' in p, p.b, P.count, p.k, P.show(), p.x1(), Object.keys(p).join('')].join(',')
+----
+5,2,true,,11,k,h,x1,abk
+
+==== tsx
+const o: any = { a: { b: () => ({ c: 3 }) } };
+const f = () => ({ v: 1 }), g = (x?: number) => x ?? (0 || 7);
+const t = (o?.a).b().c, u = -(-1), w = - -2, q = (1 + 2) * 3, r = 2 ** -(1), s = (-2) ** 2;
+const n = new (function () { return function (this: any) { this.z = 4; }; }())();
+let e = ''; if (t) if (!t) e = 'x'; else e = 'else';
+[t, f().v, g(), u, w, q, r, s, n.z, e, `${t}-${f().v}`, typeof void 0].join(',')
+----
+3,1,7,1,2,9,0.5,4,4,else,3-1,undefined
+
+==== tsx
+enum E { A = 1, B = A * 2 }
+namespace N { export const v = E.B + 1; }
+const el = <div id="a" class-name={'c' + N.v}>Hi {E[1]}<b/></div>;
+JSON.stringify(el)
+----
+{"type":"div","props":{"id":"a","class-name":"c3"},"children":["Hi ","A",{"type":"b","props":{},"children":[]}]}

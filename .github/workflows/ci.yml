@@ -87,10 +87,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+      - run: npm ci
       - name: CEr
         run: node cer/bench/conformance.mjs --min=$MIN_AGREE
       - name: CErXes (the probes read as TSX)
         run: node cer/bench/conformance.mjs --cerxes --min=$MIN_AGREE
+      - name: CErXes's JavaScript output, run by Node (the probes read as TSX)
+        run: node cerxes/bench/emit.mjs --build
 
   all-tests:
     name: All tests

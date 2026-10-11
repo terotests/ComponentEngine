@@ -13,6 +13,14 @@
 //!   cx_output_ptr() / _len()     what console.log printed since the last
 //!                                eval or call, as UTF-8 lines
 //!   cx_drop(engine)
+//!   cx_emit(src, slen, path, plen)
+//!                                writes the script as JavaScript (cerxes::emit),
+//!                                read as the file `path`'s extension says;
+//!                                0 ok (the result is the JavaScript), 1 a
+//!                                syntax error (the result is the error)
+//!   cx_runtime()                 the result is what an emitted script needs
+//!                                defined before it runs (the JSX runtime,
+//!                                defineModule)
 //!
 //! A frame of the page is a `cx_call`, not an `eval`: an eval compiles its
 //! script into the engine for good, a call only runs what is there.
@@ -128,4 +136,25 @@ pub extern "C" fn cx_output_ptr() -> *const u8 {
 #[no_mangle]
 pub extern "C" fn cx_output_len() -> usize {
     OUTPUT.with(|b| b.borrow().len())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_emit(p: *const u8, n: usize, pp: *const u8, pn: usize) -> i32 {
+    let src = text(p, n);
+    let path = text(pp, pn);
+    let r = cerxes::emit::emit_js_for_path(src.as_str(), path.as_str());
+    let failed = !r.error.is_empty();
+    OUTPUT.with(|b| b.borrow_mut().clear());
+    RESULT.with(|b| *b.borrow_mut() = if failed { r.error.into_bytes() } else { r.js.into_bytes() });
+    if failed {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn cx_runtime() {
+    OUTPUT.with(|b| b.borrow_mut().clear());
+    RESULT.with(|b| *b.borrow_mut() = cerxes::emit::runtime().into_bytes());
 }
