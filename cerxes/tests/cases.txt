@@ -447,6 +447,61 @@ import { x } from 'nope'
 ----
 Uncaught Error: Cannot find module 'nope' (modules here: m)
 
+# a module the host gives as source (defineSourceModule): run on its first
+# import, once; its names stay its own; export notes what it hands out
+==== tsx
+defineSourceModule('lib/v.ts', 'export function add(a: number[], b: number[]) { return [a[0] + b[0], a[1] + b[1]]; }\nexport const ZERO = [0, 0], [ONE] = [1];\nconst hidden = 3;\nexport default function scale(a: number[], k: number) { return [a[0] * k, a[1] * k]; }\nexport class P { x = 1 }');
+import scale, { add, ZERO, ONE } from "lib/v.ts";
+import * as V from "lib/v.ts";
+add([1, 2], [3, 4]).join() + ' ' + scale([1, 2], 3).join() + ' ' + ZERO.join() + ONE + ' ' + new V.P().x + ' ' + typeof hidden + ' ' + Object.keys(V).sort().join()
+----
+4,6 3,6 0,01 1 undefined ONE,P,ZERO,add,default
+
+==== tsx [a source module runs once, whatever name imports it]
+var runs = 0;
+defineSourceModule('../lib/c.ts', 'runs++; export let n = 0; export function bump() { return ++n; }', 'lib/c.ts');
+defineSourceModule('lib/d.ts', 'import { bump } from "./c.ts"; export const two = bump() + bump();');
+import { bump } from '../lib/c.ts';
+import { two } from 'lib/d.ts';
+runs + ' ' + two + ' ' + bump()
+----
+1 3 3
+
+==== js [export lists, re-exports, export default of an expression]
+defineModule('m', { q: 7, default: 'm-default' });
+defineSourceModule('a.js', 'const a = 1, b = 2; export { a, b as bee }; export { q as cue } from "m"; export * from "./b.js"; export * as M from "m"; export default a + b;');
+defineSourceModule('b.js', 'export const fromB = "b"; export default "not passed on";');
+import d, { a, bee, cue, fromB, M } from 'a.js';
+[d, a, bee, cue, fromB, M.q].join()
+----
+3,1,2,7,b,7
+
+==== js [a module is strict and its this is undefined]
+defineSourceModule('s.js', 'export const t = typeof this; export function f() { try { undeclared = 1; return "sloppy"; } catch (e) { return e.name; } }');
+import { t, f } from 's.js';
+t + ' ' + f()
+----
+undefined ReferenceError
+
+==== js [a syntax error names the module's file and keeps its line]
+defineSourceModule('lib/bad.ts', 'export const a = 1;\nexport const = 2;');
+import { a } from 'lib/bad.ts';
+----
+Uncaught SyntaxError: expected an identifier but found '=' (lib/bad.ts line 2)
+
+==== js [an import cycle names the modules on it]
+defineSourceModule('x.js', 'import { y } from "./y.js"; export const x = 1;');
+defineSourceModule('y.js', 'import { x } from "./x.js"; export const y = 2;');
+import { x } from 'x.js';
+----
+Uncaught Error: Import cycle: x.js → y.js → x.js
+
+==== js [a module a module imports and the host lacks]
+defineSourceModule('lib/u.js', 'import { z } from "../gone.js"; export const u = 1;');
+import { u } from 'lib/u.js';
+----
+Uncaught Error: Cannot find module 'gone.js' (imported by lib/u.js) (modules here: lib/u.js)
+
 # BigInt literals (CEr's N_BIGINT): decimal, hex, separators
 ==== tsx
 const a: bigint = 9007199254740993n; const b = 0xFFn; const c = 1_000n; typeof a + ' ' + (a + b + c) + ' ' + (2n ** 64n)

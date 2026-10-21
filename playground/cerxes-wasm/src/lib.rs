@@ -18,6 +18,11 @@
 //!                                read as the file `path`'s extension says;
 //!                                0 ok (the result is the JavaScript), 1 a
 //!                                syntax error (the result is the error)
+//!   cx_emit_module(src, slen, path, plen)
+//!                                a module the host gives as source
+//!                                (defineSourceModule) as the JavaScript
+//!                                function that runs it; 0 ok, 1 a syntax
+//!                                error
 //!   cx_runtime()                 the result is what an emitted script needs
 //!                                defined before it runs (the JSX runtime,
 //!                                defineModule)
@@ -143,6 +148,21 @@ pub unsafe extern "C" fn cx_emit(p: *const u8, n: usize, pp: *const u8, pn: usiz
     let src = text(p, n);
     let path = text(pp, pn);
     let r = cerxes::emit::emit_js_for_path(src.as_str(), path.as_str());
+    let failed = !r.error.is_empty();
+    OUTPUT.with(|b| b.borrow_mut().clear());
+    RESULT.with(|b| *b.borrow_mut() = if failed { r.error.into_bytes() } else { r.js.into_bytes() });
+    if failed {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_emit_module(p: *const u8, n: usize, pp: *const u8, pn: usize) -> i32 {
+    let src = text(p, n);
+    let path = text(pp, pn);
+    let r = cerxes::emit::emit_module_js(src.as_str(), path.as_str());
     let failed = !r.error.is_empty();
     OUTPUT.with(|b| b.borrow_mut().clear());
     RESULT.with(|b| *b.borrow_mut() = if failed { r.error.into_bytes() } else { r.js.into_bytes() });

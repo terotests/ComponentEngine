@@ -91,3 +91,28 @@ fn emitted_lines() {
     assert!(lines[7].contains("return x.a;"), "{}", r.js);
     assert!(lines[9].starts_with("throw "), "{}", r.js);
 }
+
+/// A module the host gives as source, written as the JavaScript function a
+/// host passes `defineSourceModule` instead of the text: it runs the same,
+/// and keeps the module's lines.
+#[test]
+fn emitted_module() {
+    let src = "import { k } from './k.ts';\ntype V = number[];\nexport function scale(a: V): V { return a.map((x) => x * k); }\nexport default <b>{k}</b>;\n";
+    let m = cerxes::emit::emit_module_js(src, "lib/v.tsx");
+    assert!(m.error.is_empty(), "{}", m.error);
+    let lines: Vec<&str> = m.js.lines().collect();
+    assert!(lines[2].contains("function scale(a)"), "{}", m.js);
+    let k = cerxes::emit::emit_module_js("export const k = 3;", "lib/k.ts");
+    assert!(k.error.is_empty(), "{}", k.error);
+    let mut e = Engine::new();
+    e.set_syntax(false, false);
+    let run = format!(
+        "defineSourceModule('lib/k.ts', {});\ndefineSourceModule('../lib/v.tsx', {}, 'lib/v.tsx');\nvar M = __cerxesImport('../lib/v.tsx');\nM.scale([1, 2]).join() + ' ' + renderToString(M.default)",
+        k.js.trim_end().trim_end_matches(';'),
+        m.js.trim_end().trim_end_matches(';')
+    );
+    let got = e.eval(run.as_str());
+    assert_eq!(got, "3,6 <b>3</b>", "{}", run);
+    let bad = cerxes::emit::emit_module_js("export const a = 1;\nexport const = 2;", "lib/bad.ts");
+    assert!(bad.error.contains("(lib/bad.ts line 2)"), "{}", bad.error);
+}

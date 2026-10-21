@@ -44,6 +44,19 @@ impl Syntax {
         s.jsx = jsx;
         s
     }
+
+    /// The syntax a file's extension asks for: `.ts` TypeScript, `.tsx`
+    /// (and any other) both, `.js` / `.jsx` / `.mjs` / `.cjs` JSX.
+    pub fn for_path(path: &str) -> Syntax {
+        let p = path.to_lowercase();
+        if p.ends_with(".ts") || p.ends_with(".mts") || p.ends_with(".cts") {
+            Syntax::new(true, false)
+        } else if p.ends_with(".js") || p.ends_with(".jsx") || p.ends_with(".mjs") || p.ends_with(".cjs") {
+            Syntax::new(false, true)
+        } else {
+            Syntax::tsx()
+        }
+    }
 }
 
 pub struct Parser {
@@ -66,6 +79,13 @@ pub struct Parser {
     pub(crate) no_body: bool,
     /// constructor parameter properties of the function just read
     pub(crate) param_props: Vec<String>,
+    /// reading a module the host gave as source (`crate::module`): its
+    /// file, which its imports name as where they stand; "" for a script
+    pub module_path: String,
+    /// a module's exports as read: (the name, the expression it is)
+    pub exports: Vec<(String, String)>,
+    /// the modules a module's `export * from "m"` passes on
+    pub export_stars: Vec<String>,
 }
 
 fn binary_prec(op: &str) -> int {
@@ -167,7 +187,12 @@ pub fn is_reserved(w: &str) -> bool {
 }
 
 impl Parser {
+    /// A script read as TSX; a text that starts with `module::HEADER` (what
+    /// the module registry hands `eval`) is read as that module.
     pub fn new(src: &str) -> Parser {
+        if src.starts_with(crate::module::HEADER) {
+            return crate::module::module_parser_of(src);
+        }
         Parser::with_syntax(src, Syntax::tsx())
     }
 
@@ -187,6 +212,9 @@ impl Parser {
             splits: Vec::new(),
             no_body: false,
             param_props: Vec::new(),
+            module_path: String::new(),
+            exports: Vec::new(),
+            export_stars: Vec::new(),
         }
     }
 

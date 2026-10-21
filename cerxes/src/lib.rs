@@ -33,6 +33,7 @@ pub mod jsstr;
 pub mod jsx;
 pub mod jsx_runtime;
 pub mod lexer;
+pub mod module;
 pub mod num;
 pub mod ops;
 pub mod parser;
@@ -65,6 +66,9 @@ impl Engine {
         let mut e = Engine { vm: vm, error: String::new(), syntax: Syntax::new(false, false) };
         // the built-ins written in JavaScript: CEr's, then the JSX runtime
         e.eval(prelude::PRELUDE);
+        if e.error.is_empty() {
+            e.eval(module::REGISTRY);
+        }
         if !e.error.is_empty() {
             e.vm.out.push(format!("prelude: {}", e.error));
         } else {
@@ -86,17 +90,9 @@ impl Engine {
         self.syntax = Syntax::new(typescript, jsx);
     }
 
-    /// The syntax a file's extension asks for: `.ts` TypeScript, `.tsx`
-    /// both, `.js` / `.jsx` / `.mjs` / `.cjs` JSX.
+    /// The syntax a file's extension asks for (`Syntax::for_path`).
     pub fn set_syntax_for_path(&mut self, path: &str) {
-        let p = path.to_lowercase();
-        if p.ends_with(".ts") || p.ends_with(".mts") || p.ends_with(".cts") {
-            self.set_syntax(true, false);
-        } else if p.ends_with(".js") || p.ends_with(".jsx") || p.ends_with(".mjs") || p.ends_with(".cjs") {
-            self.set_syntax(false, true);
-        } else {
-            self.set_syntax(true, true);
-        }
+        self.syntax = parser::Syntax::for_path(path);
     }
 
     /// Echo `print` / `console.log` lines to stdout as they come.

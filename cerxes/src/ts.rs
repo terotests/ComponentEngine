@@ -312,9 +312,7 @@ impl Parser {
         if k == N_VAR {
             for d in nd.list.iter() {
                 let t = self.ast.nodes[*d as usize].a;
-                if self.ast.kind(t) == N_IDENT {
-                    out.push(self.ast.nodes[t as usize].s.clone());
-                }
+                self.pattern_names(t, &mut out);
             }
         } else if (k == N_FUNC || k == N_CLASS) && (nd.flags & F_DECL) != 0 {
             out.push(nd.s.clone());
@@ -322,6 +320,31 @@ impl Parser {
             out.push(nd.s.clone());
         }
         out
+    }
+
+    /// The names a binding pattern binds (`a`, `[a, b]`, `{ a, b: c }`).
+    fn pattern_names(&self, p: int, out: &mut Vec<String>) {
+        if p < 0 {
+            return;
+        }
+        let k = self.ast.kind(p);
+        if k == N_IDENT {
+            out.push(self.ast.nodes[p as usize].s.clone());
+        } else if k == N_PAT_DEFAULT || k == N_REST || k == N_SPREAD {
+            self.pattern_names(self.ast.nodes[p as usize].a, out);
+        } else if k == N_ARRAY {
+            for e in self.ast.nodes[p as usize].list.iter() {
+                self.pattern_names(*e, out);
+            }
+        } else if k == N_OBJECT {
+            for pr in self.ast.nodes[p as usize].list.iter() {
+                if self.ast.kind(*pr) == N_PROP {
+                    self.pattern_names(self.ast.nodes[*pr as usize].b, out);
+                } else {
+                    self.pattern_names(*pr, out);
+                }
+            }
+        }
     }
 
     // ---- modules, without a module system
@@ -519,13 +542,20 @@ impl Parser {
         v
     }
 
-    /// `__cerxesImport("m")`
+    /// `__cerxesImport("m")`; in a module, `__cerxesImport("m", "its/file")`,
+    /// so "./x" and "../x" are read from the module's folder.
     fn mk_import_call(&mut self, module: &str, line: int) -> int {
         let f = self.mk_ident("__cerxesImport", line);
         let a = self.mk_str(module, line);
+        let mut args = vec![a];
+        if !self.module_path.is_empty() {
+            let from = self.module_path.clone();
+            let b = self.mk_str(from.as_str(), line);
+            args.push(b);
+        }
         let call = self.ast.add(N_CALL, line);
         self.ast.nodes[call as usize].a = f;
-        self.ast.nodes[call as usize].list = vec![a];
+        self.ast.nodes[call as usize].list = args;
         call
     }
 
@@ -533,6 +563,9 @@ impl Parser {
     /// export lists are dropped.
     pub(crate) fn export_stmt(&mut self) -> int {
         self.next();
+        if !self.module_path.is_empty() {
+            return self.module_export();
+        }
         if self.eat("default") {
             if self.is("function") || self.is("class") || (self.is("async") && self.peek_is(1, "function")) || self.is("abstract") || self.is("interface") {
                 return self.statement();
@@ -561,5 +594,135 @@ impl Parser {
             return self.import_stmt();
         }
         self.statement()
+    }
+
+    /// `export` in a module the host gave as source (`crate::module`): the
+    /// declaration stays, and what it exports is noted in `exports` (the
+    /// name, the expression that reads it) for the module to return.
+    ///   export function f / class C / const a, { b }  →  f, C, a, b
+    ///   export default <expr>                         →  default: __cerxesDefault
+    ///   export { a, b as c }                          →  a, c: b
+    ///   export { a } from "m" / export * as n from "m" / export * from "m"
+    fn module_export(&mut self) -> int {
+        let line = self.line();
+        let ts = self.syntax.typescript;
+        if self.eat("default") {
+            if ts && self.is("interface") {
+                return self.statement();
+            }
+            let named = (self.is("function") && (self.peek_kind(1) == T_IDENT || (self.peek_is(1, "*") && self.peek_kind(2) == T_IDENT)))
+                || (self.is("async") && self.peek_is(1, "function") && (self.peek_kind(2) == T_IDENT || (self.peek_is(2, "*") && self.peek_kind(3) == T_IDENT)))
+                || (self.is("class") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "extends") && !self.peek_is(1, "implements"))
+                || (self.is("abstract") && self.peek_is(1, "class") && self.peek_kind(2) == T_IDENT && !self.peek_is(2, "extends") && !self.peek_is(2, "implements"));
+            if named {
+                let st = self.statement();
+                for n in self.declared_names(st) {
+                    self.exports.push((String::from("default"), n));
+                }
+                return st;
+            }
+            let e = self.assign();
+            self.semicolon();
+            self.exports.push((String::from("default"), String::from("__cerxesDefault")));
+            return self.mk_var("__cerxesDefault", e, line);
+        }
+        if self.is("=") || (self.is("as") && self.peek_is(1, "namespace")) || (self.is("type") && (self.peek_is(1, "{") || self.peek_is(1, "*"))) {
+            // `export =`, `export as namespace N`, `export type { T }`
+            self.skip_module_clause();
+            return self.node(N_EMPTY);
+        }
+        if self.is("*") {
+            self.next();
+            let alias = if self.eat("as") { Some(self.export_name()) } else { None };
+            if !self.eat("from") || self.kind() != T_STR {
+                self.fail("expected 'from \"module\"' in export");
+                return self.node(N_EMPTY);
+            }
+            let m = self.text();
+            self.next();
+            self.module_clause_end();
+            match alias {
+                Some(n) => {
+                    let read = self.import_text(m.as_str());
+                    self.exports.push((n, read));
+                }
+                None => self.export_stars.push(m),
+            }
+            return self.node(N_EMPTY);
+        }
+        if self.is("{") {
+            self.next();
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            while !self.is("}") && self.kind() != T_EOF {
+                if ts && self.is("type") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "as") && !self.peek_is(1, ",") && !self.peek_is(1, "}") {
+                    // `type T`: erased
+                    self.next();
+                    self.export_name();
+                    if self.eat("as") {
+                        self.export_name();
+                    }
+                } else {
+                    let k = self.export_name();
+                    let n = if self.eat("as") { self.export_name() } else { k.clone() };
+                    pairs.push((n, k));
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("}");
+            let mut from: Option<String> = None;
+            if self.eat("from") {
+                if self.kind() != T_STR {
+                    self.fail("expected a module name after 'from'");
+                    return self.node(N_EMPTY);
+                }
+                from = Some(self.text());
+                self.next();
+            }
+            self.module_clause_end();
+            for (n, k) in pairs {
+                let v = match &from {
+                    Some(m) => format!("{}[{}]", self.import_text(m.as_str()), crate::emit::quote(k.as_str())),
+                    None => k,
+                };
+                self.exports.push((n, v));
+            }
+            return self.node(N_EMPTY);
+        }
+        if self.is("import") {
+            return self.import_stmt();
+        }
+        let st = self.statement();
+        for n in self.declared_names(st) {
+            self.exports.push((n.clone(), n));
+        }
+        st
+    }
+
+    /// A name in an export list: a name or a string.
+    fn export_name(&mut self) -> String {
+        if self.kind() == T_STR {
+            let t = self.text();
+            self.next();
+            return t;
+        }
+        self.ident_name()
+    }
+
+    /// `with { … }` / `assert { … }` after a module name, and the semicolon.
+    fn module_clause_end(&mut self) {
+        if self.is("with") || self.is("assert") {
+            self.next();
+            if self.is("{") {
+                self.skip_balanced();
+            }
+        }
+        self.semicolon();
+    }
+
+    /// `__cerxesImport("m", "this/module")` as text.
+    fn import_text(&self, m: &str) -> String {
+        format!("__cerxesImport({}, {})", crate::emit::quote(m), crate::emit::quote(self.module_path.as_str()))
     }
 }
