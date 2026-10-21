@@ -15,8 +15,9 @@
 //!
 //! The script it writes expects what CErXes gives every script: `__jsx`,
 //! `__jsxFragment`, `renderToString` and the host's modules
-//! (`defineModule`, `__cerxesImport`). `runtime()` is that, as JavaScript,
-//! to run once before the scripts.
+//! (`defineModule`, `defineSourceModule`, `__cerxesImport`). `runtime()` is
+//! that, as JavaScript, to run once before the scripts; `emit_module_js`
+//! writes a module the host gives as source.
 //!
 //! Class fields are written as fields again: the parser turns them into a
 //! method run on each new instance and one run once on the class (`c` and
@@ -38,26 +39,10 @@ const P_POSTFIX: int = 18;
 const P_CALL: int = 19;
 const P_PRIMARY: int = 20;
 
-/// The host functions an emitted script calls, as JavaScript: the JSX
-/// runtime and the host's modules, as CErXes defines them.
-pub const MODULES: &str = r#"(function () {
-function hide(name, v) { Object.defineProperty(globalThis, name, { value: v, writable: true, enumerable: false, configurable: true }); }
-function isObject(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
-var modules = new Map();
-hide('defineModule', function defineModule(name, exports) {
-  if (typeof name !== 'string' || name === '') throw new TypeError('defineModule: the module needs a name');
-  if (!isObject(exports)) throw new TypeError("defineModule: module '" + name + "' needs an object of exports");
-  modules.set(name, exports);
-  return exports;
-});
-hide('__cerxesImport', function __cerxesImport(name) {
-  if (!modules.has(name)) {
-    var known = Array.from(modules.keys());
-    throw new Error("Cannot find module '" + name + "'" + (known.length ? ' (modules here: ' + known.join(', ') + ')' : ' (no modules are defined here)'));
-  }
-  return modules.get(name);
-});
-})();"#;
+/// The host functions an emitted script calls, as JavaScript: the host's
+/// modules, as CErXes defines them (crate::module::REGISTRY). A module given
+/// as source there is the function `emit_module_js` wrote.
+pub const MODULES: &str = crate::module::REGISTRY;
 
 /// `MODULES` and the JSX runtime: what an emitted script needs defined
 /// before it runs. The JSX runtime defines its globals on `this`, which is
@@ -89,14 +74,25 @@ pub fn emit_js(src: &str, syntax: Syntax) -> Emitted {
 /// `src` as JavaScript, read with the syntax a file's extension asks for
 /// (as `Engine::set_syntax_for_path`).
 pub fn emit_js_for_path(src: &str, path: &str) -> Emitted {
-    let p = path.to_lowercase();
-    let mut sx = Syntax::tsx();
-    if p.ends_with(".ts") || p.ends_with(".mts") || p.ends_with(".cts") {
-        sx = Syntax::new(true, false);
-    } else if p.ends_with(".js") || p.ends_with(".jsx") || p.ends_with(".mjs") || p.ends_with(".cjs") {
-        sx = Syntax::new(false, true);
+    emit_js(src, Syntax::for_path(path))
+}
+
+/// A module the host gives as source (crate::module), as the JavaScript
+/// function that runs it and returns its exports: what an emitted host
+/// passes `defineSourceModule` as the source.
+pub fn emit_module_js(src: &str, path: &str) -> Emitted {
+    let m = crate::module::module_text(src, path);
+    if !m.error.is_empty() {
+        return Emitted { js: String::new(), error: m.error };
     }
-    emit_js(src, sx)
+    let mut p = crate::module::module_parser(m.text.as_str(), path);
+    let root = p.parse_program();
+    if !p.error.is_empty() {
+        return Emitted { js: String::new(), error: p.error.clone() };
+    }
+    let mut e = Emitter::new(p.ast);
+    e.program(root);
+    Emitted { js: e.out, error: String::new() }
 }
 
 pub struct Emitter {

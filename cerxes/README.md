@@ -74,6 +74,16 @@ What has a runtime meaning becomes the JavaScript `tsc` emits:
   asks for it. An undefined module throws `Cannot find module 'x'`, naming
   the ones there are. There is no file loading: a module is what the host
   gives (a program's runtime, a library it ships).
+- A module can also be given as source: `defineSourceModule("name", source,
+  path?)` keeps the text, and its first import runs it once, as a module
+  of its own (`src/module.rs`): strict, its top-level names its own, what
+  it `export`s (declarations, `export default e`, `export { a, b as c }`,
+  `export { a } from "m"`, `export * from "m"`, `export * as n from "m"`)
+  its exports. `path` (the name when left out) is its file: it is read as
+  the extension says (`.ts`, `.tsx`, `.js`), its syntax errors name it
+  (`(lib/x.ts line 2)`), and its own `"./x"` / `"../x"` imports are read
+  from its folder. Names that give the same path are one module. An import
+  cycle throws `Import cycle: a.ts → b.ts → a.ts`.
 
 Not there: decorators, and type checking — like `tsc --noCheck` or
 Node's type stripping, CErXes runs what a type-correct program would.
@@ -131,10 +141,14 @@ comments and indentation are not kept. Class fields go back to being
 fields (the parser turns them into initializer methods).
 
 The output calls what every CErXes script has: `__jsx`, `__jsxFragment`,
-`renderToString`, `defineModule` and `__cerxesImport`. `emit::runtime()`
-(`--runtime`) defines them; run it once before the scripts. The
-WebAssembly build has both: `cx_emit(src, len, path, len)` and
-`cx_runtime()` (`playground/cerxes-wasm`).
+`renderToString`, `defineModule`, `defineSourceModule` and
+`__cerxesImport`. `emit::runtime()` (`--runtime`) defines them; run it once
+before the scripts. A module given as source is written with
+`emit::emit_module_js(src, path)`: the function that runs it, which the
+host passes `defineSourceModule` in place of the text. The WebAssembly
+build has all three: `cx_emit(src, len, path, len)`,
+`cx_emit_module(src, len, path, len)` and `cx_runtime()`
+(`playground/cerxes-wasm`).
 
 Checked two ways: `tests/emit.rs` writes out every syntax case (and CEr's
 cases, as JavaScript and as TSX) and runs the output as plain JavaScript
