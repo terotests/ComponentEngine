@@ -244,3 +244,8 @@ if,for,64,2,2,2
 var t = new Array(3); for (var n = 0; n < 3; n++) t[n] = n + 1; var u = []; u.length = 2; u[0] = 'a'; var f = new Array(2).fill(0); [0 in t, t.reduce(function (a, b) { return a + b; }), 0 in u, 1 in u, 1 in f, Object.keys(f).length].join()
 ----
 true,6,true,false,true,2
+
+==== js redefining an accessor with only enumerable or configurable
+var o = {}; var v = 1; Object.defineProperty(o, 'p', { configurable: true, get: function () { return v; }, set: function (x) { v = x; } }); Object.defineProperty(o, 'p', { enumerable: false }); o.p = 5; var d = Object.getOwnPropertyDescriptor(o, 'p'); [o.p, typeof d.get, typeof d.set, d.enumerable, 'value' in d].join()
+----
+5,function,function,false,false
