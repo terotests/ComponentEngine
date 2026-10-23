@@ -997,7 +997,8 @@ impl Compiler {
         if bd.global {
             let nm = bd.name.clone();
             let a = self.atom(nm.as_str());
-            self.emit(OP_SET_GLOBAL, a, 0);
+            // a declaration's own write makes the global, also when strict
+            self.emit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
             return;
         }
         if bd.in_env {
@@ -1025,7 +1026,7 @@ impl Compiler {
                 return;
             }
             let a = self.atom(name.as_str());
-            self.emit(OP_SET_GLOBAL, a, 0);
+            self.emit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
             return;
         }
         if !init && self.tdz_refs.contains_key(&n) {

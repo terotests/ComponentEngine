@@ -254,12 +254,24 @@ impl Parser {
         &self.toks[i as usize]
     }
 
+    /// Forgets the tokens from `from` on, last first, undoing what they did
+    /// to the lexer's parentheses.
+    pub(crate) fn drop_toks(&mut self, from: int) {
+        while (self.toks.len() as int) > from {
+            let i = self.toks.len() - 1;
+            let paren = self.toks[i].paren;
+            self.lx.unread_paren(paren);
+            self.toks.truncate(i);
+        }
+    }
+
     /// Forgets the tokens from `pos` on and puts the lexer back at the
     /// start of the token there (read as script, it may be JSX).
     pub(crate) fn rewind_lexer(&mut self) -> int {
         let start = self.tk(self.pos).start;
         let line = self.tk(self.pos).line;
-        self.toks.truncate(self.pos as usize);
+        let p = self.pos;
+        self.drop_toks(p);
         self.splits.clear();
         self.lx.pos = start;
         self.lx.line = line;

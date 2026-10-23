@@ -1490,6 +1490,10 @@ impl Vm {
         }
         let (i, a) = self.to_key(key);
         let atom = if i >= 0 { self.index_atom(i) } else { a };
+        if atom == A_PROTOTYPE && self.objs[o as usize].class == C_FUNCTION && self.lazy_prototype(o) {
+            // made now, so that a descriptor without a value keeps it
+            self.function_prototype(o);
+        }
         let has_get = self.has_atom(d, A_GET);
         let has_set = self.has_atom(d, A_SET);
         let get_v = self.get_obj(d, A_GET, desc);

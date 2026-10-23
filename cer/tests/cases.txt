@@ -224,3 +224,18 @@ var c = function () { return
 ;[a, b, c()].join()
 ----
 1,2,
+
+==== js a regular expression after the ) of if, while and for
+var o = 65, r = []; if (o < 128) /[A-Z]/.test(String.fromCharCode(o)) && r.push('if'); while (o > 64) /x/.test('x') && o--; for (var i = 0; i < 1; i++) /y/g.exec('y') && r.push('for'); var d = (8) / 2 / (2); var g = 6, h = 3; r.push(o, d, (g) /h/ 1, [4] / 2); r.join()
+----
+if,for,64,2,2,2
+
+==== js assigning and defining a function's prototype
+'use strict'; class C {} function D() {} Object.setPrototypeOf(D, C); D.prototype = { a: 1 }; var F = function () {}; Object.defineProperty(F, 'prototype', { writable: false }); var e = ''; try { F.prototype = {}; } catch (x) { e = x.constructor.name; } [D.prototype.a, typeof F.prototype, F.prototype.constructor === F, Object.getOwnPropertyDescriptor(F, 'prototype').writable, e].join()
+----
+1,object,true,false,TypeError
+
+==== js top-level let, const and class in strict code
+'use strict'; let a = 1; const b = 2; class C {} a = a + b; var e = ''; try { undeclared = 1; } catch (x) { e = x.name; } [a, typeof C, e].join()
+----
+3,function,ReferenceError

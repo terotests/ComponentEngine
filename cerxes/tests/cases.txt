@@ -547,3 +547,13 @@ const el = <div id="a" class-name={'c' + N.v}>Hi {E[1]}<b/></div>;
 JSON.stringify(el)
 ----
 {"type":"div","props":{"id":"a","class-name":"c3"},"children":["Hi ","A",{"type":"b","props":{},"children":[]}]}
+
+==== tsx a regular expression after if (…) around JSX
+const f = (a: number) => (<i>{a}</i>);
+let n = 0;
+if (f(1)) /x/.test('x') && n++;
+if ((<b/>)) /y/.test('y') && n++;
+const q = (4) / 2;
+[n, q, JSON.stringify(f(2))].join()
+----
+2,2,{"type":"i","props":{},"children":[2]}

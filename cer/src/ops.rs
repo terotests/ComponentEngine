@@ -33,6 +33,7 @@ pub const OP_GET_ENV: int = 16;
 pub const OP_SET_ENV: int = 17;
 /// atom `a`; `c` caches the global object's slot
 pub const OP_GET_GLOBAL: int = 18;
+/// `b` 1: a top-level declaration's initialization (made when strict too)
 pub const OP_SET_GLOBAL: int = 19;
 pub const OP_TYPEOF_GLOBAL: int = 20;
 /// `var a` at the top level: define when absent
