@@ -1490,6 +1490,10 @@ impl Vm {
         }
         let (i, a) = self.to_key(key);
         let atom = if i >= 0 { self.index_atom(i) } else { a };
+        if atom == A_PROTOTYPE && self.objs[o as usize].class == C_FUNCTION && self.lazy_prototype(o) {
+            // made now, so that a descriptor without a value keeps it
+            self.function_prototype(o);
+        }
         let has_get = self.has_atom(d, A_GET);
         let has_set = self.has_atom(d, A_SET);
         let get_v = self.get_obj(d, A_GET, desc);
@@ -1572,6 +1576,12 @@ impl Vm {
             }
             let s2 = self.objs[o as usize].find(atom);
             self.objs[o as usize].attrs[s2 as usize] = P_ACCESSOR | hidden | fixed;
+            return;
+        }
+        if !has_value && !has_writable && slot >= 0 && (existing_attr & P_ACCESSOR) != 0 {
+            // a generic descriptor ({enumerable}, {configurable}): an accessor
+            // stays one, with its getter and setter
+            self.objs[o as usize].attrs[slot as usize] = P_ACCESSOR | hidden | fixed;
             return;
         }
         let readonly = self.desc_flag(d, desc, A_WRITABLE, P_READONLY, existing_attr);

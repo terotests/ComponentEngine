@@ -224,3 +224,28 @@ var c = function () { return
 ;[a, b, c()].join()
 ----
 1,2,
+
+==== js a regular expression after the ) of if, while and for
+var o = 65, r = []; if (o < 128) /[A-Z]/.test(String.fromCharCode(o)) && r.push('if'); while (o > 64) /x/.test('x') && o--; for (var i = 0; i < 1; i++) /y/g.exec('y') && r.push('for'); var d = (8) / 2 / (2); var g = 6, h = 3; r.push(o, d, (g) /h/ 1, [4] / 2); r.join()
+----
+if,for,64,2,2,2
+
+==== js assigning and defining a function's prototype
+'use strict'; class C {} function D() {} Object.setPrototypeOf(D, C); D.prototype = { a: 1 }; var F = function () {}; Object.defineProperty(F, 'prototype', { writable: false }); var e = ''; try { F.prototype = {}; } catch (x) { e = x.constructor.name; } [D.prototype.a, typeof F.prototype, F.prototype.constructor === F, Object.getOwnPropertyDescriptor(F, 'prototype').writable, e].join()
+----
+1,object,true,false,TypeError
+
+==== js top-level let, const and class in strict code
+'use strict'; let a = 1; const b = 2; class C {} a = a + b; var e = ''; try { undeclared = 1; } catch (x) { e = x.name; } [a, typeof C, e].join()
+----
+3,function,ReferenceError
+
+==== js writing the elements of new Array(n) and of a longer length
+var t = new Array(3); for (var n = 0; n < 3; n++) t[n] = n + 1; var u = []; u.length = 2; u[0] = 'a'; var f = new Array(2).fill(0); [0 in t, t.reduce(function (a, b) { return a + b; }), 0 in u, 1 in u, 1 in f, Object.keys(f).length].join()
+----
+true,6,true,false,true,2
+
+==== js redefining an accessor with only enumerable or configurable
+var o = {}; var v = 1; Object.defineProperty(o, 'p', { configurable: true, get: function () { return v; }, set: function (x) { v = x; } }); Object.defineProperty(o, 'p', { enumerable: false }); o.p = 5; var d = Object.getOwnPropertyDescriptor(o, 'p'); [o.p, typeof d.get, typeof d.set, d.enumerable, 'value' in d].join()
+----
+5,function,function,false,false

@@ -42,7 +42,16 @@ pub struct Tok {
     pub escaped: bool,
     /// where the token starts in the source (a char index)
     pub start: int,
+    /// what a `(` or `)` did to the lexer's parentheses (PAREN_*), so that
+    /// a rewind can undo it
+    pub paren: int,
 }
+
+pub const PAREN_NONE: int = 0;
+pub const PAREN_OPEN: int = 1;
+pub const PAREN_CLOSE_KEYWORD: int = 2;
+pub const PAREN_CLOSE: int = 3;
+pub const PAREN_CLOSE_EXTRA: int = 4;
 
 impl Tok {
     fn new(kind: int, line: int, nl: bool) -> Tok {
@@ -59,6 +68,7 @@ impl Tok {
             flags: String::new(),
             escaped: false,
             start: 0,
+            paren: PAREN_NONE,
         }
     }
 }
@@ -70,6 +80,11 @@ pub struct Lexer {
     pub error: String,
     /// what the previous token allows a `/` to be
     pub regex_ok: bool,
+    /// the open parentheses: whether each follows `if`, `while`, `for` or
+    /// `with`, after whose `)` a `/` starts a regular expression
+    parens: Vec<bool>,
+    /// the previous token was one of those keywords
+    paren_keyword: bool,
     puncts: Vec<String>,
 }
 
@@ -136,7 +151,7 @@ pub fn push_code_point(out: &mut String, cp: int) {
 
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
-        Lexer { src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), regex_ok: true, puncts: puncts() }
+        Lexer { src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), regex_ok: true, parens: Vec::new(), paren_keyword: false, puncts: puncts() }
     }
 
     pub fn at(&self, i: int) -> char {
@@ -215,7 +230,9 @@ impl Lexer {
             return Tok::new(T_EOF, self.line, true);
         }
         let start = self.pos;
-        let mut t = self.read_token(nl);
+        let keyword = self.paren_keyword;
+        self.paren_keyword = false;
+        let mut t = self.read_token(nl, keyword);
         t.start = start;
         if !self.error.is_empty() {
             return self.error_token();
@@ -233,13 +250,27 @@ impl Lexer {
         t
     }
 
-    fn read_token(&mut self, nl: bool) -> Tok {
+    /// Undoes what a token did to the parentheses (its `paren`; the parser
+    /// forgets the token).
+    pub fn unread_paren(&mut self, paren: int) {
+        if paren == PAREN_OPEN {
+            self.parens.pop();
+        } else if paren == PAREN_CLOSE_KEYWORD {
+            self.parens.push(true);
+        } else if paren == PAREN_CLOSE {
+            self.parens.push(false);
+        }
+    }
+
+    fn read_token(&mut self, nl: bool, keyword: bool) -> Tok {
         let c = self.cur();
         let line = self.line;
         if is_id_start(c) || c == '\\' {
             let mut t = Tok::new(T_IDENT, line, nl);
             t.text = self.read_ident(&mut t.escaped);
             self.regex_ok = regex_after_word(t.text.as_str()) && !t.escaped;
+            let w = t.text.as_str();
+            self.paren_keyword = !t.escaped && (w == "if" || w == "while" || w == "for" || w == "with");
             return t;
         }
         if c == '#' && (is_id_start(self.at(self.pos + 1)) || self.at(self.pos + 1) == '\\') {
@@ -301,6 +332,23 @@ impl Lexer {
                 self.regex_ok = !(s == ")" || s == "]" || s == "}" || s == "++" || s == "--");
                 if s == "}" {
                     self.regex_ok = true;
+                }
+                if s == "(" {
+                    self.parens.push(keyword);
+                    t.paren = PAREN_OPEN;
+                } else if s == ")" {
+                    let n = self.parens.len();
+                    if n == 0 {
+                        t.paren = PAREN_CLOSE_EXTRA;
+                    } else if self.parens[n - 1] {
+                        // `if (…) /re/.test(s)`: the condition's `)`
+                        self.regex_ok = true;
+                        t.paren = PAREN_CLOSE_KEYWORD;
+                        self.parens.pop();
+                    } else {
+                        t.paren = PAREN_CLOSE;
+                        self.parens.pop();
+                    }
                 }
                 t.text = p;
                 return t;

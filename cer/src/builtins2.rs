@@ -506,6 +506,9 @@ impl Vm {
                         }
                     } else {
                         self.objs[o as usize].elems[i as usize] = a0.clone();
+                        if (i as usize) < self.objs[o as usize].elems2.len() {
+                            self.objs[o as usize].elems2[i as usize] = Val::Bool(false);
+                        }
                     }
                     i += 1;
                 }

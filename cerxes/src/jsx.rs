@@ -173,7 +173,8 @@ impl Parser {
 
     /// From tokens to the script inside `{`; the lexer is past the `{`.
     fn jsx_enter(&mut self) {
-        self.toks.truncate(self.pos as usize);
+        let p = self.pos;
+        self.drop_toks(p);
         self.lx.regex_ok = true;
     }
 
@@ -186,7 +187,8 @@ impl Parser {
         }
         let start = self.tk(self.pos).start;
         let line = self.tk(self.pos).line;
-        self.toks.truncate(self.pos as usize);
+        let p = self.pos;
+        self.drop_toks(p);
         self.splits.clear();
         self.lx.pos = start + 1;
         self.lx.line = line;

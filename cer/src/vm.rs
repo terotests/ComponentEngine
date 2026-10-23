@@ -733,7 +733,7 @@ impl Vm {
 
     // ---- property access
 
-    fn function_prototype(&mut self, f: int) -> Val {
+    pub fn function_prototype(&mut self, f: int) -> Val {
         // made on first use; a generator's instances inherit from it and it
         // from %GeneratorPrototype%, with no `constructor`
         let pi = self.objs[f as usize].func;
@@ -752,6 +752,15 @@ impl Vm {
         self.objs[f as usize].add(A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_FIXED);
         self.objs[f as usize].has_proto_obj = true;
         Val::Obj(p)
+    }
+
+    /// A function with a `prototype` of its own that is not made yet.
+    pub fn lazy_prototype(&self, f: int) -> bool {
+        if self.objs[f as usize].has_proto_obj {
+            return false;
+        }
+        let p = &self.protos[self.objs[f as usize].func as usize];
+        p.generator || p.constructible()
     }
 
     /// A function's own `length`, `name`, `prototype` when not stored.
@@ -1010,8 +1019,11 @@ impl Vm {
             self.set_length(o, n);
             return;
         }
+        // a function's `prototype` not made yet is still its own property:
+        // the chain (a class it inherits from) has no say
+        let own_prototype = class == C_FUNCTION && atom == A_PROTOTYPE && self.lazy_prototype(o);
         // __proto__: Object.prototype's accessor, when the chain has it
-        if (self.any_setter || atom == A_PROTO) && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
+        if !own_prototype && (self.any_setter || atom == A_PROTO) && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
             return;
         }
         if !self.objs[o as usize].extensible {
@@ -2491,6 +2503,10 @@ impl Vm {
                                 let i = *n as int;
                                 if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n && ob.pos != 2 {
                                     ob.elems[i as usize] = val.clone();
+                                    if (i as usize) < ob.elems2.len() {
+                                        // the element is no longer a hole
+                                        ob.elems2[i as usize] = Val::Bool(false);
+                                    }
                                     done = true;
                                 } else if i >= 0 && (i as usize) == ob.elems.len() && (i as double) == *n && ob.extensible {
                                     ob.elems.push(val.clone());
@@ -2659,7 +2675,15 @@ impl Vm {
     /// none.
     pub fn is_hole(&self, o: int, i: int) -> bool {
         let ob = &self.objs[o as usize];
-        ob.class == C_ARRAY && i >= 0 && (i as usize) < ob.elems2.len() && matches!(ob.elems2[i as usize], Val::Bool(true))
+        if ob.class != C_ARRAY || i < 0 || (i as usize) >= ob.elems2.len() {
+            return false;
+        }
+        // a binding, not matches!(.., Val::Bool(true)): rgrc's JS matches the
+        // variant only and would count every marker as a hole
+        match &ob.elems2[i as usize] {
+            Val::Bool(b) => *b,
+            _ => false,
+        }
     }
 
     pub fn mark_hole(&mut self, o: int, i: int) {
@@ -3062,7 +3086,7 @@ impl Vm {
                 let slot = self.objs[g as usize].find(op.a);
                 if slot >= 0 && self.objs[g as usize].attrs[slot as usize] == 0 {
                     self.objs[g as usize].vals[slot as usize] = v;
-                } else if slot < 0 && self.strict_now() && !self.has_atom(g, op.a) {
+                } else if slot < 0 && op.b == 0 && self.strict_now() && !self.has_atom(g, op.a) {
                     // strict code does not create globals by assignment
                     let n = self.atom_str(op.a);
                     self.throw_ref(format!("{} is not defined", n).as_str());

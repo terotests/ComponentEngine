@@ -211,6 +211,9 @@ impl Lexer {
         let n = self.src.len() as int;
         // what the previous token allows a `/` to be
         let mut regex_ok = true;
+        // the open parentheses: whether each follows `if`, `while`, `for` or
+        // `with`, after whose `)` a `/` starts a regular expression
+        let mut parens: Vec<bool> = Vec::new();
         let mut start: int = 0;
         loop {
             // the token read last ends here
@@ -300,6 +303,21 @@ impl Lexer {
                     regex_ok = !(s == ")" || s == "]" || s == "}" || s == "++" || s == "--");
                     if s == "}" {
                         regex_ok = true;
+                    }
+                    if s == "(" {
+                        let k = toks.len();
+                        let mut keyword = false;
+                        if k > 0 && toks[k - 1].kind == T_IDENT && !toks[k - 1].escaped {
+                            let w = toks[k - 1].text.as_str();
+                            keyword = w == "if" || w == "while" || w == "for" || w == "with";
+                        }
+                        parens.push(keyword);
+                    } else if s == ")" && !parens.is_empty() {
+                        // `if (…) /re/.test(s)`: the condition's `)`
+                        if parens[parens.len() - 1] {
+                            regex_ok = true;
+                        }
+                        parens.pop();
                     }
                     toks.push(t);
                     found = true;
