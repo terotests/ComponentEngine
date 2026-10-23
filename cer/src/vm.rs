@@ -2503,6 +2503,10 @@ impl Vm {
                                 let i = *n as int;
                                 if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n && ob.pos != 2 {
                                     ob.elems[i as usize] = val.clone();
+                                    if (i as usize) < ob.elems2.len() {
+                                        // the element is no longer a hole
+                                        ob.elems2[i as usize] = Val::Bool(false);
+                                    }
                                     done = true;
                                 } else if i >= 0 && (i as usize) == ob.elems.len() && (i as double) == *n && ob.extensible {
                                     ob.elems.push(val.clone());
