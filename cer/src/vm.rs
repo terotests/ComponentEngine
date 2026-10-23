@@ -2675,7 +2675,15 @@ impl Vm {
     /// none.
     pub fn is_hole(&self, o: int, i: int) -> bool {
         let ob = &self.objs[o as usize];
-        ob.class == C_ARRAY && i >= 0 && (i as usize) < ob.elems2.len() && matches!(ob.elems2[i as usize], Val::Bool(true))
+        if ob.class != C_ARRAY || i < 0 || (i as usize) >= ob.elems2.len() {
+            return false;
+        }
+        // a binding, not matches!(.., Val::Bool(true)): rgrc's JS matches the
+        // variant only and would count every marker as a hole
+        match &ob.elems2[i as usize] {
+            Val::Bool(b) => *b,
+            _ => false,
+        }
     }
 
     pub fn mark_hole(&mut self, o: int, i: int) {
