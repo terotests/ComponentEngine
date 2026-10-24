@@ -711,6 +711,54 @@ impl Lexer {
         true
     }
 
+    /// A substitution's source up to its `}`, braces and string literals
+    /// balanced; the current position is after `${`.
+    fn substitution_chars(&mut self) -> String {
+        let n = self.src.len() as int;
+        let mut depth = 1;
+        let mut e = String::new();
+        while self.pos < n {
+            let d = self.cur();
+            if d == '{' {
+                depth += 1;
+            } else if d == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    self.pos += 1;
+                    break;
+                }
+            } else if d == '"' || d == '\'' || d == '`' {
+                // copy a nested literal whole
+                e.push(d);
+                self.pos += 1;
+                let mut inner = 0;
+                while self.pos < n {
+                    let x = self.cur();
+                    e.push(x);
+                    self.pos += 1;
+                    if x == '\\' {
+                        e.push(self.cur());
+                        self.pos += 1;
+                        continue;
+                    }
+                    if d == '`' && x == '$' && self.cur() == '{' {
+                        inner += 1;
+                    } else if d == '`' && x == '}' && inner > 0 {
+                        inner -= 1;
+                    } else if x == d && inner == 0 {
+                        break;
+                    }
+                }
+                continue;
+            } else if d == '\n' {
+                self.line += 1;
+            }
+            e.push(d);
+            self.pos += 1;
+        }
+        e
+    }
+
     fn read_template(&mut self, t: &mut Tok) {
         self.pos += 1;
         let n = self.src.len() as int;
@@ -744,47 +792,57 @@ impl Lexer {
                 t.cooked_ok.push(ok);
                 ok = true;
                 cur = String::new();
-                // the substitution's source, braces and strings balanced
-                let mut depth = 1;
-                let mut e = String::new();
-                while self.pos < n {
-                    let d = self.cur();
-                    if d == '{' {
-                        depth += 1;
-                    } else if d == '}' {
-                        depth -= 1;
-                        if depth == 0 {
-                            self.pos += 1;
-                            break;
-                        }
-                    } else if d == '"' || d == '\'' || d == '`' {
-                        // copy a nested literal whole
-                        e.push(d);
-                        self.pos += 1;
-                        let mut inner = 0;
-                        while self.pos < n {
-                            let x = self.cur();
-                            e.push(x);
-                            self.pos += 1;
-                            if x == '\\' {
-                                e.push(self.cur());
-                                self.pos += 1;
-                                continue;
-                            }
-                            if d == '`' && x == '$' && self.cur() == '{' {
-                                inner += 1;
-                            } else if d == '`' && x == '}' && inner > 0 {
-                                inner -= 1;
-                            } else if x == d && inner == 0 {
+                // the substitution's source: its tokens up to the `}` that
+                // closes it, so that a string, regular expression, comment
+                // or template inside it may hold any brace
+                let from = self.pos;
+                let from_line = self.line;
+                let saved_parens = self.parens.clone();
+                let saved_regex = self.regex_ok;
+                let saved_kw = self.paren_keyword;
+                self.regex_ok = true;
+                self.paren_keyword = false;
+                let mut depth = 0;
+                let mut to = n;
+                loop {
+                    let tok = self.next_token();
+                    if tok.kind == T_ERROR {
+                        self.error = tok.text.clone();
+                        break;
+                    }
+                    if tok.kind == T_EOF {
+                        self.fail("unterminated template");
+                        break;
+                    }
+                    if tok.kind == T_PUNCT {
+                        if tok.text.as_str() == "{" || tok.text.as_str() == "${" {
+                            depth += 1;
+                        } else if tok.text.as_str() == "}" {
+                            if depth == 0 {
+                                to = tok.start;
                                 break;
                             }
+                            depth -= 1;
                         }
-                        continue;
-                    } else if d == '\n' {
-                        self.line += 1;
                     }
-                    e.push(d);
-                    self.pos += 1;
+                }
+                self.regex_ok = saved_regex;
+                self.paren_keyword = saved_kw;
+                self.parens = saved_parens;
+                let mut e = String::new();
+                if !self.error.is_empty() {
+                    // not JavaScript tokens (JSX in the substitution): the
+                    // braces and quotes balanced instead
+                    self.error = String::new();
+                    self.pos = from;
+                    self.line = from_line;
+                    e = self.substitution_chars();
+                } else {
+                    let mut k = from;
+                    while k < to {
+                        e.push(self.src[k as usize]);
+                        k += 1;
+                    }
                 }
                 t.exprs.push(e);
                 start = self.pos;

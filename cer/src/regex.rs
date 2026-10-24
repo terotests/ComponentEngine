@@ -79,6 +79,10 @@ pub struct Regex {
     pub dot_all: bool,
     pub unicode: bool,
     pub sticky: bool,
+    /// `d`: exec reports where each group matched (`indices`)
+    pub has_indices: bool,
+    /// `v`
+    pub unicode_sets: bool,
     pub error: String,
     nregs: int,
     /// the first unit every match starts with, -1 when not one
@@ -1178,6 +1182,8 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
         dot_all: false,
         unicode: false,
         sticky: false,
+        has_indices: false,
+        unicode_sets: false,
         error: String::new(),
         nregs: 0,
         first: -1,
@@ -1190,7 +1196,7 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
             's' => re.dot_all,
             'u' => re.unicode,
             'y' => re.sticky,
-            'd' => false,
+            'd' => re.has_indices,
             'v' => re.unicode,
             _ => {
                 re.error = format!("Invalid regular expression flags '{}'", flags);
@@ -1207,8 +1213,12 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
             'm' => re.multiline = true,
             's' => re.dot_all = true,
             'u' => re.unicode = true,
-            'v' => re.unicode = true,
+            'v' => {
+                re.unicode = true;
+                re.unicode_sets = true;
+            }
             'y' => re.sticky = true,
+            'd' => re.has_indices = true,
             _ => {}
         }
     }

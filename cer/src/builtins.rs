@@ -928,7 +928,7 @@ impl Vm {
         self.objs[o as usize].prim = string_val(s.clone());
         self.objs[o as usize].add(A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
         let re = &self.regexes[idx as usize];
-        let (g, ic, m, sa, u, y) = (re.global, re.ignore_case, re.multiline, re.dot_all, re.unicode, re.sticky);
+        let (g, ic, m, sa, u, y) = (re.global, re.ignore_case, re.multiline, re.dot_all, re.unicode && !re.unicode_sets, re.sticky);
         let a_source = self.intern("source");
         let a_global = self.intern("global");
         let a_ic = self.intern("ignoreCase");
@@ -950,6 +950,9 @@ impl Vm {
     pub fn regexp_flags(&self, o: int) -> String {
         let re = &self.regexes[self.objs[o as usize].func as usize];
         let mut f = String::new();
+        if re.has_indices {
+            f.push('d');
+        }
         if re.global {
             f.push('g');
         }
@@ -962,8 +965,11 @@ impl Vm {
         if re.dot_all {
             f.push('s');
         }
-        if re.unicode {
+        if re.unicode && !re.unicode_sets {
             f.push('u');
+        }
+        if re.unicode_sets {
+            f.push('v');
         }
         if re.sticky {
             f.push('y');
@@ -974,9 +980,9 @@ impl Vm {
     /// RegExp.prototype.exec: the match array or null; updates lastIndex.
     pub fn regexp_exec(&mut self, ro: int, s: &Rc<String>) -> Val {
         let idx = self.objs[ro as usize].func;
-        let (global, sticky, ngroups) = {
+        let (global, sticky, ngroups, has_indices) = {
             let re = &self.regexes[idx as usize];
-            (re.global, re.sticky, re.ngroups)
+            (re.global, re.sticky, re.ngroups, re.has_indices)
         };
         let units = jsstr::units(s.as_str());
         let mut start: int = 0;
@@ -1027,6 +1033,38 @@ impl Vm {
                 i += 1;
             }
             self.objs[arr as usize].add(A_GROUPS, Val::Obj(go), 0);
+        }
+        if has_indices {
+            // `d`: [start, end] of each group, and of each named group
+            let mut pairs: Vec<Val> = Vec::new();
+            let mut k: int = 0;
+            while k <= ngroups {
+                let a = caps[(k * 2) as usize];
+                let b = caps[(k * 2 + 1) as usize];
+                if a < 0 || b < 0 {
+                    pairs.push(Val::Undef);
+                } else {
+                    let pa = self.new_array(vec![Val::Num(a as double), Val::Num(b as double)]);
+                    pairs.push(Val::Obj(pa));
+                }
+                k += 1;
+            }
+            let ind = self.new_array(pairs.clone());
+            if names.is_empty() {
+                self.objs[ind as usize].add(A_GROUPS, Val::Undef, 0);
+            } else {
+                let gi = self.alloc(C_OBJECT, -1);
+                let mut i: usize = 0;
+                while i < names.len() {
+                    let a = self.intern(names[i].as_str());
+                    let v = pairs[nidx[i] as usize].clone();
+                    self.objs[gi as usize].add(a, v, 0);
+                    i += 1;
+                }
+                self.objs[ind as usize].add(A_GROUPS, Val::Obj(gi), 0);
+            }
+            let a_ind = self.intern("indices");
+            self.objs[arr as usize].add(a_ind, Val::Obj(ind), 0);
         }
         Val::Obj(arr)
     }
@@ -2288,27 +2326,16 @@ impl Vm {
         let n = cs.len();
         let mut i: usize = 0;
         let mut nums: Vec<double> = vec![1970.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
-        let read = |i: &mut usize, count: usize| -> int {
-            let mut v: int = 0;
-            let mut k = 0;
-            while k < count {
-                if *i >= n || cs[*i] < '0' || cs[*i] > '9' {
-                    return -1;
-                }
-                v = v * 10 + ((cs[*i] as int) - 48);
-                *i += 1;
-                k += 1;
-            }
-            v
-        };
         let mut sign: int = 1;
         let y: int;
         if i < n && (cs[i] == '+' || cs[i] == '-') {
             sign = if cs[i] == '-' { -1 } else { 1 };
             i += 1;
-            y = read(&mut i, 6);
+            y = date_digits(&cs, i, 6);
+            i += 6;
         } else {
-            y = read(&mut i, 4);
+            y = date_digits(&cs, i, 4);
+            i += 4;
         }
         if y < 0 {
             return nan();
@@ -2316,14 +2343,16 @@ impl Vm {
         nums[0] = (sign * y) as double;
         if i < n && cs[i] == '-' {
             i += 1;
-            let m = read(&mut i, 2);
+            let m = date_digits(&cs, i, 2);
+            i += 2;
             if m < 1 || m > 12 {
                 return nan();
             }
             nums[1] = (m - 1) as double;
             if i < n && cs[i] == '-' {
                 i += 1;
-                let d = read(&mut i, 2);
+                let d = date_digits(&cs, i, 2);
+                i += 2;
                 if d < 1 || d > 31 {
                     return nan();
                 }
@@ -2333,12 +2362,14 @@ impl Vm {
         let mut offset: double = 0.0;
         if i < n && (cs[i] == 'T' || cs[i] == ' ') {
             i += 1;
-            let h = read(&mut i, 2);
+            let h = date_digits(&cs, i, 2);
+            i += 2;
             if h < 0 || i >= n || cs[i] != ':' {
                 return nan();
             }
             i += 1;
-            let mi = read(&mut i, 2);
+            let mi = date_digits(&cs, i, 2);
+            i += 2;
             if mi < 0 {
                 return nan();
             }
@@ -2346,7 +2377,8 @@ impl Vm {
             nums[4] = mi as double;
             if i < n && cs[i] == ':' {
                 i += 1;
-                let sec = read(&mut i, 2);
+                let sec = date_digits(&cs, i, 2);
+                i += 2;
                 if sec < 0 {
                     return nan();
                 }
@@ -2368,11 +2400,13 @@ impl Vm {
             } else if i < n && (cs[i] == '+' || cs[i] == '-') {
                 let sg: double = if cs[i] == '-' { -1.0 } else { 1.0 };
                 i += 1;
-                let oh = read(&mut i, 2);
+                let oh = date_digits(&cs, i, 2);
+                i += 2;
                 if i < n && cs[i] == ':' {
                     i += 1;
                 }
-                let om = read(&mut i, 2);
+                let om = date_digits(&cs, i, 2);
+                i += 2;
                 if oh < 0 || om < 0 {
                     return nan();
                 }
@@ -2707,6 +2741,7 @@ impl Vm {
                     self.objs[e as usize].add(A_CAUSE, c, P_HIDDEN);
                 }
             }
+            self.add_stack(e);
             return Val::Obj(e);
         }
         if id >= NF_DP_GET && id < NF_DP_GET + 20 {
@@ -3819,4 +3854,20 @@ fn hexval(c: char) -> int {
 
 pub fn regex_cache_new() -> HashMap<String, int> {
     HashMap::new()
+}
+
+/// `count` digits at `i` of a date string as a number, -1 when they are not
+/// all there (Date.parse; no closure, which the Go build did not write back)
+fn date_digits(cs: &Vec<char>, i: usize, count: usize) -> int {
+    let mut v: int = 0;
+    let mut k: usize = 0;
+    while k < count {
+        let j = i + k;
+        if j >= cs.len() || cs[j] < '0' || cs[j] > '9' {
+            return -1;
+        }
+        v = v * 10 + ((cs[j] as int) - 48);
+        k += 1;
+    }
+    v
 }

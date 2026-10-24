@@ -172,6 +172,26 @@ pub struct Vm {
     pub jobs: Vec<Val>,
     pub regexes: Vec<crate::regex::Regex>,
     pub regex_cache: HashMap<String, int>,
+    /// the last long string indexed (str_at, str_len): a loop over a
+    /// string's units does not scan it again for every unit
+    pub sc_s: Rc<String>,
+    pub sc_ascii: bool,
+    pub sc_len: int,
+    pub sc_units: Vec<int>,
+    /// String.prototype.normalize's tables, decoded on first use
+    pub norm: crate::normalize::Norm,
+}
+
+/// The same string: the same one first (Rust's Rc, Go's string compare
+/// sees the same bytes), then by content.
+fn same_str(a: &Rc<String>, b: &Rc<String>) -> bool {
+    let r: bool = ranger::native!(
+        rust: { Rc::ptr_eq(a, b) || a.as_str() == b.as_str() },
+        es6: "({a} === {b})",
+        go: "({a} == {b})",
+        cpp: "({a} == {b})",
+    );
+    r
 }
 
 pub fn is_obj(v: &Val) -> bool {
@@ -295,11 +315,107 @@ impl Vm {
             jobs: Vec::new(),
             regexes: Vec::new(),
             regex_cache: HashMap::new(),
+            sc_s: Rc::new(String::new()),
+            sc_ascii: true,
+            sc_len: 0,
+            sc_units: Vec::new(),
+            norm: crate::normalize::Norm::new(),
         };
         for n in first_atoms() {
             vm.intern(n.as_str());
         }
         vm
+    }
+
+    // ---- string units (a short string is scanned each time)
+
+    fn str_cache(&mut self, s: &Rc<String>) {
+        if self.sc_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.sc_s, s) {
+            return;
+        }
+        self.sc_s = s.clone();
+        self.sc_ascii = jsstr::is_ascii(s.as_str());
+        if self.sc_ascii {
+            self.sc_units = Vec::new();
+            self.sc_len = s.as_bytes().len() as int;
+        } else {
+            self.sc_units = jsstr::units(s.as_str());
+            self.sc_len = self.sc_units.len() as int;
+        }
+    }
+
+    /// The UTF-16 unit at `i`, -1 out of range.
+    pub fn str_at(&mut self, s: &Rc<String>, i: int) -> int {
+        if s.as_bytes().len() < 256 {
+            return jsstr::at(s.as_str(), i);
+        }
+        self.str_cache(s);
+        if i < 0 || i >= self.sc_len {
+            return -1;
+        }
+        if self.sc_ascii {
+            return s.as_bytes()[i as usize] as int;
+        }
+        self.sc_units[i as usize]
+    }
+
+    /// The length in UTF-16 units.
+    pub fn str_len(&mut self, s: &Rc<String>) -> int {
+        if s.as_bytes().len() < 256 {
+            return jsstr::len(s.as_str());
+        }
+        self.str_cache(s);
+        self.sc_len
+    }
+
+    /// Units [a, b) clamped to the string.
+    pub fn str_slice(&mut self, s: &Rc<String>, a: int, b: int) -> String {
+        if s.as_bytes().len() < 256 || a >= b {
+            return jsstr::slice(s.as_str(), a, b);
+        }
+        self.str_cache(s);
+        let n = self.sc_len;
+        let x = if a < 0 { 0 } else if a > n { n } else { a };
+        let y = if b < 0 { 0 } else if b > n { n } else { b };
+        if x >= y {
+            return String::new();
+        }
+        if self.sc_ascii {
+            return jsstr::byte_slice(s.as_str(), x, y);
+        }
+        jsstr::from_units(&self.sc_units, x, y)
+    }
+
+    /// The first `pat` at or after `from`, -1 when none.
+    pub fn str_index_of(&mut self, s: &Rc<String>, pat: &str, from: int) -> int {
+        if s.as_bytes().len() < 256 {
+            return jsstr::index_of(s.as_str(), pat, from);
+        }
+        self.str_cache(s);
+        if self.sc_ascii && jsstr::is_ascii(pat) {
+            return jsstr::byte_index_of(s.as_str(), pat, from);
+        }
+        if self.sc_ascii {
+            return -1;
+        }
+        let p = jsstr::units(pat);
+        let n = self.sc_len;
+        let m = p.len() as int;
+        let mut i = if from < 0 { 0 } else { from };
+        if m == 0 {
+            return if i > n { n } else { i };
+        }
+        while i + m <= n {
+            let mut k: int = 0;
+            while k < m && self.sc_units[(i + k) as usize] == p[k as usize] {
+                k += 1;
+            }
+            if k == m {
+                return i;
+            }
+            i += 1;
+        }
+        -1
     }
 
     pub fn intern(&mut self, s: &str) -> int {
@@ -356,7 +472,45 @@ impl Vm {
         if !msg.is_empty() {
             self.objs[e as usize].add(A_MESSAGE, str_val(msg), P_HIDDEN);
         }
+        self.add_stack(e);
         e
+    }
+
+    /// `stack` of a new error: its name and message, then a line for each
+    /// function running, innermost first (as V8 writes it, without places)
+    pub fn add_stack(&mut self, e: int) {
+        let ev = Val::Obj(e);
+        let nv = self.get_obj(e, A_NAME, &ev);
+        let mv = self.get_obj(e, A_MESSAGE, &ev);
+        if self.throwing {
+            return;
+        }
+        let name = match &nv {
+            Val::Str(s) => s.as_str().to_string(),
+            _ => String::from("Error"),
+        };
+        let msg = match &mv {
+            Val::Str(s) => s.as_str().to_string(),
+            _ => String::new(),
+        };
+        let mut text = if msg.is_empty() { name } else if name.is_empty() { msg } else { format!("{}: {}", name, msg) };
+        let mut k = self.frames.len() as int - 1;
+        let mut lines = 0;
+        while k >= 0 && lines < 10 {
+            let p = self.frames[k as usize].proto;
+            if p >= self.prelude_protos {
+                let fname = self.protos[p as usize].name.clone();
+                if fname.is_empty() {
+                    text.push_str("\n    at <anonymous>");
+                } else {
+                    text.push_str("\n    at ");
+                    text.push_str(fname.as_str());
+                }
+                lines += 1;
+            }
+            k -= 1;
+        }
+        self.objs[e as usize].add(A_STACK, string_val(text), P_HIDDEN);
     }
 
     pub fn throw_val(&mut self, v: Val) {
@@ -833,8 +987,8 @@ impl Vm {
                     }
                 }
                 if class == C_STRING && atom == A_LENGTH {
-                    if let Val::Str(s) = &self.objs[cur as usize].prim {
-                        return Val::Num(jsstr::len(s.as_str()) as double);
+                    if let Val::Str(s) = self.objs[cur as usize].prim.clone() {
+                        return Val::Num(self.str_len(&s) as double);
                     }
                 }
             }
@@ -852,7 +1006,7 @@ impl Vm {
             Val::Obj(o) => self.get_obj(*o, atom, v),
             Val::Str(s) => {
                 if atom == A_LENGTH {
-                    return Val::Num(jsstr::len(s.as_str()) as double);
+                    return Val::Num(self.str_len(s) as double);
                 }
                 let p = self.string_proto;
                 self.get_obj(p, atom, v)
@@ -887,22 +1041,23 @@ impl Vm {
                         return Val::Undef;
                     }
                 }
-                if ob.class == C_STRING {
-                    if let Val::Str(s) = &ob.prim {
-                        let c = jsstr::at(s.as_str(), i);
+                let class = ob.class;
+                if class == C_STRING {
+                    if let Val::Str(s) = ob.prim.clone() {
+                        let c = self.str_at(&s, i);
                         if c >= 0 {
                             return string_val(jsstr::from_unit(c));
                         }
                     }
                 }
-                if ob.class == C_TYPED {
+                if class == C_TYPED {
                     return self.ta_get(*o, i);
                 }
                 let a = self.index_atom(i);
                 self.get_obj(*o, a, v)
             }
             Val::Str(s) => {
-                let c = jsstr::at(s.as_str(), i);
+                let c = self.str_at(s, i);
                 if c >= 0 {
                     return string_val(jsstr::from_unit(c));
                 }
@@ -1842,6 +1997,10 @@ impl Vm {
             }
             let arr = self.new_array(items);
             self.stack.truncate((bp + rest) as usize);
+            // fewer arguments than the parameters before the rest one
+            while (self.stack.len() as int) < bp + rest {
+                self.stack.push(Val::Undef);
+            }
             self.stack.push(Val::Obj(arr));
         } else if argc > nparams {
             self.stack.truncate((bp + nparams) as usize);
