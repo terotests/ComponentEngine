@@ -10,8 +10,8 @@
 //! added there (`tests/cases.txt` runs every case through a unit's text).
 //!
 //! The text is ASCII: each number a little-endian run of 5-bit digits, the
-//! last one in '0'..'O', the others in 'P'..'o', and a string its length
-//! and code points.
+//! last one in '0'..'O', the others in 'P'..'o'; a string is its length
+//! and its text when that is printable ASCII, else its code points.
 
 use ranger::prelude::*;
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use crate::vm::*;
 
 /// Bumped when the text, the ops or what they mean change: older texts
 /// are then not read.
-pub const UNIT_FORMAT: int = 1;
+pub const UNIT_FORMAT: int = 2;
 
 pub struct Unit {
     pub atom_names: Vec<String>,
@@ -128,7 +128,7 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
 
 // ---- the text
 
-fn put_num(out: &mut String, v: int) {
+pub fn put_num(out: &mut String, v: int) {
     let mut z: int = if v >= 0 { v * 2 } else { -v * 2 - 1 };
     loop {
         let d = z % 32;
@@ -141,26 +141,41 @@ fn put_num(out: &mut String, v: int) {
     }
 }
 
-fn char_of(c: int) -> char {
+pub fn char_of(c: int) -> char {
     match char::from_u32(c as u32) {
         Some(ch) => ch,
         None => '0',
     }
 }
 
-fn put_str(out: &mut String, s: &str) {
+pub fn put_str(out: &mut String, s: &str) {
+    // printable ASCII as it is (the text stays ASCII, so a reader can cut
+    // it by position), anything else as code points
+    let mut plain = true;
+    for c in s.chars() {
+        let k = c as int;
+        if k < 32 || k > 126 {
+            plain = false;
+            break;
+        }
+    }
     let n = s.chars().count() as int;
-    put_num(out, n);
+    if plain {
+        put_num(out, n * 2 + 1);
+        out.push_str(s);
+        return;
+    }
+    put_num(out, n * 2);
     for c in s.chars() {
         put_num(out, c as int);
     }
 }
 
-fn put_bool(out: &mut String, b: bool) {
+pub fn put_bool(out: &mut String, b: bool) {
     put_num(out, if b { 1 } else { 0 });
 }
 
-fn put_double(out: &mut String, x: double) {
+pub fn put_double(out: &mut String, x: double) {
     if x == 0.0 && 1.0 / x < 0.0 {
         put_str(out, "-0");
     } else {
@@ -244,15 +259,19 @@ pub fn encode(u: &Unit, input: &str) -> String {
     out
 }
 
-struct Reader {
-    s: String,
-    pos: int,
-    len: int,
-    bad: bool,
+pub struct Reader {
+    pub s: String,
+    pub pos: int,
+    pub len: int,
+    pub bad: bool,
 }
 
 impl Reader {
-    fn num(&mut self) -> int {
+    pub fn new(text: &str) -> Reader {
+        Reader { s: String::from(text), pos: 0, len: text.as_bytes().len() as int, bad: false }
+    }
+
+    pub fn num(&mut self) -> int {
         let mut v: int = 0;
         let mut scale: int = 1;
         loop {
@@ -281,8 +300,18 @@ impl Reader {
         }
     }
 
-    fn string(&mut self) -> String {
-        let n = self.num();
+    pub fn string(&mut self) -> String {
+        let m = self.num();
+        let n = m / 2;
+        if m % 2 == 1 {
+            if n < 0 || self.pos + n > self.len {
+                self.bad = true;
+                return String::new();
+            }
+            let out = String::from(&self.s[(self.pos as usize)..((self.pos + n) as usize)]);
+            self.pos += n;
+            return out;
+        }
         let mut out = String::new();
         let mut i: int = 0;
         while i < n && !self.bad {
@@ -293,7 +322,7 @@ impl Reader {
         out
     }
 
-    fn flag(&mut self) -> bool {
+    pub fn flag(&mut self) -> bool {
         self.num() != 0
     }
 }
