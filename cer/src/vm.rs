@@ -2045,13 +2045,11 @@ impl Vm {
         let mut env = self.objs[fo as usize].env;
         if env_size > 0 {
             let e = self.alloc(C_ENV, env);
-            let mut slots: Vec<Val> = Vec::new();
             let mut i = 0;
             while i < env_size {
-                slots.push(Val::Undef);
+                self.objs[e as usize].elems.push(Val::Undef);
                 i += 1;
             }
-            self.objs[e as usize].elems = slots;
             env = e;
         }
         self.frames.push(Frame {
@@ -3954,13 +3952,11 @@ impl Vm {
             OP_PUSH_ENV => {
                 let parent = self.frames[fi].env;
                 let e = self.alloc(C_ENV, parent);
-                let mut slots: Vec<Val> = Vec::new();
                 let mut i = 0;
                 while i < op.a {
-                    slots.push(Val::Undef);
+                    self.objs[e as usize].elems.push(Val::Undef);
                     i += 1;
                 }
-                self.objs[e as usize].elems = slots;
                 self.frames[fi].env = e;
             }
             OP_POP_ENV => {
@@ -3970,9 +3966,13 @@ impl Vm {
             OP_COPY_ENV => {
                 let e = self.frames[fi].env;
                 let parent = self.objs[e as usize].proto;
-                let slots = self.objs[e as usize].elems.clone();
                 let n = self.alloc(C_ENV, parent);
-                self.objs[n as usize].elems = slots;
+                let mut i = 0;
+                while i < self.objs[e as usize].elems.len() {
+                    let v = self.objs[e as usize].elems[i].clone();
+                    self.objs[n as usize].elems.push(v);
+                    i += 1;
+                }
                 self.frames[fi].env = n;
             }
             OP_REGEX => {
