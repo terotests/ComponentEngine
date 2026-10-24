@@ -181,11 +181,22 @@ impl JsObj {
     }
 
     pub fn clear(&mut self) {
-        self.keys = Vec::new();
-        self.vals = Vec::new();
-        self.attrs = Vec::new();
-        self.index = HashMap::new();
-        self.elems = Vec::new();
+        // a small object's vectors stay allocated for the next one
+        if self.keys.len() as int <= INDEX_AT {
+            self.keys.truncate(0);
+            self.vals.truncate(0);
+            self.attrs.truncate(0);
+        } else {
+            self.keys = Vec::new();
+            self.vals = Vec::new();
+            self.attrs = Vec::new();
+            self.index = HashMap::new();
+        }
+        if self.elems.len() <= 16 {
+            self.elems.truncate(0);
+        } else {
+            self.elems = Vec::new();
+        }
         self.elems2 = Vec::new();
         self.nums = Vec::new();
         self.prim = Val::Undef;

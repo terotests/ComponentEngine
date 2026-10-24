@@ -8,6 +8,7 @@
 //
 //   node cerxes/bench/cpu.mjs                          # node,rust,go
 //   node cerxes/bench/cpu.mjs --engines=rust,go --build --only=regex,json
+//   node cerxes/bench/cpu.mjs --runs=3                 # the best of three
 //
 // qjs is QuickJS from PATH or the binary QJS names.
 import fs from "fs";
@@ -26,6 +27,7 @@ const rebuild = args.includes("--build");
 const engines = opt("engines", "node,rust,go").split(",");
 const only = opt("only", "");
 const timeout = Number(opt("timeout", "300")) * 1000;
+const runs = Number(opt("runs", "1"));
 
 function run(cmd, argv, cwd) {
   const r = spawnSync(cmd, argv, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
@@ -62,9 +64,17 @@ for (const f of files) {
   const row = [f.slice(0, -3)];
   for (const n of names) {
     const [cmd, argv] = cmds[n](path.join(HERE, "cpu", f));
-    const r = spawnSync(cmd, argv, { encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 });
-    const m = /\t(\d+)\s*$/.exec(r.stdout || "");
-    row.push(m && r.status === 0 ? m[1] : r.signal === "SIGTERM" ? ">" + timeout / 1000 + "s" : "error");
+    let best = null;
+    for (let k = 0; k < runs; k++) {
+      const r = spawnSync(cmd, argv, { encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 });
+      const m = /\t(\d+)\s*$/.exec(r.stdout || "");
+      if (!(m && r.status === 0)) {
+        best = r.signal === "SIGTERM" ? ">" + timeout / 1000 + "s" : "error";
+        break;
+      }
+      best = best === null ? Number(m[1]) : Math.min(best, Number(m[1]));
+    }
+    row.push(String(best));
   }
   console.log(row.join("\t"));
 }

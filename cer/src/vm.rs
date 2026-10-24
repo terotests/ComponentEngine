@@ -2045,13 +2045,11 @@ impl Vm {
         let mut env = self.objs[fo as usize].env;
         if env_size > 0 {
             let e = self.alloc(C_ENV, env);
-            let mut slots: Vec<Val> = Vec::new();
             let mut i = 0;
             while i < env_size {
-                slots.push(Val::Undef);
+                self.objs[e as usize].elems.push(Val::Undef);
                 i += 1;
             }
-            self.objs[e as usize].elems = slots;
             env = e;
         }
         self.frames.push(Frame {
@@ -2369,75 +2367,58 @@ impl Vm {
                         self.stack.pop();
                     }
                     OP_ADD_LOCAL_POP => {
-                        let b = self.pop();
-                        let i = (bp + op.a) as usize;
-                        let mut done = false;
-                        if let Val::Str(bs) = &b {
-                            done = append_in_place(&mut self.stack[i], bs.as_str());
-                        }
-                        if !done {
-                            let a = self.stack[i].clone();
+                        self.frames[fi].pc = pc;
+                        self.add_local_pop(op, bp);
+                    }
+                    // cheap ops, here rather than through step()
+                    OP_UNDEF => self.stack.push(Val::Undef),
+                    OP_NULL => self.stack.push(Val::Null),
+                    OP_TRUE => self.stack.push(Val::Bool(true)),
+                    OP_FALSE => self.stack.push(Val::Bool(false)),
+                    OP_DUP => {
+                        let v = self.stack[self.stack.len() - 1].clone();
+                        self.stack.push(v);
+                    }
+                    OP_GET_ENV => {
+                        let e = self.get_env(op.a);
+                        let v = self.objs[e as usize].elems[op.b as usize].clone();
+                        self.stack.push(v);
+                    }
+                    OP_SET_ENV => {
+                        let e = self.get_env(op.a);
+                        let v = self.stack[self.stack.len() - 1].clone();
+                        self.objs[e as usize].elems[op.b as usize] = v;
+                    }
+                    OP_NOT => {
+                        let v = self.pop();
+                        self.stack.push(Val::Bool(!truthy(&v)));
+                    }
+                    OP_NEW_OBJECT => {
+                        let o = self.new_object();
+                        self.stack.push(Val::Obj(o));
+                    }
+                    OP_GET_GLOBAL | OP_INIT_PROP | OP_TOSTR | OP_TONUM | OP_INC | OP_DEC => {
+                        if !self.quick_op(op) {
                             self.frames[fi].pc = pc;
-                            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
-                            self.stack[i] = r;
+                            let changed = self.step(op, pi, bp, fi, &mut pc);
+                            if self.throwing {
+                                if !self.unwind(base) {
+                                    return;
+                                }
+                                continue 'frames;
+                            }
+                            if changed {
+                                continue 'frames;
+                            }
                         }
                     }
                     OP_ADD_ENV_POP => {
-                        let b = self.pop();
-                        let e = self.get_env(op.a);
-                        let i = op.b as usize;
-                        let mut done = false;
-                        if let Val::Str(bs) = &b {
-                            let n = self.stack.len() - 1;
-                            if same_rc(&self.stack[n], &self.objs[e as usize].elems[i]) {
-                                // the stack's copy goes, so the slot may hold the only one
-                                self.stack.pop();
-                                done = append_in_place(&mut self.objs[e as usize].elems[i], bs.as_str());
-                                if !done {
-                                    let a = self.objs[e as usize].elems[i].clone();
-                                    self.stack.push(a);
-                                }
-                            }
-                        }
-                        if !done {
-                            let a = self.pop();
-                            self.frames[fi].pc = pc;
-                            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
-                            if !self.throwing {
-                                self.objs[e as usize].elems[i] = r;
-                            }
-                        }
+                        self.frames[fi].pc = pc;
+                        self.add_env_pop(op);
                     }
                     OP_ADD_PROP_POP => {
-                        let b = self.pop();
-                        let atom = op.a;
-                        let mut done = false;
-                        if let Val::Str(bs) = &b {
-                            let n = self.stack.len();
-                            let o = obj_of(&self.stack[n - 2]);
-                            if o >= 0 {
-                                let slot = self.objs[o as usize].find(atom);
-                                if slot >= 0 && self.objs[o as usize].attrs[slot as usize] == 0 && same_rc(&self.stack[n - 1], &self.objs[o as usize].vals[slot as usize]) {
-                                    self.stack.pop();
-                                    done = append_in_place(&mut self.objs[o as usize].vals[slot as usize], bs.as_str());
-                                    if done {
-                                        self.stack.pop();
-                                    } else {
-                                        let a = self.objs[o as usize].vals[slot as usize].clone();
-                                        self.stack.push(a);
-                                    }
-                                }
-                            }
-                        }
-                        if !done {
-                            let a = self.pop();
-                            let target = self.pop();
-                            self.frames[fi].pc = pc;
-                            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
-                            if !self.throwing {
-                                self.set(&target, atom, r);
-                            }
-                        }
+                        self.frames[fi].pc = pc;
+                        self.add_prop_pop(op);
                     }
                     OP_INC_LOCAL => {
                         let i = (bp + op.a) as usize;
@@ -3157,6 +3138,118 @@ impl Vm {
         false
     }
 
+    // the bodies of run()'s string-append ops; run() stays small enough for
+    // Go's inliner to keep its per-op copies on the stack
+    #[inline]
+    fn add_local_pop(&mut self, op: Op, bp: int) {
+        let b = self.pop();
+        let i = (bp + op.a) as usize;
+        let mut done = false;
+        if let Val::Str(bs) = &b {
+            done = append_in_place(&mut self.stack[i], bs.as_str());
+        }
+        if !done {
+            let a = self.stack[i].clone();
+            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            self.stack[i] = r;
+        }
+    }
+
+    #[inline]
+    fn add_env_pop(&mut self, op: Op) {
+        let b = self.pop();
+        let e = self.get_env(op.a);
+        let i = op.b as usize;
+        let mut done = false;
+        if let Val::Str(bs) = &b {
+            let n = self.stack.len() - 1;
+            if same_rc(&self.stack[n], &self.objs[e as usize].elems[i]) {
+                // the stack's copy goes, so the slot may hold the only one
+                self.stack.pop();
+                done = append_in_place(&mut self.objs[e as usize].elems[i], bs.as_str());
+                if !done {
+                    let a = self.objs[e as usize].elems[i].clone();
+                    self.stack.push(a);
+                }
+            }
+        }
+        if !done {
+            let a = self.pop();
+            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            if !self.throwing {
+                self.objs[e as usize].elems[i] = r;
+            }
+        }
+    }
+
+    #[inline]
+    fn add_prop_pop(&mut self, op: Op) {
+        let b = self.pop();
+        let atom = op.a;
+        let mut done = false;
+        if let Val::Str(bs) = &b {
+            let n = self.stack.len();
+            let o = obj_of(&self.stack[n - 2]);
+            if o >= 0 {
+                let slot = self.objs[o as usize].find(atom);
+                if slot >= 0 && self.objs[o as usize].attrs[slot as usize] == 0 && same_rc(&self.stack[n - 1], &self.objs[o as usize].vals[slot as usize]) {
+                    self.stack.pop();
+                    done = append_in_place(&mut self.objs[o as usize].vals[slot as usize], bs.as_str());
+                    if done {
+                        self.stack.pop();
+                    } else {
+                        let a = self.objs[o as usize].vals[slot as usize].clone();
+                        self.stack.push(a);
+                    }
+                }
+            }
+        }
+        if !done {
+            let a = self.pop();
+            let target = self.pop();
+            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            if !self.throwing {
+                self.set(&target, atom, r);
+            }
+        }
+    }
+
+    // the common case of a few ops run() would otherwise send to step()
+    #[inline]
+    fn quick_op(&mut self, op: Op) -> bool {
+        let mut done = false;
+        let n = self.stack.len();
+        if op.code == OP_GET_GLOBAL {
+            let g = self.global as usize;
+            let c = op.c;
+            if c >= 0 && (c as usize) < self.objs[g].keys.len() && self.objs[g].keys[c as usize] == op.a && self.objs[g].attrs[c as usize] & P_ACCESSOR == 0 {
+                let v = self.objs[g].vals[c as usize].clone();
+                self.stack.push(v);
+                done = true;
+            }
+        } else if op.code == OP_INIT_PROP {
+            // `key: value` of a literal (b 1 is `__proto__: v`)
+            if op.b != 1 {
+                let v = self.pop();
+                let o = obj_of(&self.stack[n - 2]);
+                self.define(o, op.a, v, 0);
+                done = true;
+            }
+        } else if op.code == OP_TOSTR {
+            if let Val::Str(_) = &self.stack[n - 1] {
+                done = true;
+            }
+        } else if let Val::Num(x) = self.stack[n - 1] {
+            if op.code == OP_TONUM {
+                done = true;
+            } else {
+                self.stack[n - 1] = Val::Num(if op.code == OP_INC { x + 1.0 } else { x - 1.0 });
+                done = true;
+            }
+        }
+        done
+    }
+
     /// The rarer operations; true when the current frame changed.
     fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
         match op.code {
@@ -3859,13 +3952,11 @@ impl Vm {
             OP_PUSH_ENV => {
                 let parent = self.frames[fi].env;
                 let e = self.alloc(C_ENV, parent);
-                let mut slots: Vec<Val> = Vec::new();
                 let mut i = 0;
                 while i < op.a {
-                    slots.push(Val::Undef);
+                    self.objs[e as usize].elems.push(Val::Undef);
                     i += 1;
                 }
-                self.objs[e as usize].elems = slots;
                 self.frames[fi].env = e;
             }
             OP_POP_ENV => {
@@ -3875,9 +3966,13 @@ impl Vm {
             OP_COPY_ENV => {
                 let e = self.frames[fi].env;
                 let parent = self.objs[e as usize].proto;
-                let slots = self.objs[e as usize].elems.clone();
                 let n = self.alloc(C_ENV, parent);
-                self.objs[n as usize].elems = slots;
+                let mut i = 0;
+                while i < self.objs[e as usize].elems.len() {
+                    let v = self.objs[e as usize].elems[i].clone();
+                    self.objs[n as usize].elems.push(v);
+                    i += 1;
+                }
                 self.frames[fi].env = n;
             }
             OP_REGEX => {
