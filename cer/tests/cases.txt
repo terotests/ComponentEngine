@@ -336,3 +336,48 @@ var out=[];
 out.join('|')
 ----
 abcq|abcde|abc|abc1|ab|xy!|abT|6|a|01234|undefinedz|1
+
+==== js Intl: number formats of the carried locales
+[new Intl.NumberFormat('de').format(-1234567.891), new Intl.NumberFormat('fr').format(1234.5), new Intl.NumberFormat('hi').format(123456789.5), new Intl.NumberFormat('es').format(9876.5), new Intl.NumberFormat('es').format(98765.5), new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(1.005), new Intl.NumberFormat('fi').format(NaN), new Intl.NumberFormat('sv').format(-5), new Intl.NumberFormat('en', { maximumSignificantDigits: 3 }).format(123456.7), new Intl.NumberFormat('de', { signDisplay: 'always' }).format(5), new Intl.NumberFormat('en').format(-0), new Intl.NumberFormat('en').format(123456789012345678901234567890n)].join('|').replace(/[\u00a0\u202f]/g, '_')
+----
+-1.234.567,891|1_234,5|12,34,56,789.5|9876,5|98.765,5|1.01|epäluku|−5|123,000|+5|-0|123,456,789,012,345,678,901,234,567,890
+
+==== js Intl: currencies and percents
+[[1234.5, 'nl', 'EUR'], [-1234.5, 'nl', 'EUR'], [1234.5, 'ja', 'JPY'], [1234.5, 'sv', 'SEK'], [1234.5, 'en-GB', 'SEK'], [-1234.5, 'en', 'USD'], [1234.5, 'pl', 'PLN'], [1234.5, 'pt-BR', 'BRL']].map(function (c) { return new Intl.NumberFormat(c[1], { style: 'currency', currency: c[2] }).format(c[0]); }).concat([new Intl.NumberFormat('de', { style: 'percent' }).format(0.256), new Intl.NumberFormat('tr', { style: 'percent' }).format(-0.5)]).join('|').replace(/[\u00a0\u202f]/g, '_')
+----
+€_1.234,50|€_-1.234,50|￥1,235|1_234,50_kr|SEK_1,234.50|-$1,234.50|1234,50_zł|R$_1.234,50|26_%|-%50
+
+==== js Intl: formatToParts
+new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).formatToParts(-1234.5).map(function (p) { return p.type + '=' + p.value; }).join(' ').replace(/[\u00a0\u202f]/g, '_')
+----
+minusSign=- integer=1 group=. integer=234 decimal=, fraction=50 literal=_ currency=€
+
+==== js Intl: plural categories
+var ru = new Intl.PluralRules('ru'), pl = new Intl.PluralRules('pl'), en = new Intl.PluralRules('en', { type: 'ordinal' }); [[1, 2, 5, 11, 21, 22, 1.5].map(function (n) { return ru.select(n); }).join(), [1, 2, 5, 12, 22, 0.5].map(function (n) { return pl.select(n); }).join(), [1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101].map(function (n) { return en.select(n); }).join(), ru.resolvedOptions().pluralCategories.join(), en.resolvedOptions().pluralCategories.join(), new Intl.PluralRules('fr').select(0), new Intl.PluralRules('en', { minimumFractionDigits: 1 }).select(1)].join('|')
+----
+one,few,many,many,one,few,other|one,few,many,many,few,other|one,two,few,other,other,other,other,one,two,few,one|few,many,one,other|few,one,two,other|one|other
+
+==== js Intl: lists
+[['en', 'conjunction'], ['en', 'disjunction'], ['de', 'conjunction'], ['es', 'conjunction'], ['ja', 'conjunction'], ['ko', 'disjunction'], ['fi', 'disjunction']].map(function (c) { return new Intl.ListFormat(c[0], { type: c[1] }).format(['a', 'b', 'c']) + '/' + new Intl.ListFormat(c[0], { type: c[1] }).format(['a', 'b']); }).join('|')
+----
+a, b, and c/a and b|a, b, or c/a or b|a, b und c/a und b|a, b y c/a y b|a、b、c/a、b|a, b 또는 c/a 또는 b|a, b tai c/a tai b
+
+==== js Intl: dates in the locales' own order
+var d = new Date(Date.UTC(2024, 0, 5, 15, 4, 5)), u = { timeZone: 'UTC' }; ['en', 'en-GB', 'de', 'fi', 'hu', 'ja', 'ko', 'th', 'zh', 'pl', 'sv'].map(function (l) { return d.toLocaleDateString(l, u) + ' / ' + d.toLocaleTimeString(l, u); }).join('|').replace(/[\u00a0\u202f]/g, '_')
+----
+1/5/2024 / 3:04:05 PM|05/01/2024 / 15:04:05|5.1.2024 / 15:04:05|5.1.2024 / 15.04.05|2024. 01. 05. / 15:04:05|2024/1/5 / 15:04:05|2024. 1. 5. / 오후 3:04:05|5/1/2567 / 15:04:05|2024/1/5 / 15:04:05|5.01.2024 / 15:04:05|2024-01-05 / 15:04:05
+
+==== js Intl: date styles and fields
+var d = new Date(Date.UTC(1999, 11, 31, 0, 30, 9)); function f(l, o) { o.timeZone = 'UTC'; return new Intl.DateTimeFormat(l, o).format(d); } [f('en', { dateStyle: 'full' }), f('de', { dateStyle: 'long' }), f('fr', { dateStyle: 'medium' }), f('en-GB', { dateStyle: 'short' }), f('fi', { year: 'numeric', month: 'long' }), f('en', { month: 'short', day: 'numeric' }), f('en', { hour: '2-digit', minute: '2-digit' }), f('nl', { weekday: 'long' }), d.toLocaleString('es', { timeZone: 'UTC' })].join('|').replace(/[\u00a0\u202f]/g, '_')
+----
+Friday, December 31, 1999|31. Dezember 1999|31 déc. 1999|31/12/1999|joulukuu 1999|Dec 31|12:30 AM|vrijdag|31/12/1999, 0:30:09
+
+==== js Intl: collation with the locales' tailorings
+var w = ['ö', 'z', 'o', 'å', 'a', 'ä', 'ch', 'h', 'i', 'c', 'č', 'ñ', 'n', 'ı', 'I', 'Eclair', 'éclair', 'ss', 'ß', 'item10', 'item2']; ['en', 'sv', 'fi', 'de', 'cs', 'es', 'pl'].map(function (l) { return w.slice().sort(new Intl.Collator(l).compare).join(' '); }).concat([w.slice().sort(new Intl.Collator('en', { numeric: true }).compare).join(' '), ['a', 'á', 'A', 'b'].map(function (x) { return new Intl.Collator('en', { sensitivity: 'base' }).compare(x, 'a'); }).join(), 'résumé'.localeCompare('resume'), 'a'.localeCompare('B'), 'ä'.localeCompare('z', 'sv'), 'ä'.localeCompare('z', 'de')]).join('|')
+----
+a å ä c č ch Eclair éclair h i I item10 item2 ı n ñ o ö ss ß z|a c č ch Eclair éclair h i I item10 item2 ı n ñ o ss ß z å ä ö|a c č ch Eclair éclair h i I item10 item2 ı n ñ o ss ß z å ä ö|a å ä c č ch Eclair éclair h i I item10 item2 ı n ñ o ö ss ß z|a å ä c č Eclair éclair h ch i I item10 item2 ı n ñ o ö ss ß z|a å ä c č ch Eclair éclair h i I item10 item2 ı n ñ o ö ss ß z|a å ä c č ch Eclair éclair h i I item10 item2 ı n ñ o ö ss ß z|a å ä c č ch Eclair éclair h i I item2 item10 ı n ñ o ö ss ß z|0,0,0,1|1|-1|1|-1
+
+==== js Intl: locales resolved and supported
+[new Intl.NumberFormat('xx').resolvedOptions().locale, new Intl.NumberFormat(['xx', 'de-AT']).resolvedOptions().locale, new Intl.DateTimeFormat('th').resolvedOptions().calendar, Intl.NumberFormat.supportedLocalesOf(['de-AT', 'xx', 'zh-Hant', 'no']).join(), Intl.getCanonicalLocales(['EN-us', 'zh-hant-tw']).join(), typeof Intl, Object.prototype.toString.call(Intl)].join('|')
+----
+en-US|de-AT|buddhist|de-AT,zh-Hant,no|en-US,zh-Hant-TW|object|[object Intl]
