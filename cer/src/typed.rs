@@ -3,11 +3,17 @@
 //! the element reads and writes the interpreter's indexing reaches. The
 //! constructors and methods are in the prelude, over the helpers here.
 //!
-//! An ArrayBuffer (C_ARRAYBUFFER) keeps its bytes as numbers in `elems`;
-//! `pos` has bit 1 when detached and bit 2 when shared. A typed array
-//! (C_TYPED) is a view: `env` the buffer, `pos` the element kind, `func`
-//! the byte offset, `prim` the length. Floats are encoded by arithmetic, so
-//! every Ranger target writes the same bytes.
+//! An ArrayBuffer (C_ARRAYBUFFER) keeps its contents in `nums`; `pos` has
+//! bit 1 when detached and bit 2 when shared. `home` says what `nums`
+//! holds: the bytes (TK_UINT8), the bytes of a buffer nothing has read or
+//! written yet (-1, all zero), or the elements of one kind. The first
+//! typed array over the whole of a new buffer makes it hold its elements
+//! (`new Float64Array(n)`: one double per element, read and written as they
+//! are); anything else that looks at it -- a view of another kind, a
+//! DataView, a copy that is not whole elements -- turns it into bytes for
+//! good. A typed array (C_TYPED) is a view: `env` the buffer, `pos` the
+//! element kind, `func` the byte offset, `prim` the length. Floats are
+//! encoded by arithmetic, so every Ranger target writes the same bytes.
 
 use ranger::prelude::*;
 
@@ -136,8 +142,36 @@ fn round_even(x: double) -> double {
 
 /// Math.fround: `x` rounded to the nearest float32.
 pub fn fround(x: double) -> double {
+    let r: double = ranger::native!(
+        rust: { fround_parts(x) },
+        es6: "Math.fround({x})",
+        go: "float64(float32({x}))",
+        cpp: "(double)(float)({x})",
+    );
+    r
+}
+
+fn fround_parts(x: double) -> double {
     let (sign, exp, mant) = float_parts(x, 8, 23);
     float_from_parts(sign, exp, mant, 8, 23)
+}
+
+/// What a `kind` element reads back after `x` (a number) is written.
+fn element_value(kind: int, x: double) -> double {
+    if kind == TK_FLOAT64 {
+        return x;
+    }
+    if kind == TK_FLOAT32 {
+        return fround(x);
+    }
+    let u = int_bits(kind, x);
+    if kind == TK_INT8 || kind == TK_INT16 || kind == TK_INT32 {
+        let half = two_pow(kind_size(kind) * 8 - 1);
+        if u >= half {
+            return u - 2.0 * half;
+        }
+    }
+    u
 }
 
 fn float_from_parts(sign: int, exp: int, mant: double, ebits: int, mbits: int) -> double {
@@ -185,9 +219,61 @@ fn int_bits(kind: int, x: double) -> double {
     v
 }
 
+/// The bytes of `x` (a number already) as a `kind` element, most
+/// significant first.
+fn encode(kind: int, x: double) -> Vec<int> {
+    let size = kind_size(kind);
+    let mut bytes: Vec<int> = Vec::new();
+    if kind == TK_FLOAT32 {
+        let (sign, exp, mant) = float_parts(x, 8, 23);
+        let m = mant as int;
+        bytes.push((sign << 7) | (exp >> 1));
+        bytes.push(((exp & 1) << 7) | ((m >> 16) & 127));
+        bytes.push((m >> 8) & 255);
+        bytes.push(m & 255);
+    } else if kind == TK_FLOAT64 {
+        let (sign, exp, mant) = float_parts(x, 11, 52);
+        // the 52 mantissa bits: the top 4, then six bytes
+        let hi = floor(mant / two_pow(48));
+        let mut rest = mant - hi * two_pow(48);
+        bytes.push((sign << 7) | (exp >> 4));
+        bytes.push(((exp & 15) << 4) | (hi as int));
+        let mut low: Vec<int> = Vec::new();
+        let mut j = 0;
+        while j < 6 {
+            let q = floor(rest / 256.0);
+            low.push((rest - q * 256.0) as int);
+            rest = q;
+            j += 1;
+        }
+        let mut k = 5;
+        while k >= 0 {
+            bytes.push(low[k as usize]);
+            k -= 1;
+        }
+    } else {
+        let mut u = int_bits(kind, x);
+        let mut low: Vec<int> = Vec::new();
+        let mut j = 0;
+        while j < size {
+            let q = floor(u / 256.0);
+            low.push((u - q * 256.0) as int);
+            u = q;
+            j += 1;
+        }
+        let mut k = size - 1;
+        while k >= 0 {
+            bytes.push(low[k as usize]);
+            k -= 1;
+        }
+    }
+    bytes
+}
+
 impl Vm {
     /// A BigInt64 / BigUint64 element at byte `at`.
     pub fn buf_read_big(&mut self, b: int, at: int, kind: int, little: bool) -> Val {
+        self.buf_to_bytes(b);
         let mut acc = String::from("0");
         let mut k: int = 0;
         while k < 8 {
@@ -204,6 +290,7 @@ impl Vm {
 
     /// Writes a BigInt (converted already) as 64 bits at byte `at`.
     pub fn buf_write_big(&mut self, b: int, at: int, v: &Val, little: bool) {
+        self.buf_to_bytes(b);
         let t = self.big_text(v);
         let mut x = crate::bigint::as_uint_n(64, t.as_str());
         let mut low: Vec<int> = Vec::new();
@@ -219,7 +306,7 @@ impl Vm {
             // low[0] is the least significant byte
             let byte = low[(7 - k) as usize];
             let idx = if little { at + 7 - k } else { at + k };
-            self.objs[b as usize].elems[idx as usize] = Val::Num(byte as double);
+            self.objs[b as usize].nums[idx as usize] = byte as double;
             k += 1;
         }
     }
@@ -239,16 +326,47 @@ impl Vm {
         }
     }
 
-    /// The byte at `i` of buffer `b`.
+    /// The byte at `i` of buffer `b`, which holds bytes.
     fn byte(&self, b: int, i: int) -> int {
-        match self.objs[b as usize].elems[i as usize] {
-            Val::Num(n) => n as int,
-            _ => 0,
+        self.objs[b as usize].nums[i as usize] as int
+    }
+
+    /// The byte length of buffer `b`.
+    pub fn buf_size(&self, b: int) -> int {
+        let mode = self.objs[b as usize].home;
+        let n = self.objs[b as usize].nums.len() as int;
+        if mode < 0 {
+            n
+        } else {
+            n * kind_size(mode)
         }
     }
 
+    /// Makes buffer `b` hold its bytes, if it holds elements.
+    pub fn buf_to_bytes(&mut self, b: int) {
+        let mode = self.objs[b as usize].home;
+        if mode < 0 || mode == TK_UINT8 {
+            self.objs[b as usize].home = TK_UINT8;
+            return;
+        }
+        let size = kind_size(mode);
+        let elems = self.objs[b as usize].nums.clone();
+        let mut bytes: Vec<double> = Vec::with_capacity(elems.len() * (size as usize));
+        for x in elems.iter() {
+            let be = encode(mode, *x);
+            let mut k: int = size - 1;
+            while k >= 0 {
+                bytes.push(be[k as usize] as double);
+                k -= 1;
+            }
+        }
+        self.objs[b as usize].nums = bytes;
+        self.objs[b as usize].home = TK_UINT8;
+    }
+
     /// Reads a `kind` element at byte `at` of buffer `b`.
-    pub fn buf_read(&self, b: int, at: int, kind: int, little: bool) -> double {
+    pub fn buf_read(&mut self, b: int, at: int, kind: int, little: bool) -> double {
+        self.buf_to_bytes(b);
         let size = kind_size(kind);
         // the bytes as an unsigned big-endian number, in pieces for floats
         let mut bytes: Vec<int> = Vec::new();
@@ -290,55 +408,13 @@ impl Vm {
 
     /// Writes `x` (a number already) as a `kind` element at byte `at`.
     pub fn buf_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
+        self.buf_to_bytes(b);
         let size = kind_size(kind);
-        let mut bytes: Vec<int> = Vec::new();
-        if kind == TK_FLOAT32 {
-            let (sign, exp, mant) = float_parts(x, 8, 23);
-            let m = mant as int;
-            bytes.push((sign << 7) | (exp >> 1));
-            bytes.push(((exp & 1) << 7) | ((m >> 16) & 127));
-            bytes.push((m >> 8) & 255);
-            bytes.push(m & 255);
-        } else if kind == TK_FLOAT64 {
-            let (sign, exp, mant) = float_parts(x, 11, 52);
-            // the 52 mantissa bits: the top 4, then six bytes
-            let hi = floor(mant / two_pow(48));
-            let mut rest = mant - hi * two_pow(48);
-            bytes.push((sign << 7) | (exp >> 4));
-            bytes.push(((exp & 15) << 4) | (hi as int));
-            let mut low: Vec<int> = Vec::new();
-            let mut j = 0;
-            while j < 6 {
-                let q = floor(rest / 256.0);
-                low.push((rest - q * 256.0) as int);
-                rest = q;
-                j += 1;
-            }
-            let mut k = 5;
-            while k >= 0 {
-                bytes.push(low[k as usize]);
-                k -= 1;
-            }
-        } else {
-            let mut u = int_bits(kind, x);
-            let mut low: Vec<int> = Vec::new();
-            let mut j = 0;
-            while j < size {
-                let q = floor(u / 256.0);
-                low.push((u - q * 256.0) as int);
-                u = q;
-                j += 1;
-            }
-            let mut k = size - 1;
-            while k >= 0 {
-                bytes.push(low[k as usize]);
-                k -= 1;
-            }
-        }
+        let bytes = encode(kind, x);
         let mut k: int = 0;
         while k < size {
             let idx = if little { at + size - 1 - k } else { at + k };
-            self.objs[b as usize].elems[idx as usize] = Val::Num(bytes[k as usize] as double);
+            self.objs[b as usize].nums[idx as usize] = bytes[k as usize] as double;
             k += 1;
         }
     }
@@ -349,8 +425,16 @@ impl Vm {
             return Val::Undef;
         }
         let kind = self.objs[o as usize].pos;
-        let at = self.objs[o as usize].func + i * kind_size(kind);
+        let size = kind_size(kind);
+        let at = self.objs[o as usize].func + i * size;
         let b = self.objs[o as usize].env;
+        let mode = self.objs[b as usize].home;
+        if mode == kind {
+            return Val::Num(self.objs[b as usize].nums[(at / size) as usize]);
+        }
+        if mode < 0 && kind == TK_UINT8 {
+            return Val::Num(self.objs[b as usize].nums[at as usize]);
+        }
         if kind >= TK_BIGINT64 {
             return self.buf_read_big(b, at, kind, true);
         }
@@ -374,8 +458,15 @@ impl Vm {
             return;
         }
         let kind = self.objs[o as usize].pos;
-        let at = self.objs[o as usize].func + i * kind_size(kind);
+        let size = kind_size(kind);
+        let at = self.objs[o as usize].func + i * size;
         let b = self.objs[o as usize].env;
+        let mode = self.objs[b as usize].home;
+        if mode == kind || (mode < 0 && kind == TK_UINT8) {
+            self.objs[b as usize].home = kind;
+            self.objs[b as usize].nums[(at / size) as usize] = element_value(kind, x);
+            return;
+        }
         self.buf_write(b, at, kind, x, true);
     }
 
@@ -416,13 +507,14 @@ impl Vm {
             }
             let proto = obj_of(&a[1]);
             let b = self.alloc(C_ARRAYBUFFER, proto);
-            let mut bytes: Vec<Val> = Vec::with_capacity(n as usize);
+            let mut bytes: Vec<double> = Vec::with_capacity(n as usize);
             let mut i = 0;
             while i < n {
-                bytes.push(Val::Num(0.0));
+                bytes.push(0.0);
                 i += 1;
             }
-            self.objs[b as usize].elems = bytes;
+            self.objs[b as usize].nums = bytes;
+            self.objs[b as usize].home = -1;
             if truthy(&a[2]) {
                 self.objs[b as usize].pos = 2;
             }
@@ -438,7 +530,7 @@ impl Vm {
             if (pos & 1) != 0 {
                 return Val::Num(-2.0);
             }
-            let n = self.objs[b as usize].elems.len() as double;
+            let n = self.buf_size(b) as double;
             return Val::Num(if (pos & 2) != 0 { n + 0.5 } else { n });
         }
         if id == NF_BUF_GET {
@@ -449,7 +541,7 @@ impl Vm {
             }
             let kind = num(&a[2]) as int;
             let at = num(&a[1]) as int;
-            if at < 0 || at + kind_size(kind) > self.objs[b as usize].elems.len() as int {
+            if at < 0 || at + kind_size(kind) > self.buf_size(b) {
                 self.throw_range("Offset is outside the bounds of the DataView");
                 return Val::Undef;
             }
@@ -466,7 +558,7 @@ impl Vm {
             }
             let kind = num(&a[2]) as int;
             let at = num(&a[1]) as int;
-            if at < 0 || at + kind_size(kind) > self.objs[b as usize].elems.len() as int {
+            if at < 0 || at + kind_size(kind) > self.buf_size(b) {
                 self.throw_range("Offset is outside the bounds of the DataView");
                 return Val::Undef;
             }
@@ -487,15 +579,49 @@ impl Vm {
                 return Val::Undef;
             }
             let (fs, ts, n) = (num(&a[1]) as int, num(&a[3]) as int, num(&a[4]) as int);
-            let mut tmp: Vec<Val> = Vec::new();
+            // whole elements between buffers of one kind are copied as they
+            // are; a new buffer copied whole takes the source's kind
+            let ms = self.objs[s as usize].home;
+            let mut md = self.objs[d as usize].home;
+            if ms > TK_UINT8 || ms == TK_INT8 {
+                let size = kind_size(ms);
+                if md < 0 && ts == 0 && n == self.buf_size(d) && n % size == 0 {
+                    let mut z: Vec<double> = Vec::new();
+                    let mut j = 0;
+                    while j < n / size {
+                        z.push(0.0);
+                        j += 1;
+                    }
+                    self.objs[d as usize].nums = z;
+                    self.objs[d as usize].home = ms;
+                    md = ms;
+                }
+                if md == ms && fs % size == 0 && ts % size == 0 && n % size == 0 {
+                    let mut tmp: Vec<double> = Vec::new();
+                    let mut i = 0;
+                    while i < n / size {
+                        tmp.push(self.objs[s as usize].nums[(fs / size + i) as usize]);
+                        i += 1;
+                    }
+                    i = 0;
+                    while i < n / size {
+                        self.objs[d as usize].nums[(ts / size + i) as usize] = tmp[i as usize];
+                        i += 1;
+                    }
+                    return Val::Undef;
+                }
+            }
+            self.buf_to_bytes(s);
+            self.buf_to_bytes(d);
+            let mut tmp: Vec<double> = Vec::new();
             let mut i = 0;
             while i < n {
-                tmp.push(self.objs[s as usize].elems[(fs + i) as usize].clone());
+                tmp.push(self.objs[s as usize].nums[(fs + i) as usize]);
                 i += 1;
             }
             i = 0;
             while i < n {
-                self.objs[d as usize].elems[(ts + i) as usize] = tmp[i as usize].clone();
+                self.objs[d as usize].nums[(ts + i) as usize] = tmp[i as usize];
                 i += 1;
             }
             return Val::Undef;
@@ -503,7 +629,8 @@ impl Vm {
         if id == NF_BUF_DETACH {
             let b = self.buffer_of(&a[0]);
             if b >= 0 {
-                self.objs[b as usize].elems = Vec::new();
+                self.objs[b as usize].nums = Vec::new();
+                self.objs[b as usize].home = TK_UINT8;
                 self.objs[b as usize].pos |= 1;
             }
             return Val::Undef;
@@ -515,8 +642,22 @@ impl Vm {
                 return Val::Undef;
             }
             let proto = obj_of(&a[4]);
+            let kind = num(&a[0]) as int;
+            let off = num(&a[2]) as int;
+            let len = num(&a[3]) as int;
+            // the first view over all of a new buffer: it holds this kind
+            if self.objs[b as usize].home < 0 && kind < TK_BIGINT64 && off == 0 && len * kind_size(kind) == self.buf_size(b) {
+                let mut z: Vec<double> = Vec::new();
+                let mut j = 0;
+                while j < len {
+                    z.push(0.0);
+                    j += 1;
+                }
+                self.objs[b as usize].nums = z;
+                self.objs[b as usize].home = kind;
+            }
             let t = self.alloc(C_TYPED, proto);
-            self.objs[t as usize].pos = num(&a[0]) as int;
+            self.objs[t as usize].pos = kind;
             self.objs[t as usize].env = b;
             self.objs[t as usize].func = num(&a[2]) as int;
             self.objs[t as usize].prim = Val::Num(num(&a[3]));
