@@ -1806,20 +1806,60 @@ impl Compiler {
         // `x += v;` on a local: the value is not used, so the VM can append
         // to x's string in place. Only when v cannot assign to anything
         // (a local not in an environment is reachable by nothing else).
-        if k == N_ASSIGN && !is_program_top && self.ast.nodes[e as usize].op.as_str() == "+=" {
+        // `x = x + v;` is `x += v;` for a binding
+        let mut add_t: int = -1;
+        let mut add_v: int = -1;
+        if k == N_ASSIGN && !is_program_top {
             let t = self.ast.nodes[e as usize].a;
             let v = self.ast.nodes[e as usize].b;
+            let o = self.ast.nodes[e as usize].op.clone();
+            if o.as_str() == "+=" {
+                add_t = t;
+                add_v = v;
+            } else if o.as_str() == "=" && self.ast.nodes[t as usize].kind == N_IDENT && self.ast.nodes[v as usize].kind == N_BINARY && self.ast.nodes[v as usize].op.as_str() == "+" {
+                let l = self.ast.nodes[v as usize].a;
+                if self.ast.nodes[l as usize].kind == N_IDENT && self.ast.nodes[l as usize].s == self.ast.nodes[t as usize].s && self.ref_bind.get(&l) == self.ref_bind.get(&t) && self.ref_bind.contains_key(&t) {
+                    add_t = t;
+                    add_v = self.ast.nodes[v as usize].b;
+                }
+            }
+        }
+        if add_t >= 0 {
+            let t = add_t;
+            let v = add_v;
             if self.ast.nodes[t as usize].kind == N_IDENT {
                 let b = match self.ref_bind.get(&t) {
                     Some(x) => *x,
                     None => -1,
                 };
-                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) && !self.with_ref.contains_key(&t) && !self.may_assign(v) {
+                if b >= 0 && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && self.binds[b as usize].kind != K_CALLEE && !self.tdz_refs.contains_key(&t) && !self.with_ref.contains_key(&t) {
                     let slot = self.binds[b as usize].slot;
-                    self.expr(v);
-                    self.emit(OP_ADD_LOCAL_POP, slot, 0);
-                    return;
+                    if !self.binds[b as usize].in_env {
+                        if !self.may_assign(v) {
+                            self.expr(v);
+                            self.emit(OP_ADD_LOCAL_POP, slot, 0);
+                            return;
+                        }
+                    } else {
+                        // x is read first, as `+=` reads it; the VM appends
+                        // in place only when x still holds what was read
+                        let depth = self.env_depth(self.cur_scope, self.binds[b as usize].scope);
+                        self.emit(OP_GET_ENV, depth, slot);
+                        self.expr(v);
+                        self.emit(OP_ADD_ENV_POP, depth, slot);
+                        return;
+                    }
                 }
+            } else if self.ast.nodes[t as usize].kind == N_MEMBER && self.ast.nodes[e as usize].op.as_str() == "+=" {
+                let obj = self.ast.nodes[t as usize].a;
+                let ps = self.ast.nodes[t as usize].s.clone();
+                let at = self.atom(ps.as_str());
+                self.expr(obj);
+                self.op(OP_DUP);
+                self.emit(OP_GET_PROP, at, 0);
+                self.expr(v);
+                self.emit(OP_ADD_PROP_POP, at, 0);
+                return;
             }
         }
         if k == N_ASSIGN && self.ast.nodes[e as usize].op.as_str() == "define" {

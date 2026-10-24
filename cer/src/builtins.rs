@@ -984,17 +984,18 @@ impl Vm {
             let re = &self.regexes[idx as usize];
             (re.global, re.sticky, re.ngroups, re.has_indices)
         };
-        let units = jsstr::units(s.as_str());
+        self.rx_cache(s);
+        let ulen = self.rx_units.len() as int;
         let mut start: int = 0;
         if global || sticky {
             let li = self.get_obj(ro, A_LASTINDEX, &Val::Obj(ro));
             start = to_integer(self.to_number(&li)) as int;
-            if start > units.len() as int || start < 0 {
+            if start > ulen || start < 0 {
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
                 return Val::Null;
             }
         }
-        let caps = self.regexes[idx as usize].exec(&units, start);
+        let caps = self.regexes[idx as usize].exec(&self.rx_units, start);
         if caps.is_empty() {
             if global || sticky {
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
@@ -1012,7 +1013,7 @@ impl Vm {
             if a < 0 || b < 0 {
                 items.push(Val::Undef);
             } else {
-                items.push(string_val(jsstr::from_units(&units, a, b)));
+                items.push(string_val(jsstr::from_units(&self.rx_units, a, b)));
             }
             g += 1;
         }

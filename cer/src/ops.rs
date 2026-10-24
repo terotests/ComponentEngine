@@ -258,3 +258,10 @@ pub const OP_BIGINT: int = 142;
 pub const OP_TDZ: int = 143;
 /// [v] → [v]; a ReferenceError naming const `a` when v is the marker
 pub const OP_CHECK_TDZ: int = 144;
+/// `x += v;` (or `x = x + v;`) as a statement on binding a b of an
+/// environment: [x, v] → []. When x still holds that string and nothing
+/// else does, v is appended in place, as OP_ADD_LOCAL_POP does
+pub const OP_ADD_ENV_POP: int = 145;
+/// `o.p += v;` as a statement, property atom a: [o, o.p, v] → [], in place
+/// when o's own data property still holds that string and nothing else does
+pub const OP_ADD_PROP_POP: int = 146;
