@@ -40,10 +40,17 @@ fn cases(file: &str) -> Vec<(String, String, String, String)> {
 
 /// Runs `all` with each case's syntax, or with `force` when given.
 fn check(all: &[(String, String, String, String)], force: Option<&str>) -> Vec<String> {
+    check_with(all, force, false)
+}
+
+/// … each script run from its compiled unit's text when `through_text`
+/// (as a host's code cache runs it).
+fn check_with(all: &[(String, String, String, String)], force: Option<&str>, through_text: bool) -> Vec<String> {
     let mut failed = Vec::new();
     for (mode, title, src, want) in all.iter() {
         let m = force.unwrap_or(mode.as_str());
         let mut e = Engine::new();
+        e.through_text = through_text;
         e.set_syntax(m == "tsx" || m == "ts", m == "tsx" || m == "jsx");
         let got = e.eval(src);
         if &got != want {
@@ -73,5 +80,13 @@ fn cer_cases_as_javascript() {
 fn cer_cases_as_tsx() {
     let all = cases("../cer/tests/cases.txt");
     let failed = check(&all, Some("tsx"));
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
+}
+
+#[test]
+fn cases_through_unit_text() {
+    let mut all = cases("tests/cases.txt");
+    all.extend(cases("../cer/tests/cases.txt"));
+    let failed = check_with(&all, None, true);
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
 }

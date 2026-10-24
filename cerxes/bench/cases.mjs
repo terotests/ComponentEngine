@@ -40,6 +40,8 @@ for (const t of targets) {
     const { Engine } = createRequire(import.meta.url)(out);
     engines.js = (mode, src) => {
       const e = Engine.new_();
+      // CER_THROUGH_TEXT=1: each case from its compiled unit's text
+      e.through_text = process.env.CER_THROUGH_TEXT === "1";
       e.set_syntax(mode.includes("ts"), mode.includes("x"));
       try {
         return e.eval(src);

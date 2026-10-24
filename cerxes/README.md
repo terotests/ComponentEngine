@@ -160,6 +160,30 @@ that CErXes itself reads differently from Node (a comment ended by U+2028
 or U+2029, an escaped `"use strict"`, a function's source text), where
 the output means what CErXes read.
 
+## Compiled code (a code cache)
+
+`eval` parses and compiles a script, then runs it. A host that runs the
+same long scripts again (a UI extension's bundle, a library) can keep the
+compiled form instead and skip both steps:
+
+```rust
+let u = e.compile(src);                 // parse + compile, nothing runs
+let text = cerxes::unit::encode(&u, src); // ASCII text, "" if not keepable
+e.run(u);
+// later, in this engine or another (a new process too):
+let u = cerxes::unit::decode(&text, src); // entry -1: not a unit's text
+e.run(u);
+```
+
+A unit (`src/unit.rs`, CEr's) numbers its atoms and closures from 0 and is
+linked into an engine as it runs, so a unit made in one engine runs in any
+other. `UNIT_FORMAT` names the text's format; a host keys what it keeps by
+the script and the engine's build. A 2.8 MB React bundle that takes 455 ms
+to parse and compile reads back in 27 ms. `Engine.through_text` runs every
+`eval` through a unit's text; `tests/syntax.rs` runs all cases that way,
+and `CER_THROUGH_TEXT=1` does it for the conformance probes and
+`bench/cases.mjs`.
+
 ## How it works
 
 - `lexer.rs`: CEr's lexer, reading one token at a time, each with its

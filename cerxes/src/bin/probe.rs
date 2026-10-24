@@ -17,6 +17,9 @@ fn main() {
         let src = parts.next().unwrap_or("").to_string();
         let r = std::panic::catch_unwind(move || {
             let mut e = Engine::new();
+            // CER_THROUGH_TEXT=1: each probe from its unit's text, as a
+            // host's code cache runs a script
+            e.through_text = std::env::var("CER_THROUGH_TEXT").map(|v| v == "1").unwrap_or(false);
             e.eval_typed(src.as_str())
         })
         .unwrap_or(String::from("panic"));

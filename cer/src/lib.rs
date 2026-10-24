@@ -37,6 +37,7 @@ pub mod regex;
 pub mod typed;
 pub mod uninorm;
 pub mod uniprops;
+pub mod unit;
 pub mod value;
 pub mod vm;
 
@@ -47,13 +48,16 @@ pub struct Engine {
     pub vm: Vm,
     /// the last script's error, empty when it ran to the end
     pub error: String,
+    /// `eval` runs each script from its unit's text (unit.rs), as a host
+    /// with a code cache does: the tests check the text loses nothing
+    pub through_text: bool,
 }
 
 impl Engine {
     pub fn new() -> Engine {
         let mut vm = Vm::new();
         vm.setup();
-        let mut e = Engine { vm: vm, error: String::new() };
+        let mut e = Engine { vm: vm, error: String::new(), through_text: false };
         // the built-ins written in JavaScript
         e.eval(prelude::PRELUDE);
         if !e.error.is_empty() {
@@ -74,32 +78,57 @@ impl Engine {
     /// Runs a script; answers the value of its last expression statement
     /// as a string, or the uncaught exception (`Uncaught TypeError: …`).
     pub fn eval(&mut self, src: &str) -> String {
+        let u = self.unit_of(src);
+        if !self.error.is_empty() {
+            return self.error.clone();
+        }
+        self.run(u)
+    }
+
+    /// `compile`, and with `through_text` the unit as a host would keep
+    /// and read it.
+    fn unit_of(&mut self, src: &str) -> unit::Unit {
+        let u = self.compile(src);
+        if !self.error.is_empty() || !self.through_text {
+            return u;
+        }
+        let t = unit::encode(&u, src);
+        if t.is_empty() {
+            return u;
+        }
+        let back = unit::decode(t.as_str(), src);
+        if back.entry < 0 {
+            self.error = String::from("internal: a unit's text did not read back");
+        }
+        back
+    }
+
+    /// A script parsed and compiled, not run: a unit (unit.rs) the host may
+    /// keep as text (unit::encode) and run later (`run`), in this engine
+    /// or another. Sets `error` when the script is not one.
+    pub fn compile(&mut self, src: &str) -> unit::Unit {
         self.error = String::new();
         let mut p = parser::Parser::new(src);
         let root = p.parse_program();
         if !p.error.is_empty() {
             self.error = p.error.clone();
+            return unit::Unit::new();
+        }
+        let u = unit::compile(p.ast, root);
+        if !u.error.is_empty() {
+            self.error = u.error.clone();
+        }
+        u
+    }
+
+    /// Runs a compiled script, as `eval` runs one.
+    pub fn run(&mut self, u: unit::Unit) -> String {
+        self.error = String::new();
+        if u.entry < 0 {
+            self.error = String::from("SyntaxError");
             return self.error.clone();
         }
-        let atoms = self.vm.atoms.clone();
-        let names = self.vm.atom_names.clone();
-        let base = self.vm.protos.len() as int;
-        let mut c = compiler::Compiler::new(p.ast, atoms, names, base);
-        let entry = c.compile_program(root);
-        if !c.error.is_empty() || entry < 0 {
-            self.error = if c.error.is_empty() { String::from("SyntaxError") } else { c.error.clone() };
-            return self.error.clone();
-        }
-        self.vm.atoms = c.atoms;
-        self.vm.atom_names = c.atom_names;
-        for pr in c.protos {
-            self.vm.protos.push(pr);
-        }
-        let fp = self.vm.function_proto;
-        let f = self.vm.alloc(C_FUNCTION, fp);
-        self.vm.objs[f as usize].func = entry;
-        let g = Val::Obj(self.vm.global);
-        let r = self.vm.run_program(Val::Obj(f), g);
+        let r = self.run_val(u);
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -110,35 +139,25 @@ impl Engine {
         self.vm.display(&r)
     }
 
+    fn run_val(&mut self, u: unit::Unit) -> Val {
+        let entry = unit::link(&mut self.vm, u);
+        let fp = self.vm.function_proto;
+        let f = self.vm.alloc(C_FUNCTION, fp);
+        self.vm.objs[f as usize].func = entry;
+        let g = Val::Obj(self.vm.global);
+        self.vm.run_program(Val::Obj(f), g)
+    }
+
     /// Runs a script and answers its completion value with its type, as
     /// the conformance harness compares it: `n:<number>`, `s:<string>`,
     /// `b:true`, `u` (undefined), `l` (null), `o:<class>`, or
     /// `t:<exception>` when it threw.
     pub fn eval_typed(&mut self, src: &str) -> String {
-        self.error = String::new();
-        let mut p = parser::Parser::new(src);
-        let root = p.parse_program();
-        if !p.error.is_empty() {
-            return format!("t:{}", p.error);
+        let u = self.unit_of(src);
+        if !self.error.is_empty() {
+            return format!("t:{}", self.error);
         }
-        let atoms = self.vm.atoms.clone();
-        let names = self.vm.atom_names.clone();
-        let base = self.vm.protos.len() as int;
-        let mut c = compiler::Compiler::new(p.ast, atoms, names, base);
-        let entry = c.compile_program(root);
-        if !c.error.is_empty() || entry < 0 {
-            return format!("t:{}", c.error);
-        }
-        self.vm.atoms = c.atoms;
-        self.vm.atom_names = c.atom_names;
-        for pr in c.protos {
-            self.vm.protos.push(pr);
-        }
-        let fp = self.vm.function_proto;
-        let f = self.vm.alloc(C_FUNCTION, fp);
-        self.vm.objs[f as usize].func = entry;
-        let g = Val::Obj(self.vm.global);
-        let r = self.vm.run_program(Val::Obj(f), g);
+        let r = self.run_val(u);
         if self.vm.throwing {
             let u = self.uncaught();
             return format!("t:{}", u);
