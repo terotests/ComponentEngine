@@ -44,7 +44,7 @@ pub const A_HASINSTANCE: int = 27;
 pub const A_ERRORS: int = 28;
 pub const A_THEN: int = 29;
 
-fn first_atoms() -> Vec<String> {
+pub fn first_atoms() -> Vec<String> {
     let names = vec![
         "length",
         "prototype",
