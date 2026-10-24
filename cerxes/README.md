@@ -184,6 +184,26 @@ to parse and compile reads back in 27 ms. `Engine.through_text` runs every
 and `CER_THROUGH_TEXT=1` does it for the conformance probes and
 `bench/cases.mjs`.
 
+## Heap snapshots
+
+A host that sets up many realms the same way (the same preludes, libraries
+and page) can keep one realm's whole state and start the next from it:
+
+```rust
+let text = e.snapshot();                 // "" while a job or a call is pending
+let mut e2 = cerxes::Engine::from_snapshot(&text); // e2.error "not a snapshot" if not
+```
+
+`src/snapshot.rs` (CEr's) writes the VM's heap, atoms, protos and globals in
+the unit text format (`SNAPSHOT_FORMAT`). Maps and Sets keep their index,
+regexes are compiled again from their source, and the `Intl` caches start
+empty. A realm that took 297 ms to set up (web/dom, a page and its style
+sheets) restores in 49 ms; `Engine::new` takes 24 ms, a restore of its
+snapshot 1.2 ms. `tests/syntax.rs` runs all cases in engines restored from a new
+engine's snapshot and checks that a realm with Maps, Sets, symbols, regexes,
+promises and generators comes back whole; `CER_FROM_SNAPSHOT=1` runs the
+conformance probes that way.
+
 ## How it works
 
 - `lexer.rs`: CEr's lexer, reading one token at a time, each with its

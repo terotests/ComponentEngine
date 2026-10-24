@@ -34,6 +34,7 @@ pub mod parser;
 pub mod prelude;
 pub mod proxy;
 pub mod regex;
+pub mod snapshot;
 pub mod typed;
 pub mod uninorm;
 pub mod uniprops;
@@ -68,6 +69,25 @@ impl Engine {
         e.vm.prelude_protos = e.vm.protos.len() as int;
         e.error = String::new();
         e
+    }
+
+    /// The engine's whole state as text (snapshot.rs), for `from_snapshot`;
+    /// "" while a script runs.
+    pub fn snapshot(&self) -> String {
+        snapshot::snapshot(&self.vm)
+    }
+
+    /// An engine in the state a snapshot's text holds, as if the scripts
+    /// run before it was taken had run in it; when the text is not a
+    /// snapshot, a new engine with `error` set.
+    pub fn from_snapshot(text: &str) -> Engine {
+        let mut vm = Vm::new();
+        if !snapshot::restore(&mut vm, text) {
+            let mut e = Engine::new();
+            e.error = String::from("not a snapshot");
+            return e;
+        }
+        Engine { vm: vm, error: String::new(), through_text: false }
     }
 
     /// Echo `print` / `console.log` lines to stdout as they come.
