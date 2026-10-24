@@ -298,3 +298,41 @@ var cnt = { n: 0 }; with (cnt) { n++; n += 2; } r.push(cnt.n);
 var strict = 'no error'; try { new Function('"use strict"; with ({}) {}'); } catch (e) { strict = e.name; } r.push(strict); r.join()
 ----
 1,c,10,set,5,4undefined,hi,object,3,SyntaxError
+
+==== js typed arrays: a buffer holding one kind's elements, then bytes for other views, DataView and copies
+var out=[];
+function p(x){ out.push(Array.isArray(x)||ArrayBuffer.isView(x)? Array.from(x).join(','): String(x)); }
+var f=new Float64Array(4); f[0]=1.5; f[1]=-0; f[2]=NaN; f[3]=123.5; p(f); p(Object.is(f[1],-0));
+var u=new Uint8Array(f.buffer); p(u.length); p(u[7]); p(u[15]); u[0]=255; p(f[0]);
+var d=new DataView(f.buffer); p(d.getFloat64(8,true)); d.setFloat64(8, 2.25, true); p(f[1]);
+var g=new Float32Array(3); g[0]=0.1; g[1]=1e40; g[2]=-1e-50; p(g); p(new Uint32Array(g.buffer));
+var i8=new Int8Array(3); i8[0]=200; i8[1]=-129; i8[2]=3.7; p(i8);
+var c=new Uint8ClampedArray(4); c[0]=300; c[1]=-5; c[2]=1.5; c[3]=2.5; p(c);
+var i16=new Int16Array([1,-2,40000]); p(i16); p(new Uint8Array(i16.buffer));
+var s=new Float64Array([1,2,3,4,5]); var sl=s.slice(1,4); p(sl); sl[0]=9; p(s); var sub=s.subarray(2); sub[0]=7; p(s);
+s.copyWithin(0,3); p(s); s.fill(0.5,1,3); p(s); s.set([8,9],3); p(s);
+var big=new BigInt64Array(2); big[0]=-5n; big[1]=2n**62n; p(big[0]); p(big[1]); p(new Int32Array(big.buffer));
+var buf=new ArrayBuffer(16); var a32=new Int32Array(buf); var a64=new Float64Array(buf); a32[0]=1; a32[1]=1072693248; p(a64[0]); a64[1]=3; p(a32[2]+','+a32[3]);
+var off=new Float64Array(new ArrayBuffer(24), 8, 2); off[0]=4; p(off); p(new Float64Array(off.buffer));
+var bs=new Float64Array([1.25,2.5]).buffer.slice(8); p(new Float64Array(bs)); p(new Uint8Array(new Float64Array([1]).buffer.slice(4)));
+var m=new Uint16Array(4); m[0]=65535; m[1]=65536; m[2]=-1; p(m); p(new Uint8Array(m.buffer, 1, 3));
+var sorted=new Float64Array([3,1,NaN,-0,0,2]).sort(); p(sorted);
+p(new Float64Array([1,2,3]).map(x=>x*2)); p(Float64Array.from([1,2]).reverse()); p(new Float32Array([1.1]).toString());
+out.join(' | ')
+----
+1.5,0,NaN,123.5 | true | 32 | 63 | 128 | 1.5000000000000566 | 0 | 2.25 | 0.10000000149011612,Infinity,0 | 1036831949,2139095040,2147483648 | -56,127,3 | 255,0,2,2 | 1,-2,-25536 | 1,0,254,255,64,156 | 2,3,4 | 1,2,3,4,5 | 1,2,7,4,5 | 4,5,7,4,5 | 4,0.5,0.5,4,5 | 4,0.5,0.5,8,9 | -5 | 4611686018427387904 | -5,-1,0,1073741824 | 1.0000000000000002 | 0,1074266112 | 4,0 | 0,4,0 | 2.5 | 0,0,240,63 | 65535,0,65535,0 | 255,0,0 | 0,0,1,2,3,NaN | 2,4,6 | 2,1 | 1.100000023841858
+
+==== js string appends in place: evaluation order, getters and setters, frozen objects, non-strings
+var out=[];
+(function(){ let s='abc'; const f=()=>{ s='Z'; return 'q' }; const g=()=>{ s += f() }; g(); out.push(s); })();
+(function(){ let s='abc'; let t; const g=()=>{ t = s; s += 'd'; s = s + 'e' }; g(); out.push(s, t); })();
+(function(){ const o={p:'ab'}; const t=o.p; o.p += 'c'; o.p += 1; out.push(o.p, t); })();
+(function(){ let v='x'; const o={ get p(){ return v }, set p(x){ v = x + '!' } }; o.p += 'y'; out.push(v); })();
+(function(){ const o={p:'ab'}; o.p += {toString(){ o.p='R'; return 'T' }}; out.push(o.p); })();
+(function(){ let n=1; const g=()=>{ n += 2; n = n + 3 }; g(); out.push(n); })();
+(function(){ const o=Object.freeze({p:'a'}); o.p += 'b'; out.push(o.p); })();
+(function(){ let s=''; const h=()=>{ for (let i=0;i<5;i++) s = s + i }; h(); out.push(s); })();
+(function(){ const a=['x']; a.length += 0; const o={}; o.q += 'z'; out.push(o.q, a.length); })();
+out.join('|')
+----
+abcq|abcde|abc|abc1|ab|xy!|abT|6|a|01234|undefinedz|1

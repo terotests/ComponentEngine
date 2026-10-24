@@ -83,6 +83,9 @@ pub struct JsObj {
     pub elems: Vec<Val>,
     /// a map's values
     pub elems2: Vec<Val>,
+    /// an ArrayBuffer's contents: its bytes, or the elements of the one
+    /// typed array kind that has used it (typed.rs)
+    pub nums: Vec<double>,
     /// the compiled function (index into `Vm.protos`) or the native id
     pub func: int,
     /// a closure's scope; a bound function's target; an iterator's source
@@ -112,6 +115,7 @@ impl JsObj {
             index: HashMap::new(),
             elems: Vec::new(),
             elems2: Vec::new(),
+            nums: Vec::new(),
             func: -1,
             env: -1,
             prim: Val::Undef,
@@ -183,6 +187,7 @@ impl JsObj {
         self.index = HashMap::new();
         self.elems = Vec::new();
         self.elems2 = Vec::new();
+        self.nums = Vec::new();
         self.prim = Val::Undef;
         self.env = -1;
         self.home = -1;

@@ -178,6 +178,11 @@ pub struct Vm {
     pub sc_ascii: bool,
     pub sc_len: int,
     pub sc_units: Vec<int>,
+    /// the string RegExp.prototype.exec matched last, as UTF-16 units: a
+    /// loop of exec calls (matchAll, a global regexp's exec loop) over one
+    /// string converts it once
+    pub rx_s: Rc<String>,
+    pub rx_units: Vec<int>,
     /// String.prototype.normalize's tables, decoded on first use
     pub norm: crate::normalize::Norm,
 }
@@ -319,6 +324,8 @@ impl Vm {
             sc_ascii: true,
             sc_len: 0,
             sc_units: Vec::new(),
+            rx_s: Rc::new(String::new()),
+            rx_units: Vec::new(),
             norm: crate::normalize::Norm::new(),
         };
         for n in first_atoms() {
@@ -342,6 +349,15 @@ impl Vm {
             self.sc_units = jsstr::units(s.as_str());
             self.sc_len = self.sc_units.len() as int;
         }
+    }
+
+    /// Fills `rx_units` with `s`'s UTF-16 units, unless it holds them.
+    pub fn rx_cache(&mut self, s: &Rc<String>) {
+        if self.rx_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s, s) {
+            return;
+        }
+        self.rx_s = s.clone();
+        self.rx_units = jsstr::units(s.as_str());
     }
 
     /// The UTF-16 unit at `i`, -1 out of range.
@@ -2363,6 +2379,63 @@ impl Vm {
                             self.stack[i] = r;
                         }
                     }
+                    OP_ADD_ENV_POP => {
+                        let b = self.pop();
+                        let e = self.get_env(op.a);
+                        let i = op.b as usize;
+                        let mut done = false;
+                        if let Val::Str(bs) = &b {
+                            let n = self.stack.len() - 1;
+                            if same_rc(&self.stack[n], &self.objs[e as usize].elems[i]) {
+                                // the stack's copy goes, so the slot may hold the only one
+                                self.stack.pop();
+                                done = append_in_place(&mut self.objs[e as usize].elems[i], bs.as_str());
+                                if !done {
+                                    let a = self.objs[e as usize].elems[i].clone();
+                                    self.stack.push(a);
+                                }
+                            }
+                        }
+                        if !done {
+                            let a = self.pop();
+                            self.frames[fi].pc = pc;
+                            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+                            if !self.throwing {
+                                self.objs[e as usize].elems[i] = r;
+                            }
+                        }
+                    }
+                    OP_ADD_PROP_POP => {
+                        let b = self.pop();
+                        let atom = op.a;
+                        let mut done = false;
+                        if let Val::Str(bs) = &b {
+                            let n = self.stack.len();
+                            let o = obj_of(&self.stack[n - 2]);
+                            if o >= 0 {
+                                let slot = self.objs[o as usize].find(atom);
+                                if slot >= 0 && self.objs[o as usize].attrs[slot as usize] == 0 && same_rc(&self.stack[n - 1], &self.objs[o as usize].vals[slot as usize]) {
+                                    self.stack.pop();
+                                    done = append_in_place(&mut self.objs[o as usize].vals[slot as usize], bs.as_str());
+                                    if done {
+                                        self.stack.pop();
+                                    } else {
+                                        let a = self.objs[o as usize].vals[slot as usize].clone();
+                                        self.stack.push(a);
+                                    }
+                                }
+                            }
+                        }
+                        if !done {
+                            let a = self.pop();
+                            let target = self.pop();
+                            self.frames[fi].pc = pc;
+                            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+                            if !self.throwing {
+                                self.set(&target, atom, r);
+                            }
+                        }
+                    }
                     OP_INC_LOCAL => {
                         let i = (bp + op.a) as usize;
                         if let Val::Num(n) = self.stack[i] {
@@ -4172,6 +4245,22 @@ fn append_in_place(slot: &mut Val, b: &str) -> bool {
             return true;
         }
     }
+    false
+}
+
+/// Whether two values are the same string object (Rust's Rc), which is what
+/// lets an append in place stand for `x = x + v`; the other targets append
+/// as values and never ask.
+#[ranger::target(rust)]
+fn same_rc(a: &Val, b: &Val) -> bool {
+    if let (Val::Str(x), Val::Str(y)) = (a, b) {
+        return Rc::ptr_eq(x, y);
+    }
+    false
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn same_rc(_a: &Val, _b: &Val) -> bool {
     false
 }
 

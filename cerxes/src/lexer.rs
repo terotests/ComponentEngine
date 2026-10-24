@@ -305,19 +305,26 @@ impl Lexer {
             return t;
         }
         let mut k: int = 0;
+        let c0 = c as int;
         while k < self.puncts.len() as int {
-            let p = self.puncts[k as usize].clone();
+            let ki = k as usize;
             k += 1;
-            let pc = p.chars().collect::<Vec<char>>();
+            // the punctuators are ASCII: compare bytes, and the first one
+            // before anything is copied
+            if (self.puncts[ki].as_bytes()[0] as int) != c0 {
+                continue;
+            }
+            let plen = self.puncts[ki].as_bytes().len() as int;
             let mut ok = true;
-            let mut j: int = 0;
-            while j < pc.len() as int {
-                if self.at(self.pos + j) != pc[j as usize] {
+            let mut j: int = 1;
+            while j < plen {
+                if (self.at(self.pos + j) as int) != (self.puncts[ki].as_bytes()[j as usize] as int) {
                     ok = false;
                     break;
                 }
                 j += 1;
             }
+            let p = self.puncts[ki].clone();
             // `?.` followed by a digit is `?` and a number
             if ok && p.as_str() == "?." {
                 let d = self.at(self.pos + 2);
@@ -327,7 +334,7 @@ impl Lexer {
             }
             if ok {
                 let mut t = Tok::new(T_PUNCT, line, nl);
-                self.pos += pc.len() as int;
+                self.pos += plen;
                 let s = p.as_str();
                 self.regex_ok = !(s == ")" || s == "]" || s == "}" || s == "++" || s == "--");
                 if s == "}" {
