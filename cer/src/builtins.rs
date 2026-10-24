@@ -785,6 +785,7 @@ impl Vm {
         self.setup_typed();
         self.setup_proxy();
         self.setup_dynamic();
+        self.setup_intl();
         self.setup_bigint();
     }
 
@@ -2669,6 +2670,9 @@ impl Vm {
         }
         if id >= 930 && id < 940 {
             return self.call_native_proxy(id, args, construct);
+        }
+        if id >= 960 && id < 970 {
+            return self.call_native_intl(id, args);
         }
         if id >= 950 && id < 960 {
             return self.call_native_bigint(id, this, args, construct);

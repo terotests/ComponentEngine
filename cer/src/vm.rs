@@ -185,6 +185,8 @@ pub struct Vm {
     pub rx_units: Vec<int>,
     /// String.prototype.normalize's tables, decoded on first use
     pub norm: crate::normalize::Norm,
+    /// Intl's collation tables, decoded on first use
+    pub intl: crate::intl::Intl,
 }
 
 /// The same string: the same one first (Rust's Rc, Go's string compare
@@ -327,6 +329,7 @@ impl Vm {
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
             norm: crate::normalize::Norm::new(),
+            intl: crate::intl::Intl::new(),
         };
         for n in first_atoms() {
             vm.intern(n.as_str());

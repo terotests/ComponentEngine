@@ -29,6 +29,8 @@ pub mod compiler;
 pub mod coroutine;
 pub mod dynamic;
 pub mod emit;
+pub mod intl;
+pub mod intl_data;
 pub mod jsstr;
 pub mod jsx;
 pub mod jsx_runtime;

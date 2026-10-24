@@ -57,9 +57,17 @@ npm run cer:octane           # the Octane suites of Ranger's interp/bench/zoo_oc
 - `normalize.rs`: `String.prototype.normalize`, NFC and NFD over the tables
   of `uninorm.rs` (written by `tools/gen-uninorm.cjs` from
   `engine/UnicodeNorm.rgr`); NFKC and NFKD decompose canonically only.
-- `prelude.rs` also holds Intl without ICU: NumberFormat, PluralRules,
-  DateTimeFormat (local time or UTC), Collator, RelativeTimeFormat and
-  ListFormat for en, fi, sv, de, fr, nl and es; any other locale is English.
+- `intl.rs`: Intl without ICU, ComponentEngine's (engine D-INTL and
+  D-COLLATE): NumberFormat, PluralRules, DateTimeFormat (UTC), Collator,
+  ListFormat and RelativeTimeFormat (English words) for the 39 locales of
+  `intl_data.rs`, which `tools/gen-intl.cjs` writes from
+  `engine/LocaleData.rgr`, `LocalePlural.rgr`, `UnicodeCollate.rgr` and
+  `UnicodeTailor.rgr`, plus a few facts per locale from the host's ICU
+  (NaN, hour padding, AM/PM, short and medium dates, stand-alone months).
+  Any other locale is en-US, and `resolvedOptions().locale` says so. The
+  collation (three levels with the per-locale tailorings) is native; the
+  rest is JavaScript, compiled the first time a script reaches for Intl or
+  a `toLocale…` method.
 
 Not there: generators, `async` / `await` (parsed, run as plain calls),
 Proxy, typed arrays, BigInt (literals read as numbers), `eval`, modules,
