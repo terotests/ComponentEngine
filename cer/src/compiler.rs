@@ -122,6 +122,13 @@ pub struct Compiler {
     pub local_program: bool,
     /// the innermost scope entered by the code being written
     cur_scope: int,
+    /// `with`: the scope of each statement's body → the statement, whose
+    /// object is the binding `%with<node>` there
+    with_scopes: HashMap<int, int>,
+    /// a name under `with`: the object bindings to look in first,
+    /// innermost first (an index into with_lists)
+    with_ref: HashMap<int, int>,
+    with_lists: Vec<Vec<int>>,
 }
 
 impl Compiler {
@@ -148,6 +155,9 @@ impl Compiler {
             keep_completion: true,
             local_program: false,
             cur_scope: -1,
+            with_scopes: HashMap::new(),
+            with_ref: HashMap::new(),
+            with_lists: Vec::new(),
         }
     }
 
@@ -297,6 +307,10 @@ impl Compiler {
             self.hoist_vars(b, scope);
             return;
         }
+        if k == N_WITH {
+            self.hoist_vars(b, scope);
+            return;
+        }
         if k == N_DOWHILE || k == N_LABELED {
             self.hoist_vars(a, scope);
             return;
@@ -415,6 +429,32 @@ impl Compiler {
     fn resolve(&mut self, n: int, scope: int) {
         let name = self.ast.nodes[n as usize].s.clone();
         let b = self.lookup(scope, name.as_str());
+        if !self.with_scopes.is_empty() && !self.decl_idents.contains_key(&n) {
+            // the objects of the `with` statements between the reference
+            // and its binding are asked first
+            let target = if b >= 0 && !self.binds[b as usize].global { self.binds[b as usize].scope } else { -1 };
+            let mut list: Vec<int> = Vec::new();
+            let mut s = scope;
+            while s >= 0 && s != target {
+                let w = match self.with_scopes.get(&s) {
+                    Some(x) => *x,
+                    None => -1,
+                };
+                if w >= 0 {
+                    let wn = format!("%with{}", w);
+                    let wb = self.lookup(scope, wn.as_str());
+                    if wb >= 0 {
+                        list.push(wb);
+                    }
+                }
+                s = self.scopes[s as usize].parent;
+            }
+            if !list.is_empty() {
+                self.with_lists.push(list);
+                let i = (self.with_lists.len() as int) - 1;
+                self.with_ref.insert(n, i);
+            }
+        }
         if b >= 0 && !self.binds[b as usize].global {
             self.ref_bind.insert(n, b);
             let kind = self.binds[b as usize].kind;
@@ -639,6 +679,16 @@ impl Compiler {
             let list = self.ast.nodes[n as usize].list.clone();
             self.declare_lexical(&list, s);
             self.visit_list(&list, s);
+            return;
+        }
+        if k == N_WITH {
+            self.visit(a, scope);
+            let s = self.new_scope(scope, n, false, false);
+            let wn = format!("%with{}", n);
+            self.declare(s, wn.as_str(), K_LET);
+            self.mark_inited(s, wn.as_str());
+            self.with_scopes.insert(s, n);
+            self.visit(b, s);
             return;
         }
         if k == N_PROGRAM {
@@ -935,7 +985,49 @@ impl Compiler {
         d
     }
 
+    /// Under `with`: for each object in turn, when it has the name, its
+    /// property (read, or written from the top of the stack); the jumps
+    /// to the end, patched after the binding's own code.
+    fn with_lookup(&mut self, n: int, store: bool) -> Vec<int> {
+        let mut ends: Vec<int> = Vec::new();
+        let li = match self.with_ref.get(&n) {
+            Some(x) => *x,
+            None => -1,
+        };
+        if li < 0 {
+            return ends;
+        }
+        let name = self.ast.nodes[n as usize].s.clone();
+        let at = self.atom(name.as_str());
+        let list = self.with_lists[li as usize].clone();
+        for wb in list.iter() {
+            self.push_str(name.as_str());
+            self.load_bind(*wb);
+            self.op(OP_IN);
+            let jf = self.emit(OP_JF, 0, 0);
+            self.load_bind(*wb);
+            if store {
+                self.op(OP_SWAP);
+                self.emit(OP_SET_PROP, at, 0);
+            } else {
+                self.emit(OP_GET_PROP, at, 0);
+            }
+            let j = self.emit(OP_JUMP, 0, 0);
+            ends.push(j);
+            self.patch(jf);
+        }
+        ends
+    }
+
     fn load_name(&mut self, n: int) {
+        let ends = self.with_lookup(n, false);
+        self.load_name_here(n);
+        for j in ends.iter() {
+            self.patch(*j);
+        }
+    }
+
+    fn load_name_here(&mut self, n: int) {
         let name = self.ast.nodes[n as usize].s.clone();
         let b = match self.ref_bind.get(&n) {
             Some(x) => *x,
@@ -1012,6 +1104,14 @@ impl Compiler {
     }
 
     fn store_name(&mut self, n: int, init: bool) {
+        let ends: Vec<int> = if init { Vec::new() } else { self.with_lookup(n, true) };
+        self.store_name_here(n, init);
+        for j in ends.iter() {
+            self.patch(*j);
+        }
+    }
+
+    fn store_name_here(&mut self, n: int, init: bool) {
         let name = self.ast.nodes[n as usize].s.clone();
         let b = match self.ref_bind.get(&n) {
             Some(x) => *x,
@@ -1376,6 +1476,31 @@ impl Compiler {
             self.block(n);
             return;
         }
+        if k == N_WITH {
+            if self.f().proto.strict {
+                self.fail("Strict mode code may not include a with statement");
+                return;
+            }
+            self.expr(a);
+            let scope = match self.node_scope.get(&n) {
+                Some(s) => *s,
+                None => -1,
+            };
+            let saved = self.cur_scope;
+            self.cur_scope = scope;
+            let pushed = self.enter_scope(scope, false);
+            let wn = format!("%with{}", n);
+            let wb = match self.scopes[scope as usize].names.get(&wn) {
+                Some(x) => *x,
+                None => -1,
+            };
+            self.store_bind(wb, true);
+            self.op(OP_POP);
+            self.statement(b);
+            self.leave_scope(pushed);
+            self.cur_scope = saved;
+            return;
+        }
         if k == N_EMPTY {
             return;
         }
@@ -1669,7 +1794,7 @@ impl Compiler {
                     Some(x) => *x,
                     None => -1,
                 };
-                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) {
+                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) && !self.with_ref.contains_key(&t) {
                     let slot = self.binds[b as usize].slot;
                     let delta = if self.ast.nodes[e as usize].op.as_str() == "++" { 1 } else { -1 };
                     self.emit(OP_INC_LOCAL, slot, delta);
@@ -1689,7 +1814,7 @@ impl Compiler {
                     Some(x) => *x,
                     None => -1,
                 };
-                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) && !self.may_assign(v) {
+                if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) && !self.with_ref.contains_key(&t) && !self.may_assign(v) {
                     let slot = self.binds[b as usize].slot;
                     self.expr(v);
                     self.emit(OP_ADD_LOCAL_POP, slot, 0);
@@ -2354,7 +2479,7 @@ impl Compiler {
                     Some(x) => *x,
                     None => -1,
                 };
-                if bnd >= 0 && !self.binds[bnd as usize].in_env && !self.binds[bnd as usize].global && !self.tdz_refs.contains_key(&a) {
+                if bnd >= 0 && !self.binds[bnd as usize].in_env && !self.binds[bnd as usize].global && !self.tdz_refs.contains_key(&a) && !self.with_ref.contains_key(&a) {
                     let slot = self.binds[bnd as usize].slot;
                     let at = self.atom(s.as_str());
                     self.emit(OP_GET_LOCAL_PROP, slot, at);
@@ -2572,6 +2697,28 @@ impl Compiler {
         let a = self.ast.nodes[n as usize].a;
         let o = op.as_str();
         if o == "typeof" {
+            if self.ast.nodes[a as usize].kind == N_IDENT && self.with_ref.contains_key(&a) {
+                let ends = self.with_lookup(a, false);
+                if self.ref_bind.contains_key(&a) {
+                    self.load_name_here(a);
+                } else {
+                    let s = self.ast.nodes[a as usize].s.clone();
+                    let at = self.atom(s.as_str());
+                    self.emit(OP_TYPEOF_GLOBAL, at, 0);
+                    let j = self.emit(OP_JUMP, 0, 0);
+                    for e in ends.iter() {
+                        self.patch(*e);
+                    }
+                    self.op(OP_TYPEOF);
+                    self.patch(j);
+                    return;
+                }
+                for e in ends.iter() {
+                    self.patch(*e);
+                }
+                self.op(OP_TYPEOF);
+                return;
+            }
             if self.ast.nodes[a as usize].kind == N_IDENT && !self.ref_bind.contains_key(&a) {
                 let s = self.ast.nodes[a as usize].s.clone();
                 let at = self.atom(s.as_str());
@@ -2665,7 +2812,7 @@ impl Compiler {
                 Some(x) => *x,
                 None => -1,
             };
-            if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) {
+            if b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && self.binds[b as usize].kind != K_CONST && !self.tdz_refs.contains_key(&t) && !self.with_ref.contains_key(&t) {
                 let slot = self.binds[b as usize].slot;
                 let delta = if op.as_str() == "++" { 1 } else { -1 };
                 self.emit(if prefix { OP_PREINC_LOCAL } else { OP_POSTINC_LOCAL }, slot, delta);

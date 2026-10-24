@@ -53,11 +53,17 @@ npm run cer:octane           # the Octane suites of Ranger's interp/bench/zoo_oc
   URI functions.
 - `regex.rs`: a backtracking matcher over UTF-16 units: groups (named too),
   back references, lookahead and lookbehind, lazy quantifiers, classes, the
-  flags `gimsuy`.
+  flags `dgimsuyv` (`d`: the `indices` of each group).
+- `normalize.rs`: `String.prototype.normalize`, NFC and NFD over the tables
+  of `uninorm.rs` (written by `tools/gen-uninorm.cjs` from
+  `engine/UnicodeNorm.rgr`); NFKC and NFKD decompose canonically only.
+- `prelude.rs` also holds Intl without ICU: NumberFormat, PluralRules,
+  DateTimeFormat (local time or UTC), Collator, RelativeTimeFormat and
+  ListFormat for en, fi, sv, de, fr, nl and es; any other locale is English.
 
 Not there: generators, `async` / `await` (parsed, run as plain calls),
-Proxy, typed arrays, BigInt (literals read as numbers), `with`, `eval`,
-modules, Intl, Unicode normalization and locale-aware collation.
+Proxy, typed arrays, BigInt (literals read as numbers), `eval`, modules,
+time zones other than UTC and the local one, and CLDR's full locale data.
 
 ## Conformance
 

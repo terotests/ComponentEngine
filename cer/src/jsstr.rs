@@ -148,6 +148,31 @@ fn slice_units(s: &str, a: int, b: int) -> String {
     from_units(&u, x, y)
 }
 
+/// Bytes [a, b) of an ASCII string, a and b in range.
+pub fn byte_slice(s: &str, a: int, b: int) -> String {
+    let r: String = ranger::native!(rust: { String::from(&s[(a as usize)..(b as usize)]) }, es6: "{s}.substring({a}, {b})");
+    r
+}
+
+/// The first `pat` at or after `from` in an ASCII string (pat ASCII too).
+pub fn byte_index_of(s: &str, pat: &str, from: int) -> int {
+    let n = s.as_bytes().len() as int;
+    let start = if from < 0 { 0 } else { from };
+    if start > n {
+        return if pat.is_empty() { n } else { -1 };
+    }
+    let r: int = ranger::native!(
+        rust: {
+            match s[(start as usize)..].find(pat) {
+                Some(p) => start + (p as int),
+                None => -1,
+            }
+        },
+        es6: "{s}.indexOf({pat}, {start})",
+    );
+    r
+}
+
 pub fn index_of(s: &str, pat: &str, from: int) -> int {
     let r: int = ranger::native!(rust: { index_of_units(s, pat, from) }, es6: "{s}.indexOf({pat}, Math.max(0, {from}))");
     r
@@ -237,11 +262,31 @@ fn compare_units(a: &str, b: &str) -> int {
     }
 }
 
+fn upper_special(c: char) -> String {
+    let pairs = ["ßSS", "ŉ\u{2bc}N", "ǰJ\u{30c}", "ﬀFF", "ﬁFI", "ﬂFL", "ﬃFFI", "ﬄFFL", "ﬅST", "ﬆST", "ևԵՒ"];
+    for p in pairs.iter() {
+        let cs = p.chars().collect::<Vec<char>>();
+        if cs[0] == c {
+            let mut r = String::new();
+            let mut k: usize = 1;
+            while k < cs.len() {
+                r.push(cs[k]);
+                k += 1;
+            }
+            return r;
+        }
+    }
+    String::new()
+}
+
 pub fn to_upper(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
-        if c == 'ß' {
-            out.push_str("SS");
+        // SpecialCasing's unconditional mappings to more than one letter,
+        // which not every target's own case mapping writes
+        let special = upper_special(c);
+        if !special.is_empty() {
+            out.push_str(special.as_str());
             continue;
         }
         out.push_str(c.to_uppercase().to_string().as_str());
@@ -261,6 +306,11 @@ pub fn to_lower(s: &str) -> String {
             let before = i > 0 && cs[i - 1].is_alphabetic();
             let after = i + 1 < n && cs[i + 1].is_alphabetic();
             out.push(if before && !after { 'ς' } else { 'σ' });
+            i += 1;
+            continue;
+        }
+        if c == 'İ' {
+            out.push_str("i\u{307}");
             i += 1;
             continue;
         }

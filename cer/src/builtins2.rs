@@ -662,9 +662,9 @@ impl Vm {
                 }
                 let mut i = to_integer(self.to_number(&a0));
                 if id == NF_SP_AT && i < 0.0 {
-                    i += jsstr::len(s.as_str()) as double;
+                    i += self.str_len(&s) as double;
                 }
-                let c = if i < 0.0 || i > 4294967295.0 { -1 } else { jsstr::at(s.as_str(), i as int) };
+                let c = if i < 0.0 || i > 4294967295.0 { -1 } else { self.str_at(&s, i as int) };
                 match id {
                     NF_SP_CHARAT => {
                         if c < 0 {
@@ -686,7 +686,7 @@ impl Vm {
                             return Val::Undef;
                         }
                         if c >= 0xd800 && c <= 0xdbff {
-                            let d = jsstr::at(s.as_str(), (i as int) + 1);
+                            let d = self.str_at(&s, (i as int) + 1);
                             if d >= 0xdc00 && d <= 0xdfff {
                                 return Val::Num((0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00)) as double);
                             }
@@ -705,11 +705,11 @@ impl Vm {
                     return Val::Undef;
                 }
                 let p = self.to_str(&a0);
-                let len = jsstr::len(s.as_str());
+                let len = self.str_len(&s);
                 match id {
                     NF_SP_INDEXOF => {
                         let from = self.rel_index_pos(&a1, len, 0);
-                        Val::Num(jsstr::index_of(s.as_str(), p.as_str(), from) as double)
+                        Val::Num(self.str_index_of(&s, p.as_str(), from) as double)
                     }
                     NF_SP_LASTINDEXOF => {
                         let n = self.to_number(&a1);
@@ -718,12 +718,12 @@ impl Vm {
                     }
                     NF_SP_INCLUDES => {
                         let from = self.rel_index_pos(&a1, len, 0);
-                        Val::Bool(jsstr::index_of(s.as_str(), p.as_str(), from) >= 0)
+                        Val::Bool(self.str_index_of(&s, p.as_str(), from) >= 0)
                     }
                     NF_SP_STARTSWITH => {
                         let from = self.rel_index_pos(&a1, len, 0);
                         let pl = jsstr::len(p.as_str());
-                        Val::Bool(jsstr::slice(s.as_str(), from, from + pl).as_str() == p.as_str())
+                        Val::Bool(self.str_slice(&s, from, from + pl).as_str() == p.as_str())
                     }
                     _ => {
                         let end = self.rel_index_pos(&a1, len, len);
@@ -731,7 +731,7 @@ impl Vm {
                         if end - pl < 0 {
                             return Val::Bool(false);
                         }
-                        Val::Bool(jsstr::slice(s.as_str(), end - pl, end).as_str() == p.as_str())
+                        Val::Bool(self.str_slice(&s, end - pl, end).as_str() == p.as_str())
                     }
                 }
             }
@@ -740,23 +740,23 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
-                let len = jsstr::len(s.as_str());
+                let len = self.str_len(&s);
                 let a = self.rel_index(&a0, len, 0);
                 let b = self.rel_index(&a1, len, len);
-                string_val(jsstr::slice(s.as_str(), a, b))
+                string_val(self.str_slice(&s, a, b))
             }
             NF_SP_SUBSTRING => {
                 let s = self.this_str(&this);
                 if self.throwing {
                     return Val::Undef;
                 }
-                let len = jsstr::len(s.as_str());
+                let len = self.str_len(&s);
                 let a = self.rel_index_pos(&a0, len, 0);
                 let b = self.rel_index_pos(&a1, len, len);
                 if a < b {
-                    string_val(jsstr::slice(s.as_str(), a, b))
+                    string_val(self.str_slice(&s, a, b))
                 } else {
-                    string_val(jsstr::slice(s.as_str(), b, a))
+                    string_val(self.str_slice(&s, b, a))
                 }
             }
             NF_SP_SUBSTR => {
@@ -764,13 +764,13 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
-                let len = jsstr::len(s.as_str());
+                let len = self.str_len(&s);
                 let a = self.rel_index(&a0, len, 0);
                 let n = if matches!(a1, Val::Undef) { len - a } else { to_integer(self.to_number(&a1)) as int };
                 if n <= 0 {
                     return str_val("");
                 }
-                string_val(jsstr::slice(s.as_str(), a, a + n))
+                string_val(self.str_slice(&s, a, a + n))
             }
             NF_SP_UPPER => {
                 let s = self.this_str(&this);
@@ -794,7 +794,19 @@ impl Vm {
             }
             NF_SP_NORMALIZE => {
                 let s = self.this_str(&this);
-                Val::Str(s)
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let form = if matches!(a0, Val::Undef) { String::from("NFC") } else { self.to_str(&a0).as_str().to_string() };
+                if self.throwing {
+                    return Val::Undef;
+                }
+                if form != "NFC" && form != "NFD" && form != "NFKC" && form != "NFKD" {
+                    self.throw_range("The normalization form should be one of NFC, NFD, NFKC, NFKD.");
+                    return Val::Undef;
+                }
+                let compose = form == "NFC" || form == "NFKC";
+                string_val(crate::normalize::normalize(&mut self.norm, s.as_str(), compose))
             }
             NF_SP_SPLIT => {
                 let s = self.this_str(&this);

@@ -557,3 +557,18 @@ const q = (4) / 2;
 [n, q, JSON.stringify(f(2))].join()
 ----
 2,2,{"type":"i","props":{},"children":[2]}
+
+==== js generators: yield, yield*, return and for await of an async generator
+function* range(n) { for (let i = 0; i < n; i++) yield i }
+function* both() { yield* range(2); yield 'x' }
+const g = range(3);
+const it = { *[Symbol.iterator]() { yield 'a'; yield 'b' } };
+[[...both()].join(''), g.next().value, g.return(9).value, g.next().done, Array.from(it).join('')].join()
+----
+01x,0,9,true,ab
+
+==== js a template substitution holding a brace in a string, regex or comment
+const x = 2;
+[`a${"}".length}b${/}"/.source}c${(function () { /* } */ return 1 })()}`, `n${`in${x}ner`}d${{ a: 1 }.a}`].join('|')
+----
+a1b}"c1|nin2nerd1

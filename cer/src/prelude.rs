@@ -1611,6 +1611,444 @@ if (!DP.toLocaleString) hide(DP, 'toLocaleString', function toLocaleString() {
   return this.toLocaleDateString() + ', ' + this.toLocaleTimeString();
 });
 
+// ---- Intl (ECMA-402), without ICU: the locales in LOCALES (their number
+// separators, plural rules, date order and names), English for any other.
+// Collator compares as the root collation does at its first three levels
+// (letters, then accents, then case, lower first); numeric digit runs.
+var LOCALES = {
+  en: { dec: '.', grp: ',', cur: 'before', date: 'mdy', dsep: '/', tsep: ':', h12: true, rel: 'en', list: ['and', 'or'], one: function (n, i, v) { return i === 1 && v === 0; } },
+  fi: { dec: ',', grp: ' ', cur: 'after', date: 'dmy', dsep: '.', tsep: '.', h12: false, list: ['ja', 'tai'], one: function (n, i, v) { return i === 1 && v === 0; },
+    months: ['tammikuuta', 'helmikuuta', 'maaliskuuta', 'huhtikuuta', 'toukokuuta', 'kesäkuuta', 'heinäkuuta', 'elokuuta', 'syyskuuta', 'lokakuuta', 'marraskuuta', 'joulukuuta'],
+    monthsAlone: ['tammikuu', 'helmikuu', 'maaliskuu', 'huhtikuu', 'toukokuu', 'kesäkuu', 'heinäkuu', 'elokuu', 'syyskuu', 'lokakuu', 'marraskuu', 'joulukuu'],
+    days: ['sunnuntai', 'maanantai', 'tiistai', 'keskiviikko', 'torstai', 'perjantai', 'lauantai'], dayDot: true },
+  sv: { dec: ',', grp: ' ', cur: 'after', date: 'ymd', dsep: '-', tsep: ':', h12: false, list: ['och', 'eller'], one: function (n, i, v) { return i === 1 && v === 0; },
+    months: ['januari', 'februari', 'mars', 'april', 'maj', 'juni', 'juli', 'augusti', 'september', 'oktober', 'november', 'december'],
+    days: ['söndag', 'måndag', 'tisdag', 'onsdag', 'torsdag', 'fredag', 'lördag'] },
+  de: { dec: ',', grp: '.', cur: 'after', date: 'dmy', dsep: '.', tsep: ':', h12: false, list: ['und', 'oder'], one: function (n, i, v) { return i === 1 && v === 0; },
+    months: ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August', 'September', 'Oktober', 'November', 'Dezember'],
+    days: ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'], dayDot: true },
+  fr: { dec: ',', grp: ' ', cur: 'after', date: 'dmy', dsep: '/', tsep: ':', h12: false, list: ['et', 'ou'], one: function (n, i, v) { return i === 0 || i === 1; },
+    months: ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'],
+    days: ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'] },
+  nl: { dec: ',', grp: '.', cur: 'before', date: 'dmy', dsep: '-', tsep: ':', h12: false, list: ['en', 'of'], one: function (n, i, v) { return i === 1 && v === 0; },
+    months: ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'],
+    days: ['zondag', 'maandag', 'dinsdag', 'woensdag', 'donderdag', 'vrijdag', 'zaterdag'] },
+  es: { dec: ',', grp: '.', cur: 'after', date: 'dmy', dsep: '/', tsep: ':', h12: false, list: ['y', 'o'], one: function (n, i, v) { return n === 1; },
+    months: ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'],
+    days: ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'] }
+};
+var EN_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+var EN_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+var CURRENCY = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', SEK: 'kr', NOK: 'kr', DKK: 'kr', CHF: 'CHF', CNY: 'CN¥', INR: '₹' };
+function canonLocale(tag) {
+  if (typeof tag !== 'string' && !(isObject(tag) && typeof tag.toString === 'function')) throw new TypeError('Incorrect locale information provided');
+  var s = String(tag);
+  if (!/^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/.test(s.replace(/_/g, '-'))) throw new RangeError('Incorrect locale information provided');
+  var parts = s.replace(/_/g, '-').split('-');
+  parts[0] = parts[0].toLowerCase();
+  for (var i = 1; i < parts.length; i++) {
+    if (parts[i].length === 2) parts[i] = parts[i].toUpperCase();
+    else if (parts[i].length === 4) parts[i] = parts[i].charAt(0).toUpperCase() + parts[i].slice(1).toLowerCase();
+    else parts[i] = parts[i].toLowerCase();
+  }
+  return parts.join('-');
+}
+function localeList(locales) {
+  if (locales === undefined) return [];
+  if (typeof locales === 'string') return [canonLocale(locales)];
+  var out = [], o = Object(locales), n = toIntegerOrInfinity(o.length);
+  for (var i = 0; i < n; i++) if (i in o) { var c = canonLocale(o[i]); if (out.indexOf(c) < 0) out.push(c); }
+  return out;
+}
+function pickLocale(locales) {
+  var list = localeList(locales);
+  for (var i = 0; i < list.length; i++) if (LOCALES[list[i].split('-')[0]]) return list[i];
+  return 'en-US';
+}
+function localeData(tag) { return LOCALES[tag.split('-')[0]] || LOCALES.en; }
+function option(o, name, allowed, dflt) {
+  var v = o[name];
+  if (v === undefined) return dflt;
+  v = typeof dflt === 'boolean' ? Boolean(v) : String(v);
+  if (allowed && allowed.indexOf(v) < 0) throw new RangeError('Value ' + v + ' out of range for Intl options property ' + name);
+  return v;
+}
+function numOption(o, name, min, max, dflt) {
+  var v = o[name];
+  if (v === undefined) return dflt;
+  v = Number(v);
+  if (v !== v || v < min || v > max) throw new RangeError(name + ' value is out of range.');
+  return Math.floor(v);
+}
+function optionsObject(o) { return o === undefined ? create(null) : Object(o); }
+function supportedLocalesOf(locales) { return localeList(locales).filter(function (l) { return !!LOCALES[l.split('-')[0]]; }); }
+function intlBrand(o, brand, what) { if (!isObject(o) || o.__intl !== brand) throw new TypeError('Method ' + what + ' called on incompatible receiver'); }
+
+// numbers: digits rounded to the fraction range, grouped by the locale
+function groupDigits(int, sep, minGroup) {
+  if (int.length < 4 + (minGroup || 0)) return int;
+  var out = '';
+  for (var i = int.length; i > 0; i -= 3) out = int.slice(Math.max(0, i - 3), i) + (out ? sep + out : '');
+  return out;
+}
+function fixedDigits(x, minF, maxF) {
+  var s = x.toFixed(maxF);
+  if (s.indexOf('e') >= 0) s = x.toLocaleString === undefined ? String(x) : String(x);
+  var dot = s.indexOf('.');
+  if (dot >= 0) {
+    var end = s.length;
+    while (end > dot + 1 + minF && s.charAt(end - 1) === '0') end--;
+    if (end === dot + 1) end = dot;
+    s = s.slice(0, end);
+  }
+  return s;
+}
+function NumberFormat(locales, options) {
+  if (!(this instanceof NumberFormat) || this.__intl) return new NumberFormat(locales, options);
+  var o = optionsObject(options);
+  var loc = pickLocale(locales);
+  var style = option(o, 'style', ['decimal', 'percent', 'currency', 'unit'], 'decimal');
+  var currency = o.currency === undefined ? undefined : String(o.currency).toUpperCase();
+  if (style === 'currency' && currency === undefined) throw new TypeError('Currency code is required with currency style.');
+  var cd = currency === 'JPY' ? 0 : 2;
+  var minF = numOption(o, 'minimumFractionDigits', 0, 100, undefined);
+  var maxF = numOption(o, 'maximumFractionDigits', 0, 100, undefined);
+  var dMin = style === 'currency' ? cd : 0, dMax = style === 'currency' ? cd : style === 'percent' ? 0 : 3;
+  if (minF === undefined && maxF === undefined) { minF = dMin; maxF = dMax; }
+  else if (minF === undefined) minF = Math.min(dMin, maxF);
+  else if (maxF === undefined) maxF = Math.max(dMax, minF);
+  else if (minF > maxF) throw new RangeError('maximumFractionDigits value is out of range.');
+  var g = o.useGrouping;
+  hide(this, '__intl', 'NumberFormat');
+  hide(this, '__o', {
+    locale: loc, numberingSystem: 'latn', style: style, currency: currency,
+    currencyDisplay: option(o, 'currencyDisplay', ['symbol', 'narrowSymbol', 'code', 'name'], 'symbol'),
+    unit: o.unit === undefined ? undefined : String(o.unit), unitDisplay: option(o, 'unitDisplay', ['short', 'narrow', 'long'], 'short'),
+    minimumIntegerDigits: numOption(o, 'minimumIntegerDigits', 1, 21, 1),
+    minimumFractionDigits: minF, maximumFractionDigits: maxF,
+    maximumSignificantDigits: numOption(o, 'maximumSignificantDigits', 1, 21, undefined),
+    useGrouping: g === undefined ? 'auto' : g === false || g === 'false' ? false : g === 'min2' ? 'min2' : 'auto',
+    notation: option(o, 'notation', ['standard', 'scientific', 'engineering', 'compact'], 'standard'),
+    signDisplay: option(o, 'signDisplay', ['auto', 'never', 'always', 'exceptZero', 'negative'], 'auto')
+  });
+}
+function numberParts(nf, x) {
+  var o = nf.__o, d = localeData(o.locale), parts = [];
+  if (typeof x === 'bigint') x = Number(x);
+  x = Number(x);
+  var neg = x < 0 || (x === 0 && 1 / x < 0);
+  var sign = '';
+  if (o.signDisplay === 'always' || (o.signDisplay === 'exceptZero' && x !== 0)) sign = neg ? '-' : '+';
+  else if (o.signDisplay !== 'never' && neg && !(o.signDisplay === 'negative' && x === 0) && !(o.signDisplay === 'auto' && x === 0 && false)) sign = '-';
+  var a = Math.abs(x);
+  if (o.style === 'percent') a *= 100;
+  var body;
+  if (a !== a) body = [{ type: 'nan', value: 'NaN' }];
+  else if (a === Infinity) body = [{ type: 'infinity', value: '∞' }];
+  else {
+    var s;
+    if (o.maximumSignificantDigits) s = String(Number(a.toPrecision(o.maximumSignificantDigits)));
+    else s = fixedDigits(a, o.minimumFractionDigits, o.maximumFractionDigits);
+    var dot = s.indexOf('.');
+    var int = dot < 0 ? s : s.slice(0, dot), frac = dot < 0 ? '' : s.slice(dot + 1);
+    while (int.length < o.minimumIntegerDigits) int = '0' + int;
+    body = [];
+    if (o.useGrouping === false) body.push({ type: 'integer', value: int });
+    else {
+      var grouped = groupDigits(int, '\u0001', o.useGrouping === 'min2' || d.grp === ' ' && false ? 1 : 0).split('\u0001');
+      for (var i = 0; i < grouped.length; i++) {
+        if (i) body.push({ type: 'group', value: d.grp });
+        body.push({ type: 'integer', value: grouped[i] });
+      }
+    }
+    if (frac) { body.push({ type: 'decimal', value: d.dec }); body.push({ type: 'fraction', value: frac }); }
+  }
+  if (sign) parts.push({ type: sign === '-' ? 'minusSign' : 'plusSign', value: sign === '-' && d.dec === ',' && o.locale.split('-')[0] !== 'de' && o.locale.split('-')[0] !== 'nl' && o.locale.split('-')[0] !== 'es' ? '−' : sign });
+  if (o.style === 'currency') {
+    var sym = o.currencyDisplay === 'code' ? o.currency : o.currencyDisplay === 'name' ? o.currency : CURRENCY[o.currency] || o.currency;
+    if (d.cur === 'before') { parts.push({ type: 'currency', value: sym }); if (sym.length > 1 && /^[A-Z]+$/.test(sym)) parts.push({ type: 'literal', value: ' ' }); parts = parts.concat(body); }
+    else { parts = parts.concat(body); parts.push({ type: 'literal', value: ' ' }); parts.push({ type: 'currency', value: sym }); }
+  } else parts = parts.concat(body);
+  if (o.style === 'percent') { if (d.dec === ',') parts.push({ type: 'literal', value: ' ' }); parts.push({ type: 'percentSign', value: '%' }); }
+  if (o.style === 'unit' && o.unit) parts.push({ type: 'literal', value: ' ' }, { type: 'unit', value: o.unit });
+  return parts;
+}
+hide(NumberFormat.prototype, 'formatToParts', function formatToParts(x) { intlBrand(this, 'NumberFormat', 'Intl.NumberFormat.prototype.formatToParts'); return numberParts(this, x); });
+defineProperty(NumberFormat.prototype, 'format', { configurable: true, enumerable: false, get: function () {
+  intlBrand(this, 'NumberFormat', 'get Intl.NumberFormat.prototype.format');
+  var self = this;
+  if (!this.__f) hide(this, '__f', function (x) { return numberParts(self, x).map(function (p) { return p.value; }).join(''); });
+  return this.__f;
+} });
+hide(NumberFormat.prototype, 'resolvedOptions', function resolvedOptions() {
+  intlBrand(this, 'NumberFormat', 'Intl.NumberFormat.prototype.resolvedOptions');
+  var r = {}, o = this.__o;
+  for (var k in o) if (o[k] !== undefined) r[k] = o[k];
+  return r;
+});
+
+// plural rules: the locale's `one`, and English ordinals
+function PluralRules(locales, options) {
+  if (!(this instanceof PluralRules)) throw new TypeError("Constructor Intl.PluralRules requires 'new'");
+  var o = optionsObject(options);
+  hide(this, '__intl', 'PluralRules');
+  hide(this, '__o', { locale: pickLocale(locales), type: option(o, 'type', ['cardinal', 'ordinal'], 'cardinal'), minimumIntegerDigits: 1, minimumFractionDigits: 0, maximumFractionDigits: 3, pluralCategories: [] });
+  this.__o.pluralCategories = this.__o.type === 'ordinal' && this.__o.locale.split('-')[0] === 'en' ? ['few', 'one', 'two', 'other'] : this.__o.type === 'ordinal' ? ['other'] : ['one', 'other'];
+}
+hide(PluralRules.prototype, 'select', function select(n) {
+  intlBrand(this, 'PluralRules', 'Intl.PluralRules.prototype.select');
+  n = Number(n);
+  var o = this.__o, lang = o.locale.split('-')[0];
+  if (n !== n || !isFinite(n)) return 'other';
+  var a = Math.abs(n), i = Math.floor(a), v = a === i ? 0 : String(a).split('.')[1].length;
+  if (o.type === 'ordinal') {
+    if (lang !== 'en') return 'other';
+    var m10 = i % 10, m100 = i % 100;
+    return m10 === 1 && m100 !== 11 ? 'one' : m10 === 2 && m100 !== 12 ? 'two' : m10 === 3 && m100 !== 13 ? 'few' : 'other';
+  }
+  return localeData(o.locale).one(a, i, v) ? 'one' : 'other';
+});
+hide(PluralRules.prototype, 'resolvedOptions', function resolvedOptions() { intlBrand(this, 'PluralRules', 'Intl.PluralRules.prototype.resolvedOptions'); var r = {}; for (var k in this.__o) r[k] = this.__o[k]; r.pluralCategories = this.__o.pluralCategories.slice(); return r; });
+
+// dates: the fields asked for, in the locale's order, local time or UTC
+var DT_FIELDS = ['weekday', 'era', 'year', 'month', 'day', 'hour', 'minute', 'second'];
+function DateTimeFormat(locales, options) {
+  if (!(this instanceof DateTimeFormat) || this.__intl) return new DateTimeFormat(locales, options);
+  var o = optionsObject(options);
+  var loc = pickLocale(locales);
+  var tz = o.timeZone === undefined ? undefined : String(o.timeZone);
+  if (tz !== undefined) {
+    var up = tz.toUpperCase();
+    if (up === 'UTC' || up === 'GMT' || up === 'ETC/UTC' || up === 'ETC/GMT') tz = 'UTC';
+    else if (!/^[A-Za-z_]+(\/[A-Za-z_+\-0-9]+)*$/.test(tz)) throw new RangeError('Invalid time zone specified: ' + tz);
+  }
+  var r = { locale: loc, calendar: 'gregory', numberingSystem: 'latn', timeZone: tz || 'UTC' };
+  var any = false;
+  var vals = { weekday: ['narrow', 'short', 'long'], era: ['narrow', 'short', 'long'], year: ['2-digit', 'numeric'], month: ['2-digit', 'numeric', 'narrow', 'short', 'long'], day: ['2-digit', 'numeric'], hour: ['2-digit', 'numeric'], minute: ['2-digit', 'numeric'], second: ['2-digit', 'numeric'] };
+  for (var i = 0; i < DT_FIELDS.length; i++) { var f = DT_FIELDS[i]; var v = option(o, f, vals[f], undefined); if (v !== undefined) { r[f] = v; any = true; } }
+  var ds = option(o, 'dateStyle', ['full', 'long', 'medium', 'short'], undefined), ts = option(o, 'timeStyle', ['full', 'long', 'medium', 'short'], undefined);
+  if ((ds || ts) && any) throw new TypeError("Can't set option " + 'dateStyle' + ' when other date/time options are set');
+  if (ds) { r.dateStyle = ds; r.year = 'numeric'; r.month = ds === 'short' ? 'numeric' : ds === 'medium' ? 'short' : 'long'; r.day = 'numeric'; if (ds === 'full') r.weekday = 'long'; }
+  if (ts) { r.timeStyle = ts; r.hour = 'numeric'; r.minute = '2-digit'; if (ts !== 'short') r.second = '2-digit'; }
+  var dflt = o.__dflt || 'date';
+  if (!any && !ds && !ts) {
+    if (dflt === 'date' || dflt === 'all') { r.year = 'numeric'; r.month = 'numeric'; r.day = 'numeric'; }
+    if (dflt === 'time' || dflt === 'all') { r.hour = 'numeric'; r.minute = '2-digit'; r.second = '2-digit'; }
+  }
+  var h12 = o.hour12 !== undefined ? Boolean(o.hour12) : o.hourCycle !== undefined ? (o.hourCycle === 'h12' || o.hourCycle === 'h11') : localeData(loc).h12 && loc !== 'en-GB';
+  if (r.hour) { r.hour12 = h12; r.hourCycle = h12 ? 'h12' : 'h23'; }
+  hide(this, '__intl', 'DateTimeFormat');
+  hide(this, '__o', r);
+  hide(this, '__utc', tz === 'UTC' || tz === undefined && false);
+  hide(this, '__tz', tz);
+}
+function two(n) { return n < 10 ? '0' + n : String(n); }
+function dateParts(dtf, date) {
+  var t = date === undefined ? Date.now() : typeof date === 'number' ? date : DP.getTime.call(date instanceof Date ? date : new Date(date));
+  if (t !== t) throw new RangeError('Invalid time value');
+  var d = new Date(t), o = dtf.__o, utc = dtf.__tz === 'UTC';
+  var Y = utc ? d.getUTCFullYear() : d.getFullYear(), M = utc ? d.getUTCMonth() : d.getMonth(), D = utc ? d.getUTCDate() : d.getDate();
+  var W = utc ? d.getUTCDay() : d.getDay(), h = utc ? d.getUTCHours() : d.getHours(), mi = utc ? d.getUTCMinutes() : d.getMinutes(), s = utc ? d.getUTCSeconds() : d.getSeconds();
+  var loc = o.locale, lang = loc.split('-')[0], ld = localeData(loc);
+  var gb = loc === 'en-GB' || loc === 'en-AU' || loc === 'en-NZ' || loc === 'en-IE';
+  var order = lang === 'en' && gb ? 'dmy' : ld.date;
+  var textMonth = o.month === 'long' || o.month === 'short' || o.month === 'narrow';
+  var months = lang === 'en' || !ld.months ? EN_MONTHS : (o.day ? ld.months : ld.monthsAlone || ld.months);
+  var days = lang === 'en' || !ld.days ? EN_DAYS : ld.days;
+  var P = [];
+  function lit(v) { if (P.length && P[P.length - 1].type === 'literal') P[P.length - 1].value += v; else P.push({ type: 'literal', value: v }); }
+  function field(type, v) { P.push({ type: type, value: v }); }
+  var year = o.year === '2-digit' ? two(Y % 100) : String(Y);
+  var day = o.day === '2-digit' ? two(D) : String(D);
+  var month = textMonth ? (o.month === 'long' ? months[M] : o.month === 'narrow' ? months[M].charAt(0).toUpperCase() : (lang === 'en' ? months[M].slice(0, 3) : months[M].slice(0, 3) + (lang === 'fi' ? 'k.' : lang === 'de' ? '.' : '.'))) : o.month === '2-digit' ? two(M + 1) : String(M + 1);
+  var hasDate = o.year || o.month || o.day;
+  if (o.weekday) {
+    var w = o.weekday === 'long' ? days[W] : o.weekday === 'short' ? days[W].slice(0, lang === 'fi' ? 2 : 3) : days[W].charAt(0).toUpperCase();
+    field('weekday', w);
+    if (hasDate) lit(', ');
+  }
+  if (hasDate) {
+    var seq = [];
+    if (textMonth) {
+      if (lang === 'en' && !gb) seq = [['month', month], [' '], ['day', day], [', '], ['year', year]];
+      else seq = [['day', day], [ld.dayDot ? '. ' : ' '], ['month', month], [' '], ['year', year]];
+    } else {
+      var map = { d: ['day', day], m: ['month', month], y: ['year', year] };
+      var sep = lang === 'en' && gb ? '/' : ld.dsep;
+      for (var k = 0; k < 3; k++) { if (k) seq.push([sep]); seq.push(map[order.charAt(k)]); }
+      if (lang === 'sv' && !o.day && o.year && o.month) seq = [['year', year], ['-'], ['month', two(M + 1)]];
+    }
+    // the fields asked for, and the separators between those kept
+    var kept = [];
+    for (var q = 0; q < seq.length; q++) if (seq[q].length === 1 || o[seq[q][0]]) kept.push(seq[q]);
+    var clean = [];
+    for (var z = 0; z < kept.length; z++) {
+      if (kept[z].length === 1 && (!clean.length || clean[clean.length - 1].length === 1)) continue;
+      clean.push(kept[z]);
+    }
+    while (clean.length && clean[clean.length - 1].length === 1) clean.pop();
+    for (var c = 0; c < clean.length; c++) { if (clean[c].length === 1) lit(clean[c][0]); else field(clean[c][0], clean[c][1]); }
+  }
+  if (o.hour || o.minute || o.second) {
+    if (hasDate || o.weekday) lit(lang === 'fi' ? ' klo ' : lang === 'en' ? ', ' : ' ');
+    var hh = o.hour12 ? (h + 11) % 12 + 1 : h;
+    var tsep = ld.tsep;
+    if (o.hour) field('hour', o.hour === '2-digit' || (!o.hour12 && o.minute && lang !== 'fi') ? two(hh) : String(hh));
+    if (o.minute) { if (o.hour) lit(tsep); field('minute', o.hour || o.minute === '2-digit' ? two(mi) : String(mi)); }
+    if (o.second) { if (o.hour || o.minute) lit(tsep); field('second', o.hour || o.minute || o.second === '2-digit' ? two(s) : String(s)); }
+    if (o.hour && o.hour12) { lit(' '); field('dayPeriod', h < 12 ? 'AM' : 'PM'); }
+  }
+  return P;
+}
+hide(DateTimeFormat.prototype, 'formatToParts', function formatToParts(d) { intlBrand(this, 'DateTimeFormat', 'Intl.DateTimeFormat.prototype.formatToParts'); return dateParts(this, d); });
+defineProperty(DateTimeFormat.prototype, 'format', { configurable: true, enumerable: false, get: function () {
+  intlBrand(this, 'DateTimeFormat', 'get Intl.DateTimeFormat.prototype.format');
+  var self = this;
+  if (!this.__f) hide(this, '__f', function (d) { return dateParts(self, d).map(function (p) { return p.value; }).join(''); });
+  return this.__f;
+} });
+hide(DateTimeFormat.prototype, 'formatRange', function formatRange(a, b) { return this.format(a) + ' – ' + this.format(b); });
+hide(DateTimeFormat.prototype, 'resolvedOptions', function resolvedOptions() { intlBrand(this, 'DateTimeFormat', 'Intl.DateTimeFormat.prototype.resolvedOptions'); var r = {}; for (var k in this.__o) r[k] = this.__o[k]; return r; });
+
+// collation: letters (accents and case folded away), then accents, then case
+function collationKeys(s, numeric, ignorePunct) {
+  var d = String(s).normalize('NFD');
+  var base = '', marks = '', cases = '';
+  for (var i = 0; i < d.length; i++) {
+    var ch = d.charAt(i);
+    if (/[̀-ͯ]/.test(ch)) { marks = marks.slice(0, -1) + ch; continue; }
+    if (ignorePunct && /[\s!-\/:-@\[-`{-~]/.test(ch)) continue;
+    var low = ch.toLowerCase();
+    base += low;
+    marks += '\u0000';
+    cases += low === ch ? '0' : '1';
+  }
+  return [base, marks, cases];
+}
+function compareBase(a, b, numeric) {
+  if (!numeric) return a < b ? -1 : a > b ? 1 : 0;
+  var re = /(\d+)|(\D+)/g, x = a.match(re) || [], y = b.match(re) || [];
+  for (var i = 0; i < x.length && i < y.length; i++) {
+    var p = x[i], q = y[i];
+    var pn = /^\d/.test(p), qn = /^\d/.test(q);
+    if (pn && qn) { var dn = Number(p) - Number(q); if (dn) return dn < 0 ? -1 : 1; continue; }
+    if (p !== q) return p < q ? -1 : 1;
+  }
+  return x.length - y.length < 0 ? -1 : x.length > y.length ? 1 : 0;
+}
+function Collator(locales, options) {
+  if (!(this instanceof Collator) || this.__intl) return new Collator(locales, options);
+  var o = optionsObject(options);
+  hide(this, '__intl', 'Collator');
+  hide(this, '__o', {
+    locale: pickLocale(locales), usage: option(o, 'usage', ['sort', 'search'], 'sort'),
+    sensitivity: option(o, 'sensitivity', ['base', 'accent', 'case', 'variant'], 'variant'),
+    ignorePunctuation: option(o, 'ignorePunctuation', null, false), collation: 'default',
+    numeric: option(o, 'numeric', null, false), caseFirst: option(o, 'caseFirst', ['upper', 'lower', 'false'], 'false')
+  });
+}
+function collate(c, a, b) {
+  var o = c.__o;
+  var x = collationKeys(a, o.numeric, o.ignorePunctuation), y = collationKeys(b, o.numeric, o.ignorePunctuation);
+  var r = compareBase(x[0], y[0], o.numeric);
+  if (r || o.sensitivity === 'base') return r;
+  if (o.sensitivity !== 'case') { r = x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0; if (r) return r; }
+  if (o.sensitivity === 'accent') return 0;
+  r = x[2] < y[2] ? -1 : x[2] > y[2] ? 1 : 0;
+  if (o.caseFirst === 'upper') r = -r;
+  return r;
+}
+defineProperty(Collator.prototype, 'compare', { configurable: true, enumerable: false, get: function () {
+  intlBrand(this, 'Collator', 'get Intl.Collator.prototype.compare');
+  var self = this;
+  if (!this.__f) hide(this, '__f', function (a, b) { return collate(self, a, b); });
+  return this.__f;
+} });
+hide(Collator.prototype, 'resolvedOptions', function resolvedOptions() { intlBrand(this, 'Collator', 'Intl.Collator.prototype.resolvedOptions'); var r = {}; for (var k in this.__o) r[k] = this.__o[k]; return r; });
+
+// relative times and lists (English, and the lists' conjunctions)
+var REL_UNITS = ['year', 'quarter', 'month', 'week', 'day', 'hour', 'minute', 'second'];
+function RelativeTimeFormat(locales, options) {
+  if (!(this instanceof RelativeTimeFormat)) throw new TypeError("Constructor Intl.RelativeTimeFormat requires 'new'");
+  var o = optionsObject(options);
+  hide(this, '__intl', 'RelativeTimeFormat');
+  hide(this, '__o', { locale: pickLocale(locales), style: option(o, 'style', ['long', 'short', 'narrow'], 'long'), numeric: option(o, 'numeric', ['always', 'auto'], 'always'), numberingSystem: 'latn' });
+}
+hide(RelativeTimeFormat.prototype, 'format', function format(v, unit) {
+  intlBrand(this, 'RelativeTimeFormat', 'Intl.RelativeTimeFormat.prototype.format');
+  v = Number(v);
+  var u = String(unit).replace(/s$/, '');
+  if (REL_UNITS.indexOf(u) < 0) throw new RangeError('Invalid unit argument for format() \'' + unit + '\'');
+  if (this.__o.numeric === 'auto') {
+    if (u === 'day' && v === 0) return 'today';
+    if (u === 'day' && v === 1) return 'tomorrow';
+    if (u === 'day' && v === -1) return 'yesterday';
+    if (v === 0) return 'this ' + u;
+    if (v === 1 && u !== 'hour' && u !== 'minute' && u !== 'second') return 'next ' + u;
+    if (v === -1 && u !== 'hour' && u !== 'minute' && u !== 'second') return 'last ' + u;
+  }
+  var a = Math.abs(v), n = new NumberFormat(this.__o.locale).format(a) + ' ' + u + (a === 1 ? '' : 's');
+  return v < 0 || (v === 0 && 1 / v < 0) ? n + ' ago' : 'in ' + n;
+});
+hide(RelativeTimeFormat.prototype, 'resolvedOptions', function resolvedOptions() { var r = {}; for (var k in this.__o) r[k] = this.__o[k]; return r; });
+function ListFormat(locales, options) {
+  if (!(this instanceof ListFormat)) throw new TypeError("Constructor Intl.ListFormat requires 'new'");
+  var o = optionsObject(options);
+  hide(this, '__intl', 'ListFormat');
+  hide(this, '__o', { locale: pickLocale(locales), type: option(o, 'type', ['conjunction', 'disjunction', 'unit'], 'conjunction'), style: option(o, 'style', ['long', 'short', 'narrow'], 'long') });
+}
+hide(ListFormat.prototype, 'format', function format(list) {
+  intlBrand(this, 'ListFormat', 'Intl.ListFormat.prototype.format');
+  var items = [];
+  for (var x of list) { if (typeof x !== 'string') throw new TypeError('Iterable yielded ' + String(x) + ' which is not a string'); items.push(x); }
+  var o = this.__o, ld = localeData(o.locale), lang = o.locale.split('-')[0];
+  if (items.length < 2) return items.join('');
+  if (o.type === 'unit') return items.join(o.style === 'narrow' ? ' ' : ', ');
+  var word = o.type === 'disjunction' ? ld.list[1] : ld.list[0];
+  if (o.type === 'conjunction' && o.style !== 'long' && lang === 'en') word = o.style === 'short' ? '&' : '';
+  var head = items.slice(0, -1).join(', ');
+  var last = items[items.length - 1];
+  if (lang === 'en' && word === '') return head + ', ' + last;
+  return head + (lang === 'en' && items.length > 2 ? ', ' : ' ') + word + ' ' + last;
+});
+hide(ListFormat.prototype, 'resolvedOptions', function resolvedOptions() { var r = {}; for (var k in this.__o) r[k] = this.__o[k]; return r; });
+
+var Intl = {};
+[['NumberFormat', NumberFormat], ['PluralRules', PluralRules], ['DateTimeFormat', DateTimeFormat], ['Collator', Collator], ['RelativeTimeFormat', RelativeTimeFormat], ['ListFormat', ListFormat]].forEach(function (e) {
+  hide(e[1], 'supportedLocalesOf', function supportedLocalesOf_(l) { return supportedLocalesOf(l); });
+  tag(e[1].prototype, 'Intl.' + e[0]);
+  hide(Intl, e[0], e[1]);
+});
+hide(Intl, 'getCanonicalLocales', function getCanonicalLocales(l) { return localeList(l); });
+hide(Intl, 'supportedValuesOf', function supportedValuesOf(k) { if (k === 'currency') return Object.keys(CURRENCY).sort(); if (k === 'timeZone') return ['UTC']; return []; });
+tag(Intl, 'Intl');
+hide(globalThis, 'Intl', Intl);
+// the toLocale… methods with locales or options go through Intl
+var nativeNumLocale = Number.prototype.toLocaleString;
+hide(Number.prototype, 'toLocaleString', function toLocaleString(locales, options) {
+  var x = typeof this === 'number' ? this : Number.prototype.valueOf.call(this);
+  return new NumberFormat(locales, options).format(x);
+});
+hide(String.prototype, 'localeCompare', function localeCompare(that, locales, options) {
+  if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
+  return collate(new Collator(locales, options), String(this), String(that));
+});
+function dateLocale(d, locales, options, dflt) {
+  if (!dateOk(d)) return 'Invalid Date';
+  var o = {};
+  if (options !== undefined) { var src = Object(options); for (var k in src) o[k] = src[k]; }
+  o.__dflt = dflt;
+  var has = false;
+  for (var i = 0; i < DT_FIELDS.length; i++) if (o[DT_FIELDS[i]] !== undefined) has = true;
+  if (o.dateStyle !== undefined || o.timeStyle !== undefined) has = true;
+  if (!has && dflt === 'all') { o.year = 'numeric'; o.month = 'numeric'; o.day = 'numeric'; o.hour = 'numeric'; o.minute = '2-digit'; o.second = '2-digit'; }
+  else if (!has && dflt === 'time') { o.hour = 'numeric'; o.minute = '2-digit'; o.second = '2-digit'; }
+  return new DateTimeFormat(locales, o).format(d);
+}
+hide(DP, 'toLocaleString', function toLocaleString(locales, options) { return dateLocale(this, locales, options, 'all'); });
+hide(DP, 'toLocaleDateString', function toLocaleDateString(locales, options) { return dateLocale(this, locales, options, 'date'); });
+hide(DP, 'toLocaleTimeString', function toLocaleTimeString(locales, options) { return dateLocale(this, locales, options, 'time'); });
+
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs
 // a callback, so a held object simply stays
 function WeakRef(target) {

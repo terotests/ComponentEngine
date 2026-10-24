@@ -70,6 +70,8 @@ pub struct Parser {
     /// `in` is not an operator in the head of a `for`
     pub(crate) no_in: bool,
     pub(crate) in_function: bool,
+    /// `yield` is an operator (a generator's body)
+    pub(crate) in_generator: bool,
     pub(crate) in_class: bool,
     /// tokens a `>` was split off while reading type arguments: (index,
     /// text before), undone when a speculative read is abandoned
@@ -208,6 +210,7 @@ impl Parser {
             syntax: sx,
             no_in: false,
             in_function: false,
+            in_generator: false,
             in_class: false,
             splits: Vec::new(),
             no_body: false,
@@ -572,8 +575,15 @@ impl Parser {
                 return self.node(N_EMPTY);
             }
             if ws == "with" {
-                self.fail("'with' is not supported");
-                return self.node(N_EMPTY);
+                let n = self.node(N_WITH);
+                self.next();
+                self.expect("(");
+                let o = self.expression();
+                self.expect(")");
+                let body = self.statement();
+                self.ast.nodes[n as usize].a = o;
+                self.ast.nodes[n as usize].b = body;
+                return n;
             }
             if ws == "import" && !self.peek_is(1, "(") && !self.peek_is(1, ".") {
                 return self.import_stmt();
@@ -730,8 +740,10 @@ impl Parser {
     fn for_stmt(&mut self) -> int {
         let line = self.line();
         self.next();
+        let mut is_await = false;
         if self.is("await") {
-            self.fail("for await is not supported");
+            self.next();
+            is_await = true;
         }
         self.expect("(");
         let mut init: int = -1;
@@ -756,6 +768,12 @@ impl Parser {
                     init = self.to_pattern(init);
                 }
                 let body = self.statement();
+                if is_await {
+                    if op.as_str() != "of" {
+                        self.fail("for await needs 'of'");
+                    }
+                    self.ast.nodes[n as usize].flags = 1;
+                }
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = init;
                 self.ast.nodes[n as usize].b = obj;
@@ -767,6 +785,9 @@ impl Parser {
                 self.ast.nodes[e as usize].a = init;
                 init = e;
             }
+        }
+        if is_await {
+            self.fail("for await needs 'of'");
         }
         let n = self.ast.add(N_FOR, line);
         self.expect(";");
@@ -1049,7 +1070,9 @@ impl Parser {
 
     pub(crate) fn function_body(&mut self, owner: int) -> int {
         let saved = self.in_function;
+        let saved_gen = self.in_generator;
         self.in_function = true;
+        self.in_generator = (self.ast.nodes[owner as usize].flags & F_GENERATOR) != 0;
         let n = self.node(N_BLOCK);
         self.expect("{");
         self.directives(owner);
@@ -1061,6 +1084,7 @@ impl Parser {
         self.expect("}");
         self.ast.nodes[n as usize].list = body;
         self.in_function = saved;
+        self.in_generator = saved_gen;
         n
     }
 
@@ -1168,11 +1192,14 @@ impl Parser {
             self.ast.nodes[n as usize].a = b;
         } else {
             let saved = self.in_function;
+            let saved_gen = self.in_generator;
             self.in_function = true;
+            self.in_generator = false;
             let saved_no_in = self.no_in;
             let e = self.assign();
             self.no_in = saved_no_in;
             self.in_function = saved;
+            self.in_generator = saved_gen;
             self.ast.nodes[n as usize].a = e;
             self.ast.nodes[n as usize].flags |= F_EXPR_BODY;
         }
@@ -1370,9 +1397,12 @@ impl Parser {
                 if self.eat("=") {
                     // a field initializer runs as a method of the instance
                     let saved_fn = self.in_function;
+                    let saved_gen = self.in_generator;
                     self.in_function = true;
+                    self.in_generator = false;
                     let e = self.assign();
                     self.in_function = saved_fn;
+                    self.in_generator = saved_gen;
                     self.ast.nodes[m as usize].b = e;
                 }
                 self.semicolon();
@@ -1534,9 +1564,19 @@ impl Parser {
         if self.arrow_ahead() {
             return self.arrow();
         }
-        if self.is("yield") && self.in_function {
-            self.fail("generators are not supported");
-            return self.node(N_UNDEF);
+        if self.is("yield") && self.in_generator && !self.escaped() {
+            let n = self.node(N_YIELD);
+            self.next();
+            self.ast.nodes[n as usize].a = -1;
+            if !self.nl_before() && self.eat("*") {
+                self.ast.nodes[n as usize].flags = 1;
+                let a = self.assign();
+                self.ast.nodes[n as usize].a = a;
+            } else if !self.nl_before() && !self.is(")") && !self.is("]") && !self.is("}") && !self.is(",") && !self.is(";") && !self.is(":") && self.kind() != T_EOF && !(self.kind() == T_IDENT && self.is("in")) {
+                let a = self.assign();
+                self.ast.nodes[n as usize].a = a;
+            }
+            return n;
         }
         let line = self.line();
         let left = self.conditional();
@@ -1911,6 +1951,7 @@ impl Parser {
         for src in exprs {
             let mut sp = Parser::with_syntax(src.as_str(), self.syntax.clone());
             sp.in_function = self.in_function;
+            sp.in_generator = self.in_generator;
             sp.in_class = self.in_class;
             let e = sp.expression();
             if sp.kind() != T_EOF && sp.error.is_empty() {

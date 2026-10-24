@@ -490,8 +490,19 @@ impl Parser {
                 return self.node(N_EMPTY);
             }
             if ws == "with" {
-                self.fail("'with' is not supported");
-                return self.node(N_EMPTY);
+                if self.strict {
+                    self.fail("Strict mode code may not include a with statement");
+                    return self.node(N_EMPTY);
+                }
+                let n = self.node(N_WITH);
+                self.next();
+                self.expect("(");
+                let o = self.expression();
+                self.expect(")");
+                let body = self.sub_statement();
+                self.ast.nodes[n as usize].a = o;
+                self.ast.nodes[n as usize].b = body;
+                return n;
             }
             if ws == "import" && !self.peek_is(1, "(") && !self.peek_is(1, ".") {
                 self.fail("modules are not supported");

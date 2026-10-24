@@ -249,3 +249,52 @@ true,6,true,false,true,2
 var o = {}; var v = 1; Object.defineProperty(o, 'p', { configurable: true, get: function () { return v; }, set: function (x) { v = x; } }); Object.defineProperty(o, 'p', { enumerable: false }); o.p = 5; var d = Object.getOwnPropertyDescriptor(o, 'p'); [o.p, typeof d.get, typeof d.set, d.enumerable, 'value' in d].join()
 ----
 5,function,function,false,false
+
+==== js a rest parameter after a defaulted one, with fewer arguments
+var f = function ({ x } = {}, ...m) { return m; }; var g = (a = 1, ...m) => m; [JSON.stringify(f()), JSON.stringify(g()), JSON.stringify(f({}, 1, 2))].join()
+----
+[],[],[1,2]
+
+==== js the d flag: indices of each group and named group
+var m = /(?<w>b)(x)?/d.exec('abc'); [JSON.stringify(m.indices), JSON.stringify(m.indices.groups), /x/dgimsuy.flags, /a/d.hasIndices, /a/v.flags, /a/v.unicode].join()
+----
+[[1,2],[1,2],null],{"w":[1,2]},dgimsuy,true,v,false
+
+==== js an error's stack starts with its name and message
+var e = new TypeError('bad'); function f() { return new Error('in f'); } [typeof e.stack, e.stack.split('\n')[0], f().stack.indexOf('at f') > 0, Object.keys(e).length].join()
+----
+string,TypeError: bad,true,0
+
+==== js normalize: NFD and NFC, Hangul, marks reordered
+var s = 'Ạ̊'; ['é'.normalize('NFD').length, 'é'.normalize() === 'é', '각'.normalize() === '각', '각'.normalize('NFD').length, 'q̣̇'.normalize('NFD') === 'q̣̇', escape(s.normalize('NFC'))].join()
+----
+2,true,true,3,true,%u1EA0%u030A
+
+==== js case mappings to more than one letter
+['ß'.toUpperCase(), 'ﬁ'.toUpperCase(), 'İ'.toLowerCase().length, 'ΑΣ'.toLowerCase()].join()
+----
+SS,FI,2,ας
+
+==== js Intl: numbers, plurals, dates in UTC, collation
+var pr = new Intl.PluralRules('en-US'); [new Intl.NumberFormat('en-US').format(1234.5), new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(1234.5), pr.select(1) + pr.select(2), new Intl.DateTimeFormat('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }).format(new Date(0)), ['b', 'a', 'C'].sort(new Intl.Collator('en').compare).join(''), 'a'.localeCompare('B'), (1234.5).toLocaleString('fi-FI')].join('|').replace(/\u00a0/g, '_')
+----
+1,234.5|1.234,50_€|oneother|January 1, 1970|abC|-1|1_234,5
+
+==== js a long string indexed, sliced and searched by units
+var s = ''; for (var i = 0; i < 300; i++) s += 'ab'; s += 'ä€x'; var n = 0; for (var j = 0; j < s.length; j++) if (s.charAt(j) === 'b') n++; [s.length, n, s[600], s.charCodeAt(601), s.slice(599, 603), s.indexOf('x'), s.indexOf('€', 10), s.lastIndexOf('a')].join()
+----
+603,300,ä,8364,bä€x,602,601,598
+
+==== js Date.parse of the ISO forms
+[Date.parse('1970-01-01T00:00:00.000Z'), Date.parse('2000-02-29'), Date.parse('2020-01-01T10:30:00+02:00'), isNaN(Date.parse('2020-13-01'))].join()
+----
+0,951782400000,1577867400000,true
+
+==== js with: the object's properties first, closures, a proxy's has, strict code refuses it
+var r = []; var o = { a: 1 }; var a = 'outer', c = 'c'; with (o) { r.push(a, c); a = 10; c = 'set'; var v = 5; } r.push(o.a, c, v);
+function f(ctx) { with (ctx) { var k = 3; return function () { return x + k + typeof nope; }; } } r.push(f({ x: 1 })());
+var p = new Proxy({}, { has: function (t, k) { return k === 'msg'; }, get: function (t, k) { return 'hi'; } }); with (p) { r.push(msg, typeof Math); }
+var cnt = { n: 0 }; with (cnt) { n++; n += 2; } r.push(cnt.n);
+var strict = 'no error'; try { new Function('"use strict"; with ({}) {}'); } catch (e) { strict = e.name; } r.push(strict); r.join()
+----
+1,c,10,set,5,4undefined,hi,object,3,SyntaxError
