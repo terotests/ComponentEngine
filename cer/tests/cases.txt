@@ -381,3 +381,11 @@ a å ä c č ch Eclair éclair h i I item10 item2 ı n ñ o ö ss ß z|a c č ch
 [new Intl.NumberFormat('xx').resolvedOptions().locale, new Intl.NumberFormat(['xx', 'de-AT']).resolvedOptions().locale, new Intl.DateTimeFormat('th').resolvedOptions().calendar, Intl.NumberFormat.supportedLocalesOf(['de-AT', 'xx', 'zh-Hant', 'no']).join(), Intl.getCanonicalLocales(['EN-us', 'zh-hant-tw']).join(), typeof Intl, Object.prototype.toString.call(Intl)].join('|')
 ----
 en-US|de-AT|buddhist|de-AT,zh-Hant,no|en-US,zh-Hant-TW|object|[object Intl]
+
+==== js a Map or Set in a recycled object slot starts empty
+for (let i = 0; i < 150000; i++) { const m = new Map(); m.set('a', i); const s = new Set(); s.add(i); }
+const seen = [];
+for (let j = 0; j < 20; j++) { const m = new Map(); m.set('x', j); const s = new Set([1]); seen.push(m.size + ',' + m.get('a') + ',' + s.size + ',' + s.has(0)); }
+seen.filter((x) => x !== '1,undefined,1,false').length
+----
+0

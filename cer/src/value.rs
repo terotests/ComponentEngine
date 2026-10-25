@@ -186,6 +186,11 @@ impl JsObj {
             self.keys.truncate(0);
             self.vals.truncate(0);
             self.attrs.truncate(0);
+            // a Map's or Set's entries are indexed here too, whatever its
+            // property count
+            if !self.index.is_empty() {
+                self.index = HashMap::new();
+            }
         } else {
             self.keys = Vec::new();
             self.vals = Vec::new();
