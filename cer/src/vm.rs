@@ -1665,6 +1665,12 @@ impl Vm {
 
     /// Keys a for-in visits: own and inherited enumerable string keys.
     pub fn for_in_keys(&mut self, o: int) -> Vec<Val> {
+        // the common case: the prototypes add no enumerable keys (an object
+        // literal over Object.prototype, a class instance), so the keys are
+        // the object's own, with nothing to shadow
+        if self.for_in_own_only(o) {
+            return self.own_keys(o, false, false);
+        }
         let mut out: Vec<Val> = Vec::new();
         let mut seen: HashMap<String, bool> = HashMap::new();
         let mut cur = o;
@@ -1695,6 +1701,37 @@ impl Vm {
             cur = self.objs[cur as usize].proto;
         }
         out
+    }
+
+    /// No object on o's prototype chain (o itself aside) is a proxy or
+    /// has an index or an enumerable string key.
+    fn for_in_own_only(&self, o: int) -> bool {
+        if self.objs[o as usize].class == C_PROXY {
+            return false;
+        }
+        let mut cur = self.objs[o as usize].proto;
+        while cur >= 0 {
+            let c = self.objs[cur as usize].class;
+            if c == C_PROXY || c == C_STRING || c == C_TYPED {
+                return false;
+            }
+            if (c == C_ARRAY || c == C_ARGUMENTS) && !self.objs[cur as usize].elems.is_empty() {
+                return false;
+            }
+            let n = self.objs[cur as usize].keys.len();
+            let mut k: usize = 0;
+            while k < n {
+                if (self.objs[cur as usize].attrs[k] & P_HIDDEN) == 0 {
+                    let a = self.objs[cur as usize].keys[k];
+                    if !self.atom_names[a as usize].starts_with('\u{1}') && !self.symbol_atoms.contains_key(&a) {
+                        return false;
+                    }
+                }
+                k += 1;
+            }
+            cur = self.objs[cur as usize].proto;
+        }
+        true
     }
 
     pub fn instance_of(&mut self, v: &Val, f: &Val) -> bool {

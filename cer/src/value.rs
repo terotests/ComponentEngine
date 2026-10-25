@@ -66,7 +66,7 @@ pub const P_FIXED: int = 4;
 pub const P_ACCESSOR: int = 8;
 
 /// Past this many properties an object keeps a hash index of its keys.
-pub const INDEX_AT: int = 8;
+pub const INDEX_AT: int = 32;
 
 pub struct JsObj {
     pub class: int,
