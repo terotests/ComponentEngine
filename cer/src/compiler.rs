@@ -85,6 +85,9 @@ struct FnState {
     /// labels waiting for the loop that follows them
     pending_labels: Vec<String>,
     is_program: bool,
+    /// the latest code position taken as a jump target; ops are fused only
+    /// past it
+    label_at: int,
 }
 
 pub struct Compiler {
@@ -849,17 +852,75 @@ impl Compiler {
         &mut self.fs[i]
     }
 
-    fn pc(&self) -> int {
-        self.fs[self.fs.len() - 1].proto.code.len() as int
+    /// The position of the next op, taken as a jump target.
+    fn pc(&mut self) -> int {
+        let i = self.fs.len() - 1;
+        let n = self.fs[i].proto.code.len() as int;
+        self.fs[i].label_at = n;
+        n
     }
 
     fn emit(&mut self, code: int, a: int, b: int) -> int {
         let i = self.fs.len() - 1;
+        let n = self.fs[i].proto.code.len();
+        // the op fused with the one before it, when no jump lands between
+        if n > 0 && (self.fs[i].label_at as usize) < n {
+            let last = self.fs[i].proto.code[n - 1];
+            let mut fused = -1;
+            let mut fa = 0;
+            let mut fb = 0;
+            if code == OP_GET_LOCAL && last.code == OP_GET_LOCAL {
+                fused = OP_GET_LOCAL2;
+                fa = last.a;
+                fb = a;
+            } else if code == OP_UNDEF && last.code == OP_GET_ENV {
+                fused = OP_GET_ENV_UNDEF;
+                fa = last.a;
+                fb = last.b;
+            } else if code == OP_CASE_JT && last.code == OP_INT {
+                fused = OP_CASE_INT_JT;
+                fa = a;
+                fb = last.a;
+            } else if code == OP_CMP_JF && (b == OP_SEQ || b == OP_SNE || b == OP_EQ || b == OP_NE) && n > 1 && (self.fs[i].label_at as usize) < n - 1 {
+                let prev = self.fs[i].proto.code[n - 2];
+                let mut slot = -1;
+                if prev.code == OP_NULL && last.code == OP_GET_LOCAL {
+                    slot = last.a;
+                } else if prev.code == OP_GET_LOCAL && last.code == OP_NULL {
+                    slot = prev.a;
+                }
+                if slot >= 0 {
+                    self.fs[i].proto.code.pop();
+                    self.fs[i].proto.code[n - 2] = Op { code: OP_LOCAL_NULL_JF, a: a, b: slot * 256 + b, c: -1 };
+                    return (n as int) - 2;
+                }
+            }
+            if fused >= 0 {
+                self.fs[i].proto.code[n - 1] = Op { code: fused, a: fa, b: fb, c: -1 };
+                return (n as int) - 1;
+            }
+        }
         self.fs[i].proto.code.push(Op { code: code, a: a, b: b, c: -1 });
         (self.fs[i].proto.code.len() as int) - 1
     }
 
     fn op(&mut self, code: int) {
+        if code == OP_POP {
+            // a store and its POP: the store pops and steps over the POP,
+            // which stays for jumps to it
+            let i = self.fs.len() - 1;
+            let n = self.fs[i].proto.code.len();
+            if n > 0 {
+                let last = self.fs[i].proto.code[n - 1].code;
+                if last == OP_SET_LOCAL {
+                    self.fs[i].proto.code[n - 1].code = OP_SET_LOCAL_POP;
+                } else if last == OP_SET_PROP {
+                    self.fs[i].proto.code[n - 1].code = OP_SET_PROP_POP;
+                } else if last == OP_SET_ELEM {
+                    self.fs[i].proto.code[n - 1].code = OP_SET_ELEM_POP;
+                }
+            }
+        }
         self.emit(code, 0, 0);
     }
 
@@ -1172,6 +1233,7 @@ impl Compiler {
             chain: Vec::new(),
             pending_labels: Vec::new(),
             is_program: true,
+            label_at: 0,
         });
         self.cur_scope = s;
         if self.local_program {
@@ -1285,6 +1347,7 @@ impl Compiler {
             chain: Vec::new(),
             pending_labels: Vec::new(),
             is_program: false,
+            label_at: 0,
         });
         self.cur_scope = scope;
         // parameters arrive in slots 0..; a simple one is its own binding
@@ -1631,7 +1694,7 @@ impl Compiler {
     }
 
     fn last_jump(&self) -> int {
-        self.pc() - 1
+        (self.fs[self.fs.len() - 1].proto.code.len() as int) - 1
     }
 
     /// The control entry a break / continue goes to; -1 when none.
@@ -1870,21 +1933,8 @@ impl Compiler {
         self.expr(e);
         if is_program_top {
             self.emit(OP_SET_LOCAL, 0, 0);
-        } else {
-            // `x = …;`: the store pops too (the POP stays for jumps to it)
-            let fi = self.fs.len() - 1;
-            let n = self.fs[fi].proto.code.len();
-            if n > 0 {
-                let last = self.fs[fi].proto.code[n - 1].code;
-                if last == OP_SET_LOCAL {
-                    self.fs[fi].proto.code[n - 1].code = OP_SET_LOCAL_POP;
-                } else if last == OP_SET_PROP {
-                    self.fs[fi].proto.code[n - 1].code = OP_SET_PROP_POP;
-                } else if last == OP_SET_ELEM {
-                    self.fs[fi].proto.code[n - 1].code = OP_SET_ELEM_POP;
-                }
-            }
         }
+        // `x = …;`: the store pops too (op())
         self.op(OP_POP);
     }
 
@@ -2183,10 +2233,8 @@ impl Compiler {
                 default_case = idx;
                 jumps.push(-1);
             } else {
-                self.op(OP_DUP);
                 self.expr(t);
-                self.op(OP_SEQ);
-                let j = self.emit(OP_JT, 0, 0);
+                let j = self.emit(OP_CASE_JT, 0, 0);
                 jumps.push(j);
             }
             idx += 1;

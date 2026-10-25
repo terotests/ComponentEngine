@@ -2558,6 +2558,60 @@ impl Vm {
                             pc = op.a;
                         }
                     }
+                    OP_GET_LOCAL2 => {
+                        let v = self.stack[(bp + op.a) as usize].clone();
+                        let w = self.stack[(bp + op.b) as usize].clone();
+                        self.stack.push(v);
+                        self.stack.push(w);
+                    }
+                    OP_GET_ENV_UNDEF => {
+                        let e = self.get_env(op.a);
+                        let v = self.objs[e as usize].elems[op.b as usize].clone();
+                        self.stack.push(v);
+                        self.stack.push(Val::Undef);
+                    }
+                    OP_CASE_INT_JT => {
+                        if let Val::Num(x) = self.stack[self.stack.len() - 1] {
+                            if x == (op.b as double) {
+                                pc = op.a;
+                            }
+                        }
+                    }
+                    OP_LOCAL_NULL_JF => {
+                        let cmp = op.b % 256;
+                        let r = match self.stack[(bp + op.b / 256) as usize] {
+                            Val::Null => cmp == OP_SEQ || cmp == OP_EQ,
+                            Val::Undef => cmp == OP_SNE || cmp == OP_EQ,
+                            _ => cmp == OP_SNE || cmp == OP_NE,
+                        };
+                        if !r {
+                            if op.a < pc {
+                                self.frames[fi].pc = op.a;
+                                if self.gc_due() {
+                                    self.gc();
+                                }
+                            }
+                            pc = op.a;
+                        }
+                    }
+                    OP_CASE_JT => {
+                        let b = self.pop();
+                        let n = self.stack.len() - 1;
+                        let hit = if let (Val::Num(x), Val::Num(y)) = (&self.stack[n], &b) {
+                            x == y
+                        } else {
+                            let q = quick_eq(&self.stack[n], &b, true);
+                            if q >= 0 {
+                                q == 1
+                            } else {
+                                let d = self.stack[n].clone();
+                                self.compare(OP_SEQ, &d, &b)
+                            }
+                        };
+                        if hit {
+                            pc = op.a;
+                        }
+                    }
                     OP_JUMP => {
                         if op.a < pc && self.gc_due() {
                             self.frames[fi].pc = op.a;

@@ -265,3 +265,14 @@ pub const OP_ADD_ENV_POP: int = 145;
 /// `o.p += v;` as a statement, property atom a: [o, o.p, v] → [], in place
 /// when o's own data property still holds that string and nothing else does
 pub const OP_ADD_PROP_POP: int = 146;
+/// a `case v:` of a switch: [d, v] → [d], to a when d === v
+pub const OP_CASE_JT: int = 147;
+/// [] → [local a, local b]
+pub const OP_GET_LOCAL2: int = 148;
+/// [] → [env (a, b) as OP_GET_ENV, undefined]: a callee and its `this`
+pub const OP_GET_ENV_UNDEF: int = 149;
+/// `case k:` of an integer k = b: [d] → [d], to a when d === k
+pub const OP_CASE_INT_JT: int = 150;
+/// `x OP null` or `null OP x` for local x = b / 256 and OP = b % 256 one of
+/// OP_SEQ, OP_SNE, OP_EQ, OP_NE: to a when it is false
+pub const OP_LOCAL_NULL_JF: int = 151;
