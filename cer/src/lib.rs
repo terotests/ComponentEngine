@@ -33,6 +33,8 @@ pub mod ops;
 pub mod parser;
 pub mod prelude;
 pub mod proxy;
+pub mod raster;
+pub mod rasterjs;
 pub mod regex;
 pub mod snapshot;
 pub mod typed;
