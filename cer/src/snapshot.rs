@@ -211,9 +211,9 @@ pub fn snapshot(vm: &Vm) -> String {
         }
         put_num(&mut b, o.class);
         put_num(&mut b, o.proto);
-        put_ints(&mut b, &o.keys);
+        put_ints(&mut b, &vm.shapes[o.shape as usize].keys);
         put_vals(&mut b, &mut st, &o.vals);
-        put_ints(&mut b, &o.attrs);
+        put_ints(&mut b, &vm.shapes[o.shape as usize].attrs);
         put_vals(&mut b, &mut st, &o.elems);
         put_vals(&mut b, &mut st, &o.elems2);
         put_num(&mut b, o.nums.len() as int);
@@ -234,6 +234,7 @@ pub fn snapshot(vm: &Vm) -> String {
                 put_num(&mut b, *k);
                 put_num(&mut b, *v);
             }
+            put_ints(&mut b, &o.marks);
         }
     }
     put_ints(&mut b, &vm.free_list);
@@ -400,6 +401,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.objs = Vec::new();
+    vm.shapes = Vec::new();
+    vm.shapes.push(Shape::new());
+    vm.free_shapes = Vec::new();
     let no = r.num();
     i = 0;
     while i < no && !r.bad {
@@ -413,9 +417,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         }
         let proto = r.num();
         let mut o = JsObj::new(class, proto);
-        o.keys = get_ints(&mut r);
-        o.vals = get_vals(&mut r, &strs);
-        o.attrs = get_ints(&mut r);
+        let keys = get_ints(&mut r);
+        let vals = get_vals(&mut r, &strs);
+        let attrs = get_ints(&mut r);
         o.elems = get_vals(&mut r, &strs);
         o.elems2 = get_vals(&mut r, &strs);
         let nn = r.num();
@@ -436,7 +440,6 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         let bits = r.num();
         o.extensible = bits % 2 == 1;
         o.has_proto_obj = (bits / 2) % 2 == 1;
-        let n = o.keys.len() as int;
         if class == C_MAP || class == C_SET {
             let ni = r.num();
             let mut j: int = 0;
@@ -446,18 +449,21 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
                 o.index.insert(k, v);
                 j += 1;
             }
-        } else if n > INDEX_AT {
-            let mut j: int = 0;
-            while j < n {
-                o.index.insert(o.keys[j as usize], j);
-                j += 1;
-            }
+            o.marks = get_ints(&mut r);
         }
-        // (a map keeps its entries' state in attrs, not one per key)
-        if o.keys.len() != o.vals.len() {
+        if keys.len() != vals.len() || keys.len() != attrs.len() {
             r.bad = true;
         }
         vm.objs.push(o);
+        if !r.bad {
+            // the shape again, from the keys in order
+            let oi = (vm.objs.len() as int) - 1;
+            let mut j: usize = 0;
+            while j < keys.len() {
+                vm.add_own(oi, keys[j], vals[j].clone(), attrs[j]);
+                j += 1;
+            }
+        }
         i += 1;
     }
     vm.free_list = get_ints(&mut r);
@@ -592,7 +598,7 @@ fn valid_heap(vm: &Vm) -> bool {
         if o.class == C_FUNCTION && (o.func < 0 || o.func >= np) {
             return false;
         }
-        for k in o.keys.iter() {
+        for k in vm.shapes[o.shape as usize].keys.iter() {
             if *k < 0 || *k >= na {
                 return false;
             }

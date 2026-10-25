@@ -335,8 +335,8 @@ impl Vm {
 
     pub fn iter_result(&mut self, v: Val, done: bool) -> Val {
         let r = self.new_object();
-        self.objs[r as usize].add(A_VALUE, v, 0);
-        self.objs[r as usize].add(A_DONE, Val::Bool(done), 0);
+        self.add_own(r, A_VALUE, v, 0);
+        self.add_own(r, A_DONE, Val::Bool(done), 0);
         Val::Obj(r)
     }
 

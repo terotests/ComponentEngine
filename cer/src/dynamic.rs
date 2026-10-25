@@ -220,23 +220,23 @@ impl Vm {
             let func = self.objs[n as usize].func;
             let prim = self.objs[n as usize].prim.clone();
             let pos = self.objs[n as usize].pos;
-            let keys = self.objs[n as usize].keys.clone();
+            let keys = self.keys_of(n);
             let vals = self.objs[n as usize].vals.clone();
             self.objs[o as usize].func = func;
             self.objs[o as usize].prim = prim;
             self.objs[o as usize].pos = pos;
             let mut i: usize = 0;
             while i < keys.len() {
-                let slot = self.objs[o as usize].find(keys[i]);
+                let slot = self.find(o, keys[i]);
                 if slot >= 0 {
                     self.objs[o as usize].vals[slot as usize] = vals[i].clone();
                 } else {
-                    let attr = self.objs[n as usize].attrs[i];
+                    let attr = self.attr_at(n, i as int);
                     self.add_prop(o, keys[i], vals[i].clone(), attr);
                 }
                 i += 1;
             }
-            let li = self.objs[o as usize].find(crate::vm::A_LASTINDEX);
+            let li = self.find(o, crate::vm::A_LASTINDEX);
             if li >= 0 {
                 self.objs[o as usize].vals[li as usize] = Val::Num(0.0);
             }
