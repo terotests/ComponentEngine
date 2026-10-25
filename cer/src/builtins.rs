@@ -907,44 +907,70 @@ impl Vm {
     pub fn new_regexp(&mut self, src: &Val, flags: &Val) -> Val {
         let s = if matches!(src, Val::Undef) { String::from("(?:)") } else { self.to_string(src) };
         let f = if matches!(flags, Val::Undef) { String::new() } else { self.to_string(flags) };
+        let idx = self.regexp_index(s.as_str(), f.as_str());
+        if idx < 0 {
+            return Val::Undef;
+        }
+        self.make_regexp(idx, string_val(s))
+    }
+
+    /// The compiled regex of source `s` and flags `f` (in `regexes`), -1
+    /// after a SyntaxError.
+    pub fn regexp_index(&mut self, s: &str, f: &str) -> int {
         let key = format!("{}/{}", s, f);
-        let idx = match self.regex_cache.get(&key) {
+        match self.regex_cache.get(&key) {
             Some(i) => *i,
             None => {
-                let re = regex::compile(s.as_str(), f.as_str());
+                let re = regex::compile(s, f);
                 if !re.error.is_empty() {
                     let m = format!("{}: /{}/", re.error, s);
                     self.throw_syntax(m.as_str());
-                    return Val::Undef;
+                    return -1;
                 }
                 self.regexes.push(re);
                 let i = (self.regexes.len() as int) - 1;
                 self.regex_cache.insert(key, i);
                 i
             }
-        };
+        }
+    }
+
+    /// A RegExp object of compiled regex `idx`; `src` its source text.
+    pub fn make_regexp(&mut self, idx: int, src: Val) -> Val {
+        // the `source` shown, made once per regex
+        while self.regex_shown.len() <= idx as usize {
+            self.regex_shown.push(Val::Undef);
+        }
+        if matches!(self.regex_shown[idx as usize], Val::Undef) {
+            let s = self.to_string(&src);
+            let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/") };
+            self.regex_shown[idx as usize] = string_val(shown);
+            // read-only properties (as add_prop marks them)
+            self.mark_setter(A_LASTINDEX);
+            let mut a = A_GLOBAL;
+            while a <= A_STICKY {
+                self.mark_setter(a);
+                a += 1;
+            }
+            self.mark_setter(A_SOURCE);
+        }
+        let shown = self.regex_shown[idx as usize].clone();
         let rp = self.regexp_proto;
         let o = self.alloc(C_REGEXP, rp);
         self.objs[o as usize].func = idx;
-        self.objs[o as usize].prim = string_val(s.clone());
-        self.objs[o as usize].add(A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
+        self.objs[o as usize].prim = src;
         let re = &self.regexes[idx as usize];
         let (g, ic, m, sa, u, y) = (re.global, re.ignore_case, re.multiline, re.dot_all, re.unicode && !re.unicode_sets, re.sticky);
-        let a_source = self.intern("source");
-        let a_global = self.intern("global");
-        let a_ic = self.intern("ignoreCase");
-        let a_m = self.intern("multiline");
-        let a_s = self.intern("dotAll");
-        let a_u = self.intern("unicode");
-        let a_y = self.intern("sticky");
-        let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/") };
-        self.add_prop(o, a_source, string_val(shown), P_HIDDEN | P_READONLY);
-        self.add_prop(o, a_global, Val::Bool(g), P_HIDDEN | P_READONLY);
-        self.add_prop(o, a_ic, Val::Bool(ic), P_HIDDEN | P_READONLY);
-        self.add_prop(o, a_m, Val::Bool(m), P_HIDDEN | P_READONLY);
-        self.add_prop(o, a_s, Val::Bool(sa), P_HIDDEN | P_READONLY);
-        self.add_prop(o, a_u, Val::Bool(u), P_HIDDEN | P_READONLY);
-        self.add_prop(o, a_y, Val::Bool(y), P_HIDDEN | P_READONLY);
+        let ob = &mut self.objs[o as usize];
+        ob.add(A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
+        let ro = P_HIDDEN | P_READONLY;
+        ob.add(A_SOURCE, shown, ro);
+        ob.add(A_GLOBAL, Val::Bool(g), ro);
+        ob.add(A_IGNORECASE, Val::Bool(ic), ro);
+        ob.add(A_MULTILINE, Val::Bool(m), ro);
+        ob.add(A_DOTALL, Val::Bool(sa), ro);
+        ob.add(A_UNICODE, Val::Bool(u), ro);
+        ob.add(A_STICKY, Val::Bool(y), ro);
         Val::Obj(o)
     }
 

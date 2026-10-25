@@ -43,6 +43,13 @@ pub const A_TOJSON: int = 26;
 pub const A_HASINSTANCE: int = 27;
 pub const A_ERRORS: int = 28;
 pub const A_THEN: int = 29;
+pub const A_SOURCE: int = 33;
+pub const A_GLOBAL: int = 35;
+pub const A_IGNORECASE: int = 36;
+pub const A_MULTILINE: int = 37;
+pub const A_DOTALL: int = 38;
+pub const A_UNICODE: int = 39;
+pub const A_STICKY: int = 40;
 
 pub fn first_atoms() -> Vec<String> {
     let names = vec![
@@ -81,6 +88,12 @@ pub fn first_atoms() -> Vec<String> {
         "join",
         "source",
         "flags",
+        "global",
+        "ignoreCase",
+        "multiline",
+        "dotAll",
+        "unicode",
+        "sticky",
     ];
     let mut out: Vec<String> = Vec::new();
     for n in names {
@@ -95,6 +108,10 @@ pub struct Vm {
     pub protos: Vec<Proto>,
     pub atoms: HashMap<String, int>,
     pub atom_names: Vec<String>,
+    /// atom names as string values, made on first use (atom_val)
+    pub atom_vals: Vec<Val>,
+    /// "undefined", "object", … as string values for typeof (type_val)
+    pub type_vals: Vec<Val>,
     /// atoms that are symbols (their description is the name)
     pub symbol_atoms: HashMap<int, int>,
     pub stack: Vec<Val>,
@@ -144,6 +161,9 @@ pub struct Vm {
     pub proxy_hooks: int,
     /// %ThrowTypeError%
     pub thrower: int,
+    /// the getter/setter pair (both %ThrowTypeError%) every strict
+    /// arguments object's `callee` shares, made on first use; -1 before
+    pub callee_pair: int,
     /// the marker of a binding in its temporal dead zone
     pub tdz_obj: int,
     /// BigInt values by their decimal text, and BigInt.prototype
@@ -177,6 +197,8 @@ pub struct Vm {
     pub jobs: Vec<Val>,
     pub regexes: Vec<crate::regex::Regex>,
     pub regex_cache: HashMap<String, int>,
+    /// a regex's `source` as shown (make_regexp), by its index
+    pub regex_shown: Vec<Val>,
     /// the last long string indexed (str_at, str_len): a loop over a
     /// string's units does not scan it again for every unit
     pub sc_s: Rc<String>,
@@ -266,6 +288,8 @@ impl Vm {
             protos: Vec::new(),
             atoms: HashMap::new(),
             atom_names: Vec::new(),
+            atom_vals: Vec::new(),
+            type_vals: Vec::new(),
             symbol_atoms: HashMap::new(),
             stack: Vec::new(),
             frames: Vec::new(),
@@ -305,6 +329,7 @@ impl Vm {
             async_from_sync: -1,
             proxy_hooks: -1,
             thrower: -1,
+            callee_pair: -1,
             tdz_obj: -1,
             bigints: HashMap::new(),
             bigint_proto: -1,
@@ -329,6 +354,7 @@ impl Vm {
             jobs: Vec::new(),
             regexes: Vec::new(),
             regex_cache: HashMap::new(),
+            regex_shown: Vec::new(),
             sc_s: Rc::new(String::new()),
             sc_ascii: true,
             sc_len: 0,
@@ -502,6 +528,33 @@ impl Vm {
         }
     }
 
+    /// The name of atom `a` as a string value, shared.
+    pub fn atom_val(&mut self, a: int) -> Val {
+        while self.atom_vals.len() <= a as usize {
+            self.atom_vals.push(Val::Undef);
+        }
+        if let Val::Undef = self.atom_vals[a as usize] {
+            self.atom_vals[a as usize] = str_val(self.atom_names[a as usize].as_str());
+        }
+        self.atom_vals[a as usize].clone()
+    }
+
+    /// `typeof v` as a string value, shared.
+    pub fn type_val(&mut self, v: &Val) -> Val {
+        if self.type_vals.is_empty() {
+            self.type_vals.push(str_val("undefined"));
+            self.type_vals.push(str_val("object"));
+            self.type_vals.push(str_val("boolean"));
+            self.type_vals.push(str_val("number"));
+            self.type_vals.push(str_val("string"));
+            self.type_vals.push(str_val("function"));
+            self.type_vals.push(str_val("symbol"));
+            self.type_vals.push(str_val("bigint"));
+        }
+        let i = self.type_index(v);
+        self.type_vals[i].clone()
+    }
+
     pub fn atom_str(&self, a: int) -> String {
         self.atom_names[a as usize].clone()
     }
@@ -629,26 +682,49 @@ impl Vm {
     }
 
     pub fn type_of(&self, v: &Val) -> String {
-        let s = match v {
-            Val::Undef => "undefined",
-            Val::Null => "object",
-            Val::Bool(_) => "boolean",
-            Val::Num(_) => "number",
-            Val::Str(_) => "string",
+        let i = self.type_index(v);
+        let s = if i == 0 {
+            "undefined"
+        } else if i == 1 {
+            "object"
+        } else if i == 2 {
+            "boolean"
+        } else if i == 3 {
+            "number"
+        } else if i == 4 {
+            "string"
+        } else if i == 5 {
+            "function"
+        } else if i == 6 {
+            "symbol"
+        } else {
+            "bigint"
+        };
+        String::from(s)
+    }
+
+    /// typeof as 0 undefined, 1 object, 2 boolean, 3 number, 4 string,
+    /// 5 function, 6 symbol, 7 bigint
+    pub fn type_index(&self, v: &Val) -> usize {
+        match v {
+            Val::Undef => 0,
+            Val::Null => 1,
+            Val::Bool(_) => 2,
+            Val::Num(_) => 3,
+            Val::Str(_) => 4,
             Val::Obj(o) => {
                 let c = self.objs[*o as usize].class;
                 if c == C_FUNCTION || c == C_NATIVE || c == C_BOUND || (c == C_PROXY && (self.objs[*o as usize].pos & 1) != 0) {
-                    "function"
+                    5
                 } else if c == C_SYMBOL {
-                    "symbol"
+                    6
                 } else if c == C_BIGINT {
-                    "bigint"
+                    7
                 } else {
-                    "object"
+                    1
                 }
             }
-        };
-        String::from(s)
+        }
     }
 
     /// ToPrimitive: `hint` "number", "string" or "default"
@@ -1662,10 +1738,12 @@ impl Vm {
             }
         }
         for a in ints {
-            out.push(str_val(self.atom_names[a as usize].as_str()));
+            let v = self.atom_val(a);
+            out.push(v);
         }
         for a in others {
-            out.push(str_val(self.atom_names[a as usize].as_str()));
+            let v = self.atom_val(a);
+            out.push(v);
         }
         if symbols {
             for a in syms {
@@ -2109,9 +2187,18 @@ impl Vm {
             self.objs[args_obj as usize].elems = items;
             if strict {
                 // a strict function's arguments.callee throws
-                let th = self.thrower;
-                self.define_accessor(args_obj, A_CALLEE, Val::Obj(th), 0, true);
-                self.define_accessor(args_obj, A_CALLEE, Val::Obj(th), 1, true);
+                // non-configurable, so the shared pair never changes
+                if self.callee_pair < 0 {
+                    let th = self.thrower;
+                    let pair = self.alloc(C_ACCESSOR, -1);
+                    self.objs[pair as usize].elems = vec![Val::Obj(th), Val::Obj(th)];
+                    self.roots.push(pair);
+                    self.callee_pair = pair;
+                    self.any_setter = true;
+                    self.mark_setter(A_CALLEE);
+                }
+                let pair = self.callee_pair;
+                self.objs[args_obj as usize].add(A_CALLEE, Val::Obj(pair), P_ACCESSOR | P_HIDDEN | P_FIXED);
             } else {
                 self.objs[args_obj as usize].add(A_CALLEE, Val::Obj(fo), P_HIDDEN);
             }
@@ -3784,8 +3871,8 @@ impl Vm {
             }
             OP_TYPEOF => {
                 let v = self.pop();
-                let t = self.type_of(&v);
-                self.stack.push(string_val(t));
+                let t = self.type_val(&v);
+                self.stack.push(t);
             }
             OP_INC | OP_DEC => {
                 let v = self.pop();
@@ -4227,12 +4314,21 @@ impl Vm {
                 self.frames[fi].env = n;
             }
             OP_REGEX => {
+                // c caches the compiled regex
                 let src = self.protos[pi].consts[op.a as usize].clone();
-                let flags = self.protos[pi].consts[op.b as usize].clone();
-                let r = self.new_regexp(&src, &flags);
-                if !self.throwing {
-                    self.stack.push(r);
+                let mut idx = op.c;
+                if idx < 0 {
+                    let flags = self.protos[pi].consts[op.b as usize].clone();
+                    let s = self.to_string(&src);
+                    let f = if matches!(flags, Val::Undef) { String::new() } else { self.to_string(&flags) };
+                    idx = self.regexp_index(s.as_str(), f.as_str());
+                    if idx < 0 {
+                        return false;
+                    }
+                    self.protos[pi].code[(*pc - 1) as usize].c = idx;
                 }
+                let r = self.make_regexp(idx, src);
+                self.stack.push(r);
             }
             OP_CLASS => {
                 let mut sup = Val::Undef;
