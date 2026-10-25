@@ -1723,7 +1723,11 @@ impl Vm {
             while k < n {
                 if (self.objs[cur as usize].attrs[k] & P_HIDDEN) == 0 {
                     let a = self.objs[cur as usize].keys[k];
-                    if !self.atom_names[a as usize].starts_with('\u{1}') && !self.symbol_atoms.contains_key(&a) {
+                    if self.atom_names[a as usize].starts_with('\u{1}') {
+                        // a private name: never a key
+                    } else if self.symbol_atoms.contains_key(&a) {
+                        // a symbol: for-in skips it
+                    } else {
                         return false;
                     }
                 }
