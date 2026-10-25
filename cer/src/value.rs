@@ -66,7 +66,7 @@ pub const P_FIXED: int = 4;
 pub const P_ACCESSOR: int = 8;
 
 /// Past this many properties an object keeps a hash index of its keys.
-pub const INDEX_AT: int = 8;
+pub const INDEX_AT: int = 32;
 
 pub struct JsObj {
     pub class: int,
@@ -186,6 +186,11 @@ impl JsObj {
             self.keys.truncate(0);
             self.vals.truncate(0);
             self.attrs.truncate(0);
+            // a Map's or Set's entries are indexed here too, whatever its
+            // property count
+            if !self.index.is_empty() {
+                self.index = HashMap::new();
+            }
         } else {
             self.keys = Vec::new();
             self.vals = Vec::new();
