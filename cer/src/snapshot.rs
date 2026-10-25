@@ -566,7 +566,11 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         vm.regex_cache.insert(key, i);
         i += 1;
     }
-    !r.bad && r.pos == r.len && valid_heap(vm)
+    if r.bad || r.pos != r.len || !valid_heap(vm) {
+        return false;
+    }
+    vm.find_setters();
+    true
 }
 
 /// Every object and proto index in range: a damaged text must not index

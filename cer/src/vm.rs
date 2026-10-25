@@ -164,6 +164,11 @@ pub struct Vm {
     /// some object has a setter or a read-only property: writes that miss
     /// look along the prototype chain
     pub any_setter: bool,
+    /// the atoms some object has as a setter or a read-only property (by
+    /// atom), and whether a proxy was made: a write that adds a property
+    /// looks along the chain only for these
+    pub setter_atoms: Vec<bool>,
+    pub proxy_made: bool,
     pub rng: int,
     pub gc_runs: int,
     pub symbols: Vec<int>,
@@ -315,6 +320,8 @@ impl Vm {
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
+            setter_atoms: Vec::new(),
+            proxy_made: false,
             rng: 42,
             gc_runs: 0,
             symbols: Vec::new(),
@@ -435,6 +442,52 @@ impl Vm {
             i += 1;
         }
         -1
+    }
+
+    /// Notes that some object has `atom` as a setter or read-only.
+    pub fn mark_setter(&mut self, atom: int) {
+        if atom < 0 {
+            return;
+        }
+        while self.setter_atoms.len() <= atom as usize {
+            self.setter_atoms.push(false);
+        }
+        self.setter_atoms[atom as usize] = true;
+    }
+
+    pub fn setter_atom(&self, atom: int) -> bool {
+        atom >= 0 && (atom as usize) < self.setter_atoms.len() && self.setter_atoms[atom as usize]
+    }
+
+    /// add, noting a setter or read-only property for mark_setter.
+    pub fn add_prop(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
+        if (attr & (P_READONLY | P_ACCESSOR)) != 0 {
+            self.mark_setter(atom);
+        }
+        self.objs[o as usize].add(atom, v, attr)
+    }
+
+    /// setter_atoms and proxy_made from the heap (a restored snapshot).
+    pub fn find_setters(&mut self) {
+        self.setter_atoms = Vec::new();
+        self.proxy_made = false;
+        let mut i: usize = 0;
+        while i < self.objs.len() {
+            if !self.objs[i].free {
+                if self.objs[i].class == C_PROXY {
+                    self.proxy_made = true;
+                }
+                let mut k: usize = 0;
+                while k < self.objs[i].keys.len() {
+                    if (self.objs[i].attrs[k] & (P_READONLY | P_ACCESSOR)) != 0 {
+                        let a = self.objs[i].keys[k];
+                        self.mark_setter(a);
+                    }
+                    k += 1;
+                }
+            }
+            i += 1;
+        }
     }
 
     pub fn intern(&mut self, s: &str) -> int {
@@ -1197,7 +1250,7 @@ impl Vm {
         // the chain (a class it inherits from) has no say
         let own_prototype = class == C_FUNCTION && atom == A_PROTOTYPE && self.lazy_prototype(o);
         // __proto__: Object.prototype's accessor, when the chain has it
-        if !own_prototype && (self.any_setter || atom == A_PROTO) && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
+        if !own_prototype && (self.proxy_made || atom == A_PROTO || self.setter_atom(atom)) && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
             return;
         }
         if !self.objs[o as usize].extensible {
@@ -1350,6 +1403,7 @@ impl Vm {
         }
         if (attr & P_READONLY) != 0 {
             self.any_setter = true;
+            self.mark_setter(atom);
         }
         let class = self.objs[o as usize].class;
         if (class == C_FUNCTION || class == C_BOUND) && atom == A_PROTOTYPE {
@@ -1373,6 +1427,7 @@ impl Vm {
     /// Defines a getter (`which` 0) or setter (1).
     pub fn define_accessor(&mut self, o: int, atom: int, f: Val, which: int, hidden: bool) {
         self.any_setter = true;
+        self.mark_setter(atom);
         let slot = self.objs[o as usize].find(atom);
         let mut pair: int = -1;
         if slot >= 0 && (self.objs[o as usize].attrs[slot as usize] & P_ACCESSOR) != 0 {
@@ -2869,7 +2924,7 @@ impl Vm {
         } else {
             self.to_string(k)
         };
-        self.objs[fo as usize].add(A_NAME, string_val(name), P_HIDDEN | P_READONLY);
+        self.add_prop(fo, A_NAME, string_val(name), P_HIDDEN | P_READONLY);
     }
 
     /// ToNumeric(v) and it plus `delta`: numbers or BigInts.
@@ -2983,6 +3038,34 @@ impl Vm {
                     continue;
                 }
                 let bp = fpos + 2;
+                // Math's functions of numbers, straight off the stack
+                let which = id - crate::builtins::NF_MATH;
+                if which >= 0 && which <= 30 && argc >= 1 {
+                    let x = match &self.stack[bp as usize] {
+                        Val::Num(n) => *n,
+                        _ => nan(),
+                    };
+                    let y = if which >= 28 && argc >= 2 {
+                        match &self.stack[(bp + 1) as usize] {
+                            Val::Num(n) => *n,
+                            _ => nan(),
+                        }
+                    } else {
+                        0.0
+                    };
+                    let numbers = matches!(self.stack[bp as usize], Val::Num(_)) && (which < 28 || (argc >= 2 && matches!(self.stack[(bp + 1) as usize], Val::Num(_))));
+                    if numbers {
+                        let r = match which {
+                            28 => arith_num(crate::ops::OP_EXP, x, y),
+                            29 => x.atan2(y),
+                            30 => imul(to_int32(x), to_int32(y)) as double,
+                            _ => crate::builtins::math1(which, x),
+                        };
+                        self.stack.truncate(fpos as usize);
+                        self.stack.push(Val::Num(r));
+                        return false;
+                    }
+                }
                 // The hottest natives, straight off the stack: no argument
                 // vector, same checks as their builtins.
                 if argc >= 1 {
