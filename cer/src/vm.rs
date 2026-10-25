@@ -1165,6 +1165,18 @@ impl Vm {
         self.get(v, a)
     }
 
+    /// A proxy up o's prototype chain (a write that misses goes to its trap).
+    fn proxy_on_chain(&self, o: int) -> bool {
+        let mut cur = self.objs[o as usize].proto;
+        while cur >= 0 {
+            if self.objs[cur as usize].class == C_PROXY {
+                return true;
+            }
+            cur = self.objs[cur as usize].proto;
+        }
+        false
+    }
+
     fn setter_on_chain(&mut self, o: int, atom: int, v: &Val, receiver: &Val) -> bool {
         // true when an accessor or read-only property up the chain took it
         let mut cur = self.objs[o as usize].proto;
@@ -1250,7 +1262,7 @@ impl Vm {
         // the chain (a class it inherits from) has no say
         let own_prototype = class == C_FUNCTION && atom == A_PROTOTYPE && self.lazy_prototype(o);
         // __proto__: Object.prototype's accessor, when the chain has it
-        if !own_prototype && (self.proxy_made || atom == A_PROTO || self.setter_atom(atom)) && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
+        if !own_prototype && (atom == A_PROTO || self.setter_atom(atom) || (self.proxy_made && self.proxy_on_chain(o))) && self.setter_on_chain(o, atom, &v, &Val::Obj(o)) {
             return;
         }
         if !self.objs[o as usize].extensible {
@@ -2071,6 +2083,9 @@ impl Vm {
     /// [f, this, args…]. For a constructor call `this` is the new object.
     pub fn enter_function(&mut self, fo: int, argc: int, construct: bool, new_target: Val) -> bool {
         let pi = self.objs[fo as usize].func;
+        if !construct && !self.protos[pi as usize].uses_args && self.protos[pi as usize].rest < 0 && !self.protos[pi as usize].class_ctor {
+            return self.enter_plain(fo, pi, argc);
+        }
         let bp = (self.stack.len() as int) - argc;
         let (nparams, nslots, env_size, rest, uses_args, arrow, strict, class_ctor, derived) = {
             let p = &self.protos[pi as usize];
@@ -2166,6 +2181,58 @@ impl Vm {
                 return false;
             }
         }
+        true
+    }
+
+    /// enter_function for a call (not `new`) of a function without
+    /// `arguments`, a rest parameter or a class constructor's checks.
+    fn enter_plain(&mut self, fo: int, pi: int, argc: int) -> bool {
+        let nparams = self.protos[pi as usize].nparams;
+        let nslots = self.protos[pi as usize].nslots;
+        let env_size = self.protos[pi as usize].env_size;
+        let bp = (self.stack.len() as int) - argc;
+        if argc > nparams {
+            self.stack.truncate((bp + nparams) as usize);
+        }
+        while (self.stack.len() as int) < bp + nslots {
+            self.stack.push(Val::Undef);
+        }
+        let arrow = self.protos[pi as usize].arrow;
+        let mut nt = Val::Undef;
+        if arrow && !self.objs[fo as usize].elems2.is_empty() {
+            nt = self.objs[fo as usize].elems2[0].clone();
+        }
+        let mut this_val = if arrow { self.objs[fo as usize].prim.clone() } else { self.stack[(bp - 1) as usize].clone() };
+        if !arrow && !self.protos[pi as usize].strict {
+            if matches!(this_val, Val::Undef) || matches!(this_val, Val::Null) {
+                this_val = Val::Obj(self.global);
+            } else if !is_obj(&this_val) {
+                let bo = self.to_object(&this_val);
+                this_val = Val::Obj(bo);
+            }
+        }
+        let mut env = self.objs[fo as usize].env;
+        if env_size > 0 {
+            let e = self.alloc(C_ENV, env);
+            let mut i = 0;
+            while i < env_size {
+                self.objs[e as usize].elems.push(Val::Undef);
+                i += 1;
+            }
+            env = e;
+        }
+        self.frames.push(Frame {
+            proto: pi,
+            fobj: fo,
+            pc: 0,
+            bp: bp,
+            env: env,
+            this_val: this_val,
+            new_target: nt,
+            args_obj: -1,
+            construct: false,
+            gen: -1,
+        });
         true
     }
 
@@ -2945,6 +3012,12 @@ impl Vm {
                         let argc = op.a;
                         if self.gc_due() {
                             self.gc();
+                        }
+                        // a function of this program: straight in
+                        let fo = obj_of(&self.stack[self.stack.len() - (argc as usize) - 2]);
+                        if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION {
+                            self.enter_function(fo, argc, false, Val::Undef);
+                            continue 'frames;
                         }
                         if self.call_op(argc) {
                             continue 'frames;
