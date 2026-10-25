@@ -381,3 +381,13 @@ a å ä c č ch Eclair éclair h i I item10 item2 ı n ñ o ö ss ß z|a c č ch
 [new Intl.NumberFormat('xx').resolvedOptions().locale, new Intl.NumberFormat(['xx', 'de-AT']).resolvedOptions().locale, new Intl.DateTimeFormat('th').resolvedOptions().calendar, Intl.NumberFormat.supportedLocalesOf(['de-AT', 'xx', 'zh-Hant', 'no']).join(), Intl.getCanonicalLocales(['EN-us', 'zh-hant-tw']).join(), typeof Intl, Object.prototype.toString.call(Intl)].join('|')
 ----
 en-US|de-AT|buddhist|de-AT,zh-Hant,no|en-US,zh-Hant-TW|object|[object Intl]
+
+==== js Map and Set with own properties: entries apart from properties
+var p = new Map(); p.foo = 1; p.bar = 2; p.set('k', 1); p.baz = 3; p.set('k2', 2); delete p.foo; p.set('k3', 3); p.delete('k2'); var s = new Set([1, 2]); s.tag = 'x'; s.clear(); s.add(3); [p.size, p.get('k'), p.get('k3'), Array.from(p.keys()).join(), p.bar, p.baz, s.size, s.tag, Object.keys(p).join()].join('|')
+----
+2|1|3|k,k3|2|3|1|x|bar,baz
+
+==== js Map: a collected Map's slot reused by a new Map keeps no old entries
+var bad = 0; for (var r = 0; r < 40; r++) { for (var i = 0; i < 300; i++) { var m = new Map(); m.set('k' + (i % 5), i); m.set('x', 1); } for (var j = 0; j < 3000; j++) { var o = [j, j + 1]; } for (var i = 0; i < 50; i++) { var n = new Map(); n.set('x', 2); n.set('k1', 3); if (n.size !== 2 || n.get('x') !== 2 || n.has('k0')) bad++; } } bad
+----
+0

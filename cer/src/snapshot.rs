@@ -22,7 +22,7 @@ use crate::value::*;
 use crate::vm::*;
 
 /// Bumped when the text or what it holds changes.
-pub const SNAPSHOT_FORMAT: int = 1;
+pub const SNAPSHOT_FORMAT: int = 2;
 
 struct Strings {
     index: HashMap<String, int>,
@@ -226,14 +226,15 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, o.home);
         put_num(&mut b, o.pos);
         put_num(&mut b, (if o.extensible { 1 } else { 0 }) + (if o.has_proto_obj { 2 } else { 0 }));
-        // a Map's or Set's index (by map_key) is kept; an object's is
-        // made again from its keys
+        // a Map's or Set's index (by map_key) and entry states are kept;
+        // the properties' index is made again from the keys
         if o.class == C_MAP || o.class == C_SET {
-            put_num(&mut b, o.index.len() as int);
-            for (k, v) in o.index.iter() {
+            put_num(&mut b, o.mindex.len() as int);
+            for (k, v) in o.mindex.iter() {
                 put_num(&mut b, *k);
                 put_num(&mut b, *v);
             }
+            put_ints(&mut b, &o.mattrs);
         }
     }
     put_ints(&mut b, &vm.free_list);
@@ -442,17 +443,18 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             while j < ni && !r.bad {
                 let k = r.num();
                 let v = r.num();
-                o.index.insert(k, v);
+                o.mindex.insert(k, v);
                 j += 1;
             }
-        } else if n > INDEX_AT {
+            o.mattrs = get_ints(&mut r);
+        }
+        if n > INDEX_AT {
             let mut j: int = 0;
             while j < n {
                 o.index.insert(o.keys[j as usize], j);
                 j += 1;
             }
         }
-        // (a map keeps its entries' state in attrs, not one per key)
         if o.keys.len() != o.vals.len() {
             r.bad = true;
         }
