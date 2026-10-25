@@ -8,7 +8,9 @@
 //! transform already applied) and hands it here.
 //!
 //! The surface is premultiplied RGBA, four doubles 0..1 per pixel, row by
-//! row; a clip mask is one double 0..1 per pixel, empty for none.
+//! row; a clip mask is one double 0..1 per pixel, empty for none, and a
+//! clip rectangle (x0 y0 x1 y1, empty for none) narrows it further without
+//! a mask, the common case of a chart's plot area.
 //!
 //! The command list (each command a code and its numbers):
 //!
@@ -153,8 +155,9 @@ struct Pen {
 }
 
 /// Runs a command list on the surface `px` (w x h), within the clip mask
-/// `clip` (empty: none). `images` are the IMAGE paints' sources.
-pub fn run(px: &mut Vec<double>, w: int, h: int, cmds: &Vec<double>, clip: &Vec<double>, images: &Vec<RasterImage>) {
+/// `clip` and the clip rectangle `crect` (each empty: none). `images` are
+/// the IMAGE paints' sources.
+pub fn run(px: &mut Vec<double>, w: int, h: int, cmds: &Vec<double>, clip: &Vec<double>, crect: &Vec<double>, images: &Vec<RasterImage>) {
     let mut path = Rings::new();
     let mut pen = Pen {
         kind: RC_SOLID,
@@ -213,7 +216,7 @@ pub fn run(px: &mut Vec<double>, w: int, h: int, cmds: &Vec<double>, clip: &Vec<
             i += 1;
             let mut cov = Coverage::new();
             cov.fill(&path, rule, w, h, true);
-            paint(px, w, h, &cov, clip, &pen, images);
+            paint(px, w, h, &cov, clip, crect, &pen, images);
         } else if c == RC_STROKE {
             let width = at(cmds, i);
             let cap = at(cmds, i + 1) as int;
@@ -224,7 +227,7 @@ pub fn run(px: &mut Vec<double>, w: int, h: int, cmds: &Vec<double>, clip: &Vec<
                 let outline = stroke(&path, width / 2.0, cap, join, limit, &pen.dash, pen.dash_off);
                 let mut cov = Coverage::new();
                 cov.fill(&outline, 0, w, h, true);
-                paint(px, w, h, &cov, clip, &pen, images);
+                paint(px, w, h, &cov, clip, crect, &pen, images);
             }
         } else if c == RC_DASH {
             let k = at(cmds, i) as int;
@@ -268,18 +271,27 @@ pub fn run(px: &mut Vec<double>, w: int, h: int, cmds: &Vec<double>, clip: &Vec<
     }
 }
 
-/// The clip mask `clip` (w x h, filled with 1 when empty) narrowed to
-/// the path the command list builds, filled with `rule`.
-pub fn clip_to(clip: &mut Vec<double>, w: int, h: int, cmds: &Vec<double>, rule: int) {
+/// The clip mask `clip` (w x h) made from the clip before it (the mask
+/// `prev` and the rectangle `crect`, each empty for none) narrowed to the
+/// path the command list builds, filled with `rule`.
+pub fn clip_to(clip: &mut Vec<double>, w: int, h: int, cmds: &Vec<double>, rule: int, prev: &Vec<double>, crect: &Vec<double>) {
     let n = (w * h) as usize;
-    if clip.len() != n {
-        *clip = Vec::with_capacity(n);
-        let mut k: usize = 0;
-        while k < n {
-            clip.push(1.0);
-            k += 1;
+    let has_prev = prev.len() == n;
+    let mut fresh: Vec<double> = Vec::with_capacity(n);
+    let mut y0: int = 0;
+    while y0 < h {
+        let mut x0: int = 0;
+        while x0 < w {
+            let mut v: double = if has_prev { prev[(y0 * w + x0) as usize] } else { 1.0 };
+            if v > 0.0 {
+                v = v * rect_cov(crect, x0, y0);
+            }
+            fresh.push(v);
+            x0 += 1;
         }
+        y0 += 1;
     }
+    *clip = fresh;
     let mut cov = Coverage::new();
     // the path, through a run that only builds it
     let mut path = Rings::new();
@@ -923,8 +935,9 @@ fn orient(out: &mut Rings, s: int) {
 // ---- paint and composition
 
 /// Paints the coverage `cov` with the pen onto the surface.
-fn paint(px: &mut Vec<double>, w: int, h: int, cov: &Coverage, clip: &Vec<double>, pen: &Pen, images: &Vec<RasterImage>) {
+fn paint(px: &mut Vec<double>, w: int, h: int, cov: &Coverage, clip: &Vec<double>, crect: &Vec<double>, pen: &Pen, images: &Vec<RasterImage>) {
     let has_clip = clip.len() as int == w * h;
+    let has_rect = crect.len() == 4;
     let mut src: Vec<double> = vec![0.0, 0.0, 0.0, 0.0];
     if pen.kind == RC_SOLID {
         let a = clamp01(pen.color[3]);
@@ -940,6 +953,9 @@ fn paint(px: &mut Vec<double>, w: int, h: int, cov: &Coverage, clip: &Vec<double
             if f > 0.0 && has_clip {
                 f = f * clip[(y * w + x) as usize];
             }
+            if f > 0.0 && has_rect {
+                f = f * rect_cov(crect, x, y);
+            }
             if f > 0.0 {
                 if pen.kind != RC_SOLID {
                     src = paint_at(pen, (x as double) + 0.5, (y as double) + 0.5, images);
@@ -951,6 +967,21 @@ fn paint(px: &mut Vec<double>, w: int, h: int, cov: &Coverage, clip: &Vec<double
         }
         ly += 1;
     }
+}
+
+/// How much of pixel (x, y) the clip rectangle covers (1 with none).
+fn rect_cov(r: &Vec<double>, x: int, y: int) -> double {
+    if r.len() != 4 {
+        return 1.0;
+    }
+    let fx = x as double;
+    let fy = y as double;
+    let ox = (if fx + 1.0 < r[2] { fx + 1.0 } else { r[2] }) - (if fx > r[0] { fx } else { r[0] });
+    let oy = (if fy + 1.0 < r[3] { fy + 1.0 } else { r[3] }) - (if fy > r[1] { fy } else { r[1] });
+    if ox <= 0.0 || oy <= 0.0 {
+        return 0.0;
+    }
+    ox * oy
 }
 
 fn clamp01(v: double) -> double {

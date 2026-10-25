@@ -4,9 +4,11 @@
 //! (w * h * 4), so it lives in the heap like any value (snapshots keep
 //! it); the engine only runs commands on it:
 //!
-//!   __cerRaster(0, surface, w, h, commands, clip?, images?)   draw (raster.rs's command list, a Float64Array);
-//!                     clip a Float64Array of w * h or undefined; images an array of [surface, w, h]
-//!   __cerRaster(1, clip, w, h, commands, rule)                narrow the clip mask to a path
+//!   __cerRaster(0, surface, w, h, commands, clip?, images?, rect?)   draw (raster.rs's command list, a Float64Array);
+//!                     clip a Float64Array of w * h or undefined; images an array of [surface, w, h];
+//!                     rect the clip rectangle [x0, y0, x1, y1] or undefined
+//!   __cerRaster(1, clip, w, h, commands, rule, prev?, rect?)  the clip mask (a new Float64Array of w * h): the
+//!                     clip before it (mask prev, rectangle rect) narrowed to a path
 //!   __cerRaster(2, surface, w, h, x, y, rw, rh, out)          getImageData into a Uint8ClampedArray
 //!   __cerRaster(3, surface, w, h, x, y, rw, rh, data)         putImageData from a Uint8ClampedArray
 //!   __cerRaster(4, surface, w, h)                             the surface as a PNG data: URL
@@ -70,6 +72,19 @@ impl Vm {
         self.objs[b as usize].nums.clone()
     }
 
+    /// A clip rectangle from an array of four numbers, else none.
+    fn rect_values(&mut self, v: &Val) -> Vec<double> {
+        let o = obj_of(v);
+        let mut out: Vec<double> = Vec::new();
+        if o >= 0 && self.objs[o as usize].class == C_ARRAY && self.objs[o as usize].elems.len() == 4 {
+            let items = self.objs[o as usize].elems.clone();
+            for it in items.iter() {
+                out.push(number(it));
+            }
+        }
+        out
+    }
+
     pub fn call_native_raster(&mut self, args: Vec<Val>) -> Val {
         let mut a: Vec<Val> = args;
         while a.len() < 9 {
@@ -106,13 +121,16 @@ impl Vm {
                     images.push(img);
                 }
             }
-            crate::raster::run(&mut self.objs[b as usize].nums, w, h, &cmds, &clip, &images);
+            let rect = self.rect_values(&a[7]);
+            crate::raster::run(&mut self.objs[b as usize].nums, w, h, &cmds, &clip, &rect, &images);
             return Val::Undef;
         }
         if op == 1 {
             let cmds = self.f64_values(&a[4]);
             let rule = number(&a[5]) as int;
-            crate::raster::clip_to(&mut self.objs[b as usize].nums, w, h, &cmds, rule);
+            let prev = self.f64_values(&a[6]);
+            let rect = self.rect_values(&a[7]);
+            crate::raster::clip_to(&mut self.objs[b as usize].nums, w, h, &cmds, rule, &prev, &rect);
             return Val::Undef;
         }
         if op == 2 || op == 3 {
