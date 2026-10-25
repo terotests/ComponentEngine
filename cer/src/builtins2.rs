@@ -1371,8 +1371,8 @@ impl Vm {
                     NF_MP_CLEAR => {
                         self.objs[o as usize].elems = Vec::new();
                         self.objs[o as usize].elems2 = Vec::new();
-                        self.objs[o as usize].attrs = Vec::new();
-                        self.objs[o as usize].index = HashMap::new();
+                        self.objs[o as usize].mattrs = Vec::new();
+                        self.objs[o as usize].mindex = HashMap::new();
                         self.objs[o as usize].pos = 0;
                         Val::Undef
                     }
@@ -1384,7 +1384,7 @@ impl Vm {
                         let is_set = self.objs[o as usize].class == C_SET;
                         let mut i: usize = 0;
                         while i < self.objs[o as usize].elems.len() {
-                            if self.objs[o as usize].attrs[i] == 0 {
+                            if self.objs[o as usize].mattrs[i] == 0 {
                                 let k = self.objs[o as usize].elems[i].clone();
                                 let v = if is_set { k.clone() } else { self.objs[o as usize].elems2[i].clone() };
                                 self.call_value(a0.clone(), a1.clone(), vec![v, k, this.clone()]);

@@ -66,7 +66,7 @@ pub const P_FIXED: int = 4;
 pub const P_ACCESSOR: int = 8;
 
 /// Past this many properties an object keeps a hash index of its keys.
-pub const INDEX_AT: int = 8;
+pub const INDEX_AT: int = 32;
 
 pub struct JsObj {
     pub class: int,
@@ -83,6 +83,11 @@ pub struct JsObj {
     pub elems: Vec<Val>,
     /// a map's values
     pub elems2: Vec<Val>,
+    /// a Map's or Set's entries by map_key, and each entry's state (1 when
+    /// deleted), apart from `index` and `attrs`, which are the object's
+    /// own properties' (a Map can have those too)
+    pub mindex: HashMap<int, int>,
+    pub mattrs: Vec<int>,
     /// an ArrayBuffer's contents: its bytes, or the elements of the one
     /// typed array kind that has used it (typed.rs)
     pub nums: Vec<double>,
@@ -115,6 +120,8 @@ impl JsObj {
             index: HashMap::new(),
             elems: Vec::new(),
             elems2: Vec::new(),
+            mindex: HashMap::new(),
+            mattrs: Vec::new(),
             nums: Vec::new(),
             func: -1,
             env: -1,
@@ -186,6 +193,10 @@ impl JsObj {
             self.keys.truncate(0);
             self.vals.truncate(0);
             self.attrs.truncate(0);
+            // (a property index left from the slot's last object)
+            if !self.index.is_empty() {
+                self.index = HashMap::new();
+            }
         } else {
             self.keys = Vec::new();
             self.vals = Vec::new();
@@ -198,6 +209,10 @@ impl JsObj {
             self.elems = Vec::new();
         }
         self.elems2 = Vec::new();
+        if !self.mindex.is_empty() {
+            self.mindex = HashMap::new();
+        }
+        self.mattrs = Vec::new();
         self.nums = Vec::new();
         self.prim = Val::Undef;
         self.env = -1;
