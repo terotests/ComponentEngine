@@ -164,6 +164,37 @@ fn element_value(kind: int, x: double) -> double {
     if kind == TK_FLOAT32 {
         return fround(x);
     }
+    // an integer the kind holds as it is (the common case): no modulo
+    if x == floor(x) {
+        if x == 0.0 {
+            return 0.0;
+        }
+        let lo = if kind == TK_INT8 {
+            -128.0
+        } else if kind == TK_INT16 {
+            -32768.0
+        } else if kind == TK_INT32 {
+            -2147483648.0
+        } else {
+            0.0
+        };
+        let hi = if kind == TK_INT8 {
+            127.0
+        } else if kind == TK_UINT8 || kind == TK_UINT8C {
+            255.0
+        } else if kind == TK_INT16 {
+            32767.0
+        } else if kind == TK_UINT16 {
+            65535.0
+        } else if kind == TK_INT32 {
+            2147483647.0
+        } else {
+            4294967295.0
+        };
+        if x >= lo && x <= hi {
+            return x;
+        }
+    }
     let u = int_bits(kind, x);
     if kind == TK_INT8 || kind == TK_INT16 || kind == TK_INT32 {
         let half = two_pow(kind_size(kind) * 8 - 1);

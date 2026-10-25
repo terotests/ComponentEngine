@@ -141,6 +141,7 @@ impl Vm {
             }
             // writes that miss look along the chain, where a proxy may be
             self.any_setter = true;
+            self.proxy_made = true;
             return Val::Obj(p);
         }
         if id == NF_PROXY_REVOKE {

@@ -31,7 +31,7 @@ impl Vm {
         self.method(symp, "valueOf", NF_SYMP_VALUEOF, 0);
         let a_tp = crate::vm::A_TOPRIMITIVE;
         let tpf = self.native_fn("[Symbol.toPrimitive]", NF_SYMP_VALUEOF, 1);
-        self.objs[symp as usize].add(a_tp, Val::Obj(tpf), P_HIDDEN | P_READONLY);
+        self.add_prop(symp, a_tp, Val::Obj(tpf), P_HIDDEN | P_READONLY);
         let op = self.object_proto;
         let pg = self.native_fn("get __proto__", NF_PROTO_GET, 0);
         let ps = self.native_fn("set __proto__", NF_PROTO_SET, 1);
@@ -57,26 +57,26 @@ impl Vm {
         // through their prototypes only
         let gfp = self.generator_function_proto;
         let gf = self.native_fn("GeneratorFunction", NF_GENERATOR_FUNCTION, 1);
-        self.objs[gf as usize].add(A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
+        self.add_prop(gf, A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.objs[gf as usize].has_proto_obj = true;
-        self.objs[gfp as usize].add(A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
+        self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
         let fc = self.get_obj(self.global, self.atoms["Function"], &Val::Obj(self.global));
         if let Val::Obj(f) = fc {
             self.objs[gf as usize].proto = f;
         }
         let agfp = self.async_generator_function_proto;
         let agf = self.native_fn("AsyncGeneratorFunction", NF_ASYNC_GENERATOR_FUNCTION, 1);
-        self.objs[agf as usize].add(A_PROTOTYPE, Val::Obj(agfp), P_HIDDEN | P_READONLY | P_FIXED);
+        self.add_prop(agf, A_PROTOTYPE, Val::Obj(agfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.objs[agf as usize].has_proto_obj = true;
-        self.objs[agfp as usize].add(A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
+        self.add_prop(agfp, A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
         if let Val::Obj(f) = fc {
             self.objs[agf as usize].proto = f;
         }
         let afp = self.async_function_proto;
         let af = self.native_fn("AsyncFunction", NF_ASYNC_FUNCTION, 1);
-        self.objs[af as usize].add(A_PROTOTYPE, Val::Obj(afp), P_HIDDEN | P_READONLY | P_FIXED);
+        self.add_prop(af, A_PROTOTYPE, Val::Obj(afp), P_HIDDEN | P_READONLY | P_FIXED);
         self.objs[af as usize].has_proto_obj = true;
-        self.objs[afp as usize].add(A_CONSTRUCTOR, Val::Obj(af), P_HIDDEN | P_READONLY);
+        self.add_prop(afp, A_CONSTRUCTOR, Val::Obj(af), P_HIDDEN | P_READONLY);
         if let Val::Obj(f) = fc {
             self.objs[af as usize].proto = f;
         }
@@ -232,7 +232,7 @@ impl Vm {
                     self.objs[o as usize].vals[slot as usize] = vals[i].clone();
                 } else {
                     let attr = self.objs[n as usize].attrs[i];
-                    self.objs[o as usize].add(keys[i], vals[i].clone(), attr);
+                    self.add_prop(o, keys[i], vals[i].clone(), attr);
                 }
                 i += 1;
             }
