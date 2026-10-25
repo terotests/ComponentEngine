@@ -391,3 +391,21 @@ var p = new Map(); p.foo = 1; p.bar = 2; p.set('k', 1); p.baz = 3; p.set('k2', 2
 var bad = 0; for (var r = 0; r < 40; r++) { for (var i = 0; i < 300; i++) { var m = new Map(); m.set('k' + (i % 5), i); m.set('x', 1); } for (var j = 0; j < 3000; j++) { var o = [j, j + 1]; } for (var i = 0; i < 50; i++) { var n = new Map(); n.set('x', 2); n.set('k1', 3); if (n.size !== 2 || n.get('x') !== 2 || n.has('k0')) bad++; } } bad
 ----
 0
+
+==== js a Map or Set in a recycled object slot starts empty
+for (let i = 0; i < 150000; i++) { const m = new Map(); m.set('a', i); const s = new Set(); s.add(i); }
+const seen = [];
+for (let j = 0; j < 20; j++) { const m = new Map(); m.set('x', j); const s = new Set([1]); seen.push(m.size + ',' + m.get('a') + ',' + s.size + ',' + s.has(0)); }
+seen.filter((x) => x !== '1,undefined,1,false').length
+----
+0
+
+==== js for-in: own keys, inherited enumerable keys, shadowing
+var P = { p: 1, s: 2 }; var o = Object.create(P); o.b = 1; o[2] = 1; o.a = 1; o.s = 3; o[1] = 1;
+class C { constructor() { this.y = 1; this.x = 2; } m() {} }
+var r1 = []; for (var k in o) r1.push(k);
+var r2 = []; for (var k in new C()) r2.push(k);
+var r3 = []; for (var k in { z: 1, [Symbol('q')]: 2, 0: 1 }) r3.push(k);
+[r1.join(), r2.join(), r3.join()].join('|')
+----
+1,2,b,a,s,p|y,x|0,z
