@@ -530,7 +530,7 @@ impl Vm {
         self.method(bp, "toLocaleString", NF_BIGINTP_TOSTRING, 0);
         self.method(bp, "valueOf", NF_BIGINTP_VALUEOF, 0);
         let a_tag = self.intern("@@toStringTag");
-        self.objs[bp as usize].add(a_tag, str_val("BigInt"), P_HIDDEN | P_READONLY);
+        self.add_prop(bp, a_tag, str_val("BigInt"), P_HIDDEN | P_READONLY);
     }
 
     /// The BigInt with decimal text `s` (canonical), made once.

@@ -294,8 +294,8 @@ impl Vm {
         self.objs[f as usize].func = id;
         let a = self.intern(name);
         let _ = a;
-        self.objs[f as usize].add(A_NAME, str_val(name), P_HIDDEN | P_READONLY);
-        self.objs[f as usize].add(A_LENGTH, Val::Num(length as double), P_HIDDEN | P_READONLY);
+        self.add_prop(f, A_NAME, str_val(name), P_HIDDEN | P_READONLY);
+        self.add_prop(f, A_LENGTH, Val::Num(length as double), P_HIDDEN | P_READONLY);
         f
     }
 
@@ -321,13 +321,13 @@ impl Vm {
 
     pub fn value_prop(&mut self, o: int, name: &str, v: Val) {
         let a = self.intern(name);
-        self.objs[o as usize].add(a, v, P_HIDDEN | P_READONLY | P_FIXED);
+        self.add_prop(o, a, v, P_HIDDEN | P_READONLY | P_FIXED);
     }
 
     /// A constructor with its prototype object wired both ways.
     pub fn ctor(&mut self, name: &str, id: int, length: int, proto: int) -> int {
         let f = self.native_fn(name, id, length);
-        self.objs[f as usize].add(A_PROTOTYPE, Val::Obj(proto), P_HIDDEN | P_READONLY | P_FIXED);
+        self.add_prop(f, A_PROTOTYPE, Val::Obj(proto), P_HIDDEN | P_READONLY | P_FIXED);
         self.objs[f as usize].has_proto_obj = true;
         self.objs[proto as usize].add(A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
         let g = self.global;
@@ -383,8 +383,8 @@ impl Vm {
         self.promise_proto = pp;
         self.roots = vec![op, fp, g, ap, sp, np, bp, symp, ep, rp, dp, mp, setp, ip, pp];
 
-        self.objs[fp as usize].add(A_NAME, str_val(""), P_HIDDEN | P_READONLY);
-        self.objs[fp as usize].add(A_LENGTH, Val::Num(0.0), P_HIDDEN | P_READONLY);
+        self.add_prop(fp, A_NAME, str_val(""), P_HIDDEN | P_READONLY);
+        self.add_prop(fp, A_LENGTH, Val::Num(0.0), P_HIDDEN | P_READONLY);
 
         let it_sym = self.well_known_symbol(A_ITERATOR, "Symbol.iterator");
         let a_async = self.intern("@@asyncIterator");
@@ -770,8 +770,8 @@ impl Vm {
         self.method(wsp, "has", NF_MP_HAS, 1);
         self.method(wsp, "delete", NF_MP_DELETE, 1);
         let a_tag2 = self.intern("@@toStringTag");
-        self.objs[wmp as usize].add(a_tag2, str_val("WeakMap"), P_HIDDEN | P_READONLY);
-        self.objs[wsp as usize].add(a_tag2, str_val("WeakSet"), P_HIDDEN | P_READONLY);
+        self.add_prop(wmp, a_tag2, str_val("WeakMap"), P_HIDDEN | P_READONLY);
+        self.add_prop(wsp, a_tag2, str_val("WeakSet"), P_HIDDEN | P_READONLY);
 
         // Promise
         let prc = self.ctor("Promise", NF_PROMISE, 1, pp);
@@ -938,13 +938,13 @@ impl Vm {
         let a_u = self.intern("unicode");
         let a_y = self.intern("sticky");
         let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/") };
-        self.objs[o as usize].add(a_source, string_val(shown), P_HIDDEN | P_READONLY);
-        self.objs[o as usize].add(a_global, Val::Bool(g), P_HIDDEN | P_READONLY);
-        self.objs[o as usize].add(a_ic, Val::Bool(ic), P_HIDDEN | P_READONLY);
-        self.objs[o as usize].add(a_m, Val::Bool(m), P_HIDDEN | P_READONLY);
-        self.objs[o as usize].add(a_s, Val::Bool(sa), P_HIDDEN | P_READONLY);
-        self.objs[o as usize].add(a_u, Val::Bool(u), P_HIDDEN | P_READONLY);
-        self.objs[o as usize].add(a_y, Val::Bool(y), P_HIDDEN | P_READONLY);
+        self.add_prop(o, a_source, string_val(shown), P_HIDDEN | P_READONLY);
+        self.add_prop(o, a_global, Val::Bool(g), P_HIDDEN | P_READONLY);
+        self.add_prop(o, a_ic, Val::Bool(ic), P_HIDDEN | P_READONLY);
+        self.add_prop(o, a_m, Val::Bool(m), P_HIDDEN | P_READONLY);
+        self.add_prop(o, a_s, Val::Bool(sa), P_HIDDEN | P_READONLY);
+        self.add_prop(o, a_u, Val::Bool(u), P_HIDDEN | P_READONLY);
+        self.add_prop(o, a_y, Val::Bool(y), P_HIDDEN | P_READONLY);
         Val::Obj(o)
     }
 
@@ -3409,6 +3409,8 @@ impl Vm {
                             self.objs[o as usize].attrs[i] |= P_FIXED;
                             if id == NF_O_FREEZE && !acc {
                                 self.objs[o as usize].attrs[i] |= P_READONLY;
+                                let a = self.objs[o as usize].keys[i];
+                                self.mark_setter(a);
                             }
                             i += 1;
                         }
@@ -3704,7 +3706,14 @@ impl Vm {
             };
             return Val::Num(r);
         }
-        let r = match which {
+        Val::Num(math1(which, x))
+    }
+}
+
+/// Math's one-argument functions (`which` 0..27) on a number.
+pub fn math1(which: int, x: double) -> double {
+    {
+        match which {
             0 => x.abs(),
             1 => x.floor(),
             2 => x.ceil(),
@@ -3760,8 +3769,7 @@ impl Vm {
                 n as double
             }
             _ => nan(),
-        };
-        Val::Num(r)
+        }
     }
 }
 
