@@ -303,13 +303,13 @@ impl Vm {
     pub fn method(&mut self, o: int, name: &str, id: int, length: int) -> int {
         let f = self.native_fn(name, id, length);
         let a = self.intern(name);
-        self.objs[o as usize].add(a, Val::Obj(f), P_HIDDEN);
+        self.add_own(o, a, Val::Obj(f), P_HIDDEN);
         f
     }
 
     pub fn sym_method(&mut self, o: int, atom: int, label: &str, id: int, length: int) -> int {
         let f = self.native_fn(label, id, length);
-        self.objs[o as usize].add(atom, Val::Obj(f), P_HIDDEN);
+        self.add_own(o, atom, Val::Obj(f), P_HIDDEN);
         f
     }
 
@@ -329,10 +329,10 @@ impl Vm {
         let f = self.native_fn(name, id, length);
         self.add_prop(f, A_PROTOTYPE, Val::Obj(proto), P_HIDDEN | P_READONLY | P_FIXED);
         self.objs[f as usize].has_proto_obj = true;
-        self.objs[proto as usize].add(A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
+        self.add_own(proto, A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
         let g = self.global;
         let a = self.intern(name);
-        self.objs[g as usize].add(a, Val::Obj(f), P_HIDDEN);
+        self.add_own(g, a, Val::Obj(f), P_HIDDEN);
         f
     }
 
@@ -399,7 +399,7 @@ impl Vm {
         let unscop_sym = self.well_known_symbol(a_unscop, "Symbol.unscopables");
 
         // globals
-        self.objs[g as usize].add(self.atoms["globalThis"], Val::Obj(g), P_HIDDEN);
+        self.add_own(g, self.atoms["globalThis"], Val::Obj(g), P_HIDDEN);
         self.value_prop(g, "NaN", Val::Num(nan()));
         self.value_prop(g, "Infinity", Val::Num(infinity()));
         self.value_prop(g, "undefined", Val::Undef);
@@ -423,11 +423,11 @@ impl Vm {
         self.method(console, "error", NF_PRINT, 0);
         self.method(console, "debug", NF_PRINT, 0);
         let a_console = self.intern("console");
-        self.objs[g as usize].add(a_console, Val::Obj(console), P_HIDDEN);
+        self.add_own(g, a_console, Val::Obj(console), P_HIDDEN);
         let perf = self.new_object();
         self.method(perf, "now", NF_PERF_NOW, 0);
         let a_perf = self.intern("performance");
-        self.objs[g as usize].add(a_perf, Val::Obj(perf), P_HIDDEN);
+        self.add_own(g, a_perf, Val::Obj(perf), P_HIDDEN);
 
         // Object
         let oc = self.ctor("Object", NF_OBJECT, 1, op);
@@ -516,7 +516,7 @@ impl Vm {
         }
         let values = self.method(ap, "values", NF_AP_VALUES, 0);
         self.array_values_fn = values;
-        self.objs[ap as usize].add(A_ITERATOR, Val::Obj(values), P_HIDDEN);
+        self.add_own(ap, A_ITERATOR, Val::Obj(values), P_HIDDEN);
         self.method(ip, "next", NF_ITER_NEXT, 0);
 
         // String
@@ -625,8 +625,8 @@ impl Vm {
             } else {
                 self.objs[c as usize].proto = base_ctor;
             }
-            self.objs[proto as usize].add(A_NAME, str_val(n), P_HIDDEN);
-            self.objs[proto as usize].add(A_MESSAGE, str_val(""), P_HIDDEN);
+            self.add_own(proto, A_NAME, str_val(n), P_HIDDEN);
+            self.add_own(proto, A_MESSAGE, str_val(""), P_HIDDEN);
             if k == 1 {
                 self.type_error_proto = proto;
             } else if k == 2 {
@@ -644,7 +644,7 @@ impl Vm {
         // Math
         let math = self.new_object();
         let a_math = self.intern("Math");
-        self.objs[g as usize].add(a_math, Val::Obj(math), P_HIDDEN);
+        self.add_own(g, a_math, Val::Obj(math), P_HIDDEN);
         let mut i: int = 0;
         for n in math_names() {
             let len = if n.as_str() == "pow" || n.as_str() == "atan2" || n.as_str() == "imul" || n.as_str() == "min" || n.as_str() == "max" || n.as_str() == "hypot" {
@@ -669,14 +669,14 @@ impl Vm {
         // JSON
         let json = self.new_object();
         let a_json = self.intern("JSON");
-        self.objs[g as usize].add(a_json, Val::Obj(json), P_HIDDEN);
+        self.add_own(g, a_json, Val::Obj(json), P_HIDDEN);
         self.method(json, "stringify", NF_JSON_STRINGIFY, 3);
         self.method(json, "parse", NF_JSON_PARSE, 2);
 
         // Reflect
         let reflect = self.new_object();
         let a_reflect = self.intern("Reflect");
-        self.objs[g as usize].add(a_reflect, Val::Obj(reflect), P_HIDDEN);
+        self.add_own(g, a_reflect, Val::Obj(reflect), P_HIDDEN);
         self.method(reflect, "apply", NF_REFLECT_APPLY, 3);
         self.method(reflect, "construct", NF_REFLECT_CONSTRUCT, 2);
         self.method(reflect, "ownKeys", NF_REFLECT_OWNKEYS, 1);
@@ -723,7 +723,7 @@ impl Vm {
         self.method(dp, "toString", NF_DP_TOSTRING, 0);
         let utcs = self.method(dp, "toUTCString", NF_DP_TOSTRING, 0);
         let a_gmt = self.intern("toGMTString");
-        self.objs[dp as usize].add(a_gmt, Val::Obj(utcs), P_HIDDEN);
+        self.add_own(dp, a_gmt, Val::Obj(utcs), P_HIDDEN);
         self.method(dp, "toDateString", NF_DP_TOSTRING, 0);
         self.method(dp, "toLocaleString", NF_DP_TOSTRING, 0);
         self.method(dp, "valueOf", NF_DP_VALUEOF, 0);
@@ -739,7 +739,7 @@ impl Vm {
         self.method(mp, "keys", NF_MP_KEYS, 0);
         self.method(mp, "values", NF_MP_VALUES, 0);
         let me = self.method(mp, "entries", NF_MP_ENTRIES, 0);
-        self.objs[mp as usize].add(A_ITERATOR, Val::Obj(me), P_HIDDEN);
+        self.add_own(mp, A_ITERATOR, Val::Obj(me), P_HIDDEN);
         self.getter(mp, "size", NF_MP_SIZE);
         self.ctor("Set", NF_SET, 0, setp);
         self.method(setp, "add", NF_SETP_ADD, 1);
@@ -750,8 +750,8 @@ impl Vm {
         self.method(setp, "entries", NF_MP_ENTRIES, 0);
         let sv = self.method(setp, "values", NF_MP_KEYS, 0);
         let a_keys = self.intern("keys");
-        self.objs[setp as usize].add(a_keys, Val::Obj(sv), P_HIDDEN);
-        self.objs[setp as usize].add(A_ITERATOR, Val::Obj(sv), P_HIDDEN);
+        self.add_own(setp, a_keys, Val::Obj(sv), P_HIDDEN);
+        self.add_own(setp, A_ITERATOR, Val::Obj(sv), P_HIDDEN);
         self.getter(setp, "size", NF_MP_SIZE);
         // WeakMap / WeakSet: a Map / Set underneath, with only the methods a
         // weak collection has (no size, no iteration)
@@ -861,9 +861,9 @@ impl Vm {
         let names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError"];
         let g = self.global;
         let a = self.atoms[names[kind as usize]];
-        let slot = self.objs[g as usize].find(a);
+        let slot = self.find(g, a);
         let c = obj_of(&self.objs[g as usize].vals[slot as usize]);
-        let ps = self.objs[c as usize].find(A_PROTOTYPE);
+        let ps = self.find(c, A_PROTOTYPE);
         obj_of(&self.objs[c as usize].vals[ps as usize])
     }
 
@@ -961,16 +961,15 @@ impl Vm {
         self.objs[o as usize].prim = src;
         let re = &self.regexes[idx as usize];
         let (g, ic, m, sa, u, y) = (re.global, re.ignore_case, re.multiline, re.dot_all, re.unicode && !re.unicode_sets, re.sticky);
-        let ob = &mut self.objs[o as usize];
-        ob.add(A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
+        self.add_own(o, A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
         let ro = P_HIDDEN | P_READONLY;
-        ob.add(A_SOURCE, shown, ro);
-        ob.add(A_GLOBAL, Val::Bool(g), ro);
-        ob.add(A_IGNORECASE, Val::Bool(ic), ro);
-        ob.add(A_MULTILINE, Val::Bool(m), ro);
-        ob.add(A_DOTALL, Val::Bool(sa), ro);
-        ob.add(A_UNICODE, Val::Bool(u), ro);
-        ob.add(A_STICKY, Val::Bool(y), ro);
+        self.add_own(o, A_SOURCE, shown, ro);
+        self.add_own(o, A_GLOBAL, Val::Bool(g), ro);
+        self.add_own(o, A_IGNORECASE, Val::Bool(ic), ro);
+        self.add_own(o, A_MULTILINE, Val::Bool(m), ro);
+        self.add_own(o, A_DOTALL, Val::Bool(sa), ro);
+        self.add_own(o, A_UNICODE, Val::Bool(u), ro);
+        self.add_own(o, A_STICKY, Val::Bool(y), ro);
         Val::Obj(o)
     }
 
@@ -1045,22 +1044,22 @@ impl Vm {
             g += 1;
         }
         let arr = self.new_array(items.clone());
-        self.objs[arr as usize].add(A_INDEX, Val::Num(caps[0] as double), 0);
-        self.objs[arr as usize].add(A_INPUT, Val::Str(s.clone()), 0);
+        self.add_own(arr, A_INDEX, Val::Num(caps[0] as double), 0);
+        self.add_own(arr, A_INPUT, Val::Str(s.clone()), 0);
         let names = self.regexes[idx as usize].names.clone();
         let nidx = self.regexes[idx as usize].name_index.clone();
         if names.is_empty() {
-            self.objs[arr as usize].add(A_GROUPS, Val::Undef, 0);
+            self.add_own(arr, A_GROUPS, Val::Undef, 0);
         } else {
             let go = self.alloc(C_OBJECT, -1);
             let mut i: usize = 0;
             while i < names.len() {
                 let a = self.intern(names[i].as_str());
                 let v = items[nidx[i] as usize].clone();
-                self.objs[go as usize].add(a, v, 0);
+                self.add_own(go, a, v, 0);
                 i += 1;
             }
-            self.objs[arr as usize].add(A_GROUPS, Val::Obj(go), 0);
+            self.add_own(arr, A_GROUPS, Val::Obj(go), 0);
         }
         if has_indices {
             // `d`: [start, end] of each group, and of each named group
@@ -1079,20 +1078,20 @@ impl Vm {
             }
             let ind = self.new_array(pairs.clone());
             if names.is_empty() {
-                self.objs[ind as usize].add(A_GROUPS, Val::Undef, 0);
+                self.add_own(ind, A_GROUPS, Val::Undef, 0);
             } else {
                 let gi = self.alloc(C_OBJECT, -1);
                 let mut i: usize = 0;
                 while i < names.len() {
                     let a = self.intern(names[i].as_str());
                     let v = pairs[nidx[i] as usize].clone();
-                    self.objs[gi as usize].add(a, v, 0);
+                    self.add_own(gi, a, v, 0);
                     i += 1;
                 }
-                self.objs[ind as usize].add(A_GROUPS, Val::Obj(gi), 0);
+                self.add_own(ind, A_GROUPS, Val::Obj(gi), 0);
             }
             let a_ind = self.intern("indices");
-            self.objs[arr as usize].add(a_ind, Val::Obj(ind), 0);
+            self.add_own(arr, a_ind, Val::Obj(ind), 0);
         }
         Val::Obj(arr)
     }
@@ -1226,7 +1225,7 @@ impl Vm {
                         let go = self.new_object();
                         for (gn, gv) in groups.iter() {
                             let a = self.intern(gn.as_str());
-                            self.objs[go as usize].add(a, gv.clone(), 0);
+                            self.add_own(go, a, gv.clone(), 0);
                         }
                         args.push(Val::Obj(go));
                     }
@@ -1471,7 +1470,7 @@ impl Vm {
         };
         self.objs[m as usize].elems.push(kk);
         self.objs[m as usize].elems2.push(v);
-        self.objs[m as usize].attrs.push(0);
+        self.objs[m as usize].marks.push(0);
         self.objs[m as usize].index.insert(key, pos);
         self.objs[m as usize].pos += 1;
     }
@@ -1483,7 +1482,7 @@ impl Vm {
         }
         let key = self.map_key(k);
         self.objs[m as usize].index.remove(&key);
-        self.objs[m as usize].attrs[i as usize] = 1;
+        self.objs[m as usize].marks[i as usize] = 1;
         self.objs[m as usize].elems[i as usize] = Val::Undef;
         self.objs[m as usize].elems2[i as usize] = Val::Undef;
         self.objs[m as usize].pos -= 1;
@@ -1506,7 +1505,7 @@ impl Vm {
         let is_set = self.objs[m as usize].class == C_SET;
         let mut i: usize = 0;
         while i < n {
-            if self.objs[m as usize].attrs[i] == 0 {
+            if self.objs[m as usize].marks[i] == 0 {
                 let k = self.objs[m as usize].elems[i].clone();
                 let v = if is_set { k.clone() } else { self.objs[m as usize].elems2[i].clone() };
                 if kind == 0 {
@@ -1574,8 +1573,8 @@ impl Vm {
             self.throw_type("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
             return;
         }
-        let slot = self.objs[o as usize].find(atom);
-        let existing_attr = if slot >= 0 { self.objs[o as usize].attrs[slot as usize] } else { -1 };
+        let slot = self.find(o, atom);
+        let existing_attr = if slot >= 0 { self.attr_at(o, slot) } else { -1 };
         let in_elems = i >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && (i as usize) < self.objs[o as usize].elems.len();
         if slot < 0 && !in_elems && !self.objs[o as usize].extensible && !(self.objs[o as usize].class == C_ARRAY && atom == A_LENGTH) {
             let n = self.atom_str(atom);
@@ -1640,14 +1639,14 @@ impl Vm {
                 }
                 self.define_accessor(o, atom, set_v, 1, false);
             }
-            let s2 = self.objs[o as usize].find(atom);
-            self.objs[o as usize].attrs[s2 as usize] = P_ACCESSOR | hidden | fixed;
+            let s2 = self.find(o, atom);
+            self.set_attr(o, s2, P_ACCESSOR | hidden | fixed);
             return;
         }
         if !has_value && !has_writable && slot >= 0 && (existing_attr & P_ACCESSOR) != 0 {
             // a generic descriptor ({enumerable}, {configurable}): an accessor
             // stays one, with its getter and setter
-            self.objs[o as usize].attrs[slot as usize] = P_ACCESSOR | hidden | fixed;
+            self.set_attr(o, slot, P_ACCESSOR | hidden | fixed);
             return;
         }
         let readonly = self.desc_flag(d, desc, A_WRITABLE, P_READONLY, existing_attr);
@@ -1688,33 +1687,33 @@ impl Vm {
         let d = self.new_object();
         if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.objs[o as usize].elems.len() {
             let v = self.objs[o as usize].elems[i as usize].clone();
-            self.objs[d as usize].add(A_VALUE, v, 0);
-            self.objs[d as usize].add(A_WRITABLE, Val::Bool(true), 0);
-            self.objs[d as usize].add(A_ENUMERABLE, Val::Bool(true), 0);
-            self.objs[d as usize].add(A_CONFIGURABLE, Val::Bool(true), 0);
+            self.add_own(d, A_VALUE, v, 0);
+            self.add_own(d, A_WRITABLE, Val::Bool(true), 0);
+            self.add_own(d, A_ENUMERABLE, Val::Bool(true), 0);
+            self.add_own(d, A_CONFIGURABLE, Val::Bool(true), 0);
             return Val::Obj(d);
         }
         if i >= 0 && class == C_STRING {
             if let Val::Str(s) = self.objs[o as usize].prim.clone() {
                 let c = jsstr::at(s.as_str(), i);
                 if c >= 0 {
-                    self.objs[d as usize].add(A_VALUE, string_val(jsstr::from_unit(c)), 0);
-                    self.objs[d as usize].add(A_WRITABLE, Val::Bool(false), 0);
-                    self.objs[d as usize].add(A_ENUMERABLE, Val::Bool(true), 0);
-                    self.objs[d as usize].add(A_CONFIGURABLE, Val::Bool(false), 0);
+                    self.add_own(d, A_VALUE, string_val(jsstr::from_unit(c)), 0);
+                    self.add_own(d, A_WRITABLE, Val::Bool(false), 0);
+                    self.add_own(d, A_ENUMERABLE, Val::Bool(true), 0);
+                    self.add_own(d, A_CONFIGURABLE, Val::Bool(false), 0);
                     return Val::Obj(d);
                 }
             }
         }
         let atom = if i >= 0 { self.index_atom(i) } else { a };
-        let slot = self.objs[o as usize].find(atom);
+        let slot = self.find(o, atom);
         if slot < 0 {
             if (class == C_ARRAY || class == C_STRING) && atom == A_LENGTH {
                 let l = self.get_obj(o, A_LENGTH, &Val::Obj(o));
-                self.objs[d as usize].add(A_VALUE, l, 0);
-                self.objs[d as usize].add(A_WRITABLE, Val::Bool(class == C_ARRAY), 0);
-                self.objs[d as usize].add(A_ENUMERABLE, Val::Bool(false), 0);
-                self.objs[d as usize].add(A_CONFIGURABLE, Val::Bool(false), 0);
+                self.add_own(d, A_VALUE, l, 0);
+                self.add_own(d, A_WRITABLE, Val::Bool(class == C_ARRAY), 0);
+                self.add_own(d, A_ENUMERABLE, Val::Bool(false), 0);
+                self.add_own(d, A_CONFIGURABLE, Val::Bool(false), 0);
                 return Val::Obj(d);
             }
             if class == C_FUNCTION && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
@@ -1723,28 +1722,28 @@ impl Vm {
                     return Val::Undef;
                 }
                 let is_proto = atom == A_PROTOTYPE;
-                self.objs[d as usize].add(A_VALUE, v, 0);
-                self.objs[d as usize].add(A_WRITABLE, Val::Bool(is_proto), 0);
-                self.objs[d as usize].add(A_ENUMERABLE, Val::Bool(false), 0);
-                self.objs[d as usize].add(A_CONFIGURABLE, Val::Bool(!is_proto), 0);
+                self.add_own(d, A_VALUE, v, 0);
+                self.add_own(d, A_WRITABLE, Val::Bool(is_proto), 0);
+                self.add_own(d, A_ENUMERABLE, Val::Bool(false), 0);
+                self.add_own(d, A_CONFIGURABLE, Val::Bool(!is_proto), 0);
                 return Val::Obj(d);
             }
             return Val::Undef;
         }
-        let attr = self.objs[o as usize].attrs[slot as usize];
+        let attr = self.attr_at(o, slot);
         if (attr & P_ACCESSOR) != 0 {
             let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
             let g = self.objs[pair as usize].elems[0].clone();
             let s = self.objs[pair as usize].elems[1].clone();
-            self.objs[d as usize].add(A_GET, g, 0);
-            self.objs[d as usize].add(A_SET, s, 0);
+            self.add_own(d, A_GET, g, 0);
+            self.add_own(d, A_SET, s, 0);
         } else {
             let v = self.objs[o as usize].vals[slot as usize].clone();
-            self.objs[d as usize].add(A_VALUE, v, 0);
-            self.objs[d as usize].add(A_WRITABLE, Val::Bool((attr & P_READONLY) == 0), 0);
+            self.add_own(d, A_VALUE, v, 0);
+            self.add_own(d, A_WRITABLE, Val::Bool((attr & P_READONLY) == 0), 0);
         }
-        self.objs[d as usize].add(A_ENUMERABLE, Val::Bool((attr & P_HIDDEN) == 0), 0);
-        self.objs[d as usize].add(A_CONFIGURABLE, Val::Bool((attr & P_FIXED) == 0), 0);
+        self.add_own(d, A_ENUMERABLE, Val::Bool((attr & P_HIDDEN) == 0), 0);
+        self.add_own(d, A_CONFIGURABLE, Val::Bool((attr & P_FIXED) == 0), 0);
         Val::Obj(d)
     }
 
@@ -2757,19 +2756,19 @@ impl Vm {
                 let errs = arg(&args, 0);
                 let items = self.iterable_to_vec(&errs);
                 let arr = self.new_array(items);
-                self.objs[e as usize].add(A_ERRORS, Val::Obj(arr), P_HIDDEN);
+                self.add_own(e, A_ERRORS, Val::Obj(arr), P_HIDDEN);
                 mi = 1;
             }
             let m = arg(&args, mi);
             if !matches!(m, Val::Undef) {
                 let ms = self.to_str(&m);
-                self.objs[e as usize].add(A_MESSAGE, Val::Str(ms), P_HIDDEN);
+                self.add_own(e, A_MESSAGE, Val::Str(ms), P_HIDDEN);
             }
             let opts = arg(&args, mi + 1);
             if let Val::Obj(oo) = &opts {
                 if self.has_atom(*oo, A_CAUSE) {
                     let c = self.get(&opts, A_CAUSE);
-                    self.objs[e as usize].add(A_CAUSE, c, P_HIDDEN);
+                    self.add_own(e, A_CAUSE, c, P_HIDDEN);
                 }
             }
             self.add_stack(e);
@@ -3379,10 +3378,10 @@ impl Vm {
                 }
                 if id != NF_O_OWNSYMBOLS && class == C_FUNCTION {
                     let mut extra: Vec<Val> = Vec::new();
-                    if self.objs[o as usize].find(A_LENGTH) < 0 {
+                    if self.find(o, A_LENGTH) < 0 {
                         extra.push(str_val("length"));
                     }
-                    if self.objs[o as usize].find(A_NAME) < 0 {
+                    if self.find(o, A_NAME) < 0 {
                         extra.push(str_val("name"));
                     }
                     for k in keys {
@@ -3428,15 +3427,17 @@ impl Vm {
                     let o = *o;
                     self.objs[o as usize].extensible = false;
                     if id != NF_O_PREVENTEXT {
-                        let n = self.objs[o as usize].attrs.len();
-                        let mut i: usize = 0;
+                        let n = self.nkeys(o);
+                        let mut i: int = 0;
                         while i < n {
-                            let acc = (self.objs[o as usize].attrs[i] & P_ACCESSOR) != 0;
-                            self.objs[o as usize].attrs[i] |= P_FIXED;
+                            let at = self.attr_at(o, i);
+                            let acc = (at & P_ACCESSOR) != 0;
                             if id == NF_O_FREEZE && !acc {
-                                self.objs[o as usize].attrs[i] |= P_READONLY;
-                                let a = self.objs[o as usize].keys[i];
+                                self.set_attr(o, i, at | P_FIXED | P_READONLY);
+                                let a = self.key_at(o, i);
                                 self.mark_setter(a);
+                            } else {
+                                self.set_attr(o, i, at | P_FIXED);
                             }
                             i += 1;
                         }
@@ -3462,7 +3463,8 @@ impl Vm {
                     if id == NF_O_ISFROZEN && class == C_ARRAY && !self.objs[o as usize].elems.is_empty() && self.objs[o as usize].pos != 2 {
                         return Val::Bool(false);
                     }
-                    for a in self.objs[o as usize].attrs.iter() {
+                    let sh = self.objs[o as usize].shape;
+                    for a in self.shapes[sh as usize].attrs.iter() {
                         if (*a & P_FIXED) == 0 {
                             return Val::Bool(false);
                         }
@@ -3557,11 +3559,11 @@ impl Vm {
                     return Val::Bool((i as usize) < self.objs[o as usize].elems.len());
                 }
                 let atom = if i >= 0 { self.index_atom(i) } else { a };
-                let slot = self.objs[o as usize].find(atom);
+                let slot = self.find(o, atom);
                 if slot < 0 {
                     return Val::Bool(false);
                 }
-                Val::Bool((self.objs[o as usize].attrs[slot as usize] & P_HIDDEN) == 0)
+                Val::Bool((self.attr_at(o, slot) & P_HIDDEN) == 0)
             }
             NF_OP_TOSTRING => {
                 let tag = match &this {

@@ -105,6 +105,10 @@ pub fn first_atoms() -> Vec<String> {
 pub struct Vm {
     pub objs: Vec<JsObj>,
     pub free_list: Vec<int>,
+    /// object shapes (value.rs); 0 is the empty one
+    pub shapes: Vec<Shape>,
+    /// owned shapes of freed objects, for reuse
+    pub free_shapes: Vec<int>,
     pub protos: Vec<Proto>,
     pub atoms: HashMap<String, int>,
     pub atom_names: Vec<String>,
@@ -285,6 +289,8 @@ impl Vm {
         let mut vm = Vm {
             objs: Vec::new(),
             free_list: Vec::new(),
+            shapes: Vec::new(),
+            free_shapes: Vec::new(),
             protos: Vec::new(),
             atoms: HashMap::new(),
             atom_names: Vec::new(),
@@ -364,6 +370,7 @@ impl Vm {
             norm: crate::normalize::Norm::new(),
             intl: crate::intl::Intl::new(),
         };
+        vm.shapes.push(Shape::new());
         for n in first_atoms() {
             vm.intern(n.as_str());
         }
@@ -486,11 +493,204 @@ impl Vm {
     }
 
     /// add, noting a setter or read-only property for mark_setter.
+    // ---- own properties, through the object's shape
+
+
+    /// The slot inline cache `c` names for own property `atom` of `o`,
+    /// -1 on a miss. A cache is shape * 65536 + slot for a shared shape,
+    /// which never changes, and the slot alone for an owned one, checked
+    /// against its key. `plain`: a writable data property; else any data
+    /// property.
+    #[inline]
+    pub fn ic_slot(&self, o: int, atom: int, c: int, plain: bool) -> int {
+        let sh = self.objs[o as usize].shape;
+        if c >= 65536 {
+            return if (c >> 16) == sh { c & 65535 } else { -1 };
+        }
+        if c >= 0 {
+            let s = &self.shapes[sh as usize];
+            if (c as usize) < s.keys.len() && s.keys[c as usize] == atom {
+                let a = s.attrs[c as usize];
+                if a == 0 || (!plain && (a & P_ACCESSOR) == 0) {
+                    return c;
+                }
+            }
+        }
+        -1
+    }
+
+    /// The inline cache for slot `slot` of `o`.
+    #[inline]
+    pub fn ic_of(&self, o: int, slot: int) -> int {
+        let sh = self.objs[o as usize].shape;
+        if self.shapes[sh as usize].owned || slot >= 65536 {
+            return slot;
+        }
+        sh * 65536 + slot
+    }
+
+    /// The slot of own data property `atom` of `o` for the get op before
+    /// `pc`, filling its cache; -1 when there is none.
+    #[inline]
+    pub fn ic_get(&mut self, o: int, atom: int, c: int, pi: usize, pc: int) -> int {
+        let hit = self.ic_slot(o, atom, c, false);
+        if hit >= 0 {
+            return hit;
+        }
+        let slot = self.find(o, atom);
+        if slot < 0 || (self.attr_at(o, slot) & P_ACCESSOR) != 0 {
+            return -1;
+        }
+        let nc = self.ic_of(o, slot);
+        self.protos[pi].code[(pc - 1) as usize].c = nc;
+        slot
+    }
+
+    /// As ic_get for a writable data property, for a set.
+    #[inline]
+    pub fn ic_set(&mut self, o: int, atom: int, c: int, pi: usize, pc: int) -> int {
+        let hit = self.ic_slot(o, atom, c, true);
+        if hit >= 0 {
+            return hit;
+        }
+        let slot = self.find(o, atom);
+        if slot < 0 || self.attr_at(o, slot) != 0 {
+            return -1;
+        }
+        let nc = self.ic_of(o, slot);
+        self.protos[pi].code[(pc - 1) as usize].c = nc;
+        slot
+    }
+
+
+    /// The slot of own property `atom` of `o`, -1 when absent.
+    #[inline]
+    pub fn find(&self, o: int, atom: int) -> int {
+        self.shapes[self.objs[o as usize].shape as usize].find(atom)
+    }
+
+    #[inline]
+    pub fn nkeys(&self, o: int) -> int {
+        self.shapes[self.objs[o as usize].shape as usize].keys.len() as int
+    }
+
+    #[inline]
+    pub fn key_at(&self, o: int, slot: int) -> int {
+        self.shapes[self.objs[o as usize].shape as usize].keys[slot as usize]
+    }
+
+    #[inline]
+    pub fn attr_at(&self, o: int, slot: int) -> int {
+        self.shapes[self.objs[o as usize].shape as usize].attrs[slot as usize]
+    }
+
+    /// The own keys of `o` in order.
+    pub fn keys_of(&self, o: int) -> Vec<int> {
+        self.shapes[self.objs[o as usize].shape as usize].keys.clone()
+    }
+
+    /// Adds own property `atom` (absent) to `o`; its slot.
+    pub fn add_own(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
+        let sh = self.objs[o as usize].shape;
+        if self.shapes[sh as usize].owned {
+            self.objs[o as usize].vals.push(v);
+            return self.shapes[sh as usize].push(atom, attr);
+        }
+        let slot = self.shapes[sh as usize].keys.len() as int;
+        let mut next: int = -1;
+        {
+            let s = &self.shapes[sh as usize];
+            let mut i: usize = 0;
+            while i < s.t_atom.len() {
+                if s.t_atom[i] == atom && s.t_attr[i] == attr {
+                    next = s.t_to[i];
+                    break;
+                }
+                i += 1;
+            }
+            if next < 0 && !s.t_map.is_empty() {
+                next = match s.t_map.get(&(atom * 16 + attr)) {
+                    Some(t) => *t,
+                    None => -1,
+                };
+            }
+        }
+        if next < 0 {
+            if slot >= SHAPE_MAX {
+                // a dictionary
+                self.own_shape(o);
+                let sh2 = self.objs[o as usize].shape;
+                self.objs[o as usize].vals.push(v);
+                return self.shapes[sh2 as usize].push(atom, attr);
+            }
+            let mut ns = self.shapes[sh as usize].copy();
+            ns.owned = false;
+            ns.push(atom, attr);
+            next = self.shapes.len() as int;
+            self.shapes.push(ns);
+            let s = &mut self.shapes[sh as usize];
+            if (s.t_atom.len() as int) < T_LINEAR {
+                s.t_atom.push(atom);
+                s.t_attr.push(attr);
+                s.t_to.push(next);
+            } else {
+                s.t_map.insert(atom * 16 + attr, next);
+            }
+        }
+        self.objs[o as usize].shape = next;
+        self.objs[o as usize].vals.push(v);
+        slot
+    }
+
+    /// Gives `o` an owned copy of its shape, to change in place.
+    pub fn own_shape(&mut self, o: int) {
+        let sh = self.objs[o as usize].shape;
+        if self.shapes[sh as usize].owned {
+            return;
+        }
+        let ns = self.shapes[sh as usize].copy();
+        let id = if self.free_shapes.is_empty() {
+            self.shapes.push(ns);
+            (self.shapes.len() as int) - 1
+        } else {
+            let i = self.free_shapes.pop().unwrap();
+            self.shapes[i as usize] = ns;
+            i
+        };
+        self.objs[o as usize].shape = id;
+    }
+
+    pub fn set_attr(&mut self, o: int, slot: int, attr: int) {
+        if self.attr_at(o, slot) == attr {
+            return;
+        }
+        self.own_shape(o);
+        let sh = self.objs[o as usize].shape;
+        self.shapes[sh as usize].attrs[slot as usize] = attr;
+    }
+
+    pub fn remove_own(&mut self, o: int, slot: int) {
+        self.own_shape(o);
+        let sh = self.objs[o as usize].shape;
+        self.shapes[sh as usize].remove(slot);
+        self.objs[o as usize].vals.remove(slot as usize);
+    }
+
+    /// Puts `o` back on the empty shape, freeing an owned one.
+    pub fn free_shape(&mut self, o: int) {
+        let sh = self.objs[o as usize].shape;
+        if self.shapes[sh as usize].owned {
+            self.shapes[sh as usize] = Shape::new();
+            self.free_shapes.push(sh);
+        }
+        self.objs[o as usize].shape = 0;
+    }
+
     pub fn add_prop(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
         if (attr & (P_READONLY | P_ACCESSOR)) != 0 {
             self.mark_setter(atom);
         }
-        self.objs[o as usize].add(atom, v, attr)
+        self.add_own(o, atom, v, attr)
     }
 
     /// setter_atoms and proxy_made from the heap (a restored snapshot).
@@ -503,16 +703,21 @@ impl Vm {
                 if self.objs[i].class == C_PROXY {
                     self.proxy_made = true;
                 }
-                let mut k: usize = 0;
-                while k < self.objs[i].keys.len() {
-                    if (self.objs[i].attrs[k] & (P_READONLY | P_ACCESSOR)) != 0 {
-                        let a = self.objs[i].keys[k];
-                        self.mark_setter(a);
-                    }
-                    k += 1;
-                }
             }
             i += 1;
+        }
+        // every shape's, used or not (a superset is safe)
+        let mut si: usize = 0;
+        while si < self.shapes.len() {
+            let mut k: usize = 0;
+            while k < self.shapes[si].keys.len() {
+                if (self.shapes[si].attrs[k] & (P_READONLY | P_ACCESSOR)) != 0 {
+                    let a = self.shapes[si].keys[k];
+                    self.mark_setter(a);
+                }
+                k += 1;
+            }
+            si += 1;
         }
     }
 
@@ -595,7 +800,7 @@ impl Vm {
     pub fn new_error(&mut self, proto: int, msg: &str) -> int {
         let e = self.alloc(C_ERROR, proto);
         if !msg.is_empty() {
-            self.objs[e as usize].add(A_MESSAGE, str_val(msg), P_HIDDEN);
+            self.add_own(e, A_MESSAGE, str_val(msg), P_HIDDEN);
         }
         self.add_stack(e);
         e
@@ -635,7 +840,7 @@ impl Vm {
             }
             k -= 1;
         }
-        self.objs[e as usize].add(A_STACK, string_val(text), P_HIDDEN);
+        self.add_own(e, A_STACK, string_val(text), P_HIDDEN);
     }
 
     pub fn throw_val(&mut self, v: Val) {
@@ -1049,9 +1254,9 @@ impl Vm {
         };
         let p = self.alloc(C_OBJECT, proto);
         if !generator {
-            self.objs[p as usize].add(A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
+            self.add_own(p, A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
         }
-        self.objs[f as usize].add(A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_FIXED);
+        self.add_own(f, A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_FIXED);
         self.objs[f as usize].has_proto_obj = true;
         Val::Obj(p)
     }
@@ -1104,9 +1309,9 @@ impl Vm {
         let mut cur = o;
         let mut hops = 0;
         while cur >= 0 {
-            let slot = self.objs[cur as usize].find(atom);
+            let slot = self.find(cur, atom);
             if slot >= 0 {
-                let attr = self.objs[cur as usize].attrs[slot as usize];
+                let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
                     let g = self.objs[pair as usize].elems[0].clone();
@@ -1185,7 +1390,7 @@ impl Vm {
                         return ob.elems[i as usize].clone();
                     }
                     // an index far past the end is a property (set_index)
-                    if ob.class == C_ARRAY && ob.keys.is_empty() {
+                    if ob.class == C_ARRAY && ob.shape == 0 {
                         return Val::Undef;
                     }
                 }
@@ -1262,9 +1467,9 @@ impl Vm {
                 self.proxy_call(cur, PH_SET, vec![k, v.clone(), receiver.clone()]);
                 return true;
             }
-            let slot = self.objs[cur as usize].find(atom);
+            let slot = self.find(cur, atom);
             if slot >= 0 {
-                let attr = self.objs[cur as usize].attrs[slot as usize];
+                let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
                     let s = self.objs[pair as usize].elems[1].clone();
@@ -1300,9 +1505,9 @@ impl Vm {
             }
             return;
         }
-        let slot = self.objs[o as usize].find(atom);
+        let slot = self.find(o, atom);
         if slot >= 0 {
-            let attr = self.objs[o as usize].attrs[slot as usize];
+            let attr = self.attr_at(o, slot);
             if attr == 0 {
                 self.objs[o as usize].vals[slot as usize] = v;
                 return;
@@ -1351,7 +1556,7 @@ impl Vm {
         if (class == C_FUNCTION || class == C_BOUND) && atom == A_PROTOTYPE {
             self.objs[o as usize].has_proto_obj = true;
         }
-        self.objs[o as usize].add(atom, v, 0);
+        self.add_own(o, atom, v, 0);
     }
 
     fn strict_now(&self) -> bool {
@@ -1482,12 +1687,12 @@ impl Vm {
 
     /// Defines (or redefines) an own data property.
     pub fn define(&mut self, o: int, atom: int, v: Val, attr: int) {
-        let slot = self.objs[o as usize].find(atom);
+        let slot = self.find(o, atom);
         if slot >= 0 {
             self.objs[o as usize].vals[slot as usize] = v;
-            self.objs[o as usize].attrs[slot as usize] = attr;
+            self.set_attr(o, slot, attr);
         } else {
-            self.objs[o as usize].add(atom, v, attr);
+            self.add_own(o, atom, v, attr);
         }
         if (attr & P_READONLY) != 0 {
             self.any_setter = true;
@@ -1516,9 +1721,9 @@ impl Vm {
     pub fn define_accessor(&mut self, o: int, atom: int, f: Val, which: int, hidden: bool) {
         self.any_setter = true;
         self.mark_setter(atom);
-        let slot = self.objs[o as usize].find(atom);
+        let slot = self.find(o, atom);
         let mut pair: int = -1;
-        if slot >= 0 && (self.objs[o as usize].attrs[slot as usize] & P_ACCESSOR) != 0 {
+        if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) != 0 {
             pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
         }
         if pair < 0 {
@@ -1527,9 +1732,9 @@ impl Vm {
             let attr = P_ACCESSOR | if hidden { P_HIDDEN } else { 0 };
             if slot >= 0 {
                 self.objs[o as usize].vals[slot as usize] = Val::Obj(pair);
-                self.objs[o as usize].attrs[slot as usize] = attr;
+                self.set_attr(o, slot, attr);
             } else {
-                self.objs[o as usize].add(atom, Val::Obj(pair), attr);
+                self.add_own(o, atom, Val::Obj(pair), attr);
             }
         }
         self.objs[pair as usize].elems[which as usize] = f;
@@ -1565,7 +1770,7 @@ impl Vm {
                 let k = self.key_val(a);
                 return self.proxy_bool(cur, PH_HAS, vec![k]);
             }
-            if self.objs[cur as usize].find(a) >= 0 {
+            if self.find(cur, a) >= 0 {
                 return true;
             }
             let class = self.objs[cur as usize].class;
@@ -1604,9 +1809,9 @@ impl Vm {
                 }
             }
             let at = self.index_atom(i);
-            return self.objs[o as usize].find(at) >= 0;
+            return self.find(o, at) >= 0;
         }
-        if self.objs[o as usize].find(a) >= 0 {
+        if self.find(o, a) >= 0 {
             return true;
         }
         if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING || class == C_FUNCTION) {
@@ -1650,16 +1855,16 @@ impl Vm {
             return true;
         }
         let atom = if i >= 0 { self.index_atom(i) } else { a };
-        let slot = self.objs[o as usize].find(atom);
+        let slot = self.find(o, atom);
         if slot >= 0 {
-            if (self.objs[o as usize].attrs[slot as usize] & P_FIXED) != 0 {
+            if (self.attr_at(o, slot) & P_FIXED) != 0 {
                 if self.strict_now() {
                     let n = self.atom_str(atom);
                     self.throw_type(format!("Cannot delete property '{}'", n).as_str());
                 }
                 return false;
             }
-            self.objs[o as usize].remove(slot);
+            self.remove_own(o, slot);
         }
         true
     }
@@ -1700,8 +1905,8 @@ impl Vm {
                 i += 1;
             }
         }
-        let keys = self.objs[o as usize].keys.clone();
-        let attrs = self.objs[o as usize].attrs.clone();
+        let keys = self.keys_of(o);
+        let attrs = self.shapes[self.objs[o as usize].shape as usize].attrs.clone();
         let mut ints: Vec<int> = Vec::new();
         let mut others: Vec<int> = Vec::new();
         let mut syms: Vec<int> = Vec::new();
@@ -1808,11 +2013,11 @@ impl Vm {
             if (c == C_ARRAY || c == C_ARGUMENTS) && !self.objs[cur as usize].elems.is_empty() {
                 return false;
             }
-            let n = self.objs[cur as usize].keys.len();
+            let n = self.nkeys(cur) as usize;
             let mut k: usize = 0;
             while k < n {
-                if (self.objs[cur as usize].attrs[k] & P_HIDDEN) == 0 {
-                    let a = self.objs[cur as usize].keys[k];
+                if (self.attr_at(cur, k as int) & P_HIDDEN) == 0 {
+                    let a = self.key_at(cur, k as int);
                     if self.atom_names[a as usize].starts_with('\u{1}') {
                         // a private name: never a key
                     } else if self.symbol_atoms.contains_key(&a) {
@@ -2198,12 +2403,12 @@ impl Vm {
                     self.mark_setter(A_CALLEE);
                 }
                 let pair = self.callee_pair;
-                self.objs[args_obj as usize].add(A_CALLEE, Val::Obj(pair), P_ACCESSOR | P_HIDDEN | P_FIXED);
+                self.add_own(args_obj, A_CALLEE, Val::Obj(pair), P_ACCESSOR | P_HIDDEN | P_FIXED);
             } else {
-                self.objs[args_obj as usize].add(A_CALLEE, Val::Obj(fo), P_HIDDEN);
+                self.add_own(args_obj, A_CALLEE, Val::Obj(fo), P_HIDDEN);
             }
             let values = self.array_values_fn;
-            self.objs[args_obj as usize].add(A_ITERATOR, Val::Obj(values), P_HIDDEN);
+            self.add_own(args_obj, A_ITERATOR, Val::Obj(values), P_HIDDEN);
         }
         if rest >= 0 {
             let mut items: Vec<Val> = Vec::new();
@@ -2648,7 +2853,7 @@ impl Vm {
                         self.stack.push(Val::Obj(o));
                     }
                     OP_GET_GLOBAL | OP_INIT_PROP | OP_TOSTR | OP_TONUM | OP_INC | OP_DEC => {
-                        if !self.quick_op(op) {
+                        if !self.quick_op(op, pi, pc) {
                             self.frames[fi].pc = pc;
                             let changed = self.step(op, pi, bp, fi, &mut pc);
                             if self.throwing {
@@ -2870,25 +3075,17 @@ impl Vm {
                         let atom = op.a;
                         let mut done = false;
                         if let Val::Obj(o) = &v {
-                            let ob = &self.objs[*o as usize];
-                            let c = op.c;
-                            if c >= 0 && (c as usize) < ob.keys.len() && ob.keys[c as usize] == atom && ob.attrs[c as usize] & P_ACCESSOR == 0 {
-                                let r = ob.vals[c as usize].clone();
+                            let o = *o;
+                            let slot = self.ic_get(o, atom, op.c, pi, pc);
+                            if slot >= 0 {
+                                let r = self.objs[o as usize].vals[slot as usize].clone();
                                 self.stack.push(r);
                                 done = true;
-                            } else {
-                                let slot = ob.find(atom);
-                                if slot >= 0 && ob.attrs[slot as usize] & P_ACCESSOR == 0 {
-                                    let r = ob.vals[slot as usize].clone();
-                                    self.protos[pi].code[(pc - 1) as usize].c = slot;
-                                    self.stack.push(r);
-                                    done = true;
-                                } else if slot < 0 && atom == A_LENGTH && ob.class == C_ARRAY {
-                                    // an array's length is its element count
-                                    let r = Val::Num(ob.elems.len() as double);
-                                    self.stack.push(r);
-                                    done = true;
-                                }
+                            } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                                // an array's length is its element count
+                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                self.stack.push(r);
+                                done = true;
                             }
                         }
                         if !done {
@@ -2902,25 +3099,17 @@ impl Vm {
                         let atom = op.b;
                         let mut done = false;
                         if let Val::Obj(o) = &v {
-                            let ob = &self.objs[*o as usize];
-                            let c = op.c;
-                            if c >= 0 && (c as usize) < ob.keys.len() && ob.keys[c as usize] == atom && ob.attrs[c as usize] & P_ACCESSOR == 0 {
-                                let r = ob.vals[c as usize].clone();
+                            let o = *o;
+                            let slot = self.ic_get(o, atom, op.c, pi, pc);
+                            if slot >= 0 {
+                                let r = self.objs[o as usize].vals[slot as usize].clone();
                                 self.stack.push(r);
                                 done = true;
-                            } else {
-                                let slot = ob.find(atom);
-                                if slot >= 0 && ob.attrs[slot as usize] & P_ACCESSOR == 0 {
-                                    let r = ob.vals[slot as usize].clone();
-                                    self.protos[pi].code[(pc - 1) as usize].c = slot;
-                                    self.stack.push(r);
-                                    done = true;
-                                } else if slot < 0 && atom == A_LENGTH && ob.class == C_ARRAY {
-                                    // an array's length is its element count
-                                    let r = Val::Num(ob.elems.len() as double);
-                                    self.stack.push(r);
-                                    done = true;
-                                }
+                            } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                                // an array's length is its element count
+                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                self.stack.push(r);
+                                done = true;
                             }
                         }
                         if !done {
@@ -2934,25 +3123,17 @@ impl Vm {
                         let atom = op.a;
                         let mut done = false;
                         if let Val::Obj(o) = &v {
-                            let ob = &self.objs[*o as usize];
-                            let c = op.c;
-                            if c >= 0 && (c as usize) < ob.keys.len() && ob.keys[c as usize] == atom && ob.attrs[c as usize] & P_ACCESSOR == 0 {
-                                let r = ob.vals[c as usize].clone();
+                            let o = *o;
+                            let slot = self.ic_get(o, atom, op.c, pi, pc);
+                            if slot >= 0 {
+                                let r = self.objs[o as usize].vals[slot as usize].clone();
                                 self.stack.push(r);
                                 done = true;
-                            } else {
-                                let slot = ob.find(atom);
-                                if slot >= 0 && ob.attrs[slot as usize] & P_ACCESSOR == 0 {
-                                    let r = ob.vals[slot as usize].clone();
-                                    self.protos[pi].code[(pc - 1) as usize].c = slot;
-                                    self.stack.push(r);
-                                    done = true;
-                                } else if slot < 0 && atom == A_LENGTH && ob.class == C_ARRAY {
-                                    // an array's length is its element count
-                                    let r = Val::Num(ob.elems.len() as double);
-                                    self.stack.push(r);
-                                    done = true;
-                                }
+                            } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                                // an array's length is its element count
+                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                self.stack.push(r);
+                                done = true;
                             }
                         }
                         if !done {
@@ -2967,18 +3148,11 @@ impl Vm {
                         let atom = op.a;
                         let mut done = false;
                         if let Val::Obj(o) = &target {
-                            let c = op.c;
-                            let ob = &mut self.objs[*o as usize];
-                            if c >= 0 && (c as usize) < ob.keys.len() && ob.keys[c as usize] == atom && ob.attrs[c as usize] == 0 {
-                                ob.vals[c as usize] = val.clone();
+                            let o = *o;
+                            let slot = self.ic_set(o, atom, op.c, pi, pc);
+                            if slot >= 0 {
+                                self.objs[o as usize].vals[slot as usize] = val.clone();
                                 done = true;
-                            } else {
-                                let slot = ob.find(atom);
-                                if slot >= 0 && ob.attrs[slot as usize] == 0 {
-                                    ob.vals[slot as usize] = val.clone();
-                                    self.protos[pi].code[(pc - 1) as usize].c = slot;
-                                    done = true;
-                                }
                             }
                         }
                         if !done {
@@ -3052,28 +3226,11 @@ impl Vm {
                         let mut done = false;
                         if let Val::Obj(o) = &v {
                             // own slot, else the prototype's slot, cached
-                            let ob = &self.objs[*o as usize];
-                            let slot = ob.find(atom);
-                            if slot >= 0 && ob.attrs[slot as usize] & P_ACCESSOR == 0 {
-                                f = ob.vals[slot as usize].clone();
+                            let o = *o;
+                            let slot = self.find(o, atom);
+                            if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
+                                f = self.objs[o as usize].vals[slot as usize].clone();
                                 done = true;
-                            } else if slot < 0 && ob.class == C_OBJECT {
-                                let p = ob.proto;
-                                if p >= 0 {
-                                    let pob = &self.objs[p as usize];
-                                    let c = op.c;
-                                    if c >= 0 && (c as usize) < pob.keys.len() && pob.keys[c as usize] == atom && pob.attrs[c as usize] & P_ACCESSOR == 0 {
-                                        f = pob.vals[c as usize].clone();
-                                        done = true;
-                                    } else {
-                                        let ps = pob.find(atom);
-                                        if ps >= 0 && pob.attrs[ps as usize] & P_ACCESSOR == 0 {
-                                            f = pob.vals[ps as usize].clone();
-                                            self.protos[pi].code[(pc - 1) as usize].c = ps;
-                                            done = true;
-                                        }
-                                    }
-                                }
                             }
                         }
                         if !done {
@@ -3162,7 +3319,7 @@ impl Vm {
     /// its name (a symbol's as "[description]").
     pub fn name_by_key(&mut self, f: &Val, k: &Val) {
         let fo = obj_of(f);
-        if fo < 0 || self.objs[fo as usize].class != C_FUNCTION || self.objs[fo as usize].find(A_NAME) >= 0 {
+        if fo < 0 || self.objs[fo as usize].class != C_FUNCTION || self.find(fo, A_NAME) >= 0 {
             return;
         }
         let pi = self.objs[fo as usize].func;
@@ -3529,8 +3686,8 @@ impl Vm {
             let n = self.stack.len();
             let o = obj_of(&self.stack[n - 2]);
             if o >= 0 {
-                let slot = self.objs[o as usize].find(atom);
-                if slot >= 0 && self.objs[o as usize].attrs[slot as usize] == 0 && same_rc(&self.stack[n - 1], &self.objs[o as usize].vals[slot as usize]) {
+                let slot = self.find(o, atom);
+                if slot >= 0 && self.attr_at(o, slot) == 0 && same_rc(&self.stack[n - 1], &self.objs[o as usize].vals[slot as usize]) {
                     self.stack.pop();
                     done = append_in_place(&mut self.objs[o as usize].vals[slot as usize], bs.as_str());
                     if done {
@@ -3554,14 +3711,14 @@ impl Vm {
 
     // the common case of a few ops run() would otherwise send to step()
     #[inline]
-    fn quick_op(&mut self, op: Op) -> bool {
+    fn quick_op(&mut self, op: Op, pi: usize, pc: int) -> bool {
         let mut done = false;
         let n = self.stack.len();
         if op.code == OP_GET_GLOBAL {
-            let g = self.global as usize;
-            let c = op.c;
-            if c >= 0 && (c as usize) < self.objs[g].keys.len() && self.objs[g].keys[c as usize] == op.a && self.objs[g].attrs[c as usize] & P_ACCESSOR == 0 {
-                let v = self.objs[g].vals[c as usize].clone();
+            let g = self.global;
+            let slot = self.ic_slot(g, op.a, op.c, false);
+            if slot >= 0 {
+                let v = self.objs[g as usize].vals[slot as usize].clone();
                 self.stack.push(v);
                 done = true;
             }
@@ -3570,7 +3727,19 @@ impl Vm {
             if op.b != 1 {
                 let v = self.pop();
                 let o = obj_of(&self.stack[n - 2]);
-                self.define(o, op.a, v, 0);
+                // c caches the transition: shape before * 2^24 + after
+                let sh = self.objs[o as usize].shape;
+                let c = op.c;
+                if c >= 0 && (c >> 24) == sh {
+                    self.objs[o as usize].shape = c & 16777215;
+                    self.objs[o as usize].vals.push(v);
+                } else {
+                    self.define(o, op.a, v, 0);
+                    let sh2 = self.objs[o as usize].shape;
+                    if sh2 != sh && sh2 < 16777216 && !self.shapes[sh as usize].owned && !self.shapes[sh2 as usize].owned {
+                        self.protos[pi].code[(pc - 1) as usize].c = sh * 16777216 + sh2;
+                    }
+                }
                 done = true;
             }
         } else if op.code == OP_TOSTR {
@@ -3726,31 +3895,23 @@ impl Vm {
             }
             OP_GET_GLOBAL => {
                 let g = self.global;
-                let c = op.c;
-                let ob = &self.objs[g as usize];
-                if c >= 0 && (c as usize) < ob.keys.len() && ob.keys[c as usize] == op.a && ob.attrs[c as usize] & P_ACCESSOR == 0 {
-                    let v = ob.vals[c as usize].clone();
+                let slot = self.ic_get(g, op.a, op.c, pi, *pc);
+                if slot >= 0 {
+                    let v = self.objs[g as usize].vals[slot as usize].clone();
+                    self.stack.push(v);
+                } else if self.has_atom(g, op.a) {
+                    let v = self.get_obj(g, op.a, &Val::Obj(g));
                     self.stack.push(v);
                 } else {
-                    let slot = ob.find(op.a);
-                    if slot >= 0 && ob.attrs[slot as usize] & P_ACCESSOR == 0 {
-                        let v = ob.vals[slot as usize].clone();
-                        self.protos[pi].code[(*pc - 1) as usize].c = slot;
-                        self.stack.push(v);
-                    } else if self.has_atom(g, op.a) {
-                        let v = self.get_obj(g, op.a, &Val::Obj(g));
-                        self.stack.push(v);
-                    } else {
-                        let n = self.atom_str(op.a);
-                        self.throw_ref(format!("{} is not defined", n).as_str());
-                    }
+                    let n = self.atom_str(op.a);
+                    self.throw_ref(format!("{} is not defined", n).as_str());
                 }
             }
             OP_SET_GLOBAL => {
                 let g = self.global;
                 let v = self.top().clone();
-                let slot = self.objs[g as usize].find(op.a);
-                if slot >= 0 && self.objs[g as usize].attrs[slot as usize] == 0 {
+                let slot = self.find(g, op.a);
+                if slot >= 0 && self.attr_at(g, slot) == 0 {
                     self.objs[g as usize].vals[slot as usize] = v;
                 } else if slot < 0 && op.b == 0 && self.strict_now() && !self.has_atom(g, op.a) {
                     // strict code does not create globals by assignment
@@ -3762,8 +3923,8 @@ impl Vm {
             }
             OP_DECL_GLOBAL => {
                 let g = self.global;
-                if self.objs[g as usize].find(op.a) < 0 {
-                    self.objs[g as usize].add(op.a, Val::Undef, P_FIXED);
+                if self.find(g, op.a) < 0 {
+                    self.add_own(g, op.a, Val::Undef, P_FIXED);
                 }
             }
             OP_TYPEOF_GLOBAL => {
@@ -4018,11 +4179,11 @@ impl Vm {
                     }
                     // the native made its own object: give it this one's fields
                     if let (Val::Obj(t), Val::Obj(n)) = (&this, &r) {
-                        let keys = self.objs[*t as usize].keys.clone();
+                        let keys = self.keys_of(*t);
                         let vals = self.objs[*t as usize].vals.clone();
                         let mut i: usize = 0;
                         while i < keys.len() {
-                            self.objs[*n as usize].add(keys[i], vals[i].clone(), 0);
+                            self.add_own(*n, keys[i], vals[i].clone(), 0);
                             i += 1;
                         }
                     }
@@ -4365,7 +4526,7 @@ impl Vm {
                     }
                 }
                 let p = self.alloc(C_OBJECT, proto_parent);
-                self.objs[p as usize].add(A_CONSTRUCTOR, Val::Obj(ctor), P_HIDDEN);
+                self.add_own(p, A_CONSTRUCTOR, Val::Obj(ctor), P_HIDDEN);
                 self.objs[p as usize].pos = 1; // a class prototype: methods hidden
                 self.define(ctor, A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_READONLY | P_FIXED);
                 self.objs[ctor as usize].home = p;
@@ -4598,11 +4759,12 @@ impl Vm {
         let mut live: int = 0;
         let mut i2: usize = 0;
         while i2 < total {
-            let ob = &mut self.objs[i2];
-            if ob.marked {
-                ob.marked = false;
+            if self.objs[i2].marked {
+                self.objs[i2].marked = false;
                 live += 1;
-            } else if !ob.free {
+            } else if !self.objs[i2].free {
+                self.free_shape(i2 as int);
+                let ob = &mut self.objs[i2];
                 ob.clear();
                 ob.free = true;
                 self.free_list.push(i2 as int);

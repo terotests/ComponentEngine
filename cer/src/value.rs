@@ -72,12 +72,13 @@ pub struct JsObj {
     pub class: int,
     /// the prototype, -1 for none; for a scope, the enclosing scope
     pub proto: int,
-    /// property keys (atoms) in insertion order, their values and
-    /// attributes
-    pub keys: Vec<int>,
+    /// the shape (`Vm.shapes`): property keys (atoms) in insertion order
+    /// and their attributes; `vals` holds the values, slot by slot
+    pub shape: int,
     pub vals: Vec<Val>,
-    pub attrs: Vec<int>,
+    /// a Map's or Set's entries by map_key, and which are deleted (1)
     pub index: HashMap<int, int>,
+    pub marks: Vec<int>,
     /// array elements, scope slots, a bound function's arguments, an
     /// accessor's getter and setter, a map's keys
     pub elems: Vec<Val>,
@@ -109,10 +110,10 @@ impl JsObj {
         JsObj {
             class: class,
             proto: proto,
-            keys: Vec::new(),
+            shape: 0,
             vals: Vec::new(),
-            attrs: Vec::new(),
             index: HashMap::new(),
+            marks: Vec::new(),
             elems: Vec::new(),
             elems2: Vec::new(),
             nums: Vec::new(),
@@ -128,7 +129,81 @@ impl JsObj {
         }
     }
 
-    /// The slot of `atom` among the own properties, -1 when absent.
+    pub fn clear(&mut self) {
+        // a small object's values stay allocated for the next one; the
+        // shape is the caller's (Vm::free_shape)
+        self.shape = 0;
+        if self.vals.len() as int <= INDEX_AT {
+            self.vals.truncate(0);
+        } else {
+            self.vals = Vec::new();
+        }
+        if !self.index.is_empty() {
+            self.index = HashMap::new();
+        }
+        if !self.marks.is_empty() {
+            self.marks = Vec::new();
+        }
+        if self.elems.len() <= 16 {
+            self.elems.truncate(0);
+        } else {
+            self.elems = Vec::new();
+        }
+        self.elems2 = Vec::new();
+        self.nums = Vec::new();
+        self.prim = Val::Undef;
+        self.env = -1;
+        self.home = -1;
+        self.func = -1;
+        self.proto = -1;
+        self.pos = 0;
+        self.extensible = true;
+        self.has_proto_obj = false;
+    }
+}
+
+/// Past this many properties an object gets a shape of its own (a
+/// dictionary).
+pub const SHAPE_MAX: int = 64;
+
+/// Past this many transitions from a shape, the rest are hashed.
+pub const T_LINEAR: int = 8;
+
+/// The keys and attributes objects share: objects that got the same
+/// properties in the same order with the same attributes have one shape.
+/// A shared shape never changes; adding a property moves an object to the
+/// next shape (a transition). An owned shape belongs to one object, which
+/// changes it in place.
+pub struct Shape {
+    pub keys: Vec<int>,
+    pub attrs: Vec<int>,
+    /// past INDEX_AT keys, slot by key
+    pub index: HashMap<int, int>,
+    /// transitions: adding t_atom[i] with t_attr[i] leads to t_to[i];
+    /// past T_LINEAR of them, t_map by atom * 16 + attr
+    pub t_atom: Vec<int>,
+    pub t_attr: Vec<int>,
+    pub t_to: Vec<int>,
+    pub t_map: HashMap<int, int>,
+    pub owned: bool,
+}
+
+impl Shape {
+    pub fn new() -> Shape {
+        Shape {
+            keys: Vec::new(),
+            attrs: Vec::new(),
+            index: HashMap::new(),
+            t_atom: Vec::new(),
+            t_attr: Vec::new(),
+            t_to: Vec::new(),
+            t_map: HashMap::new(),
+            owned: false,
+        }
+    }
+
+    /// The slot of `atom`, -1 when absent.
+    #[inline]
     pub fn find(&self, atom: int) -> int {
         let n = self.keys.len() as int;
         if n > INDEX_AT {
@@ -147,10 +222,9 @@ impl JsObj {
         -1
     }
 
-    pub fn add(&mut self, atom: int, v: Val, attr: int) -> int {
+    pub fn push(&mut self, atom: int, attr: int) -> int {
         let slot = self.keys.len() as int;
         self.keys.push(atom);
-        self.vals.push(v);
         self.attrs.push(attr);
         if slot + 1 > INDEX_AT {
             if slot == INDEX_AT {
@@ -167,7 +241,6 @@ impl JsObj {
 
     pub fn remove(&mut self, slot: int) {
         self.keys.remove(slot as usize);
-        self.vals.remove(slot as usize);
         self.attrs.remove(slot as usize);
         self.index = HashMap::new();
         let n = self.keys.len() as int;
@@ -180,38 +253,16 @@ impl JsObj {
         }
     }
 
-    pub fn clear(&mut self) {
-        // a small object's vectors stay allocated for the next one
-        if self.keys.len() as int <= INDEX_AT {
-            self.keys.truncate(0);
-            self.vals.truncate(0);
-            self.attrs.truncate(0);
-            // a Map's or Set's entries are indexed here too, whatever its
-            // property count
-            if !self.index.is_empty() {
-                self.index = HashMap::new();
-            }
-        } else {
-            self.keys = Vec::new();
-            self.vals = Vec::new();
-            self.attrs = Vec::new();
-            self.index = HashMap::new();
+    /// An owned copy of the keys and attributes, without transitions.
+    pub fn copy(&self) -> Shape {
+        let mut s = Shape::new();
+        let mut i: usize = 0;
+        while i < self.keys.len() {
+            s.push(self.keys[i], self.attrs[i]);
+            i += 1;
         }
-        if self.elems.len() <= 16 {
-            self.elems.truncate(0);
-        } else {
-            self.elems = Vec::new();
-        }
-        self.elems2 = Vec::new();
-        self.nums = Vec::new();
-        self.prim = Val::Undef;
-        self.env = -1;
-        self.home = -1;
-        self.func = -1;
-        self.proto = -1;
-        self.pos = 0;
-        self.extensible = true;
-        self.has_proto_obj = false;
+        s.owned = true;
+        s
     }
 }
 

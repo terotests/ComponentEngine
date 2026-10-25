@@ -598,12 +598,12 @@ impl Vm {
                 let r = self.new_object();
                 match self.iter_next(&this) {
                     Some(v) => {
-                        self.objs[r as usize].add(A_VALUE, v, 0);
-                        self.objs[r as usize].add(A_DONE, Val::Bool(false), 0);
+                        self.add_own(r, A_VALUE, v, 0);
+                        self.add_own(r, A_DONE, Val::Bool(false), 0);
                     }
                     None => {
-                        self.objs[r as usize].add(A_VALUE, Val::Undef, 0);
-                        self.objs[r as usize].add(A_DONE, Val::Bool(true), 0);
+                        self.add_own(r, A_VALUE, Val::Undef, 0);
+                        self.add_own(r, A_DONE, Val::Bool(true), 0);
                     }
                 }
                 Val::Obj(r)
@@ -1068,7 +1068,7 @@ impl Vm {
                     _ => String::new(),
                 };
                 let holder = self.new_object();
-                self.objs[holder as usize].add(self.atoms[""], a0.clone(), 0);
+                self.add_own(holder, self.atoms[""], a0.clone(), 0);
                 let mut out = String::new();
                 let mut stack: Vec<int> = Vec::new();
                 let ok = self.json_str(&Val::Obj(holder), &str_val(""), a0, &a1, &allow, gap.as_str(), "", &mut stack, &mut out);
@@ -1094,7 +1094,7 @@ impl Vm {
                 }
                 if self.is_callable(&a1) {
                     let holder = self.new_object();
-                    self.objs[holder as usize].add(self.atoms[""], v, 0);
+                    self.add_own(holder, self.atoms[""], v, 0);
                     return self.json_revive(&Val::Obj(holder), &str_val(""), &a1);
                 }
                 v
@@ -1371,7 +1371,7 @@ impl Vm {
                     NF_MP_CLEAR => {
                         self.objs[o as usize].elems = Vec::new();
                         self.objs[o as usize].elems2 = Vec::new();
-                        self.objs[o as usize].attrs = Vec::new();
+                        self.objs[o as usize].marks = Vec::new();
                         self.objs[o as usize].index = HashMap::new();
                         self.objs[o as usize].pos = 0;
                         Val::Undef
@@ -1384,7 +1384,7 @@ impl Vm {
                         let is_set = self.objs[o as usize].class == C_SET;
                         let mut i: usize = 0;
                         while i < self.objs[o as usize].elems.len() {
-                            if self.objs[o as usize].attrs[i] == 0 {
+                            if self.objs[o as usize].marks[i] == 0 {
                                 let k = self.objs[o as usize].elems[i].clone();
                                 let v = if is_set { k.clone() } else { self.objs[o as usize].elems2[i].clone() };
                                 self.call_value(a0.clone(), a1.clone(), vec![v, k, this.clone()]);
