@@ -787,6 +787,7 @@ impl Vm {
         self.setup_dynamic();
         self.setup_intl();
         self.setup_bigint();
+        self.setup_raster();
     }
 
     // ---- helpers
@@ -2673,6 +2674,9 @@ impl Vm {
         }
         if id >= 960 && id < 970 {
             return self.call_native_intl(id, args);
+        }
+        if id == crate::rasterjs::NF_RASTER {
+            return self.call_native_raster(args);
         }
         if id >= 950 && id < 960 {
             return self.call_native_bigint(id, this, args, construct);

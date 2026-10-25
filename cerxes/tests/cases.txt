@@ -572,3 +572,43 @@ const x = 2;
 [`a${"}".length}b${/}"/.source}c${(function () { /* } */ return 1 })()}`, `n${`in${x}ner`}d${{ a: 1 }.a}`].join('|')
 ----
 a1b}"c1|nin2nerd1
+
+# __cerRaster (rasterjs.rs, raster.rs): a 2D canvas's drawing on a surface
+==== js
+var px = new Float64Array(20 * 10 * 4), o = new Uint8ClampedArray(20 * 10 * 4);
+__cerRaster(0, px, 20, 10, new Float64Array([0, 1, 0, 0, 2, 10, 0, 2, 10, 10, 2, 0, 10, 5, 20, 1, 0, 0, 1, 10, 0,
+  0, 1, 12.5, 2.5, 2, 17.5, 2.5, 2, 17.5, 7.5, 2, 12.5, 7.5, 5, 20, 0, 0, 1, 0.5, 10, 0]));
+__cerRaster(2, px, 20, 10, 0, 0, 20, 10, o);
+function p(x, y) { var k = (y * 20 + x) * 4; return [o[k], o[k + 1], o[k + 2], o[k + 3]].join(','); }
+[p(5, 5), p(10, 5), p(15, 5), p(12, 5)].join(' ')
+----
+255,0,0,255 0,0,0,0 0,0,255,128 0,0,255,64
+
+==== js
+var px = new Float64Array(10 * 10 * 4), clip = new Float64Array(100), o = new Uint8ClampedArray(4);
+clip.fill(1);
+__cerRaster(1, clip, 10, 10, new Float64Array([1, 0, 0, 2, 5, 0, 2, 5, 10, 2, 0, 10, 5]), 0);
+__cerRaster(0, px, 10, 10, new Float64Array([1, 0, 0, 2, 10, 0, 2, 10, 10, 2, 0, 10, 5, 20, 0, 1, 0, 1, 10, 0]), clip);
+__cerRaster(2, px, 10, 10, 2, 2, 1, 1, o); var a = o.join(',');
+__cerRaster(2, px, 10, 10, 7, 2, 1, 1, o); a + ' ' + o.join(',')
+----
+0,255,0,255 0,0,0,0
+
+==== js
+var px = new Float64Array(4 * 4 * 4), d = new Uint8ClampedArray(16), o = new Uint8ClampedArray(16);
+for (var i = 0; i < 16; i += 4) { d[i] = 10; d[i + 1] = 20; d[i + 2] = 30; d[i + 3] = 255; }
+__cerRaster(3, px, 4, 4, 1, 1, 2, 2, d);
+__cerRaster(0, px, 4, 4, new Float64Array([13, 6, 1, 0, 0, 2, 2, 0, 2, 2, 4, 2, 0, 4, 5, 10, 0]));
+__cerRaster(2, px, 4, 4, 1, 1, 2, 2, o);
+[o.slice(0, 4).join(','), o.slice(4, 8).join(','), __cerRaster(4, px, 4, 4).slice(0, 22)].join(' ')
+----
+0,0,0,0 10,20,30,255 data:image/png;base64,
+
+==== js
+var px = new Float64Array(10 * 1 * 4), o = new Uint8ClampedArray(40);
+__cerRaster(0, px, 10, 1, new Float64Array([21, 1, 1, 0, 0, 1, 0, 0, 0, 0, 10, 0, 2, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1,
+  1, 0, 0, 2, 10, 0, 2, 10, 1, 2, 0, 1, 5, 10, 0]));
+__cerRaster(2, px, 10, 1, 0, 0, 10, 1, o);
+[o[0], o[2], o[20], o[22], o[36], o[38]].join(',')
+----
+0,13,0,140,0,242
