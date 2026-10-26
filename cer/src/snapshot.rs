@@ -216,8 +216,8 @@ pub fn snapshot(vm: &Vm) -> String {
         put_ints(&mut b, &vm.shapes[o.shape as usize].attrs);
         put_vals(&mut b, &mut st, &o.elems);
         put_vals(&mut b, &mut st, &o.elems2);
-        put_num(&mut b, o.nums.len() as int);
-        for x in o.nums.iter() {
+        put_num(&mut b, o.c().nums.len() as int);
+        for x in o.c().nums.iter() {
             put_number(&mut b, *x);
         }
         put_num(&mut b, o.func);
@@ -229,12 +229,12 @@ pub fn snapshot(vm: &Vm) -> String {
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
         if o.class == C_MAP || o.class == C_SET {
-            put_num(&mut b, o.index.len() as int);
-            for (k, v) in o.index.iter() {
+            put_num(&mut b, o.c().index.len() as int);
+            for (k, v) in o.c().index.iter() {
                 put_num(&mut b, *k);
                 put_num(&mut b, *v);
             }
-            put_ints(&mut b, &o.marks);
+            put_ints(&mut b, &o.c().marks);
         }
     }
     put_ints(&mut b, &vm.free_list);
@@ -426,7 +426,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         let mut k: int = 0;
         while k < nn && !r.bad {
             let x = get_val(&mut r, &strs);
-            o.nums.push(match x {
+            o.cm().nums.push(match x {
                 Val::Num(d) => d,
                 _ => 0.0,
             });
@@ -446,10 +446,10 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             while j < ni && !r.bad {
                 let k = r.num();
                 let v = r.num();
-                o.index.insert(k, v);
+                o.cm().index.insert(k, v);
                 j += 1;
             }
-            o.marks = get_ints(&mut r);
+            o.cm().marks = get_ints(&mut r);
         }
         if keys.len() != vals.len() || keys.len() != attrs.len() {
             r.bad = true;

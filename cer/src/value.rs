@@ -68,6 +68,21 @@ pub const P_ACCESSOR: int = 8;
 /// Past this many properties an object keeps a hash index of its keys.
 pub const INDEX_AT: int = 32;
 
+pub struct Cold {
+    /// a Map's or Set's entries by map_key, and which are deleted (1)
+    pub index: HashMap<int, int>,
+    pub marks: Vec<int>,
+    /// an ArrayBuffer's contents: its bytes, or the elements of the one
+    /// typed array kind that has used it (typed.rs)
+    pub nums: Vec<double>,
+}
+
+thread_local! {
+    static EMPTY_COLD: &'static Cold = Box::leak(Box::new(Cold { index: HashMap::new(), marks: Vec::new(), nums: Vec::new() }));
+}
+
+static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 pub struct JsObj {
     pub class: int,
     /// the prototype, -1 for none; for a scope, the enclosing scope
@@ -76,17 +91,13 @@ pub struct JsObj {
     /// and their attributes; `vals` holds the values, slot by slot
     pub shape: int,
     pub vals: Vec<Val>,
-    /// a Map's or Set's entries by map_key, and which are deleted (1)
-    pub index: HashMap<int, int>,
-    pub marks: Vec<int>,
+    /// rarely used parts (Map/Set/ArrayBuffer), allocated on first use
+    pub cold: Option<Box<Cold>>,
     /// array elements, scope slots, a bound function's arguments, an
     /// accessor's getter and setter, a map's keys
     pub elems: Vec<Val>,
     /// a map's values
     pub elems2: Vec<Val>,
-    /// an ArrayBuffer's contents: its bytes, or the elements of the one
-    /// typed array kind that has used it (typed.rs)
-    pub nums: Vec<double>,
     /// the compiled function (index into `Vm.protos`) or the native id
     pub func: int,
     /// a closure's scope; a bound function's target; an iterator's source
@@ -106,17 +117,31 @@ pub struct JsObj {
 }
 
 impl JsObj {
+    #[inline]
+    pub fn c(&self) -> &Cold {
+        match &self.cold {
+            Some(b) => b,
+            None => EMPTY_COLD.with(|e| *e),
+        }
+    }
+
+    #[inline]
+    pub fn cm(&mut self) -> &mut Cold {
+        if self.cold.is_none() {
+            self.cold = Some(Box::new(Cold { index: HashMap::new(), marks: Vec::new(), nums: Vec::new() }));
+        }
+        self.cold.as_mut().unwrap()
+    }
+
     pub fn new(class: int, proto: int) -> JsObj {
         JsObj {
             class: class,
             proto: proto,
             shape: 0,
             vals: Vec::new(),
-            index: HashMap::new(),
-            marks: Vec::new(),
+            cold: None,
             elems: Vec::new(),
             elems2: Vec::new(),
-            nums: Vec::new(),
             func: -1,
             env: -1,
             prim: Val::Undef,
@@ -133,24 +158,19 @@ impl JsObj {
         // a small object's values stay allocated for the next one; the
         // shape is the caller's (Vm::free_shape)
         self.shape = 0;
-        if self.vals.len() as int <= INDEX_AT {
+        let keep = *KEEP.get_or_init(|| std::env::var("CERXES_KEEP").map(|v| v != "0").unwrap_or(true));
+        if keep && self.vals.len() as int <= INDEX_AT {
             self.vals.truncate(0);
         } else {
             self.vals = Vec::new();
         }
-        if !self.index.is_empty() {
-            self.index = HashMap::new();
-        }
-        if !self.marks.is_empty() {
-            self.marks = Vec::new();
-        }
-        if self.elems.len() <= 16 {
+        self.cold = None;
+        self.elems2 = Vec::new();
+        if keep && self.elems.len() <= 16 {
             self.elems.truncate(0);
         } else {
             self.elems = Vec::new();
         }
-        self.elems2 = Vec::new();
-        self.nums = Vec::new();
         self.prim = Val::Undef;
         self.env = -1;
         self.home = -1;

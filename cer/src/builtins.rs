@@ -1442,7 +1442,7 @@ impl Vm {
 
     pub fn map_find(&mut self, m: int, k: &Val) -> int {
         let key = self.map_key(k);
-        match self.objs[m as usize].index.get(&key) {
+        match self.objs[m as usize].c().index.get(&key) {
             Some(i) => *i,
             None => -1,
         }
@@ -1450,7 +1450,7 @@ impl Vm {
 
     pub fn map_set(&mut self, m: int, k: Val, v: Val) {
         let key = self.map_key(&k);
-        let found = match self.objs[m as usize].index.get(&key) {
+        let found = match self.objs[m as usize].c().index.get(&key) {
             Some(i) => *i,
             None => -1,
         };
@@ -1470,8 +1470,8 @@ impl Vm {
         };
         self.objs[m as usize].elems.push(kk);
         self.objs[m as usize].elems2.push(v);
-        self.objs[m as usize].marks.push(0);
-        self.objs[m as usize].index.insert(key, pos);
+        self.objs[m as usize].cm().marks.push(0);
+        self.objs[m as usize].cm().index.insert(key, pos);
         self.objs[m as usize].pos += 1;
     }
 
@@ -1481,8 +1481,8 @@ impl Vm {
             return false;
         }
         let key = self.map_key(k);
-        self.objs[m as usize].index.remove(&key);
-        self.objs[m as usize].marks[i as usize] = 1;
+        self.objs[m as usize].cm().index.remove(&key);
+        self.objs[m as usize].cm().marks[i as usize] = 1;
         self.objs[m as usize].elems[i as usize] = Val::Undef;
         self.objs[m as usize].elems2[i as usize] = Val::Undef;
         self.objs[m as usize].pos -= 1;
@@ -1505,7 +1505,7 @@ impl Vm {
         let is_set = self.objs[m as usize].class == C_SET;
         let mut i: usize = 0;
         while i < n {
-            if self.objs[m as usize].marks[i] == 0 {
+            if self.objs[m as usize].c().marks[i] == 0 {
                 let k = self.objs[m as usize].elems[i].clone();
                 let v = if is_set { k.clone() } else { self.objs[m as usize].elems2[i].clone() };
                 if kind == 0 {

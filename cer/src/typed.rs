@@ -337,7 +337,7 @@ impl Vm {
             // low[0] is the least significant byte
             let byte = low[(7 - k) as usize];
             let idx = if little { at + 7 - k } else { at + k };
-            self.objs[b as usize].nums[idx as usize] = byte as double;
+            self.objs[b as usize].cm().nums[idx as usize] = byte as double;
             k += 1;
         }
     }
@@ -359,13 +359,13 @@ impl Vm {
 
     /// The byte at `i` of buffer `b`, which holds bytes.
     fn byte(&self, b: int, i: int) -> int {
-        self.objs[b as usize].nums[i as usize] as int
+        self.objs[b as usize].c().nums[i as usize] as int
     }
 
     /// The byte length of buffer `b`.
     pub fn buf_size(&self, b: int) -> int {
         let mode = self.objs[b as usize].home;
-        let n = self.objs[b as usize].nums.len() as int;
+        let n = self.objs[b as usize].c().nums.len() as int;
         if mode < 0 {
             n
         } else {
@@ -381,7 +381,7 @@ impl Vm {
             return;
         }
         let size = kind_size(mode);
-        let elems = self.objs[b as usize].nums.clone();
+        let elems = self.objs[b as usize].c().nums.clone();
         let mut bytes: Vec<double> = Vec::with_capacity(elems.len() * (size as usize));
         for x in elems.iter() {
             let be = encode(mode, *x);
@@ -391,7 +391,7 @@ impl Vm {
                 k -= 1;
             }
         }
-        self.objs[b as usize].nums = bytes;
+        self.objs[b as usize].cm().nums = bytes;
         self.objs[b as usize].home = TK_UINT8;
     }
 
@@ -445,7 +445,7 @@ impl Vm {
         let mut k: int = 0;
         while k < size {
             let idx = if little { at + size - 1 - k } else { at + k };
-            self.objs[b as usize].nums[idx as usize] = bytes[k as usize] as double;
+            self.objs[b as usize].cm().nums[idx as usize] = bytes[k as usize] as double;
             k += 1;
         }
     }
@@ -461,10 +461,10 @@ impl Vm {
         let b = self.objs[o as usize].env;
         let mode = self.objs[b as usize].home;
         if mode == kind {
-            return Val::Num(self.objs[b as usize].nums[(at / size) as usize]);
+            return Val::Num(self.objs[b as usize].c().nums[(at / size) as usize]);
         }
         if mode < 0 && kind == TK_UINT8 {
-            return Val::Num(self.objs[b as usize].nums[at as usize]);
+            return Val::Num(self.objs[b as usize].c().nums[at as usize]);
         }
         if kind >= TK_BIGINT64 {
             return self.buf_read_big(b, at, kind, true);
@@ -495,7 +495,7 @@ impl Vm {
         let mode = self.objs[b as usize].home;
         if mode == kind || (mode < 0 && kind == TK_UINT8) {
             self.objs[b as usize].home = kind;
-            self.objs[b as usize].nums[(at / size) as usize] = element_value(kind, x);
+            self.objs[b as usize].cm().nums[(at / size) as usize] = element_value(kind, x);
             return;
         }
         self.buf_write(b, at, kind, x, true);
@@ -544,7 +544,7 @@ impl Vm {
                 bytes.push(0.0);
                 i += 1;
             }
-            self.objs[b as usize].nums = bytes;
+            self.objs[b as usize].cm().nums = bytes;
             self.objs[b as usize].home = -1;
             if truthy(&a[2]) {
                 self.objs[b as usize].pos = 2;
@@ -623,7 +623,7 @@ impl Vm {
                         z.push(0.0);
                         j += 1;
                     }
-                    self.objs[d as usize].nums = z;
+                    self.objs[d as usize].cm().nums = z;
                     self.objs[d as usize].home = ms;
                     md = ms;
                 }
@@ -631,12 +631,12 @@ impl Vm {
                     let mut tmp: Vec<double> = Vec::new();
                     let mut i = 0;
                     while i < n / size {
-                        tmp.push(self.objs[s as usize].nums[(fs / size + i) as usize]);
+                        tmp.push(self.objs[s as usize].c().nums[(fs / size + i) as usize]);
                         i += 1;
                     }
                     i = 0;
                     while i < n / size {
-                        self.objs[d as usize].nums[(ts / size + i) as usize] = tmp[i as usize];
+                        self.objs[d as usize].cm().nums[(ts / size + i) as usize] = tmp[i as usize];
                         i += 1;
                     }
                     return Val::Undef;
@@ -647,12 +647,12 @@ impl Vm {
             let mut tmp: Vec<double> = Vec::new();
             let mut i = 0;
             while i < n {
-                tmp.push(self.objs[s as usize].nums[(fs + i) as usize]);
+                tmp.push(self.objs[s as usize].c().nums[(fs + i) as usize]);
                 i += 1;
             }
             i = 0;
             while i < n {
-                self.objs[d as usize].nums[(ts + i) as usize] = tmp[i as usize];
+                self.objs[d as usize].cm().nums[(ts + i) as usize] = tmp[i as usize];
                 i += 1;
             }
             return Val::Undef;
@@ -660,7 +660,7 @@ impl Vm {
         if id == NF_BUF_DETACH {
             let b = self.buffer_of(&a[0]);
             if b >= 0 {
-                self.objs[b as usize].nums = Vec::new();
+                self.objs[b as usize].cm().nums = Vec::new();
                 self.objs[b as usize].home = TK_UINT8;
                 self.objs[b as usize].pos |= 1;
             }
@@ -684,7 +684,7 @@ impl Vm {
                     z.push(0.0);
                     j += 1;
                 }
-                self.objs[b as usize].nums = z;
+                self.objs[b as usize].cm().nums = z;
                 self.objs[b as usize].home = kind;
             }
             let t = self.alloc(C_TYPED, proto);

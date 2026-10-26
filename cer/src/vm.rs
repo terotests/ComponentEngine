@@ -346,7 +346,7 @@ impl Vm {
             out: Vec::new(),
             echo: false,
             alloc_count: 0,
-            gc_threshold: 200000,
+            gc_threshold: gc_min(),
             native_depth: 0,
             prelude_protos: 0,
             temp_roots: Vec::new(),
@@ -4772,8 +4772,16 @@ impl Vm {
             i2 += 1;
         }
         self.alloc_count = 0;
-        self.gc_threshold = if live * 2 > 200000 { live * 2 } else { 200000 };
+        let gmin = gc_min(); let grow = live * gc_grow() / 100; self.gc_threshold = if grow > gmin { grow } else { gmin };
     }
+}
+
+pub fn gc_grow() -> int {
+    std::env::var("CERXES_GC_GROW").ok().and_then(|v| v.parse::<int>().ok()).unwrap_or(200)
+}
+
+pub fn gc_min() -> int {
+    std::env::var("CERXES_GC_MIN").ok().and_then(|v| v.parse::<int>().ok()).unwrap_or(200000)
 }
 
 pub fn pow2(n: int) -> double {

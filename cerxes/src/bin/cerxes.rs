@@ -29,6 +29,17 @@ fn main() {
     e.set_syntax_for_path(path.as_str());
     e.set_echo(true);
     let r = e.eval(src.as_str());
+    if std::env::var("CERXES_STATS").is_ok() {
+        e.vm.gc();
+        let v = &e.vm;
+        let mut free = 0usize; let mut vc = 0usize; let mut ec = 0usize; let mut hm = 0usize;
+        for o in v.objs.iter() { if o.free { free += 1; } vc += o.vals.capacity(); ec += o.elems.capacity() + o.elems2.capacity(); hm += o.c().index.capacity(); }
+        let mut cls = [(0usize,0usize,0usize,0usize,0usize);24];
+        for o in v.objs.iter() { if o.free { continue; } let c = &mut cls[o.class as usize]; c.0 += 1; c.1 += o.vals.len(); c.2 += o.vals.capacity(); c.3 += o.elems.len(); c.4 += o.elems.capacity(); }
+        for (i, c) in cls.iter().enumerate() { if c.0 > 0 { eprintln!("class {} n={} vals={}/{} elems={}/{}", i, c.0, c.1, c.2, c.3, c.4); } }
+        eprintln!("stats sizeof(JsObj)={} sizeof(Val)={} objs={} free={} gc_runs={} vals_cap={} elems_cap={} index_cap={} shapes={}",
+            std::mem::size_of::<cerxes::value::JsObj>(), std::mem::size_of::<cerxes::value::Val>(), v.objs.len(), free, v.gc_runs, vc, ec, hm, v.shapes.len());
+    }
     if !e.error.is_empty() {
         eprintln!("{}", r);
         std::process::exit(1);
