@@ -174,6 +174,8 @@ pub const NF_EP_TOSTRING: int = 184;
 pub const NF_SYM_KEYFOR: int = 185;
 // Math
 pub const NF_MATH: int = 200; // + index into MATH_NAMES
+/// __hostSync(text): the host's answer (Vm::set_host_sync), synchronously
+pub const NF_HOST_SYNC: int = 1990;
 // JSON
 pub const NF_JSON_STRINGIFY: int = 250;
 pub const NF_JSON_PARSE: int = 251;
@@ -416,6 +418,7 @@ impl Vm {
         self.method(g, "unescape", NF_UNESCAPE, 1);
         self.method(g, "gc", NF_GC, 0);
         self.method(g, "queueMicrotask", NF_QUEUE_MICROTASK, 1);
+        self.method(g, "__hostSync", NF_HOST_SYNC, 1);
         let console = self.new_object();
         self.method(console, "log", NF_PRINT, 0);
         self.method(console, "info", NF_PRINT, 0);
@@ -2689,6 +2692,15 @@ impl Vm {
             if t >= 0 && self.objs[t as usize].class == C_ARRAY && !self.objs[t as usize].elems2.is_empty() {
                 self.objs[t as usize].elems2 = Vec::new();
             }
+        }
+        if id == NF_HOST_SYNC {
+            if !self.host_sync_set {
+                self.throw_type("__hostSync: the host gives no synchronous answers");
+                return Val::Undef;
+            }
+            let req = if args.is_empty() { String::new() } else { self.to_string(&args[0]) };
+            let answer = self.host_sync.call(&req);
+            return string_val(answer);
         }
         if id >= 920 && id < 930 {
             return self.call_native_typed(id, args);
