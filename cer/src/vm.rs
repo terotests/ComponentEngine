@@ -102,6 +102,22 @@ pub fn first_atoms() -> Vec<String> {
     out
 }
 
+/// A host's synchronous answer to a script (__hostSync(text)): the embedder
+/// sets one with Vm::set_host_sync, and the script waits for its text. The
+/// engine gives the text through unchanged; what it means is the host's.
+pub trait HostSync {
+    fn call(&mut self, request: &str) -> String;
+}
+
+/// The host when the embedder set none: __hostSync throws.
+pub struct NoHostSync {}
+
+impl HostSync for NoHostSync {
+    fn call(&mut self, _request: &str) -> String {
+        String::new()
+    }
+}
+
 pub struct Vm {
     pub objs: Vec<JsObj>,
     pub free_list: Vec<int>,
@@ -178,6 +194,9 @@ pub struct Vm {
     pub throwing: bool,
     pub exc: Val,
     pub out: Vec<String>,
+    /// __hostSync's host (Vm::set_host_sync); NoHostSync by default
+    pub(crate) host_sync: Box<dyn HostSync>,
+    pub(crate) host_sync_set: bool,
     pub echo: bool,
     pub alloc_count: int,
     pub gc_threshold: int,
@@ -369,6 +388,8 @@ impl Vm {
             rx_units: Vec::new(),
             norm: crate::normalize::Norm::new(),
             intl: crate::intl::Intl::new(),
+            host_sync: Box::new(NoHostSync {}),
+            host_sync_set: false,
         };
         vm.shapes.push(Shape::new());
         for n in first_atoms() {
@@ -846,6 +867,12 @@ impl Vm {
     pub fn throw_val(&mut self, v: Val) {
         self.exc = v;
         self.throwing = true;
+    }
+
+    /// The host __hostSync(text) asks: its answer is the call's value.
+    pub fn set_host_sync(&mut self, h: Box<dyn HostSync>) {
+        self.host_sync = h;
+        self.host_sync_set = true;
     }
 
     pub fn throw_type(&mut self, msg: &str) {
