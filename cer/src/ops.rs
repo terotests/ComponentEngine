@@ -276,3 +276,126 @@ pub const OP_CASE_INT_JT: int = 150;
 /// `x OP null` or `null OP x` for local x = b / 256 and OP = b % 256 one of
 /// OP_SEQ, OP_SNE, OP_EQ, OP_NE: to a when it is false
 pub const OP_LOCAL_NULL_JF: int = 151;
+
+// ---- register operands
+//
+// The ops below read their operands where they are: a local's slot, a
+// constant, or the stack. An operand holds a slot (>= 0), OPND_STACK
+// (popped, the deeper operand popped last), or a constant (opnd_const).
+// The compiler keeps the loads of locals and constants it has not written
+// yet (FnState.vcode) and gives them to the op that uses them
+// (compiler.rs, Compiler::emit), so `x = o.p` is one op where it was three.
+//
+// A result goes to the stack, or with a destination slot `dst` >= 0 into
+// that local, skipping the next op (the statement's POP, as
+// OP_SET_LOCAL_POP does).
+//
+// An Op stays four ints (32 bytes: a bigger one made every op slower), so
+// operands share a field, packed to fit 31 bits (Ranger's C++ int is 32
+// bits): pk(x, y) with each in [-PK_BIAS, PK_BIAS), and pk3(x, y, code)
+// with each in [-PK3_BIAS, PK3_BIAS) and an op code below 256. The
+// compiler leaves an operand that does not fit on the stack.
+
+pub const OPND_STACK: int = -1;
+
+/// The operand of constant `k`.
+pub fn opnd_const(k: int) -> int {
+    -2 - k
+}
+
+pub const PK_BIAS: int = 16384;
+pub const PK_SPAN: int = 32768;
+pub const PK3_BIAS: int = 1024;
+pub const PK3_SPAN: int = 2048;
+
+pub fn pk(x: int, y: int) -> int {
+    (x + PK_BIAS) * PK_SPAN + (y + PK_BIAS)
+}
+
+#[inline]
+pub fn pk_hi(v: int) -> int {
+    v / PK_SPAN - PK_BIAS
+}
+
+#[inline]
+pub fn pk_lo(v: int) -> int {
+    v % PK_SPAN - PK_BIAS
+}
+
+pub fn pk3(x: int, y: int, code: int) -> int {
+    ((x + PK3_BIAS) * PK3_SPAN + (y + PK3_BIAS)) * 256 + code
+}
+
+#[inline]
+pub fn pk3_x(v: int) -> int {
+    v / 256 / PK3_SPAN - PK3_BIAS
+}
+
+#[inline]
+pub fn pk3_y(v: int) -> int {
+    (v / 256) % PK3_SPAN - PK3_BIAS
+}
+
+/// Whether operand v fits a field of pk (bias PK_BIAS) or pk3 (PK3_BIAS).
+pub fn opnd_fits(v: int, bias: int) -> bool {
+    v >= -bias && v < bias
+}
+
+/// local a = operand b; the value stays as the expression's (the compiler's)
+pub const OP_MOV_R: int = 152;
+/// obj x, atom a, b = pk(dst, x); c the inline cache
+pub const OP_GET_PROP_R: int = 153;
+/// obj x, value y, atom a, b = pk(x, y); c the inline cache. Pushes
+/// nothing: the value is still the compiler's operand
+pub const OP_SET_PROP_R: int = 154;
+/// obj x, key y: a = pk(x, y), dst b
+pub const OP_GET_ELEM_R: int = 155;
+/// obj x, key y: a = pk(x, y), value b (an operand); pushes nothing
+pub const OP_SET_ELEM_R: int = 156;
+/// x <op> y, b = pk3(x, y, op) (an OP_ADD… or OP_LT… code), dst a
+pub const OP_BIN_R: int = 157;
+/// to a when x <cmp> y is false, b = pk3(x, y, cmp)
+pub const OP_CMP_JF_R: int = 158;
+/// to a when operand b is falsy / truthy
+pub const OP_JF_R: int = 159;
+pub const OP_JT_R: int = 160;
+/// returns operand a
+pub const OP_RETURN_R: int = 161;
+/// obj x, atom a → [obj.a, obj] as OP_GET_METHOD; b = pk(its b, x)
+pub const OP_GET_METHOD_R: int = 162;
+
+/// A register op's operands (x, y, a third: SET_ELEM_R's value) and its
+/// destination slot, OPND_STACK for those it has not.
+pub fn reg_opnds(code: int, a: int, b: int) -> (int, int, int, int) {
+    if code == OP_MOV_R {
+        return (b, OPND_STACK, OPND_STACK, a);
+    }
+    if code == OP_GET_PROP_R {
+        return (pk_lo(b), OPND_STACK, OPND_STACK, pk_hi(b));
+    }
+    if code == OP_SET_PROP_R {
+        return (pk_hi(b), pk_lo(b), OPND_STACK, OPND_STACK);
+    }
+    if code == OP_GET_ELEM_R {
+        return (pk_hi(a), pk_lo(a), OPND_STACK, b);
+    }
+    if code == OP_SET_ELEM_R {
+        return (pk_hi(a), pk_lo(a), b, OPND_STACK);
+    }
+    if code == OP_BIN_R {
+        return (pk3_x(b), pk3_y(b), OPND_STACK, a);
+    }
+    if code == OP_CMP_JF_R {
+        return (pk3_x(b), pk3_y(b), OPND_STACK, OPND_STACK);
+    }
+    if code == OP_JF_R || code == OP_JT_R {
+        return (b, OPND_STACK, OPND_STACK, OPND_STACK);
+    }
+    if code == OP_RETURN_R {
+        return (a, OPND_STACK, OPND_STACK, OPND_STACK);
+    }
+    if code == OP_GET_METHOD_R {
+        return (pk_lo(b), OPND_STACK, OPND_STACK, OPND_STACK);
+    }
+    (OPND_STACK, OPND_STACK, OPND_STACK, OPND_STACK)
+}

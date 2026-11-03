@@ -572,3 +572,22 @@ const x = 2;
 [`a${"}".length}b${/}"/.source}c${(function () { /* } */ return 1 })()}`, `n${`in${x}ner`}d${{ a: 1 }.a}`].join('|')
 ----
 a1b}"c1|nin2nerd1
+
+# register operands (ops.rs, OP_*_R): a waiting load of a local is read
+# before a later write of it; getters run in order; dst and constants
+==== js register operands keep the order of reads and writes
+let log = [];
+const o = { get p() { log.push("p"); return 2; }, q: 1 };
+let i = 0, a = [10, 20, 30];
+let x = o.p + a[i + 1];
+a[i] = x - 1;
+let s = 0; for (let k = 0; k < 5; k++) { if (k == 2) continue; s = s + k * 2; }
+function g(q) { return q.p; }
+let t = g(o) === 2 && !(x < 3) ? "ok" : "no";
+let y = 1; y = y + (y = 5);
+let z = 1; z = z + z++;
+let w = 3; o.q = w; w = 9; o.r = o.q + w;
+let n = null, u; let m = (n == null) + (u === undefined) + (a[2] == 30);
+[log.join(""), x, a[0], s, t, y, z, o.r, m].join()
+----
+pp,22,21,16,ok,6,2,12,3

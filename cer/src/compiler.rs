@@ -88,6 +88,11 @@ struct FnState {
     /// the latest code position taken as a jump target; ops are fused only
     /// past it
     label_at: int,
+    /// loads of locals and constants not written yet, on top of the stack
+    /// (their op and its `a`): the op that uses them reads them as
+    /// register operands (Compiler::emit)
+    vcode: Vec<int>,
+    va: Vec<int>,
 }
 
 pub struct Compiler {
@@ -132,6 +137,8 @@ pub struct Compiler {
     /// innermost first (an index into with_lists)
     with_ref: HashMap<int, int>,
     with_lists: Vec<Vec<int>>,
+    /// register operands (Compiler::emit); false: the plain stack machine
+    pub regs: bool,
 }
 
 impl Compiler {
@@ -161,6 +168,7 @@ impl Compiler {
             with_scopes: HashMap::new(),
             with_ref: HashMap::new(),
             with_lists: Vec::new(),
+            regs: true,
         }
     }
 
@@ -854,13 +862,294 @@ impl Compiler {
 
     /// The position of the next op, taken as a jump target.
     fn pc(&mut self) -> int {
+        self.flush();
         let i = self.fs.len() - 1;
         let n = self.fs[i].proto.code.len() as int;
         self.fs[i].label_at = n;
         n
     }
 
+    // ---- register operands
+    //
+    // A load of a local or a constant (GET_LOCAL, INT, CONST, UNDEF, NULL,
+    // TRUE, FALSE) is not written at once: it waits in vcode / va, above
+    // everything on the stack. The next op either uses the waiting loads as
+    // operands (the _R ops of ops.rs), or the loads are written first
+    // (flush) and it is written as it is. Only loads come between a load
+    // and its use, so the local still holds the value it would have
+    // pushed. A jump target (pc) writes them first.
+
+    /// Writes the loads not written yet.
+    fn flush(&mut self) {
+        let i = self.fs.len() - 1;
+        if self.fs[i].vcode.is_empty() {
+            return;
+        }
+        let codes = self.fs[i].vcode.clone();
+        let args = self.fs[i].va.clone();
+        self.fs[i].vcode = Vec::new();
+        self.fs[i].va = Vec::new();
+        let mut k: usize = 0;
+        while k < codes.len() {
+            self.emit_raw(codes[k], args[k], 0);
+            k += 1;
+        }
+    }
+
+    /// Writes all but the last `keep` loads.
+    fn flush_below(&mut self, keep: int) {
+        let i = self.fs.len() - 1;
+        let n = self.fs[i].vcode.len() as int;
+        if n <= keep {
+            return;
+        }
+        let codes = self.fs[i].vcode.clone();
+        let args = self.fs[i].va.clone();
+        let cut = (n - keep) as usize;
+        let mut rest_c: Vec<int> = Vec::new();
+        let mut rest_a: Vec<int> = Vec::new();
+        let mut k: usize = cut;
+        while k < codes.len() {
+            rest_c.push(codes[k]);
+            rest_a.push(args[k]);
+            k += 1;
+        }
+        self.fs[i].vcode = Vec::new();
+        self.fs[i].va = Vec::new();
+        k = 0;
+        while k < cut {
+            self.emit_raw(codes[k], args[k], 0);
+            k += 1;
+        }
+        self.fs[i].vcode = rest_c;
+        self.fs[i].va = rest_a;
+    }
+
+    fn waiting(&self) -> int {
+        self.fs[self.fs.len() - 1].vcode.len() as int
+    }
+
+    /// The operand of the waiting load `k` from the top (0 the top one),
+    /// taken away; the loads are the top ones.
+    fn take_opnd(&mut self) -> int {
+        let i = self.fs.len() - 1;
+        let code = self.fs[i].vcode.pop().unwrap();
+        let a = self.fs[i].va.pop().unwrap();
+        self.opnd_of(code, a)
+    }
+
+    fn opnd_of(&mut self, code: int, a: int) -> int {
+        if code == OP_GET_LOCAL {
+            return a;
+        }
+        if code == OP_CONST {
+            return opnd_const(a);
+        }
+        if code == OP_INT {
+            let k = self.num_const(a as double);
+            return opnd_const(k);
+        }
+        let k = self.val_const(code);
+        opnd_const(k)
+    }
+
+    /// The constant of UNDEF, NULL, TRUE or FALSE.
+    fn val_const(&mut self, code: int) -> int {
+        let key = if code == OP_UNDEF {
+            "!u"
+        } else if code == OP_NULL {
+            "!n"
+        } else if code == OP_TRUE {
+            "!t"
+        } else {
+            "!f"
+        };
+        let found = match self.f().num_consts.get(key) {
+            Some(i) => *i,
+            None => -1,
+        };
+        if found >= 0 {
+            return found;
+        }
+        let v = if code == OP_UNDEF {
+            Val::Undef
+        } else if code == OP_NULL {
+            Val::Null
+        } else if code == OP_TRUE {
+            Val::Bool(true)
+        } else {
+            Val::Bool(false)
+        };
+        let f = self.f();
+        let i = f.proto.consts.len() as int;
+        f.proto.consts.push(v);
+        f.num_consts.insert(String::from(key), i);
+        i
+    }
+
+    fn push_load(&mut self, code: int, a: int) -> int {
+        let i = self.fs.len() - 1;
+        self.fs[i].vcode.push(code);
+        self.fs[i].va.push(a);
+        (self.fs[i].proto.code.len() as int) - 1
+    }
+
+    /// Writes a register op: a and b as the stack op's (a dst, b dst, as
+    /// ops.rs says per op), x and y its operands, packed into a and b.
+    fn emit_r(&mut self, code: int, a: int, b: int, x: int, y: int) -> int {
+        let mut fa = a;
+        let mut fb = b;
+        if code == OP_MOV_R || code == OP_JF_R || code == OP_JT_R {
+            fb = x;
+        } else if code == OP_GET_PROP_R || code == OP_GET_METHOD_R {
+            fb = pk(b, x);
+        } else if code == OP_SET_PROP_R {
+            fb = pk(x, y);
+        } else if code == OP_GET_ELEM_R || code == OP_SET_ELEM_R {
+            fa = pk(x, y);
+        } else if code == OP_BIN_R || code == OP_CMP_JF_R {
+            fb = pk3(x, y, b);
+        } else if code == OP_RETURN_R {
+            fa = x;
+        }
+        let i = self.fs.len() - 1;
+        self.fs[i].proto.code.push(Op { code: code, a: fa, b: fb, c: -1 });
+        (self.fs[i].proto.code.len() as int) - 1
+    }
+
+    /// Every waiting load's operand fits a packed field (ops.rs, pk and
+    /// pk3, of `bias`).
+    fn opnds_fit(&self, bias: int) -> bool {
+        let f = &self.fs[self.fs.len() - 1];
+        let mut k: usize = 0;
+        while k < f.vcode.len() {
+            let code = f.vcode[k];
+            if code == OP_GET_LOCAL {
+                if !opnd_fits(f.va[k], bias) {
+                    return false;
+                }
+            } else if code == OP_CONST {
+                if !opnd_fits(opnd_const(f.va[k]), bias) {
+                    return false;
+                }
+            } else if !opnd_fits(opnd_const((f.proto.consts.len() as int) + 8), bias) {
+                // a constant still to make
+                return false;
+            }
+            k += 1;
+        }
+        true
+    }
+
+    /// Two operands: the waiting loads on top, the rest from the stack.
+    fn take2(&mut self) -> (int, int) {
+        self.flush_below(2);
+        let w = self.waiting();
+        if w == 2 {
+            let y = self.take_opnd();
+            let x = self.take_opnd();
+            (x, y)
+        } else {
+            let y = self.take_opnd();
+            (OPND_STACK, y)
+        }
+    }
+
     fn emit(&mut self, code: int, a: int, b: int) -> int {
+        if !self.regs {
+            return self.emit_raw(code, a, b);
+        }
+        if code == OP_GET_LOCAL || code == OP_INT || code == OP_CONST || code == OP_UNDEF || code == OP_NULL || code == OP_TRUE || code == OP_FALSE {
+            return self.push_load(code, a);
+        }
+        if code == OP_GET_LOCAL_PROP {
+            self.push_load(OP_GET_LOCAL, a);
+            return self.emit(OP_GET_PROP, b, 0);
+        }
+        let w = self.waiting();
+        if w == 0 {
+            return self.emit_raw(code, a, b);
+        }
+        let i = self.fs.len() - 1;
+        if code == OP_POP {
+            // the load is not needed
+            self.fs[i].vcode.pop();
+            self.fs[i].va.pop();
+            return (self.fs[i].proto.code.len() as int) - 1;
+        }
+        if code == OP_DUP {
+            let c = self.fs[i].vcode[(w - 1) as usize];
+            let v = self.fs[i].va[(w - 1) as usize];
+            return self.push_load(c, v);
+        }
+        let bias = if is_binary(code) || code == OP_CMP_JF { PK3_BIAS } else { PK_BIAS };
+        if !self.opnds_fit(bias) {
+            self.flush();
+            return self.emit_raw(code, a, b);
+        }
+        if code == OP_SET_LOCAL {
+            // local a = the load; the expression's value is local a now
+            self.flush_below(1);
+            let x = self.take_opnd();
+            let at = self.emit_r(OP_MOV_R, a, 0, x, OPND_STACK);
+            self.push_load(OP_GET_LOCAL, a);
+            return at;
+        }
+        if code == OP_GET_PROP || code == OP_GET_METHOD {
+            self.flush_below(1);
+            let x = self.take_opnd();
+            let rc = if code == OP_GET_PROP { OP_GET_PROP_R } else { OP_GET_METHOD_R };
+            let rb = if code == OP_GET_PROP { -1 } else { b };
+            return self.emit_r(rc, a, rb, x, OPND_STACK);
+        }
+        if code == OP_GET_ELEM {
+            let (x, y) = self.take2();
+            return self.emit_r(OP_GET_ELEM_R, 0, -1, x, y);
+        }
+        if code == OP_SET_PROP {
+            // [obj, v]: v waiting; the value stays the expression's
+            let vc = self.fs[i].vcode[(w - 1) as usize];
+            let va = self.fs[i].va[(w - 1) as usize];
+            let (x, y) = self.take2();
+            let at = self.emit_r(OP_SET_PROP_R, a, 0, x, y);
+            self.push_load(vc, va);
+            return at;
+        }
+        if code == OP_SET_ELEM {
+            // [obj, key, v]
+            let vc = self.fs[i].vcode[(w - 1) as usize];
+            let va = self.fs[i].va[(w - 1) as usize];
+            self.flush_below(3);
+            let v = self.take_opnd();
+            let (x, y) = if self.waiting() == 0 { (OPND_STACK, OPND_STACK) } else { self.take2() };
+            let at = self.emit_r(OP_SET_ELEM_R, 0, v, x, y);
+            self.push_load(vc, va);
+            return at;
+        }
+        if is_binary(code) {
+            let (x, y) = self.take2();
+            return self.emit_r(OP_BIN_R, -1, code, x, y);
+        }
+        if code == OP_CMP_JF {
+            let (x, y) = self.take2();
+            return self.emit_r(OP_CMP_JF_R, a, b, x, y);
+        }
+        if code == OP_JF || code == OP_JT {
+            self.flush_below(1);
+            let x = self.take_opnd();
+            let rc = if code == OP_JF { OP_JF_R } else { OP_JT_R };
+            return self.emit_r(rc, a, 0, x, OPND_STACK);
+        }
+        if code == OP_RETURN {
+            self.flush_below(1);
+            let x = self.take_opnd();
+            return self.emit_r(OP_RETURN_R, 0, 0, x, OPND_STACK);
+        }
+        self.flush();
+        self.emit_raw(code, a, b)
+    }
+
+    fn emit_raw(&mut self, code: int, a: int, b: int) -> int {
         let i = self.fs.len() - 1;
         let n = self.fs[i].proto.code.len();
         // the op fused with the one before it, when no jump lands between
@@ -905,6 +1194,14 @@ impl Compiler {
     }
 
     fn op(&mut self, code: int) {
+        if code == OP_POP && self.regs && self.waiting() > 0 {
+            self.emit(OP_POP, 0, 0);
+            return;
+        }
+        if code == OP_POP && self.regs && self.dst_fuse() {
+            self.emit_raw(OP_POP, 0, 0);
+            return;
+        }
         if code == OP_POP {
             // a store and its POP: the store pops and steps over the POP,
             // which stays for jumps to it
@@ -922,6 +1219,40 @@ impl Compiler {
             }
         }
         self.emit(code, 0, 0);
+    }
+
+    /// `<op>; SET_LOCAL x; POP` with a register op that leaves its result:
+    /// the op stores into x and steps over the POP.
+    fn dst_fuse(&mut self) -> bool {
+        let i = self.fs.len() - 1;
+        let n = self.fs[i].proto.code.len();
+        if n < 2 || (self.fs[i].label_at as usize) > n - 2 {
+            return false;
+        }
+        let last = self.fs[i].proto.code[n - 1];
+        let prev = self.fs[i].proto.code[n - 2];
+        if last.code != OP_SET_LOCAL {
+            return false;
+        }
+        if !opnd_fits(last.a, PK_BIAS) {
+            return false;
+        }
+        if prev.code == OP_GET_PROP_R && pk_hi(prev.b) == -1 {
+            self.fs[i].proto.code.pop();
+            self.fs[i].proto.code[n - 2].b = pk(last.a, pk_lo(prev.b));
+            return true;
+        }
+        if prev.code == OP_GET_ELEM_R && prev.b == -1 {
+            self.fs[i].proto.code.pop();
+            self.fs[i].proto.code[n - 2].b = last.a;
+            return true;
+        }
+        if prev.code == OP_BIN_R && prev.a == -1 {
+            self.fs[i].proto.code.pop();
+            self.fs[i].proto.code[n - 2].a = last.a;
+            return true;
+        }
+        false
     }
 
     /// Points the jump at `at` to here.
@@ -1234,6 +1565,8 @@ impl Compiler {
             pending_labels: Vec::new(),
             is_program: true,
             label_at: 0,
+            vcode: Vec::new(),
+            va: Vec::new(),
         });
         self.cur_scope = s;
         if self.local_program {
@@ -1260,6 +1593,7 @@ impl Compiler {
         }
         self.emit(OP_GET_LOCAL, 0, 0);
         self.op(OP_RETURN);
+        self.flush();
         let fs = self.fs.pop().unwrap();
         let mut p = fs.proto;
         p.nslots = fs.next_slot;
@@ -1348,6 +1682,8 @@ impl Compiler {
             pending_labels: Vec::new(),
             is_program: false,
             label_at: 0,
+            vcode: Vec::new(),
+            va: Vec::new(),
         });
         self.cur_scope = scope;
         // parameters arrive in slots 0..; a simple one is its own binding
@@ -1471,6 +1807,7 @@ impl Compiler {
             self.op(OP_RETURN_UNDEF);
             self.leave_scope(pushed);
         }
+        self.flush();
         let fs = self.fs.pop().unwrap();
         let mut p = fs.proto;
         p.nslots = fs.next_slot;
@@ -3382,6 +3719,11 @@ impl Compiler {
             self.cur_scope = saved;
         }
     }
+}
+
+/// The binary operators OP_BIN_R does.
+fn is_binary(code: int) -> bool {
+    code >= OP_ADD && code <= OP_GE
 }
 
 fn binary_code(op: &str) -> int {

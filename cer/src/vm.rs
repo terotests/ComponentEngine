@@ -2872,6 +2872,156 @@ impl Vm {
         &self.stack[self.stack.len() - 1]
     }
 
+    /// A register operand (ops.rs): a local's slot, the stack, a constant.
+    #[inline]
+    fn opnd(&mut self, x: int, bp: int, pi: usize) -> Val {
+        if x >= 0 {
+            self.stack[(bp + x) as usize].clone()
+        } else if x == OPND_STACK {
+            self.stack.pop().unwrap()
+        } else {
+            self.protos[pi].consts[(-2 - x) as usize].clone()
+        }
+    }
+
+    /// A register operand where it is, the stack's top for OPND_STACK (not
+    /// popped).
+    #[inline]
+    fn peek(&self, x: int, bp: int, pi: usize) -> &Val {
+        if x >= 0 {
+            &self.stack[(bp + x) as usize]
+        } else if x == OPND_STACK {
+            &self.stack[self.stack.len() - 1]
+        } else {
+            &self.protos[pi].consts[(-2 - x) as usize]
+        }
+    }
+
+    /// `v.atom` with the inline cache `ic` of the op before `pc`.
+    #[inline]
+    fn get_prop_ic(&mut self, v: &Val, atom: int, ic: int, pi: usize, pc: int, fi: usize) -> Val {
+        if let Val::Obj(o) = v {
+            let o = *o;
+            let slot = self.ic_get(o, atom, ic, pi, pc);
+            if slot >= 0 {
+                return self.objs[o as usize].vals[slot as usize].clone();
+            }
+            if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                // an array's length is its element count
+                return Val::Num(self.objs[o as usize].elems.len() as double);
+            }
+        }
+        self.frames[fi].pc = pc;
+        self.get(v, atom)
+    }
+
+    /// `v[k]`, an array's element straight.
+    #[inline]
+    fn get_elem_fast(&mut self, v: &Val, k: &Val, pc: int, fi: usize) -> Val {
+        if let (Val::Obj(o), Val::Num(n)) = (v, k) {
+            let ob = &self.objs[*o as usize];
+            if ob.class == C_ARRAY {
+                let i = *n as int;
+                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n {
+                    return ob.elems[i as usize].clone();
+                }
+            }
+        }
+        self.frames[fi].pc = pc;
+        self.get_elem(v, k)
+    }
+
+    /// `target[k] = val`, an array's element straight.
+    fn set_elem_fast(&mut self, target: &Val, k: &Val, val: &Val, pc: int, fi: usize) {
+        let mut done = false;
+        if let (Val::Obj(o), Val::Num(n)) = (target, k) {
+            if let Val::Obj(x) = val {
+                self.objs[*x as usize].rc += 1;
+            }
+            let ob = &mut self.objs[*o as usize];
+            let mut old: int = -1;
+            if ob.class == C_ARRAY {
+                let i = *n as int;
+                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n && ob.pos != 2 {
+                    old = obj_of(&ob.elems[i as usize]);
+                    ob.elems[i as usize] = val.clone();
+                    if (i as usize) < ob.elems2.len() {
+                        // the element is no longer a hole
+                        ob.elems2[i as usize] = Val::Bool(false);
+                    }
+                    done = true;
+                } else if i >= 0 && (i as usize) == ob.elems.len() && (i as double) == *n && ob.extensible {
+                    ob.elems.push(val.clone());
+                    done = true;
+                }
+            }
+            if done {
+                self.dec_o(old);
+            } else {
+                self.dec(val);
+            }
+        }
+        if !done {
+            self.frames[fi].pc = pc;
+            self.set_elem(target, k, val.clone());
+        }
+    }
+
+    /// `a <code> b` of the binary operators (OP_ADD … OP_GE).
+    fn binary(&mut self, code: int, a: &Val, b: &Val, pc: int, fi: usize) -> Val {
+        if let (Val::Num(x), Val::Num(y)) = (a, b) {
+            let (x, y) = (*x, *y);
+            return match code {
+                OP_ADD => Val::Num(x + y),
+                OP_SUB => Val::Num(x - y),
+                OP_MUL => Val::Num(x * y),
+                OP_LT => Val::Bool(x < y),
+                OP_GT => Val::Bool(x > y),
+                OP_LE => Val::Bool(x <= y),
+                OP_GE => Val::Bool(x >= y),
+                OP_SEQ | OP_EQ => Val::Bool(x == y),
+                OP_SNE | OP_NE => Val::Bool(x != y),
+                _ => Val::Num(arith_num(code, x, y)),
+            };
+        }
+        if code >= OP_EQ {
+            let strict = code == OP_SEQ || code == OP_SNE;
+            let q = if strict || code == OP_EQ || code == OP_NE { quick_eq(a, b, strict) } else { -1 };
+            if q >= 0 {
+                return Val::Bool((q == 1) == (code == OP_SEQ || code == OP_EQ));
+            }
+            self.frames[fi].pc = pc;
+            return Val::Bool(self.compare(code, a, b));
+        }
+        self.frames[fi].pc = pc;
+        if code == OP_ADD {
+            return self.add_vals(a, b);
+        }
+        self.arith(code, a, b)
+    }
+
+    /// `a <cmp> b` for a compare-and-jump.
+    #[inline]
+    fn test(&mut self, cmp: int, a: &Val, b: &Val, pc: int, fi: usize) -> bool {
+        if let (Val::Num(x), Val::Num(y)) = (a, b) {
+            return match cmp {
+                OP_LT => x < y,
+                OP_GT => x > y,
+                OP_LE => x <= y,
+                OP_GE => x >= y,
+                OP_SEQ | OP_EQ => x == y,
+                _ => x != y,
+            };
+        }
+        let strict = cmp == OP_SEQ || cmp == OP_SNE;
+        let q = if strict || cmp == OP_EQ || cmp == OP_NE { quick_eq(a, b, strict) } else { -1 };
+        if q >= 0 {
+            return (q == 1) == (cmp == OP_SEQ || cmp == OP_EQ);
+        }
+        self.frames[fi].pc = pc;
+        self.compare(cmp, a, b)
+    }
+
     // ---- the interpreter
 
     /// Runs frames until the frame count falls back to `base`.
@@ -3002,6 +3152,157 @@ impl Vm {
                                     self.gc();
                                 }
                             }
+                            pc = op.a;
+                        }
+                    }
+                    OP_MOV_R => {
+                        let v = self.peek(op.b, bp, pi).clone();
+                        self.stack[(bp + op.a) as usize] = v;
+                    }
+                    OP_GET_PROP_R => {
+                        let x = pk_lo(op.b);
+                        let dst = pk_hi(op.b);
+                        let r = if x >= 0 {
+                            let v = &self.stack[(bp + x) as usize];
+                            let o = obj_of(v);
+                            let slot = if o >= 0 { self.ic_get(o, op.a, op.c, pi, pc) } else { -1 };
+                            if slot >= 0 {
+                                self.objs[o as usize].vals[slot as usize].clone()
+                            } else {
+                                let v = self.stack[(bp + x) as usize].clone();
+                                self.get_prop_ic(&v, op.a, op.c, pi, pc, fi)
+                            }
+                        } else {
+                            let v = self.opnd(x, bp, pi);
+                            self.get_prop_ic(&v, op.a, op.c, pi, pc, fi)
+                        };
+                        if dst >= 0 {
+                            self.stack[(bp + dst) as usize] = r;
+                            pc += 1;
+                        } else {
+                            self.stack.push(r);
+                        }
+                    }
+                    OP_SET_PROP_R => {
+                        let val = self.opnd(pk_lo(op.b), bp, pi);
+                        let target = self.opnd(pk_hi(op.b), bp, pi);
+                        let mut done = false;
+                        if let Val::Obj(o) = &target {
+                            let o = *o;
+                            let slot = self.ic_set(o, op.a, op.c, pi, pc);
+                            if slot >= 0 {
+                                self.put_slot(o, slot, val.clone());
+                                done = true;
+                            }
+                        }
+                        if !done {
+                            self.frames[fi].pc = pc;
+                            self.set(&target, op.a, val);
+                        }
+                    }
+                    OP_GET_ELEM_R => {
+                        // an array's element where the operands are
+                        let x = pk_hi(op.a);
+                        let y = pk_lo(op.a);
+                        let mut r = Val::Undef;
+                        let mut done = false;
+                        if let (Val::Obj(o), Val::Num(n)) = (self.peek(x, bp, pi), self.peek(y, bp, pi)) {
+                            let ob = &self.objs[*o as usize];
+                            if ob.class == C_ARRAY {
+                                let i = *n as int;
+                                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n {
+                                    r = ob.elems[i as usize].clone();
+                                    done = true;
+                                }
+                            }
+                        }
+                        if done {
+                            if x == OPND_STACK {
+                                self.stack.pop();
+                            }
+                        } else {
+                            let k = self.opnd(y, bp, pi);
+                            let v = self.opnd(x, bp, pi);
+                            r = self.get_elem_fast(&v, &k, pc, fi);
+                        }
+                        if op.b >= 0 {
+                            self.stack[(bp + op.b) as usize] = r;
+                            pc += 1;
+                        } else {
+                            self.stack.push(r);
+                        }
+                    }
+                    OP_SET_ELEM_R => {
+                        let val = self.opnd(op.b, bp, pi);
+                        let k = self.opnd(pk_lo(op.a), bp, pi);
+                        let target = self.opnd(pk_hi(op.a), bp, pi);
+                        self.set_elem_fast(&target, &k, &val, pc, fi);
+                    }
+                    OP_BIN_R => {
+                        // numbers where they are; y is never the stack
+                        let code = op.b % 256;
+                        let x = pk3_x(op.b);
+                        let y = pk3_y(op.b);
+                        let mut r = Val::Undef;
+                        let mut done = false;
+                        if let (Val::Num(p), Val::Num(q)) = (self.peek(x, bp, pi), self.peek(y, bp, pi)) {
+                            r = num_binary(code, *p, *q);
+                            done = true;
+                        }
+                        if done {
+                            if x == OPND_STACK {
+                                self.stack.pop();
+                            }
+                        } else {
+                            let b = self.opnd(y, bp, pi);
+                            let a = self.opnd(x, bp, pi);
+                            r = self.binary(code, &a, &b, pc, fi);
+                        }
+                        if op.a >= 0 {
+                            self.stack[(bp + op.a) as usize] = r;
+                            pc += 1;
+                        } else {
+                            self.stack.push(r);
+                        }
+                    }
+                    OP_CMP_JF_R => {
+                        let cmp = op.b % 256;
+                        let x = pk3_x(op.b);
+                        let y = pk3_y(op.b);
+                        let mut t = false;
+                        let mut done = false;
+                        if let (Val::Num(p), Val::Num(q)) = (self.peek(x, bp, pi), self.peek(y, bp, pi)) {
+                            t = num_test(cmp, *p, *q);
+                            done = true;
+                        }
+                        if done {
+                            if x == OPND_STACK {
+                                self.stack.pop();
+                            }
+                        } else {
+                            let b = self.opnd(y, bp, pi);
+                            let a = self.opnd(x, bp, pi);
+                            t = self.test(cmp, &a, &b, pc, fi);
+                        }
+                        if !t {
+                            if op.a < pc {
+                                self.frames[fi].pc = op.a;
+                                if self.gc_due() {
+                                    self.gc();
+                                }
+                            }
+                            pc = op.a;
+                        }
+                    }
+                    OP_JF_R => {
+                        let t = truthy(self.peek(op.b, bp, pi));
+                        if !t {
+                            pc = op.a;
+                        }
+                    }
+                    OP_JT_R => {
+                        let t = truthy(self.peek(op.b, bp, pi));
+                        if t {
                             pc = op.a;
                         }
                     }
@@ -3316,8 +3617,9 @@ impl Vm {
                             self.stack.push(val);
                         }
                     }
-                    OP_GET_METHOD => {
-                        let v = self.pop();
+                    OP_GET_METHOD | OP_GET_METHOD_R => {
+                        let v = if op.code == OP_GET_METHOD { self.pop() } else { self.opnd(pk_lo(op.b), bp, pi) };
+                        let flag = if op.code == OP_GET_METHOD { op.b } else { pk_hi(op.b) };
                         self.frames[fi].pc = pc;
                         let atom = op.a;
                         let mut f = Val::Undef;
@@ -3334,7 +3636,7 @@ impl Vm {
                         if !done {
                             f = self.get(&v, atom);
                         }
-                        if !self.throwing && op.b == 0 && !self.is_callable(&f) {
+                        if !self.throwing && flag == 0 && !self.is_callable(&f) {
                             let name = self.atom_str(atom);
                             self.throw_type(format!("{} is not a function", name).as_str());
                         }
@@ -3365,8 +3667,14 @@ impl Vm {
                             continue 'frames;
                         }
                     }
-                    OP_RETURN | OP_RETURN_UNDEF => {
-                        let mut v = if op.code == OP_RETURN { self.pop() } else { Val::Undef };
+                    OP_RETURN | OP_RETURN_UNDEF | OP_RETURN_R => {
+                        let mut v = if op.code == OP_RETURN {
+                            self.pop()
+                        } else if op.code == OP_RETURN_R {
+                            self.opnd(op.a, bp, pi)
+                        } else {
+                            Val::Undef
+                        };
                         let fr = self.frames.pop().unwrap();
                         if fr.construct && !is_obj(&v) {
                             if !matches!(v, Val::Undef) && self.protos[fr.proto as usize].derived {
@@ -5550,6 +5858,35 @@ pub fn wrap32(v: int) -> int {
         m - 4294967296
     } else {
         m
+    }
+}
+
+/// `x <code> y` of two numbers, OP_ADD … OP_GE.
+#[inline]
+pub fn num_binary(code: int, x: double, y: double) -> Val {
+    match code {
+        OP_ADD => Val::Num(x + y),
+        OP_SUB => Val::Num(x - y),
+        OP_MUL => Val::Num(x * y),
+        OP_LT => Val::Bool(x < y),
+        OP_GT => Val::Bool(x > y),
+        OP_LE => Val::Bool(x <= y),
+        OP_GE => Val::Bool(x >= y),
+        OP_SEQ | OP_EQ => Val::Bool(x == y),
+        OP_SNE | OP_NE => Val::Bool(x != y),
+        _ => Val::Num(arith_num(code, x, y)),
+    }
+}
+
+#[inline]
+pub fn num_test(cmp: int, x: double, y: double) -> bool {
+    match cmp {
+        OP_LT => x < y,
+        OP_GT => x > y,
+        OP_LE => x <= y,
+        OP_GE => x >= y,
+        OP_SEQ | OP_EQ => x == y,
+        _ => x != y,
     }
 }
 

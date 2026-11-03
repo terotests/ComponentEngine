@@ -25,7 +25,7 @@ use crate::vm::*;
 
 /// Bumped when the text, the ops or what they mean change: older texts
 /// are then not read.
-pub const UNIT_FORMAT: int = 2;
+pub const UNIT_FORMAT: int = 3;
 
 pub struct Unit {
     pub atom_names: Vec<String>,
@@ -67,6 +67,9 @@ pub fn atom_operand(code: int) -> int {
         || code == OP_DEFINE_METHOD
         || code == OP_GET_SUPER
         || code == OP_ADD_PROP_POP
+        || code == OP_GET_PROP_R
+        || code == OP_SET_PROP_R
+        || code == OP_GET_METHOD_R
     {
         return 1;
     }
@@ -413,6 +416,13 @@ pub fn decode(text: &str, input: &str) -> Unit {
     u
 }
 
+fn opnd_ok(v: int, nc: int, nslots: int) -> bool {
+    if v >= 0 {
+        return v < nslots;
+    }
+    v == OPND_STACK || -2 - v < nc
+}
+
 /// Every atom and closure operand in range (a damaged text must not index
 /// past the tables).
 fn valid(u: &Unit) -> bool {
@@ -427,6 +437,13 @@ fn valid(u: &Unit) -> bool {
             }
             if op.code == OP_CLOSURE && (op.a < 0 || op.a >= np) {
                 return false;
+            }
+            // register operands: a slot or a constant of this proto
+            if op.code >= OP_MOV_R && op.code <= OP_GET_METHOD_R {
+                let (x, y, z, dst) = reg_opnds(op.code, op.a, op.b);
+                if !opnd_ok(x, nc, p.nslots) || !opnd_ok(y, nc, p.nslots) || !opnd_ok(z, nc, p.nslots) || dst >= p.nslots || dst < OPND_STACK {
+                    return false;
+                }
             }
             if (op.code == OP_CONST || op.code == OP_SET_NAME || op.code == OP_CHECK_TDZ) && (op.a < 0 || op.a >= nc) {
                 return false;
