@@ -26,6 +26,16 @@ impl Vm {
         }
     }
 
+    /// The atom of the property op at pc (its stack op's operand).
+    pub fn ratom(&self, pi: usize, pc: int) -> int {
+        let op = self.protos[pi].code[pc as usize];
+        if op.code == OP_GET_LOCAL_PROP {
+            op.b
+        } else {
+            op.a
+        }
+    }
+
     /// Stack ops the register code runs on the window that `step` does
     /// not do (run() does them); true when the frame changed.
     pub fn win_op(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
@@ -134,13 +144,7 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        let a = self.rget(bp, w2).clone();
-                        let b = self.rget(bp, w3).clone();
-                        self.frames[fi].pc = pc + 1;
-                        let r = self.add_vals(&a, &b);
-                        if !self.throwing {
-                            self.stack[(bp + w1) as usize] = r;
-                        }
+                        self.r_add_slow(bp, fi, pc, w1, w2, w3);
                     }
                     R_SUB | R_MUL | R_ARITH => {
                         let code = if (w0 & 255) == R_SUB {
@@ -174,13 +178,7 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        let a = self.rget(bp, w2).clone();
-                        let b = self.rget(bp, w3).clone();
-                        self.frames[fi].pc = pc + 1;
-                        let r = self.arith(code, &a, &b);
-                        if !self.throwing {
-                            self.stack[(bp + w1) as usize] = r;
-                        }
+                        self.r_arith_slow(code, bp, fi, pc, w1, w2, w3);
                     }
                     R_CMP => {
                         let code = (w0 >> 8) & 255;
@@ -356,7 +354,8 @@ impl Vm {
                         }
                     }
                     R_GET_PROP | R_GET_THIS_PROP => {
-                        let c = self.protos[pi].code[pc as usize].c;
+                        // w3 is the inline cache; the atom is the stack op's
+                        let c = w3;
                         let mut o: int = -1;
                         if (w0 & 255) == R_GET_PROP {
                             if let Val::Obj(x) = self.rget(bp, w2) {
@@ -365,7 +364,6 @@ impl Vm {
                         } else if let Val::Obj(x) = &self.frames[fi].this_val {
                             o = *x;
                         }
-                        let mut done = false;
                         if o >= 0 && c >= 65536 && (c >> 16) == self.objs[o as usize].shape {
                             // the cache's shape: the slot without a call
                             let r = self.objs[o as usize].vals[(c & 65535) as usize].clone();
@@ -373,49 +371,17 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        if o >= 0 {
-                            let slot = self.ic_get(o, w3, c, pi, pc + 1);
-                            if slot >= 0 {
-                                let r = self.objs[o as usize].vals[slot as usize].clone();
-                                self.stack[(bp + w1) as usize] = r;
-                                done = true;
-                            } else if w3 == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, w3) < 0 {
-                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
-                                self.stack[(bp + w1) as usize] = r;
-                                done = true;
-                            }
-                        }
-                        if done {
+                        self.r_get_prop_slow(o, pi, rb, bp, fi, pc, w0, w1, w2);
+                    }
+                    R_SET_PROP => {
+                        let o = obj_of(self.rget(bp, w1));
+                        if o >= 0 && w3 >= 65536 && (w3 >> 16) == self.objs[o as usize].shape && ((w0 >> 8) & 255) == 0 {
+                            let val = self.rget(bp, w2).clone();
+                            self.put_slot(o, w3 & 65535, val);
                             pc = next;
                             continue;
                         }
-                        let v = if (w0 & 255) == R_GET_PROP { self.rget(bp, w2).clone() } else { self.frames[fi].this_val.clone() };
-                        self.frames[fi].pc = pc + 1;
-                        let r = self.get(&v, w3);
-                        if !self.throwing {
-                            self.stack[(bp + w1) as usize] = r;
-                        }
-                    }
-                    R_SET_PROP => {
-                        let val = self.rget(bp, w2).clone();
-                        let o = obj_of(self.rget(bp, w1));
-                        let mut done = false;
-                        if o >= 0 {
-                            let c = self.protos[pi].code[pc as usize].c;
-                            let slot = if c >= 65536 && (c >> 16) == self.objs[o as usize].shape { c & 65535 } else { self.ic_set(o, w3, c, pi, pc + 1) };
-                            if slot >= 0 {
-                                self.put_slot(o, slot, val.clone());
-                                done = true;
-                            }
-                        }
-                        if !done {
-                            let target = self.rget(bp, w1).clone();
-                            self.frames[fi].pc = pc + 1;
-                            self.set(&target, w3, val.clone());
-                        }
-                        if ((w0 >> 8) & 255) == 1 && !self.throwing {
-                            self.stack[(bp + w1) as usize] = val;
-                        }
+                        self.r_set_prop_slow(o, pi, rb, bp, fi, pc, w0, w1, w2, w3);
                     }
                     R_GET_ELEM => {
                         let mut r = Val::Undef;
@@ -480,35 +446,11 @@ impl Vm {
                             }
                         }
                         if !done {
-                            let target = self.rget(bp, w1).clone();
-                            let kv = self.rget(bp, w2).clone();
-                            self.frames[fi].pc = pc + 1;
-                            self.set_elem(&target, &kv, val);
+                            self.r_set_elem_slow(bp, fi, pc, w1, w2, val);
                         }
                     }
                     R_GET_METHOD => {
-                        let v = self.rget(bp, w2).clone();
-                        self.frames[fi].pc = pc + 1;
-                        let atom = w3;
-                        let mut f = Val::Undef;
-                        let mut done = false;
-                        if let Val::Obj(o) = &v {
-                            let o = *o;
-                            let slot = self.find(o, atom);
-                            if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
-                                f = self.objs[o as usize].vals[slot as usize].clone();
-                                done = true;
-                            }
-                        }
-                        if !done {
-                            f = self.get(&v, atom);
-                        }
-                        if !self.throwing && ((w0 >> 8) & 255) == 0 && !self.is_callable(&f) {
-                            let name = self.atom_str(atom);
-                            self.throw_type(format!("{} is not a function", name).as_str());
-                        }
-                        self.stack[(bp + w1) as usize] = f;
-                        self.stack[(bp + w1 + 1) as usize] = v;
+                        self.r_get_method(bp, fi, pc, w0, w1, w2, w3);
                     }
                     R_CALL => {
                         let argc = w2;
@@ -547,17 +489,8 @@ impl Vm {
                                 rb = self.protos[pi].rbase;
                                 continue;
                             }
-                            let nf = self.frames.len();
-                            self.stack.truncate((fpos + argc + 2) as usize);
-                            self.enter_function(fo, argc, false, Val::Undef);
-                            self.call_result(nf, fpos, dst, want);
-                            continue 'frames;
                         }
-                        let nf = self.frames.len();
-                        self.stack.truncate((fpos + argc + 2) as usize);
-                        if self.call_op(argc) {
-                            let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
-                            self.call_result(nf, fpos, dst, want);
+                        if self.r_call_slow(fo, fpos, argc, bp, w3, want) {
                             continue 'frames;
                         }
                         if self.throwing {
@@ -566,31 +499,20 @@ impl Vm {
                             }
                             continue 'frames;
                         }
-                        while self.stack.len() < want {
-                            self.stack.push(Val::Undef);
-                        }
-                        if w3 > 0 {
-                            let v = self.stack[fpos as usize].clone();
-                            self.stack[(bp + w3 - 1) as usize] = v;
-                        }
                         pc = next;
                         continue;
                     }
                     R_RET | R_RET_UNDEF => {
                         let mut v = if (w0 & 255) == R_RET { self.rget(bp, w1).clone() } else { Val::Undef };
-                        let fr = self.frames.pop().unwrap();
-                        if fr.construct && !is_obj(&v) {
-                            if !matches!(v, Val::Undef) && self.protos[fr.proto as usize].derived {
-                                self.frames.push(fr);
-                                self.frames[fi].pc = pc + 1;
-                                self.throw_type("Derived constructors may only return object or undefined");
+                        if self.frames[fi].construct && !is_obj(&v) {
+                            if self.r_ret_construct(&mut v, fi, pc) {
                                 if !self.unwind(base) {
                                     return;
                                 }
                                 continue 'frames;
                             }
-                            v = fr.this_val.clone();
                         }
+                        let fr = self.frames.pop().unwrap();
                         let depth = self.frames.len() as int;
                         while !self.handlers.is_empty() && self.handlers[self.handlers.len() - 1].frame >= depth {
                             self.handlers.pop();
@@ -651,38 +573,11 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        let op = self.protos[pi].code[pc as usize];
-                        let mut p2 = pc + 1;
-                        self.frames[fi].pc = p2;
-                        self.step(op, pi, bp, fi, &mut p2);
-                        if !self.throwing {
-                            let v = self.stack.pop().unwrap();
-                            self.stack[(bp + w1) as usize] = v;
-                        }
+                        self.r_step_push(pi, bp, fi, pc, w1);
                     }
                     R_ITER_NEXT => {
-                        let it = self.stack[(bp + w1) as usize].clone();
-                        let o = obj_of(&it);
-                        let src_obj = if o >= 0 { self.objs[o as usize].home } else { -1 };
-                        self.frames[fi].pc = pc + 1;
-                        loop {
-                            match self.iter_next(&it) {
-                                Some(v) => {
-                                    if src_obj >= 0 && self.objs[o as usize].class == C_ITER {
-                                        // a key deleted since the loop began is skipped
-                                        if !self.has_property(src_obj, &v) {
-                                            continue;
-                                        }
-                                    }
-                                    self.stack[(bp + w3) as usize] = v;
-                                }
-                                None => {
-                                    if !self.throwing {
-                                        npc = w2;
-                                    }
-                                }
-                            }
-                            break;
+                        if !self.r_iter_next(bp, fi, pc, w1, w3) && !self.throwing {
+                            npc = w2;
                         }
                     }
                     R_TYPEOF => {
@@ -791,39 +686,20 @@ impl Vm {
                         self.step(op, pi, bp, fi, &mut p2);
                     }
                     R_STEP_PUSH => {
-                        let op = self.protos[pi].code[pc as usize];
-                        let mut p2 = pc + 1;
-                        self.frames[fi].pc = p2;
-                        self.step(op, pi, bp, fi, &mut p2);
-                        if !self.throwing {
-                            let v = self.stack.pop().unwrap();
-                            self.stack[(bp + w1) as usize] = v;
-                        }
+                        self.r_step_push(pi, bp, fi, pc, w1);
                     }
                     R_WIN => {
-                        self.stack.truncate((bp + w1) as usize);
-                        let op = self.protos[pi].code[pc as usize];
-                        let mut p2 = pc + 1;
-                        self.frames[fi].pc = p2;
-                        let changed = self.win_op(op, pi, bp, fi, &mut p2);
+                        let p2 = self.r_win(pi, bp, fi, pc, w1, want);
                         if self.throwing {
                             if !self.unwind(base) {
                                 return;
                             }
                             continue 'frames;
                         }
-                        if changed {
+                        if p2 < 0 {
                             continue 'frames;
                         }
-                        while self.stack.len() < want {
-                            self.stack.push(Val::Undef);
-                        }
-                        if self.stack.len() > want {
-                            self.stack.truncate(want);
-                        }
-                        if p2 != pc + 1 {
-                            npc = p2;
-                        }
+                        npc = p2;
                     }
                     _ => {
                         self.throw_type("register code: unknown instruction");
@@ -839,6 +715,225 @@ impl Vm {
                 pc = npc;
             }
         }
+    }
+
+    #[inline(never)]
+    fn r_add_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+        let a = self.rget(bp, w2).clone();
+        let b = self.rget(bp, w3).clone();
+        self.frames[fi].pc = pc + 1;
+        let r = self.add_vals(&a, &b);
+        if !self.throwing {
+            self.stack[(bp + w1) as usize] = r;
+        }
+    }
+
+    #[inline(never)]
+    fn r_arith_slow(&mut self, code: int, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+        let a = self.rget(bp, w2).clone();
+        let b = self.rget(bp, w3).clone();
+        self.frames[fi].pc = pc + 1;
+        let r = self.arith(code, &a, &b);
+        if !self.throwing {
+            self.stack[(bp + w1) as usize] = r;
+        }
+    }
+
+    /// R_GET_PROP / R_GET_THIS_PROP past its inline cache.
+    #[inline(never)]
+    fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) {
+        let atom = self.ratom(pi, pc);
+        if o >= 0 {
+            let c = self.rcode[(rb + pc) as usize].c;
+            let slot = self.ic_get(o, atom, c, pi, pc + 1);
+            self.rcode[(rb + pc) as usize].c = self.protos[pi].code[pc as usize].c;
+            if slot >= 0 {
+                let r = self.objs[o as usize].vals[slot as usize].clone();
+                self.stack[(bp + w1) as usize] = r;
+                return;
+            }
+            if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                self.stack[(bp + w1) as usize] = r;
+                return;
+            }
+        }
+        let v = if (w0 & 255) == R_GET_PROP { self.rget(bp, w2).clone() } else { self.frames[fi].this_val.clone() };
+        self.frames[fi].pc = pc + 1;
+        let r = self.get(&v, atom);
+        if !self.throwing {
+            self.stack[(bp + w1) as usize] = r;
+        }
+    }
+
+    /// R_SET_PROP past its inline cache, or one that keeps its value.
+    #[inline(never)]
+    fn r_set_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+        let val = self.rget(bp, w2).clone();
+        let mut done = false;
+        if o >= 0 {
+            let slot = if w3 >= 65536 && (w3 >> 16) == self.objs[o as usize].shape {
+                w3 & 65535
+            } else {
+                let atom = self.ratom(pi, pc);
+                let s = self.ic_set(o, atom, w3, pi, pc + 1);
+                self.rcode[(rb + pc) as usize].c = self.protos[pi].code[pc as usize].c;
+                s
+            };
+            if slot >= 0 {
+                self.put_slot(o, slot, val.clone());
+                done = true;
+            }
+        }
+        if !done {
+            let target = self.rget(bp, w1).clone();
+            self.frames[fi].pc = pc + 1;
+            let atom = self.ratom(pi, pc);
+            self.set(&target, atom, val.clone());
+        }
+        if ((w0 >> 8) & 255) == 1 && !self.throwing {
+            self.stack[(bp + w1) as usize] = val;
+        }
+    }
+
+    #[inline(never)]
+    fn r_set_elem_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, val: Val) {
+        let target = self.rget(bp, w1).clone();
+        let kv = self.rget(bp, w2).clone();
+        self.frames[fi].pc = pc + 1;
+        self.set_elem(&target, &kv, val);
+    }
+
+    #[inline(never)]
+    fn r_get_method(&mut self, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+        let v = self.rget(bp, w2).clone();
+        self.frames[fi].pc = pc + 1;
+        let atom = w3;
+        let mut f = Val::Undef;
+        let mut done = false;
+        if let Val::Obj(o) = &v {
+            let o = *o;
+            let slot = self.find(o, atom);
+            if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
+                f = self.objs[o as usize].vals[slot as usize].clone();
+                done = true;
+            }
+        }
+        if !done {
+            f = self.get(&v, atom);
+        }
+        if !self.throwing && ((w0 >> 8) & 255) == 0 && !self.is_callable(&f) {
+            let name = self.atom_str(atom);
+            self.throw_type(format!("{} is not a function", name).as_str());
+        }
+        self.stack[(bp + w1) as usize] = f;
+        self.stack[(bp + w1 + 1) as usize] = v;
+    }
+
+    /// R_CALL of what is not a plain JS function: true when the frames
+    /// changed (the caller goes on through 'frames); else the result is in
+    /// its slot and the stack is the frame's again.
+    #[inline(never)]
+    fn r_call_slow(&mut self, fo: int, fpos: int, argc: int, bp: int, w3: int, want: usize) -> bool {
+        let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
+        let nf = self.frames.len();
+        self.stack.truncate((fpos + argc + 2) as usize);
+        if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION {
+            self.enter_function(fo, argc, false, Val::Undef);
+            self.call_result(nf, fpos, dst, want);
+            return true;
+        }
+        if self.call_op(argc) {
+            self.call_result(nf, fpos, dst, want);
+            return true;
+        }
+        if self.throwing {
+            return false;
+        }
+        while self.stack.len() < want {
+            self.stack.push(Val::Undef);
+        }
+        if w3 > 0 {
+            let v = self.stack[fpos as usize].clone();
+            self.stack[(bp + w3 - 1) as usize] = v;
+        }
+        false
+    }
+
+    /// A constructor's return of a non-object: `this`, or true when it
+    /// threw (a derived constructor's).
+    #[inline(never)]
+    fn r_ret_construct(&mut self, v: &mut Val, fi: usize, pc: int) -> bool {
+        if !matches!(*v, Val::Undef) && self.protos[self.frames[fi].proto as usize].derived {
+            self.frames[fi].pc = pc + 1;
+            self.throw_type("Derived constructors may only return object or undefined");
+            return true;
+        }
+        *v = self.frames[fi].this_val.clone();
+        false
+    }
+
+    #[inline(never)]
+    fn r_step_push(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int) {
+        let op = self.protos[pi].code[pc as usize];
+        let mut p2 = pc + 1;
+        self.frames[fi].pc = p2;
+        self.step(op, pi, bp, fi, &mut p2);
+        if !self.throwing {
+            let v = self.stack.pop().unwrap();
+            self.stack[(bp + w1) as usize] = v;
+        }
+    }
+
+    /// The next value of the iterator in slot w1 into slot w3; false when
+    /// it is done (or threw).
+    #[inline(never)]
+    fn r_iter_next(&mut self, bp: int, fi: usize, pc: int, w1: int, w3: int) -> bool {
+        let it = self.stack[(bp + w1) as usize].clone();
+        let o = obj_of(&it);
+        let src_obj = if o >= 0 { self.objs[o as usize].home } else { -1 };
+        self.frames[fi].pc = pc + 1;
+        loop {
+            match self.iter_next(&it) {
+                Some(v) => {
+                    if src_obj >= 0 && self.objs[o as usize].class == C_ITER {
+                        // a key deleted since the loop began is skipped
+                        if !self.has_property(src_obj, &v) {
+                            continue;
+                        }
+                    }
+                    self.stack[(bp + w3) as usize] = v;
+                    return true;
+                }
+                None => {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// A stack op on the frame's window: where to go on, -1 when the
+    /// frames changed.
+    #[inline(never)]
+    fn r_win(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int, want: usize) -> int {
+        self.stack.truncate((bp + w1) as usize);
+        let op = self.protos[pi].code[pc as usize];
+        let mut p2 = pc + 1;
+        self.frames[fi].pc = p2;
+        let changed = self.win_op(op, pi, bp, fi, &mut p2);
+        if self.throwing {
+            return 0;
+        }
+        if changed {
+            return -1;
+        }
+        while self.stack.len() < want {
+            self.stack.push(Val::Undef);
+        }
+        if self.stack.len() > want {
+            self.stack.truncate(want);
+        }
+        p2
     }
 
     /// A call of a JS function without `arguments`, a rest parameter or a

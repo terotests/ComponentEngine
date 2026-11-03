@@ -588,16 +588,16 @@ impl Tr {
                 }
             } else if c == OP_GET_PROP {
                 let o = self.opnd(d - 1);
-                self.result(i, R_GET_PROP, 0, 1, o, op.a);
+                self.result(i, R_GET_PROP, 0, 1, o, -1);
             } else if c == OP_GET_LOCAL_PROP {
-                self.result(i, R_GET_PROP, 0, 0, op.a, op.b);
+                self.result(i, R_GET_PROP, 0, 0, op.a, -1);
             } else if c == OP_GET_THIS_PROP {
-                self.result(i, R_GET_THIS_PROP, 0, 0, 0, op.a);
+                self.result(i, R_GET_THIS_PROP, 0, 0, 0, -1);
             } else if c == OP_SET_PROP_POP {
                 let o = self.opnd(d - 2);
                 let v = self.opnd(d - 1);
                 self.popn(2);
-                self.set(i, R_SET_PROP, 0, o, v, op.a);
+                self.set(i, R_SET_PROP, 0, o, v, -1);
                 next = i + 2;
             } else if c == OP_GET_ELEM {
                 let o = self.opnd(d - 2);
@@ -634,7 +634,7 @@ impl Tr {
                 self.mat(d - 2);
                 let v = self.opnd(d - 1);
                 self.popn(2);
-                self.set(i, R_SET_PROP, 1, ns + d - 2, v, op.a);
+                self.set(i, R_SET_PROP, 1, ns + d - 2, v, -1);
                 self.push_own(-1);
             } else if c == OP_TYPEOF {
                 let x = self.opnd(d - 1);
