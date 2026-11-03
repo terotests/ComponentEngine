@@ -22,7 +22,7 @@ use crate::value::*;
 use crate::vm::*;
 
 /// Bumped when the text or what it holds changes.
-pub const SNAPSHOT_FORMAT: int = 1;
+pub const SNAPSHOT_FORMAT: int = 2;
 
 struct Strings {
     index: HashMap<String, int>,

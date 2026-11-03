@@ -38,6 +38,11 @@ npm run cer:octane           # the Octane suites of Ranger's interp/bench/zoo_oc
   block that needs it, copied per iteration for `for (let …)`), or a
   property of the global object — and writes bytecode for a stack machine
   (`ops.rs`). `finally` blocks are inlined on the exits that cross them.
+  Loads of locals and constants wait in the compiler (`FnState.vcode`) and
+  become the operands of the op that uses them (the `OP_*_R` ops: property
+  and element reads and writes, arithmetic, compares and jumps, return), so
+  `x = o.p` and `i < n` are one op each. The operands are packed into an
+  op's `a` and `b` (`ops.rs`, `pk`), which keeps an op 32 bytes.
 - `vm.rs`: the interpreter loop and the heap. Objects live in an arena and a
   value is an index (`value.rs`); strings are shared `Rc<String>`. Property
   reads and writes carry an inline cache of the slot found last time, method
@@ -180,6 +185,13 @@ expression) and a fast path for `==` / `===` of objects, `null` and
 on the native build, and the Ranger builds gained as much). A tagged
 32-bit integer value was tried as well and measured no faster: the
 conversions it saves are a small part of the time.
+
+Register operands (2026-11) take about 20 % of the ops away. A numeric
+loop runs in a third of the time, property and call loops in about 80 %;
+a React update or a Chart.js draw, where calls, property lookups and the
+natives take the time, stays the same (callgrind: 814M instructions per
+React update against 794M before). Making `Op` 48 bytes for two operand
+fields cost every op as much as the operands saved, so they are packed.
 
 ## The Ranger targets
 
