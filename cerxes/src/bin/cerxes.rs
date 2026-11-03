@@ -26,9 +26,34 @@ fn main() {
     let path = args.get(1).expect(usage);
     let src = std::fs::read_to_string(path).expect("cannot read the script");
     let mut e = Engine::new();
+    // CERXES_RC=0: the collector alone frees objects; CERXES_RC_CHECK=1
+    // checks the reference counts (slow); CERXES_STATS=1 prints the heap
+    if std::env::var("CERXES_RC").map(|v| v == "0").unwrap_or(false) {
+        e.vm.rc_on = false;
+        e.vm.zct = Vec::new();
+        for o in e.vm.objs.iter_mut() {
+            o.zct = false;
+        }
+    }
+    e.vm.rc_check = std::env::var("CERXES_RC_CHECK").map(|v| v == "1").unwrap_or(false);
+    if std::env::var("CERXES_RC_CHECK").map(|v| v == "stress").unwrap_or(false) {
+        e.vm.rc_stress();
+    }
     e.set_syntax_for_path(path.as_str());
     e.set_echo(true);
     let r = e.eval(src.as_str());
+    if e.vm.rc_check || std::env::var("CERXES_STATS").is_ok() {
+        let v = &e.vm;
+        let free = v.objs.iter().filter(|o| o.free).count();
+        eprintln!(
+            "rc: errors={} freed={} reclaims={} gc_runs={} objs={} free={} live={} zct={} sizeof(JsObj)={}",
+            v.rc_errors, v.rc_freed, v.reclaims, v.gc_runs, v.objs.len(), free, v.live, v.zct.len(),
+            std::mem::size_of::<cerxes::value::JsObj>()
+        );
+        for l in v.rc_log.iter() {
+            eprintln!("{}", l);
+        }
+    }
     if !e.error.is_empty() {
         eprintln!("{}", r);
         std::process::exit(1);

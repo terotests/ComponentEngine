@@ -24,7 +24,18 @@ fn main() {
             // CER_THROUGH_TEXT=1: each probe from its unit's text, as a
             // host's code cache runs a script
             e.through_text = std::env::var("CER_THROUGH_TEXT").map(|v| v == "1").unwrap_or(false);
-            e.eval_typed(src.as_str())
+            // CER_RC_CHECK=1: a reclaim at every safe point, each checked
+            // against a full mark (Vm::rc_stress)
+            let check = std::env::var("CER_RC_CHECK").map(|v| v == "1").unwrap_or(false);
+            if check {
+                e.vm.rc_stress();
+            }
+            let r = e.eval_typed(src.as_str());
+            if check && e.vm.rc_errors > 0 {
+                format!("rc-error {}: {}", e.vm.rc_errors, e.vm.rc_log.join("; "))
+            } else {
+                r
+            }
         })
         .unwrap_or(String::from("panic"));
         println!("{}\t{}", name, r.replace('\\', "\\\\").replace('\n', "\\n"));

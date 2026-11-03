@@ -342,7 +342,7 @@ impl Vm {
         let sp = self.symbol_proto;
         let s = self.alloc(C_SYMBOL, sp);
         self.objs[s as usize].pos = atom;
-        self.objs[s as usize].prim = str_val(desc);
+        self.put_prim(s, str_val(desc));
         self.symbol_atoms.insert(atom, s);
         self.symbols.push(s);
         s
@@ -359,13 +359,13 @@ impl Vm {
         let ap = self.alloc(C_ARRAY, op);
         self.array_proto = ap;
         let sp = self.alloc(C_STRING, op);
-        self.objs[sp as usize].prim = str_val("");
+        self.put_prim(sp, str_val(""));
         self.string_proto = sp;
         let np = self.alloc(C_NUMBER, op);
-        self.objs[np as usize].prim = Val::Num(0.0);
+        self.put_prim(np, Val::Num(0.0));
         self.number_proto = np;
         let bp = self.alloc(C_BOOLEAN, op);
-        self.objs[bp as usize].prim = Val::Bool(false);
+        self.put_prim(bp, Val::Bool(false));
         self.boolean_proto = bp;
         let symp = self.alloc(C_OBJECT, op);
         self.symbol_proto = symp;
@@ -626,7 +626,7 @@ impl Vm {
             if k == 0 {
                 base_ctor = c;
             } else {
-                self.objs[c as usize].proto = base_ctor;
+                self.put_proto(c, base_ctor);
             }
             self.add_own(proto, A_NAME, str_val(n), P_HIDDEN);
             self.add_own(proto, A_MESSAGE, str_val(""), P_HIDDEN);
@@ -961,7 +961,7 @@ impl Vm {
         let rp = self.regexp_proto;
         let o = self.alloc(C_REGEXP, rp);
         self.objs[o as usize].func = idx;
-        self.objs[o as usize].prim = src;
+        self.put_prim(o, src);
         let re = &self.regexes[idx as usize];
         let (g, ic, m, sa, u, y) = (re.global, re.ignore_case, re.multiline, re.dot_all, re.unicode && !re.unicode_sets, re.sticky);
         self.add_own(o, A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
@@ -1445,7 +1445,7 @@ impl Vm {
 
     pub fn map_find(&mut self, m: int, k: &Val) -> int {
         let key = self.map_key(k);
-        match self.objs[m as usize].index.get(&key) {
+        match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
             Some(i) => *i,
             None => -1,
         }
@@ -1453,12 +1453,12 @@ impl Vm {
 
     pub fn map_set(&mut self, m: int, k: Val, v: Val) {
         let key = self.map_key(&k);
-        let found = match self.objs[m as usize].index.get(&key) {
+        let found = match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
             Some(i) => *i,
             None => -1,
         };
         if found >= 0 {
-            self.objs[m as usize].elems2[found as usize] = v;
+            self.put_elem2(m, found, v);
             return;
         }
         let pos = self.objs[m as usize].elems.len() as int;
@@ -1471,10 +1471,11 @@ impl Vm {
         } else {
             k
         };
-        self.objs[m as usize].elems.push(kk);
-        self.objs[m as usize].elems2.push(v);
-        self.objs[m as usize].marks.push(0);
-        self.objs[m as usize].index.insert(key, pos);
+        self.push_elem(m, kk);
+        self.push_elem2(m, v);
+        let c = self.cold_id(m) as usize;
+        self.colds[c].marks.push(0);
+        self.colds[c].index.insert(key, pos);
         self.objs[m as usize].pos += 1;
     }
 
@@ -1484,10 +1485,11 @@ impl Vm {
             return false;
         }
         let key = self.map_key(k);
-        self.objs[m as usize].index.remove(&key);
-        self.objs[m as usize].marks[i as usize] = 1;
-        self.objs[m as usize].elems[i as usize] = Val::Undef;
-        self.objs[m as usize].elems2[i as usize] = Val::Undef;
+        let c = self.cold_id(m) as usize;
+        self.colds[c].index.remove(&key);
+        self.colds[c].marks[i as usize] = 1;
+        self.put_elem(m, i, Val::Undef);
+        self.put_elem2(m, i, Val::Undef);
         self.objs[m as usize].pos -= 1;
         true
     }
@@ -1508,7 +1510,7 @@ impl Vm {
         let is_set = self.objs[m as usize].class == C_SET;
         let mut i: usize = 0;
         while i < n {
-            if self.objs[m as usize].marks[i] == 0 {
+            if self.colds[self.objs[m as usize].cold as usize].marks[i] == 0 {
                 let k = self.objs[m as usize].elems[i].clone();
                 let v = if is_set { k.clone() } else { self.objs[m as usize].elems2[i].clone() };
                 if kind == 0 {
@@ -1525,7 +1527,7 @@ impl Vm {
         let arr = self.new_array(items);
         let ip = if is_set { self.set_iter_proto } else { self.map_iter_proto };
         let it = self.alloc(C_ITER, ip);
-        self.objs[it as usize].env = arr;
+        self.put_env(it, arr);
         self.objs[it as usize].func = 0;
         Val::Obj(it)
     }
@@ -1671,7 +1673,7 @@ impl Vm {
         if i >= 0 && class == C_ARRAY && (i as usize) < self.objs[o as usize].elems.len() {
             // an element with attributes: keep it as a property instead
             let v = if has_value { value.clone() } else { self.objs[o as usize].elems[i as usize].clone() };
-            self.objs[o as usize].elems[i as usize] = v.clone();
+            self.put_elem(o, i, v.clone());
             return;
         }
         let v = if has_value {
@@ -2094,7 +2096,7 @@ impl Vm {
                     self.temp_roots.pop();
                     return Val::Undef;
                 }
-                self.objs[a as usize].elems.push(v);
+                self.push_elem(a, v);
                 self.json_ws(cs, pos);
                 if *pos < cs.len() && cs[*pos] == ',' {
                     *pos += 1;
@@ -2489,9 +2491,9 @@ impl Vm {
             }
         }
         self.objs[p as usize].pos = state;
-        self.objs[p as usize].prim = v.clone();
+        self.put_prim(p, v.clone());
         let reactions = self.objs[p as usize].elems.clone();
-        self.objs[p as usize].elems = Vec::new();
+        self.put_elems(p, Vec::new());
         let mut i: usize = 0;
         while i + 2 < reactions.len() {
             self.queue_reaction(reactions[i].clone(), reactions[i + 1].clone(), reactions[i + 2].clone(), state, v.clone());
@@ -2501,13 +2503,13 @@ impl Vm {
 
     pub fn resolving_functions(&mut self, p: int) -> (int, int) {
         let res = self.native_fn("", NF_PR_RESOLVE_FN, 1);
-        self.objs[res as usize].env = p;
+        self.put_env(res, p);
         let rej = self.native_fn("", NF_PR_REJECT_FN, 1);
-        self.objs[rej as usize].env = p;
+        self.put_env(rej, p);
         // shared "already resolved" flag: both point at one cell
         let cell = self.alloc(C_OBJECT, -1);
-        self.objs[res as usize].home = cell;
-        self.objs[rej as usize].home = cell;
+        self.put_home(res, cell);
+        self.put_home(rej, cell);
         (res, rej)
     }
 
@@ -2573,9 +2575,9 @@ impl Vm {
         let d = self.new_promise();
         let state = self.objs[p as usize].pos;
         if state == 0 {
-            self.objs[p as usize].elems.push(on_ok);
-            self.objs[p as usize].elems.push(on_err);
-            self.objs[p as usize].elems.push(Val::Obj(d));
+            self.push_elem(p, on_ok);
+            self.push_elem(p, on_err);
+            self.push_elem(p, Val::Obj(d));
         } else {
             let v = self.objs[p as usize].prim.clone();
             self.queue_reaction(on_ok, on_err, Val::Obj(d), state, v);
@@ -2690,7 +2692,7 @@ impl Vm {
             // the rest read and write `elems` directly: holes become undefined
             let t = obj_of(&this);
             if t >= 0 && self.objs[t as usize].class == C_ARRAY && !self.objs[t as usize].elems2.is_empty() {
-                self.objs[t as usize].elems2 = Vec::new();
+                self.put_elems2(t, Vec::new());
             }
         }
         if id == NF_HOST_SYNC {
@@ -2827,7 +2829,7 @@ impl Vm {
                 let n = self.to_number(&arg(&args, 0));
                 // TimeClip: + 0 turns -0 into +0
                 let v = if is_finite(n) && n.abs() <= 8.64e15 { to_integer(n) + 0.0 } else { nan() };
-                self.objs[o as usize].prim = Val::Num(v);
+                self.put_prim(o, Val::Num(v));
                 return Val::Num(v);
             }
             let f = if is_nan(t) { Vm::time_fields(0.0) } else { Vm::time_fields(t) };
@@ -2861,7 +2863,7 @@ impl Vm {
                 return Val::Num(nan());
             }
             let v = Vm::make_time(&parts);
-            self.objs[o as usize].prim = Val::Num(v);
+            self.put_prim(o, Val::Num(v));
             return Val::Num(v);
         }
         let a0 = arg(&args, 0);
@@ -3003,7 +3005,7 @@ impl Vm {
                 if construct {
                     let proto = self.proto_from(&new_target, self.string_proto);
                     let o = self.alloc(C_STRING, proto);
-                    self.objs[o as usize].prim = Val::Str(s);
+                    self.put_prim(o, Val::Str(s));
                     return Val::Obj(o);
                 }
                 Val::Str(s)
@@ -3020,7 +3022,7 @@ impl Vm {
                 if construct {
                     let proto = self.proto_from(&new_target, self.number_proto);
                     let o = self.alloc(C_NUMBER, proto);
-                    self.objs[o as usize].prim = Val::Num(n);
+                    self.put_prim(o, Val::Num(n));
                     return Val::Obj(o);
                 }
                 Val::Num(n)
@@ -3030,7 +3032,7 @@ impl Vm {
                 if construct {
                     let proto = self.proto_from(&new_target, self.boolean_proto);
                     let o = self.alloc(C_BOOLEAN, proto);
-                    self.objs[o as usize].prim = Val::Bool(b);
+                    self.put_prim(o, Val::Bool(b));
                     return Val::Obj(o);
                 }
                 Val::Bool(b)
@@ -3071,18 +3073,18 @@ impl Vm {
                             v.push(Val::Undef);
                             i += 1;
                         }
-                        self.objs[a as usize].elems = v;
+                        self.put_elems(a, v);
                         let mut h: Vec<Val> = Vec::new();
                         let mut j = 0;
                         while j < len {
                             h.push(Val::Bool(true));
                             j += 1;
                         }
-                        self.objs[a as usize].elems2 = h;
+                        self.put_elems2(a, h);
                         return Val::Obj(a);
                     }
                 }
-                self.objs[a as usize].elems = args;
+                self.put_elems(a, args);
                 Val::Obj(a)
             }
             NF_SYMBOL => {
@@ -3097,7 +3099,7 @@ impl Vm {
                 let sp = self.symbol_proto;
                 let s = self.alloc(C_SYMBOL, sp);
                 self.objs[s as usize].pos = atom;
-                self.objs[s as usize].prim = if matches!(a0, Val::Undef) { Val::Undef } else { string_val(desc) };
+                self.put_prim(s, if matches!(a0, Val::Undef) { Val::Undef } else { string_val(desc) });
                 self.symbol_atoms.insert(atom, s);
                 self.symbols.push(s);
                 Val::Obj(s)
@@ -3112,7 +3114,7 @@ impl Vm {
                 let sp = self.symbol_proto;
                 let s = self.alloc(C_SYMBOL, sp);
                 self.objs[s as usize].pos = atom;
-                self.objs[s as usize].prim = string_val(key.clone());
+                self.put_prim(s, string_val(key.clone()));
                 self.symbol_atoms.insert(atom, s);
                 self.symbols.push(s);
                 self.symbol_registry.insert(key, s);
@@ -3187,15 +3189,15 @@ impl Vm {
                 }
                 let fp = self.objs[obj_of(&this) as usize].proto;
                 let b = self.alloc(C_BOUND, fp);
-                self.objs[b as usize].env = obj_of(&this);
-                self.objs[b as usize].prim = a0;
+                self.put_env(b, obj_of(&this));
+                self.put_prim(b, a0);
                 let mut rest: Vec<Val> = Vec::new();
                 let mut i: usize = 1;
                 while i < args.len() {
                     rest.push(args[i].clone());
                     i += 1;
                 }
-                self.objs[b as usize].elems = rest;
+                self.put_elems(b, rest);
                 Val::Obj(b)
             }
             NF_FN_TOSTRING => {
@@ -3329,9 +3331,9 @@ impl Vm {
                                 }
                                 c = self.objs[c as usize].proto;
                             }
-                            self.objs[*o as usize].proto = po;
+                            self.put_proto(*o, po);
                         }
-                        Val::Null => self.objs[*o as usize].proto = -1,
+                        Val::Null => self.put_proto(*o, -1),
                         _ => {
                             self.throw_type("Object prototype may only be an Object or null");
                             return Val::Undef;
@@ -3531,7 +3533,7 @@ impl Vm {
                     }
                     let cur = self.get_elem(&Val::Obj(o), &k);
                     if let Val::Obj(a) = cur {
-                        self.objs[a as usize].elems.push(it);
+                        self.push_elem(a, it);
                     } else {
                         let a = self.new_array(vec![it]);
                         self.define_elem(o, &k, Val::Obj(a), 0);

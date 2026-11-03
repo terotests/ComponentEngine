@@ -62,7 +62,7 @@ impl Vm {
         self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
         let fc = self.get_obj(self.global, self.atoms["Function"], &Val::Obj(self.global));
         if let Val::Obj(f) = fc {
-            self.objs[gf as usize].proto = f;
+            self.put_proto(gf, f);
         }
         let agfp = self.async_generator_function_proto;
         let agf = self.native_fn("AsyncGeneratorFunction", NF_ASYNC_GENERATOR_FUNCTION, 1);
@@ -70,7 +70,7 @@ impl Vm {
         self.objs[agf as usize].has_proto_obj = true;
         self.add_prop(agfp, A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
         if let Val::Obj(f) = fc {
-            self.objs[agf as usize].proto = f;
+            self.put_proto(agf, f);
         }
         let afp = self.async_function_proto;
         let af = self.native_fn("AsyncFunction", NF_ASYNC_FUNCTION, 1);
@@ -78,7 +78,7 @@ impl Vm {
         self.objs[af as usize].has_proto_obj = true;
         self.add_prop(afp, A_CONSTRUCTOR, Val::Obj(af), P_HIDDEN | P_READONLY);
         if let Val::Obj(f) = fc {
-            self.objs[af as usize].proto = f;
+            self.put_proto(af, f);
         }
     }
 
@@ -194,7 +194,7 @@ impl Vm {
                 self.throw_type("#<Object> is not extensible");
                 return Val::Undef;
             }
-            self.objs[o as usize].proto = p;
+            self.put_proto(o, p);
             return Val::Undef;
         }
         if id == NF_RE_COMPILE {
@@ -223,13 +223,13 @@ impl Vm {
             let keys = self.keys_of(n);
             let vals = self.objs[n as usize].vals.clone();
             self.objs[o as usize].func = func;
-            self.objs[o as usize].prim = prim;
+            self.put_prim(o, prim);
             self.objs[o as usize].pos = pos;
             let mut i: usize = 0;
             while i < keys.len() {
                 let slot = self.find(o, keys[i]);
                 if slot >= 0 {
-                    self.objs[o as usize].vals[slot as usize] = vals[i].clone();
+                    self.put_slot(o, slot, vals[i].clone());
                 } else {
                     let attr = self.attr_at(n, i as int);
                     self.add_prop(o, keys[i], vals[i].clone(), attr);
@@ -238,7 +238,7 @@ impl Vm {
             }
             let li = self.find(o, crate::vm::A_LASTINDEX);
             if li >= 0 {
-                self.objs[o as usize].vals[li as usize] = Val::Num(0.0);
+                self.put_slot(o, li, Val::Num(0.0));
             }
             return this;
         }
@@ -294,7 +294,7 @@ impl Vm {
         if fo >= 0 && is_obj(&new_target) {
             let dflt = self.objs[fo as usize].proto;
             let p = self.proto_from(&new_target, dflt);
-            self.objs[fo as usize].proto = p;
+            self.put_proto(fo, p);
         }
         f
     }

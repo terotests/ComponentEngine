@@ -51,6 +51,12 @@ fn check_with(all: &[(String, String, String, String)], force: Option<&str>, thr
 
 /// … each case in an engine made from `snap` when given.
 fn check_in(all: &[(String, String, String, String)], force: Option<&str>, through_text: bool, snap: Option<&str>) -> Vec<String> {
+    check_rc(all, force, through_text, snap, false)
+}
+
+/// … with `rc`, a reclaim at every safe point, each checked against a full
+/// mark (Vm::rc_stress).
+fn check_rc(all: &[(String, String, String, String)], force: Option<&str>, through_text: bool, snap: Option<&str>, rc: bool) -> Vec<String> {
     let mut failed = Vec::new();
     for (mode, title, src, want) in all.iter() {
         let m = force.unwrap_or(mode.as_str());
@@ -60,10 +66,13 @@ fn check_in(all: &[(String, String, String, String)], force: Option<&str>, throu
         };
         assert!(e.error.is_empty(), "{}", e.error);
         e.through_text = through_text;
+        if rc {
+            e.vm.rc_stress();
+        }
         e.set_syntax(m == "tsx" || m == "ts", m == "tsx" || m == "jsx");
         let got = e.eval(src);
-        if &got != want {
-            failed.push(format!("[{} {}] {}\n  want: {}\n  got:  {}", m, title, src, want, got));
+        if &got != want || e.vm.rc_errors > 0 {
+            failed.push(format!("[{} {}] {}\n  want: {}\n  got:  {}\n  rc: {}", m, title, src, want, got, e.vm.rc_log.join("; ")));
         }
     }
     failed
@@ -107,6 +116,18 @@ fn cases_in_restored_engines() {
     let snap = Engine::new().snapshot();
     assert!(!snap.is_empty());
     let failed = check_in(&all, None, false, Some(snap.as_str()));
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
+}
+
+/// Every case with reference counting checked at every safe point, in new
+/// and in restored engines.
+#[test]
+fn cases_rc_checked() {
+    let mut all = cases("tests/cases.txt");
+    all.extend(cases("../cer/tests/cases.txt"));
+    let mut failed = check_rc(&all, None, false, None, true);
+    let snap = Engine::new().snapshot();
+    failed.extend(check_rc(&all, None, false, Some(snap.as_str()), true));
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
 }
 

@@ -3,7 +3,6 @@
 //! RegExp, Date, Map / Set, Promise and iterators.
 
 use ranger::prelude::*;
-use std::collections::HashMap;
 
 use crate::builtins::*;
 use crate::jsstr;
@@ -149,7 +148,7 @@ impl Vm {
                         return Val::Undef;
                     }
                     for a in args {
-                        self.objs[o as usize].elems.push(a);
+                        self.push_elem(o, a);
                     }
                     return Val::Num(self.objs[o as usize].elems.len() as double);
                 }
@@ -164,10 +163,9 @@ impl Vm {
             NF_AP_POP => {
                 let o = self.this_array(&this);
                 if self.is_array_obj(o) {
-                    return match self.objs[o as usize].elems.pop() {
-                        Some(v) => v,
-                        None => Val::Undef,
-                    };
+                    let v = self.pop_elem_val(o);
+                    self.dec(&v);
+                    return v;
                 }
                 let n = self.len_of(&Val::Obj(o));
                 if n == 0 {
@@ -185,13 +183,15 @@ impl Vm {
                 if self.objs[o as usize].elems.is_empty() {
                     return Val::Undef;
                 }
-                self.objs[o as usize].elems.remove(0)
+                let v = self.objs[o as usize].elems.remove(0);
+                self.dec(&v);
+                v
             }
             NF_AP_UNSHIFT => {
                 let o = self.this_array(&this);
                 let mut i: usize = 0;
                 for a in args {
-                    self.objs[o as usize].elems.insert(i, a);
+                    self.insert_elem(o, (i) as int, a);
                     i += 1;
                 }
                 Val::Num(self.objs[o as usize].elems.len() as double)
@@ -232,13 +232,15 @@ impl Vm {
                 let mut removed: Vec<Val> = Vec::new();
                 let mut k = 0;
                 while k < del {
-                    removed.push(self.objs[o as usize].elems.remove(s as usize));
+                    let v = self.objs[o as usize].elems.remove(s as usize);
+                    self.dec(&v);
+                    removed.push(v);
                     k += 1;
                 }
                 let mut i: usize = 2;
                 let mut at = s as usize;
                 while i < args.len() {
-                    self.objs[o as usize].elems.insert(at, args[i].clone());
+                    self.insert_elem(o, (at) as int, args[i].clone());
                     at += 1;
                     i += 1;
                 }
@@ -481,7 +483,7 @@ impl Vm {
                     return Val::Obj(a);
                 }
                 if self.objs[o as usize].class == C_ARRAY {
-                    self.objs[o as usize].elems = items;
+                    self.put_elems(o, items);
                 } else {
                     let mut i: int = 0;
                     for it in items {
@@ -505,9 +507,9 @@ impl Vm {
                             return Val::Undef;
                         }
                     } else {
-                        self.objs[o as usize].elems[i as usize] = a0.clone();
+                        self.put_elem(o, i, a0.clone());
                         if (i as usize) < self.objs[o as usize].elems2.len() {
-                            self.objs[o as usize].elems2[i as usize] = Val::Bool(false);
+                            self.put_elem2(o, i, Val::Bool(false));
                         }
                     }
                     i += 1;
@@ -530,7 +532,7 @@ impl Vm {
                             return Val::Undef;
                         }
                     } else {
-                        self.objs[o as usize].elems[(t + i) as usize] = items[(s + i) as usize].clone();
+                        self.put_elem(o, (t + i), items[(s + i) as usize].clone());
                     }
                     i += 1;
                 }
@@ -578,11 +580,11 @@ impl Vm {
                 let it = self.alloc(C_ITER, ip);
                 let class = self.objs[o as usize].class;
                 if class == C_ARRAY || class == C_ARGUMENTS {
-                    self.objs[it as usize].env = o;
+                    self.put_env(it, o);
                 } else {
                     let items = self.array_like_to_vec(&Val::Obj(o));
                     let a = self.new_array(items);
-                    self.objs[it as usize].env = a;
+                    self.put_env(it, a);
                 }
                 self.objs[it as usize].func = 0;
                 self.objs[it as usize].pos = if id == NF_AP_KEYS {
@@ -871,7 +873,7 @@ impl Vm {
                     let arr = self.new_array(out);
                     let ip = self.iter_proto;
                     let it = self.alloc(C_ITER, ip);
-                    self.objs[it as usize].env = arr;
+                    self.put_env(it, arr);
                     self.objs[it as usize].func = 0;
                     return Val::Obj(it);
                 }
@@ -957,7 +959,7 @@ impl Vm {
                 let arr = self.new_array(items);
                 let ip = self.string_iter_proto;
                 let it = self.alloc(C_ITER, ip);
-                self.objs[it as usize].env = arr;
+                self.put_env(it, arr);
                 self.objs[it as usize].func = 0;
                 Val::Obj(it)
             }
@@ -1150,7 +1152,7 @@ impl Vm {
                     let rp = self.regexp_proto;
                     let proto = self.proto_from(&new_target, rp);
                     if proto != rp {
-                        self.objs[obj_of(&r) as usize].proto = proto;
+                        self.put_proto(obj_of(&r), proto);
                     }
                 }
                 r
@@ -1225,7 +1227,7 @@ impl Vm {
                 };
                 let proto = self.proto_from(&new_target, self.date_proto);
                 let d = self.alloc(C_DATE, proto);
-                self.objs[d as usize].prim = Val::Num(t);
+                self.put_prim(d, Val::Num(t));
                 Val::Obj(d)
             }
             NF_DATE_NOW => Val::Num(now_ms().floor()),
@@ -1369,10 +1371,9 @@ impl Vm {
                     NF_MP_HAS => Val::Bool(self.map_find(o, &a0) >= 0),
                     NF_MP_DELETE => Val::Bool(self.map_delete(o, &a0)),
                     NF_MP_CLEAR => {
-                        self.objs[o as usize].elems = Vec::new();
-                        self.objs[o as usize].elems2 = Vec::new();
-                        self.objs[o as usize].marks = Vec::new();
-                        self.objs[o as usize].index = HashMap::new();
+                        self.put_elems(o, Vec::new());
+                        self.put_elems2(o, Vec::new());
+                        self.free_cold(o);
                         self.objs[o as usize].pos = 0;
                         Val::Undef
                     }
@@ -1384,7 +1385,7 @@ impl Vm {
                         let is_set = self.objs[o as usize].class == C_SET;
                         let mut i: usize = 0;
                         while i < self.objs[o as usize].elems.len() {
-                            if self.objs[o as usize].marks[i] == 0 {
+                            if self.colds[self.objs[o as usize].cold as usize].marks[i] == 0 {
                                 let k = self.objs[o as usize].elems[i].clone();
                                 let v = if is_set { k.clone() } else { self.objs[o as usize].elems2[i].clone() };
                                 self.call_value(a0.clone(), a1.clone(), vec![v, k, this.clone()]);
@@ -1412,7 +1413,7 @@ impl Vm {
                 }
                 let p = self.new_promise();
                 let proto = self.proto_from(&new_target, self.promise_proto);
-                self.objs[p as usize].proto = proto;
+                self.put_proto(p, proto);
                 let (res, rej) = self.resolving_functions(p);
                 self.temp_roots.push(Val::Obj(p));
                 self.call_value(a0, Val::Undef, vec![Val::Obj(res), Val::Obj(rej)]);

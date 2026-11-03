@@ -540,7 +540,7 @@ impl Vm {
         }
         let bp = self.bigint_proto;
         let o = self.alloc(C_BIGINT, bp);
-        self.objs[o as usize].prim = str_val(s);
+        self.put_prim(o, str_val(s));
         self.bigints.insert(String::from(s), o);
         self.symbols.push(o);
         Val::Obj(o)

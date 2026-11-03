@@ -45,3 +45,22 @@ fn cases_txt() {
     }
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
 }
+
+/// The same cases with a reclaim at every safe point, each checked against
+/// a full mark: reference counting frees nothing a script can still reach
+/// (Vm::rc_stress).
+#[test]
+fn cases_txt_rc_checked() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases.txt")).unwrap();
+    let all = parse(&text);
+    let mut failed = Vec::new();
+    for (title, src, want) in all.iter() {
+        let mut e = Engine::new();
+        e.vm.rc_stress();
+        let got = e.eval(src);
+        if &got != want || e.vm.rc_errors > 0 {
+            failed.push(format!("[{}]\n  want: {}\n  got:  {}\n  rc: {}", title, want, got, e.vm.rc_log.join("; ")));
+        }
+    }
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
+}

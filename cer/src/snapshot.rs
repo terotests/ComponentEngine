@@ -216,8 +216,9 @@ pub fn snapshot(vm: &Vm) -> String {
         put_ints(&mut b, &vm.shapes[o.shape as usize].attrs);
         put_vals(&mut b, &mut st, &o.elems);
         put_vals(&mut b, &mut st, &o.elems2);
-        put_num(&mut b, o.nums.len() as int);
-        for x in o.nums.iter() {
+        let cold = &vm.colds[o.cold as usize];
+        put_num(&mut b, cold.nums.len() as int);
+        for x in cold.nums.iter() {
             put_number(&mut b, *x);
         }
         put_num(&mut b, o.func);
@@ -229,12 +230,12 @@ pub fn snapshot(vm: &Vm) -> String {
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
         if o.class == C_MAP || o.class == C_SET {
-            put_num(&mut b, o.index.len() as int);
-            for (k, v) in o.index.iter() {
+            put_num(&mut b, cold.index.len() as int);
+            for (k, v) in cold.index.iter() {
                 put_num(&mut b, *k);
                 put_num(&mut b, *v);
             }
-            put_ints(&mut b, &o.marks);
+            put_ints(&mut b, &cold.marks);
         }
     }
     put_ints(&mut b, &vm.free_list);
@@ -401,6 +402,11 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.objs = Vec::new();
+    vm.colds = Vec::new();
+    vm.colds.push(Cold::new());
+    vm.free_colds = Vec::new();
+    vm.zct = Vec::new();
+    vm.freed = Vec::new();
     vm.shapes = Vec::new();
     vm.shapes.push(Shape::new());
     vm.free_shapes = Vec::new();
@@ -422,11 +428,14 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         let attrs = get_ints(&mut r);
         o.elems = get_vals(&mut r, &strs);
         o.elems2 = get_vals(&mut r, &strs);
+        let mut cold = Cold::new();
+        let mut has_cold = false;
         let nn = r.num();
         let mut k: int = 0;
         while k < nn && !r.bad {
             let x = get_val(&mut r, &strs);
-            o.nums.push(match x {
+            has_cold = true;
+            cold.nums.push(match x {
                 Val::Num(d) => d,
                 _ => 0.0,
             });
@@ -446,10 +455,15 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             while j < ni && !r.bad {
                 let k = r.num();
                 let v = r.num();
-                o.index.insert(k, v);
+                cold.index.insert(k, v);
                 j += 1;
             }
-            o.marks = get_ints(&mut r);
+            cold.marks = get_ints(&mut r);
+            has_cold = true;
+        }
+        if has_cold {
+            o.cold = vm.colds.len() as int;
+            vm.colds.push(cold);
         }
         if keys.len() != vals.len() || keys.len() != attrs.len() {
             r.bad = true;
@@ -460,7 +474,10 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             let oi = (vm.objs.len() as int) - 1;
             let mut j: usize = 0;
             while j < keys.len() {
-                vm.add_own(oi, keys[j], vals[j].clone(), attrs[j]);
+                // the value straight in: the objects it names may come
+                // later, and recount() counts them at the end
+                let slot = vm.add_own(oi, keys[j], Val::Undef, attrs[j]);
+                vm.objs[oi as usize].vals[slot as usize] = vals[j].clone();
                 j += 1;
             }
         }
@@ -579,6 +596,8 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         return false;
     }
     vm.find_setters();
+    // the counts are not in the text: made again from the heap
+    vm.recount();
     true
 }
 

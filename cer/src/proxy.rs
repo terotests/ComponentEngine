@@ -134,8 +134,8 @@ impl Vm {
                 return Val::Undef;
             }
             let p = self.alloc(C_PROXY, -1);
-            self.objs[p as usize].env = t;
-            self.objs[p as usize].home = h;
+            self.put_env(p, t);
+            self.put_home(p, h);
             if self.is_callable(&a0) {
                 self.objs[p as usize].pos = 1;
             }
@@ -147,8 +147,8 @@ impl Vm {
         if id == NF_PROXY_REVOKE {
             let p = obj_of(&a0);
             if self.is_proxy(p) {
-                self.objs[p as usize].env = -1;
-                self.objs[p as usize].home = -1;
+                self.put_env(p, -1);
+                self.put_home(p, -1);
             }
             return Val::Undef;
         }

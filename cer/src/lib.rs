@@ -9,7 +9,8 @@
 //!
 //! The pipeline: `lexer` → `parser` (a tree in an arena) → `compiler`
 //! (scopes, closures captured into scope objects, bytecode for a stack
-//! machine) → `vm` (objects in an arena with a mark-and-sweep collector,
+//! machine) → `vm` (objects in an arena, reference counted, with a
+//! mark-and-sweep collector for cycles,
 //! inline caches for property reads and writes). `builtins` / `builtins2`
 //! hold the standard library, `regex` a backtracking regular expression
 //! engine.

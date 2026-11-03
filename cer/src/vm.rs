@@ -121,6 +121,30 @@ impl HostSync for NoHostSync {
 pub struct Vm {
     pub objs: Vec<JsObj>,
     pub free_list: Vec<int>,
+    /// the objects' Colds (value.rs); 0 is the empty one, never written
+    pub colds: Vec<Cold>,
+    pub free_colds: Vec<int>,
+    /// the objects whose count is 0 (JsObj.rc): garbage unless a root
+    /// holds one (Vm::reclaim)
+    pub zct: Vec<int>,
+    /// reclaim runs when zct grows past this, at least zct_min (ZCT_MIN;
+    /// tests make it 1: a reclaim at every safe point)
+    pub zct_limit: int,
+    pub zct_min: int,
+    /// slots reclaim freed, reused after the next reclaim or collection
+    pub freed: Vec<int>,
+    /// objects in use: allocated and not yet freed
+    pub live: int,
+    /// reference counting frees objects (false: only the collector)
+    pub rc_on: bool,
+    /// tests: every reclaim checks against a full mark that it frees only
+    /// unreachable objects, and every collection that no count was low;
+    /// rc_errors counts what was wrong
+    pub rc_check: bool,
+    pub rc_errors: int,
+    pub rc_log: Vec<String>,
+    pub rc_freed: int,
+    pub reclaims: int,
     /// object shapes (value.rs); 0 is the empty one
     pub shapes: Vec<Shape>,
     /// owned shapes of freed objects, for reuse
@@ -308,6 +332,19 @@ impl Vm {
         let mut vm = Vm {
             objs: Vec::new(),
             free_list: Vec::new(),
+            colds: Vec::new(),
+            free_colds: Vec::new(),
+            zct: Vec::new(),
+            zct_limit: ZCT_MIN,
+            zct_min: ZCT_MIN,
+            freed: Vec::new(),
+            live: 0,
+            rc_on: true,
+            rc_check: false,
+            rc_errors: 0,
+            rc_log: Vec::new(),
+            rc_freed: 0,
+            reclaims: 0,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             protos: Vec::new(),
@@ -392,6 +429,7 @@ impl Vm {
             host_sync_set: false,
         };
         vm.shapes.push(Shape::new());
+        vm.colds.push(Cold::new());
         for n in first_atoms() {
             vm.intern(n.as_str());
         }
@@ -614,7 +652,7 @@ impl Vm {
     pub fn add_own(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
         let sh = self.objs[o as usize].shape;
         if self.shapes[sh as usize].owned {
-            self.objs[o as usize].vals.push(v);
+            self.push_val(o, v);
             return self.shapes[sh as usize].push(atom, attr);
         }
         let slot = self.shapes[sh as usize].keys.len() as int;
@@ -641,7 +679,7 @@ impl Vm {
                 // a dictionary
                 self.own_shape(o);
                 let sh2 = self.objs[o as usize].shape;
-                self.objs[o as usize].vals.push(v);
+                self.push_val(o, v);
                 return self.shapes[sh2 as usize].push(atom, attr);
             }
             let mut ns = self.shapes[sh as usize].copy();
@@ -659,7 +697,7 @@ impl Vm {
             }
         }
         self.objs[o as usize].shape = next;
-        self.objs[o as usize].vals.push(v);
+        self.push_val(o, v);
         slot
     }
 
@@ -694,7 +732,7 @@ impl Vm {
         self.own_shape(o);
         let sh = self.objs[o as usize].shape;
         self.shapes[sh as usize].remove(slot);
-        self.objs[o as usize].vals.remove(slot as usize);
+        self.remove_val(o, slot);
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
@@ -793,17 +831,27 @@ impl Vm {
 
     pub fn alloc(&mut self, class: int, proto: int) -> int {
         self.alloc_count += 1;
-        if !self.free_list.is_empty() {
+        self.live += 1;
+        if proto >= 0 {
+            self.objs[proto as usize].rc += 1;
+        }
+        let i = if !self.free_list.is_empty() {
             let i = self.free_list.pop().unwrap();
             let o = &mut self.objs[i as usize];
             o.class = class;
             o.proto = proto;
             o.free = false;
             o.marked = false;
-            return i;
+            i
+        } else {
+            self.objs.push(JsObj::new(class, proto));
+            (self.objs.len() as int) - 1
+        };
+        if self.rc_on {
+            self.objs[i as usize].zct = true;
+            self.zct.push(i);
         }
-        self.objs.push(JsObj::new(class, proto));
-        (self.objs.len() as int) - 1
+        i
     }
 
     pub fn new_object(&mut self) -> int {
@@ -814,7 +862,7 @@ impl Vm {
     pub fn new_array(&mut self, elems: Vec<Val>) -> int {
         let p = self.array_proto;
         let a = self.alloc(C_ARRAY, p);
-        self.objs[a as usize].elems = elems;
+        self.put_elems(a, elems);
         a
     }
 
@@ -1073,14 +1121,14 @@ impl Vm {
                 if self.objs[*o as usize].class == C_BIGINT {
                     let p = self.bigint_proto;
                     let b = self.alloc(C_OBJECT, p);
-                    self.objs[b as usize].prim = v.clone();
+                    self.put_prim(b, v.clone());
                     return b;
                 }
                 if self.objs[*o as usize].class == C_SYMBOL {
                     // a Symbol object: the symbol in prim
                     let p = self.symbol_proto;
                     let b = self.alloc(C_OBJECT, p);
-                    self.objs[b as usize].prim = v.clone();
+                    self.put_prim(b, v.clone());
                     return b;
                 }
                 *o
@@ -1092,19 +1140,19 @@ impl Vm {
             Val::Bool(_) => {
                 let p = self.boolean_proto;
                 let o = self.alloc(C_BOOLEAN, p);
-                self.objs[o as usize].prim = v.clone();
+                self.put_prim(o, v.clone());
                 o
             }
             Val::Num(_) => {
                 let p = self.number_proto;
                 let o = self.alloc(C_NUMBER, p);
-                self.objs[o as usize].prim = v.clone();
+                self.put_prim(o, v.clone());
                 o
             }
             Val::Str(_) => {
                 let p = self.string_proto;
                 let o = self.alloc(C_STRING, p);
-                self.objs[o as usize].prim = v.clone();
+                self.put_prim(o, v.clone());
                 o
             }
         }
@@ -1536,7 +1584,7 @@ impl Vm {
         if slot >= 0 {
             let attr = self.attr_at(o, slot);
             if attr == 0 {
-                self.objs[o as usize].vals[slot as usize] = v;
+                self.put_slot(o, slot, v);
                 return;
             }
             if (attr & P_ACCESSOR) != 0 {
@@ -1557,7 +1605,7 @@ impl Vm {
                 }
                 return;
             }
-            self.objs[o as usize].vals[slot as usize] = v;
+            self.put_slot(o, slot, v);
             return;
         }
         let class = self.objs[o as usize].class;
@@ -1607,14 +1655,14 @@ impl Vm {
             return;
         }
         if len < cur {
-            self.objs[o as usize].elems.truncate(len as usize);
+            self.cut_elems(o, len);
             if self.objs[o as usize].elems2.len() > len as usize {
-                self.objs[o as usize].elems2.truncate(len as usize);
+                self.cut_elems2(o, len);
             }
         } else {
             let mut i = cur;
             while i < len {
-                self.objs[o as usize].elems.push(Val::Undef);
+                self.push_elem(o, Val::Undef);
                 i += 1;
             }
             let mut h = cur;
@@ -1658,7 +1706,7 @@ impl Vm {
                     }
                     return;
                 }
-                self.objs[o as usize].elems[i as usize] = v;
+                self.put_elem(o, i, v);
                 if class == C_ARRAY && !self.objs[o as usize].elems2.is_empty() {
                     self.clear_hole(o, i);
                 }
@@ -1667,10 +1715,10 @@ impl Vm {
             if class == C_ARRAY && self.objs[o as usize].extensible && i < len + 50000000 {
                 let mut k = len;
                 while k < i {
-                    self.objs[o as usize].elems.push(Val::Undef);
+                    self.push_elem(o, Val::Undef);
                     k += 1;
                 }
-                self.objs[o as usize].elems.push(v);
+                self.push_elem(o, v);
                 if i > len {
                     let mut h = len;
                     while h < i {
@@ -1716,7 +1764,7 @@ impl Vm {
     pub fn define(&mut self, o: int, atom: int, v: Val, attr: int) {
         let slot = self.find(o, atom);
         if slot >= 0 {
-            self.objs[o as usize].vals[slot as usize] = v;
+            self.put_slot(o, slot, v);
             self.set_attr(o, slot, attr);
         } else {
             self.add_own(o, atom, v, attr);
@@ -1755,16 +1803,16 @@ impl Vm {
         }
         if pair < 0 {
             pair = self.alloc(C_ACCESSOR, -1);
-            self.objs[pair as usize].elems = vec![Val::Undef, Val::Undef];
+            self.put_elems(pair, vec![Val::Undef, Val::Undef]);
             let attr = P_ACCESSOR | if hidden { P_HIDDEN } else { 0 };
             if slot >= 0 {
-                self.objs[o as usize].vals[slot as usize] = Val::Obj(pair);
+                self.put_slot(o, slot, Val::Obj(pair));
                 self.set_attr(o, slot, attr);
             } else {
                 self.add_own(o, atom, Val::Obj(pair), attr);
             }
         }
-        self.objs[pair as usize].elems[which as usize] = f;
+        self.put_elem(pair, which, f);
     }
 
     pub fn has_property(&mut self, o: int, k: &Val) -> bool {
@@ -1871,9 +1919,9 @@ impl Vm {
             let len = self.objs[o as usize].elems.len() as int;
             if i < len {
                 if i == len - 1 && class == C_ARGUMENTS {
-                    self.objs[o as usize].elems.pop();
+                    self.pop_elem(o);
                 } else {
-                    self.objs[o as usize].elems[i as usize] = Val::Undef;
+                    self.put_elem(o, i, Val::Undef);
                     if class == C_ARRAY {
                         self.mark_hole(o, i);
                     }
@@ -2416,14 +2464,14 @@ impl Vm {
             }
             let p = self.object_proto;
             args_obj = self.alloc(C_ARGUMENTS, p);
-            self.objs[args_obj as usize].elems = items;
+            self.put_elems(args_obj, items);
             if strict {
                 // a strict function's arguments.callee throws
                 // non-configurable, so the shared pair never changes
                 if self.callee_pair < 0 {
                     let th = self.thrower;
                     let pair = self.alloc(C_ACCESSOR, -1);
-                    self.objs[pair as usize].elems = vec![Val::Obj(th), Val::Obj(th)];
+                    self.put_elems(pair, vec![Val::Obj(th), Val::Obj(th)]);
                     self.roots.push(pair);
                     self.callee_pair = pair;
                     self.any_setter = true;
@@ -2477,7 +2525,7 @@ impl Vm {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
             while i < env_size {
-                self.objs[e as usize].elems.push(Val::Undef);
+                self.push_elem(e, Val::Undef);
                 i += 1;
             }
             env = e;
@@ -2535,7 +2583,7 @@ impl Vm {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
             while i < env_size {
-                self.objs[e as usize].elems.push(Val::Undef);
+                self.push_elem(e, Val::Undef);
                 i += 1;
             }
             env = e;
@@ -2617,17 +2665,17 @@ impl Vm {
         let fi = self.frames.len() - 1;
         let env = self.frames[fi].env;
         self.objs[f as usize].func = pi;
-        self.objs[f as usize].env = env;
+        self.put_env(f, env);
         if self.protos[pi as usize].arrow {
             let t = self.frames[fi].this_val.clone();
-            self.objs[f as usize].prim = t;
+            self.put_prim(f, t);
             let home = self.objs[self.frames[fi].fobj as usize].home;
-            self.objs[f as usize].home = home;
+            self.put_home(f, home);
             if self.protos[pi as usize].lexical_ctor {
                 let nt = self.frames[fi].new_target.clone();
                 let owner = self.ctor_of_frame(fi);
-                self.objs[f as usize].elems2.push(nt);
-                self.objs[f as usize].elems2.push(Val::Obj(owner));
+                self.push_elem2(f, nt);
+                self.push_elem2(f, Val::Obj(owner));
             }
         }
         f
@@ -2642,7 +2690,7 @@ impl Vm {
                 if obj_of(&f) == self.array_values_fn || class == C_ARGUMENTS {
                     let ip = self.iter_proto;
                     let it = self.alloc(C_ITER, ip);
-                    self.objs[it as usize].env = *o;
+                    self.put_env(it, *o);
                     self.objs[it as usize].func = 0;
                     return Val::Obj(it);
                 }
@@ -2658,7 +2706,7 @@ impl Vm {
             let arr = self.new_array(items);
             let ip = self.iter_proto;
             let it = self.alloc(C_ITER, ip);
-            self.objs[it as usize].env = arr;
+            self.put_env(it, arr);
             self.objs[it as usize].func = 0;
             return Val::Obj(it);
         }
@@ -2694,7 +2742,7 @@ impl Vm {
             }
             let len = self.objs[src as usize].elems.len() as int;
             if i >= len {
-                self.objs[o as usize].env = -1;
+                self.put_env(o, -1);
                 return None;
             }
             self.objs[o as usize].func = i + 1;
@@ -2869,7 +2917,7 @@ impl Vm {
                     OP_SET_ENV => {
                         let e = self.get_env(op.a);
                         let v = self.stack[self.stack.len() - 1].clone();
-                        self.objs[e as usize].elems[op.b as usize] = v;
+                        self.put_elem(e, op.b, v);
                     }
                     OP_NOT => {
                         let v = self.pop();
@@ -3178,7 +3226,7 @@ impl Vm {
                             let o = *o;
                             let slot = self.ic_set(o, atom, op.c, pi, pc);
                             if slot >= 0 {
-                                self.objs[o as usize].vals[slot as usize] = val.clone();
+                                self.put_slot(o, slot, val.clone());
                                 done = true;
                             }
                         }
@@ -3219,10 +3267,15 @@ impl Vm {
                         let target = self.pop();
                         let mut done = false;
                         if let (Val::Obj(o), Val::Num(n)) = (&target, &k) {
+                            if let Val::Obj(x) = val {
+                                self.objs[x as usize].rc += 1;
+                            }
                             let ob = &mut self.objs[*o as usize];
+                            let mut old: int = -1;
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
                                 if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n && ob.pos != 2 {
+                                    old = obj_of(&ob.elems[i as usize]);
                                     ob.elems[i as usize] = val.clone();
                                     if (i as usize) < ob.elems2.len() {
                                         // the element is no longer a hole
@@ -3233,6 +3286,11 @@ impl Vm {
                                     ob.elems.push(val.clone());
                                     done = true;
                                 }
+                            }
+                            if done {
+                                self.dec_o(old);
+                            } else {
+                                self.dec(&val);
                             }
                         }
                         if !done {
@@ -3399,16 +3457,16 @@ impl Vm {
     pub fn mark_hole(&mut self, o: int, i: int) {
         let n = self.objs[o as usize].elems.len();
         while self.objs[o as usize].elems2.len() < n {
-            self.objs[o as usize].elems2.push(Val::Bool(false));
+            self.push_elem2(o, Val::Bool(false));
         }
         if (i as usize) < n {
-            self.objs[o as usize].elems2[i as usize] = Val::Bool(true);
+            self.put_elem2(o, i, Val::Bool(true));
         }
     }
 
     fn clear_hole(&mut self, o: int, i: int) {
         if (i as usize) < self.objs[o as usize].elems2.len() {
-            self.objs[o as usize].elems2[i as usize] = Val::Bool(false);
+            self.put_elem2(o, i, Val::Bool(false));
         }
     }
 
@@ -3427,7 +3485,7 @@ impl Vm {
     }
 
     pub fn gc_due(&self) -> bool {
-        self.alloc_count >= self.gc_threshold && self.native_depth == 0
+        (self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit) && self.native_depth == 0
     }
 
     /// The calling part of OP_CALL; true when a frame was pushed or the
@@ -3516,7 +3574,7 @@ impl Vm {
                         let mut hit = false;
                         if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.objs[tobj as usize].elems2.is_empty() {
                             let a = self.stack[bp as usize].clone();
-                            self.objs[tobj as usize].elems.push(a);
+                            self.push_elem(tobj, a);
                             r = Val::Num(self.objs[tobj as usize].elems.len() as double);
                             hit = true;
                         } else if (tclass == C_MAP || tclass == C_SET) && !weak {
@@ -3699,7 +3757,7 @@ impl Vm {
             let a = self.pop();
             let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
             if !self.throwing {
-                self.objs[e as usize].elems[i] = r;
+                self.put_elem(e, (i) as int, r);
             }
         }
     }
@@ -3759,7 +3817,7 @@ impl Vm {
                 let c = op.c;
                 if c >= 0 && (c >> 24) == sh {
                     self.objs[o as usize].shape = c & 16777215;
-                    self.objs[o as usize].vals.push(v);
+                    self.push_val(o, v);
                 } else {
                     self.define(o, op.a, v, 0);
                     let sh2 = self.objs[o as usize].shape;
@@ -3918,7 +3976,7 @@ impl Vm {
             OP_SET_ENV => {
                 let e = self.get_env(op.a);
                 let v = self.top().clone();
-                self.objs[e as usize].elems[op.b as usize] = v;
+                self.put_elem(e, op.b, v);
             }
             OP_GET_GLOBAL => {
                 let g = self.global;
@@ -3939,7 +3997,7 @@ impl Vm {
                 let v = self.top().clone();
                 let slot = self.find(g, op.a);
                 if slot >= 0 && self.attr_at(g, slot) == 0 {
-                    self.objs[g as usize].vals[slot as usize] = v;
+                    self.put_slot(g, slot, v);
                 } else if slot < 0 && op.b == 0 && self.strict_now() && !self.has_atom(g, op.a) {
                     // strict code does not create globals by assignment
                     let n = self.atom_str(op.a);
@@ -4255,8 +4313,8 @@ impl Vm {
                 let o = obj_of(self.top());
                 if op.b == 1 {
                     match v {
-                        Val::Obj(p) => self.objs[o as usize].proto = p,
-                        Val::Null => self.objs[o as usize].proto = -1,
+                        Val::Obj(p) => self.put_proto(o, p),
+                        Val::Null => self.put_proto(o, -1),
                         _ => {}
                     }
                 } else {
@@ -4288,7 +4346,7 @@ impl Vm {
             OP_INIT_GETTER | OP_INIT_SETTER => {
                 let f = self.pop();
                 let o = obj_of(self.top());
-                self.objs[obj_of(&f) as usize].home = o;
+                self.put_home(obj_of(&f), o);
                 self.define_accessor(o, op.a, f, if op.code == OP_INIT_GETTER { 0 } else { 1 }, op.b == 1);
             }
             OP_INIT_GETTER_ELEM | OP_INIT_SETTER_ELEM => {
@@ -4297,7 +4355,7 @@ impl Vm {
                 let o = obj_of(self.top());
                 let (i, a) = self.to_key(&k);
                 let atom = if i >= 0 { self.index_atom(i) } else { a };
-                self.objs[obj_of(&f) as usize].home = o;
+                self.put_home(obj_of(&f), o);
                 self.define_accessor(o, atom, f, if op.code == OP_INIT_GETTER_ELEM { 0 } else { 1 }, op.b == 1);
             }
             OP_INIT_SPREAD => {
@@ -4325,7 +4383,7 @@ impl Vm {
             OP_DEFINE_METHOD => {
                 let f = self.pop();
                 let o = obj_of(self.top());
-                self.objs[obj_of(&f) as usize].home = o;
+                self.put_home(obj_of(&f), o);
                 let hidden = self.is_class_proto(o) || self.is_class_ctor(o);
                 self.define(o, op.a, f, if hidden { P_HIDDEN } else { 0 });
             }
@@ -4334,7 +4392,7 @@ impl Vm {
                 let k = self.pop();
                 let o = obj_of(self.top());
                 self.name_by_key(&f, &k);
-                self.objs[obj_of(&f) as usize].home = o;
+                self.put_home(obj_of(&f), o);
                 let hidden = self.is_class_proto(o) || self.is_class_ctor(o);
                 self.define_elem(o, &k, f, if hidden { P_HIDDEN } else { 0 });
             }
@@ -4353,11 +4411,11 @@ impl Vm {
             OP_ARRAY_PUSH => {
                 let v = self.pop();
                 let a = obj_of(self.top());
-                self.objs[a as usize].elems.push(v);
+                self.push_elem(a, v);
             }
             OP_ARRAY_HOLE => {
                 let a = obj_of(self.top());
-                self.objs[a as usize].elems.push(Val::Undef);
+                self.push_elem(a, Val::Undef);
                 let i = (self.objs[a as usize].elems.len() as int) - 1;
                 self.mark_hole(a, i);
             }
@@ -4369,7 +4427,7 @@ impl Vm {
                 }
                 let a = obj_of(self.top());
                 for x in items {
-                    self.objs[a as usize].elems.push(x);
+                    self.push_elem(a, x);
                 }
             }
             OP_TEMPLATE_OBJ => {
@@ -4437,10 +4495,10 @@ impl Vm {
                 let arr = self.new_array(keys);
                 let ip = self.iter_proto;
                 let it = self.alloc(C_ITER, ip);
-                self.objs[it as usize].env = arr;
+                self.put_env(it, arr);
                 self.objs[it as usize].func = 0;
                 // for-in skips keys deleted during the loop
-                self.objs[it as usize].home = obj_of(&v);
+                self.put_home(it, obj_of(&v));
                 self.stack.push(Val::Obj(it));
             }
             OP_ITER_VALUES => {
@@ -4480,7 +4538,7 @@ impl Vm {
                 let e = self.alloc(C_ENV, parent);
                 let mut i = 0;
                 while i < op.a {
-                    self.objs[e as usize].elems.push(Val::Undef);
+                    self.push_elem(e, Val::Undef);
                     i += 1;
                 }
                 self.frames[fi].env = e;
@@ -4496,7 +4554,7 @@ impl Vm {
                 let mut i = 0;
                 while i < self.objs[e as usize].elems.len() {
                     let v = self.objs[e as usize].elems[i].clone();
-                    self.objs[n as usize].elems.push(v);
+                    self.push_elem(n, v);
                     i += 1;
                 }
                 self.frames[fi].env = n;
@@ -4544,7 +4602,7 @@ impl Vm {
                                     return false;
                                 }
                             }
-                            self.objs[ctor as usize].proto = *s;
+                            self.put_proto(ctor, *s);
                         }
                         _ => {
                             self.throw_type("Class extends value is not a constructor or null");
@@ -4556,14 +4614,14 @@ impl Vm {
                 self.add_own(p, A_CONSTRUCTOR, Val::Obj(ctor), P_HIDDEN);
                 self.objs[p as usize].pos = 1; // a class prototype: methods hidden
                 self.define(ctor, A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_READONLY | P_FIXED);
-                self.objs[ctor as usize].home = p;
+                self.put_home(ctor, p);
                 self.stack.push(Val::Obj(p));
             }
             OP_SET_FIELDS => {
                 let f = self.pop();
                 let ctor = obj_of(self.top());
-                self.objs[obj_of(&f) as usize].home = self.objs[ctor as usize].home;
-                self.objs[ctor as usize].elems2 = vec![f];
+                self.put_home(obj_of(&f), self.objs[ctor as usize].home);
+                self.put_elems2(ctor, vec![f]);
             }
             OP_GET_SUPER | OP_GET_SUPER_ELEM => {
                 let key = if op.code == OP_GET_SUPER { self.key_val(op.a) } else { self.pop() };
@@ -4684,6 +4742,260 @@ impl Vm {
     }
 
     // ---- collection
+    //
+    // Reference counting frees most garbage when it becomes garbage; a
+    // mark-and-sweep collection frees the rest (cycles) and corrects the
+    // counts.
+    //
+    // A count (JsObj.rc) is the number of references to the object from
+    // other objects: properties, elements, a closure's scope, a prototype.
+    // References from the stack, the frames, the handlers and the machine's
+    // own fields (the roots) are not counted, so pushing, popping and
+    // moving values costs nothing (deferred reference counting). An object
+    // whose count falls to 0 goes to `zct` (and a new object starts there);
+    // when the table is full, at a safe point, `reclaim` frees the objects
+    // in it that no root holds, and what only they held.
+    //
+    // A missing increment would free a live object; the counts are
+    // therefore written where the heap changes (inc / dec, set_slot, ...),
+    // and `rc_check` (tests) checks every reclaim against a full mark.
+
+    #[inline]
+    pub fn inc(&mut self, v: &Val) {
+        if let Val::Obj(o) = v {
+            self.objs[*o as usize].rc += 1;
+        }
+    }
+
+    #[inline]
+    pub fn inc_o(&mut self, o: int) {
+        if o >= 0 {
+            self.objs[o as usize].rc += 1;
+        }
+    }
+
+    #[inline]
+    pub fn dec(&mut self, v: &Val) {
+        if let Val::Obj(o) = v {
+            self.dec_o(*o);
+        }
+    }
+
+    #[inline]
+    pub fn dec_o(&mut self, o: int) {
+        if o >= 0 {
+            let ob = &mut self.objs[o as usize];
+            ob.rc -= 1;
+            if ob.rc <= 0 && !ob.zct && !ob.free {
+                ob.zct = true;
+                self.zct.push(o);
+            }
+        }
+    }
+
+    /// Counts each object of `vs` (values put in the heap at once).
+    pub fn inc_all(&mut self, vs: &Vec<Val>) {
+        let n = vs.len();
+        let mut i: usize = 0;
+        while i < n {
+            if let Val::Obj(o) = vs[i] {
+                self.objs[o as usize].rc += 1;
+            }
+            i += 1;
+        }
+    }
+
+    pub fn dec_all(&mut self, vs: &Vec<Val>) {
+        let n = vs.len();
+        let mut i: usize = 0;
+        while i < n {
+            if let Val::Obj(o) = vs[i] {
+                self.dec_o(o);
+            }
+            i += 1;
+        }
+    }
+
+    /// Property slot `slot` of `o` becomes `v`.
+    #[inline]
+    pub fn put_slot(&mut self, o: int, slot: int, v: Val) {
+        self.inc(&v);
+        let old = obj_of(&self.objs[o as usize].vals[slot as usize]);
+        self.objs[o as usize].vals[slot as usize] = v;
+        self.dec_o(old);
+    }
+
+    /// Element `i` of `o` becomes `v`.
+    #[inline]
+    pub fn put_elem(&mut self, o: int, i: int, v: Val) {
+        self.inc(&v);
+        let old = obj_of(&self.objs[o as usize].elems[i as usize]);
+        self.objs[o as usize].elems[i as usize] = v;
+        self.dec_o(old);
+    }
+
+    #[inline]
+    pub fn push_val(&mut self, o: int, v: Val) {
+        self.inc(&v);
+        self.objs[o as usize].vals.push(v);
+    }
+
+    pub fn remove_val(&mut self, o: int, slot: int) {
+        let v = self.objs[o as usize].vals.remove(slot as usize);
+        self.dec(&v);
+    }
+
+    #[inline]
+    pub fn push_elem(&mut self, o: int, v: Val) {
+        self.inc(&v);
+        self.objs[o as usize].elems.push(v);
+    }
+
+    pub fn put_elem2(&mut self, o: int, i: int, v: Val) {
+        self.inc(&v);
+        let old = obj_of(&self.objs[o as usize].elems2[i as usize]);
+        self.objs[o as usize].elems2[i as usize] = v;
+        self.dec_o(old);
+    }
+
+    pub fn push_elem2(&mut self, o: int, v: Val) {
+        self.inc(&v);
+        self.objs[o as usize].elems2.push(v);
+    }
+
+    /// `o`'s elements become `vs`.
+    pub fn put_elems(&mut self, o: int, vs: Vec<Val>) {
+        self.inc_all(&vs);
+        let n = self.objs[o as usize].elems.len();
+        let mut i: usize = 0;
+        while i < n {
+            if let Val::Obj(x) = self.objs[o as usize].elems[i] {
+                self.dec_o(x);
+            }
+            i += 1;
+        }
+        self.objs[o as usize].elems = vs;
+    }
+
+    pub fn put_elems2(&mut self, o: int, vs: Vec<Val>) {
+        self.inc_all(&vs);
+        let n = self.objs[o as usize].elems2.len();
+        let mut i: usize = 0;
+        while i < n {
+            if let Val::Obj(x) = self.objs[o as usize].elems2[i] {
+                self.dec_o(x);
+            }
+            i += 1;
+        }
+        self.objs[o as usize].elems2 = vs;
+    }
+
+    /// `o`'s elements past `n` go.
+    pub fn cut_elems(&mut self, o: int, n: int) {
+        let len = self.objs[o as usize].elems.len() as int;
+        if n >= len {
+            return;
+        }
+        let mut i = n;
+        while i < len {
+            if let Val::Obj(x) = self.objs[o as usize].elems[i as usize] {
+                self.dec_o(x);
+            }
+            i += 1;
+        }
+        self.objs[o as usize].elems.truncate(n as usize);
+    }
+
+    pub fn cut_elems2(&mut self, o: int, n: int) {
+        let len = self.objs[o as usize].elems2.len() as int;
+        if n >= len {
+            return;
+        }
+        let mut i = n;
+        while i < len {
+            if let Val::Obj(x) = self.objs[o as usize].elems2[i as usize] {
+                self.dec_o(x);
+            }
+            i += 1;
+        }
+        self.objs[o as usize].elems2.truncate(n as usize);
+    }
+
+    /// The last element of `o`, taken out (the caller owns its count).
+    pub fn pop_elem_val(&mut self, o: int) -> Val {
+        match self.objs[o as usize].elems.pop() {
+            Some(v) => v,
+            None => Val::Undef,
+        }
+    }
+
+    pub fn pop_elem(&mut self, o: int) {
+        let v = self.pop_elem_val(o);
+        self.dec(&v);
+    }
+
+    pub fn insert_elem(&mut self, o: int, i: int, v: Val) {
+        self.inc(&v);
+        self.objs[o as usize].elems.insert(i as usize, v);
+    }
+
+    pub fn remove_elem(&mut self, o: int, i: int) {
+        let v = self.objs[o as usize].elems.remove(i as usize);
+        self.dec(&v);
+    }
+
+    pub fn put_prim(&mut self, o: int, v: Val) {
+        self.inc(&v);
+        let old = obj_of(&self.objs[o as usize].prim);
+        self.objs[o as usize].prim = v;
+        self.dec_o(old);
+    }
+
+    pub fn put_proto(&mut self, o: int, p: int) {
+        self.inc_o(p);
+        let old = self.objs[o as usize].proto;
+        self.objs[o as usize].proto = p;
+        self.dec_o(old);
+    }
+
+    pub fn put_env(&mut self, o: int, e: int) {
+        self.inc_o(e);
+        let old = self.objs[o as usize].env;
+        self.objs[o as usize].env = e;
+        self.dec_o(old);
+    }
+
+    pub fn put_home(&mut self, o: int, h: int) {
+        self.inc_o(h);
+        let old = self.objs[o as usize].home;
+        self.objs[o as usize].home = h;
+        self.dec_o(old);
+    }
+
+    /// `o`'s Cold, made on first use.
+    pub fn cold_id(&mut self, o: int) -> int {
+        let c = self.objs[o as usize].cold;
+        if c > 0 {
+            return c;
+        }
+        let id = if self.free_colds.is_empty() {
+            self.colds.push(Cold::new());
+            (self.colds.len() as int) - 1
+        } else {
+            self.free_colds.pop().unwrap()
+        };
+        self.objs[o as usize].cold = id;
+        id
+    }
+
+    pub fn free_cold(&mut self, o: int) {
+        let c = self.objs[o as usize].cold;
+        if c > 0 {
+            self.colds[c as usize] = Cold::new();
+            self.free_colds.push(c);
+            self.objs[o as usize].cold = 0;
+        }
+    }
 
     fn mark_val(&mut self, v: &Val, work: &mut Vec<int>) {
         if let Val::Obj(o) = v {
@@ -4701,22 +5013,81 @@ impl Vm {
         }
     }
 
-    pub fn gc(&mut self) {
-        self.gc_runs += 1;
-        let mut work: Vec<int> = Vec::new();
+    /// Marks what the roots hold (not what that holds): the global object,
+    /// the host's roots, the stack, the frames, the handlers, the pending
+    /// exception and jobs, and the objects the machine keeps in its fields.
+    fn mark_roots(&mut self, work: &mut Vec<int>) {
         let g = self.global;
-        self.mark_obj(g, &mut work);
-        for r in self.roots.clone() {
-            self.mark_obj(r, &mut work);
+        self.mark_obj(g, work);
+        let nr = self.roots.len();
+        let mut r: usize = 0;
+        while r < nr {
+            let x = self.roots[r];
+            self.mark_obj(x, work);
+            r += 1;
         }
-        for s in self.symbols.clone() {
-            self.mark_obj(s, &mut work);
+        let ns = self.symbols.len();
+        r = 0;
+        while r < ns {
+            let x = self.symbols[r];
+            self.mark_obj(x, work);
+            r += 1;
+        }
+        let fields = vec![
+            self.object_proto,
+            self.function_proto,
+            self.array_proto,
+            self.string_proto,
+            self.number_proto,
+            self.boolean_proto,
+            self.symbol_proto,
+            self.error_proto,
+            self.type_error_proto,
+            self.range_error_proto,
+            self.reference_error_proto,
+            self.syntax_error_proto,
+            self.regexp_proto,
+            self.date_proto,
+            self.map_proto,
+            self.set_proto,
+            self.iter_proto,
+            self.promise_proto,
+            self.iterator_proto,
+            self.map_iter_proto,
+            self.set_iter_proto,
+            self.string_iter_proto,
+            self.generator_proto,
+            self.generator_function_proto,
+            self.async_function_proto,
+            self.async_generator_proto,
+            self.async_generator_function_proto,
+            self.async_from_sync,
+            self.proxy_hooks,
+            self.thrower,
+            self.callee_pair,
+            self.tdz_obj,
+            self.bigint_proto,
+            self.array_values_fn,
+        ];
+        for x in fields {
+            self.mark_obj(x, work);
+        }
+        let mut held: Vec<int> = Vec::new();
+        for (_, v) in self.bigints.iter() {
+            held.push(*v);
+        }
+        for (_, v) in self.symbol_registry.iter() {
+            held.push(*v);
+        }
+        for x in held {
+            self.mark_obj(x, work);
         }
         let n = self.stack.len();
         let mut i: usize = 0;
         while i < n {
-            let v = self.stack[i].clone();
-            self.mark_val(&v, &mut work);
+            if let Val::Obj(x) = self.stack[i] {
+                self.mark_obj(x, work);
+            }
             i += 1;
         }
         let nf = self.frames.len();
@@ -4724,44 +5095,71 @@ impl Vm {
         while k < nf {
             let (fo, env, t, nt, ao, gen) = {
                 let f = &self.frames[k];
-                (f.fobj, f.env, f.this_val.clone(), f.new_target.clone(), f.args_obj, f.gen)
+                (f.fobj, f.env, obj_of(&f.this_val), obj_of(&f.new_target), f.args_obj, f.gen)
             };
-            self.mark_obj(gen, &mut work);
-            self.mark_obj(fo, &mut work);
-            self.mark_obj(env, &mut work);
-            self.mark_val(&t, &mut work);
-            self.mark_val(&nt, &mut work);
-            self.mark_obj(ao, &mut work);
+            self.mark_obj(gen, work);
+            self.mark_obj(fo, work);
+            self.mark_obj(env, work);
+            self.mark_obj(t, work);
+            self.mark_obj(nt, work);
+            self.mark_obj(ao, work);
             k += 1;
         }
-        for h in 0..self.handlers.len() {
+        let nh = self.handlers.len();
+        let mut h: usize = 0;
+        while h < nh {
             let e = self.handlers[h].env;
-            self.mark_obj(e, &mut work);
+            self.mark_obj(e, work);
+            h += 1;
         }
-        let exc = self.exc.clone();
-        self.mark_val(&exc, &mut work);
-        for v in self.temp_roots.clone() {
-            self.mark_val(&v, &mut work);
+        let exc = obj_of(&self.exc);
+        self.mark_obj(exc, work);
+        let nt = self.temp_roots.len();
+        i = 0;
+        while i < nt {
+            if let Val::Obj(x) = self.temp_roots[i] {
+                self.mark_obj(x, work);
+            }
+            i += 1;
         }
-        for v in self.jobs.clone() {
-            self.mark_val(&v, &mut work);
+        let nj = self.jobs.len();
+        i = 0;
+        while i < nj {
+            if let Val::Obj(x) = self.jobs[i] {
+                self.mark_obj(x, work);
+            }
+            i += 1;
         }
+    }
+
+    /// Marks everything reachable from `work` (marked already); with
+    /// `count`, every reference followed is counted into JsObj.rc.
+    fn trace(&mut self, work: &mut Vec<int>, count: bool) {
         while !work.is_empty() {
             let o = work.pop().unwrap();
             let (proto, env, home) = {
                 let ob = &self.objs[o as usize];
-                (ob.proto, ob.env, ob.home)
+                // an ArrayBuffer's home is what its numbers hold (typed.rs)
+                (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { ob.home })
             };
-            self.mark_obj(proto, &mut work);
-            self.mark_obj(env, &mut work);
-            self.mark_obj(home, &mut work);
-            let prim = self.objs[o as usize].prim.clone();
-            self.mark_val(&prim, &mut work);
+            let prim = obj_of(&self.objs[o as usize].prim);
+            let firsts = vec![proto, env, home, prim];
+            for x in firsts {
+                if x >= 0 {
+                    if count {
+                        self.objs[x as usize].rc += 1;
+                    }
+                    self.mark_obj(x, work);
+                }
+            }
             let nv = self.objs[o as usize].vals.len();
             let mut j: usize = 0;
             while j < nv {
                 if let Val::Obj(x) = self.objs[o as usize].vals[j] {
-                    self.mark_obj(x, &mut work);
+                    if count {
+                        self.objs[x as usize].rc += 1;
+                    }
+                    self.mark_obj(x, work);
                 }
                 j += 1;
             }
@@ -4769,7 +5167,10 @@ impl Vm {
             j = 0;
             while j < ne {
                 if let Val::Obj(x) = self.objs[o as usize].elems[j] {
-                    self.mark_obj(x, &mut work);
+                    if count {
+                        self.objs[x as usize].rc += 1;
+                    }
+                    self.mark_obj(x, work);
                 }
                 j += 1;
             }
@@ -4777,31 +5178,346 @@ impl Vm {
             j = 0;
             while j < ne2 {
                 if let Val::Obj(x) = self.objs[o as usize].elems2[j] {
-                    self.mark_obj(x, &mut work);
+                    if count {
+                        self.objs[x as usize].rc += 1;
+                    }
+                    self.mark_obj(x, work);
                 }
                 j += 1;
             }
         }
+    }
+
+    /// A collection when one is due, else a reclaim (the safe points call
+    /// this when gc_due).
+    pub fn gc(&mut self) {
+        if self.rc_on && self.alloc_count < self.gc_threshold {
+            self.reclaim();
+            return;
+        }
+        self.collect();
+    }
+
+    /// The mark-and-sweep collection: frees everything unreachable (cycles
+    /// too) and counts every object's references again.
+    pub fn collect(&mut self) {
+        self.gc_runs += 1;
         let total = self.objs.len();
-        let mut live: int = 0;
+        let mut old: Vec<int> = Vec::new();
         let mut i2: usize = 0;
+        while i2 < total {
+            if self.rc_check {
+                old.push(self.objs[i2].rc);
+            }
+            self.objs[i2].rc = 0;
+            i2 += 1;
+        }
+        let mut work: Vec<int> = Vec::new();
+        self.mark_roots(&mut work);
+        self.trace(&mut work, true);
+        let mut live: int = 0;
+        self.zct = Vec::new();
+        i2 = 0;
         while i2 < total {
             if self.objs[i2].marked {
                 self.objs[i2].marked = false;
                 live += 1;
+                if self.rc_check && old[i2] < self.objs[i2].rc {
+                    // a reference was not counted
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        let c = self.objs[i2].class;
+                        let nr = self.objs[i2].rc;
+                        self.rc_log.push(format!("rc: low count {} < {} (class {}, #{})", old[i2], nr, c, i2));
+                    }
+                }
+                if self.rc_on && self.objs[i2].rc == 0 {
+                    // held only by roots
+                    self.objs[i2].zct = true;
+                    self.zct.push(i2 as int);
+                } else {
+                    self.objs[i2].zct = false;
+                }
             } else if !self.objs[i2].free {
-                self.free_shape(i2 as int);
-                let ob = &mut self.objs[i2];
-                ob.clear();
-                ob.free = true;
+                self.release(i2 as int);
                 self.free_list.push(i2 as int);
             }
             i2 += 1;
         }
+        let nf = self.freed.len();
+        let mut k: usize = 0;
+        while k < nf {
+            let x = self.freed[k];
+            self.free_list.push(x);
+            k += 1;
+        }
+        self.freed = Vec::new();
+        self.live = live;
         self.alloc_count = 0;
         self.gc_threshold = if live * 2 > 200000 { live * 2 } else { 200000 };
+        self.zct_limit = self.next_zct_limit();
+    }
+
+    /// Tests: every safe point reclaims and checks the counts (rc_errors,
+    /// rc_log).
+    pub fn rc_stress(&mut self) {
+        self.rc_check = true;
+        self.zct_min = 1;
+        self.zct_limit = 1;
+    }
+
+    fn next_zct_limit(&self) -> int {
+        let n = (self.zct.len() as int) * 2;
+        if n > self.zct_min {
+            n
+        } else {
+            self.zct_min
+        }
+    }
+
+    /// Empties slot `o` (garbage): its shape and Cold go back.
+    fn release(&mut self, o: int) {
+        self.free_shape(o);
+        self.free_cold(o);
+        let ob = &mut self.objs[o as usize];
+        ob.clear();
+        ob.free = true;
+        ob.zct = false;
+        ob.marked = false;
+    }
+
+    /// Frees the objects of `zct` that no root holds, and what only they
+    /// held. The slots freed are reused after the next reclaim: an id of a
+    /// dead object may still be compared somewhere (the host's ids).
+    pub fn reclaim(&mut self) {
+        self.reclaims += 1;
+        let nf = self.freed.len();
+        let mut k: usize = 0;
+        while k < nf {
+            let x = self.freed[k];
+            self.free_list.push(x);
+            k += 1;
+        }
+        self.freed = Vec::new();
+        let mut rooted: Vec<int> = Vec::new();
+        self.mark_roots(&mut rooted);
+        let mut reach: Vec<bool> = Vec::new();
+        if self.rc_check {
+            reach = self.reachable();
+        }
+        let list = self.zct.clone();
+        self.zct = Vec::new();
+        let n = list.len();
+        let mut i: usize = 0;
+        let mut work: Vec<int> = Vec::new();
+        while i < n {
+            let o = list[i];
+            i += 1;
+            let ob = &mut self.objs[o as usize];
+            if !ob.zct {
+                continue;
+            }
+            ob.zct = false;
+            if ob.free || ob.rc > 0 {
+                continue;
+            }
+            if ob.marked {
+                ob.zct = true;
+                self.zct.push(o);
+                continue;
+            }
+            ob.free = true;
+            work.push(o);
+            while !work.is_empty() {
+                let x = work.pop().unwrap();
+                if self.rc_check && reach[x as usize] {
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        let c = self.objs[x as usize].class;
+                        self.rc_log.push(format!("rc: freed a reachable object (class {}, #{})", c, x));
+                    }
+                }
+                self.drop_refs(x, &mut work);
+                self.release(x);
+                self.freed.push(x);
+                self.live -= 1;
+                self.alloc_count -= 1;
+                self.rc_freed += 1;
+            }
+        }
+        let nr = rooted.len();
+        i = 0;
+        while i < nr {
+            let x = rooted[i] as usize;
+            self.objs[x].marked = false;
+            i += 1;
+        }
+        self.zct_limit = self.next_zct_limit();
+    }
+
+    /// The references `x` (being freed) holds are let go; what only it
+    /// held joins `work`.
+    fn drop_refs(&mut self, x: int, work: &mut Vec<int>) {
+        let (proto, env, home) = {
+            let ob = &self.objs[x as usize];
+            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { ob.home })
+        };
+        let prim = obj_of(&self.objs[x as usize].prim);
+        self.drop_ref(proto, work);
+        self.drop_ref(env, work);
+        self.drop_ref(home, work);
+        self.drop_ref(prim, work);
+        let nv = self.objs[x as usize].vals.len();
+        let mut j: usize = 0;
+        while j < nv {
+            if let Val::Obj(c) = self.objs[x as usize].vals[j] {
+                self.drop_ref(c, work);
+            }
+            j += 1;
+        }
+        let ne = self.objs[x as usize].elems.len();
+        j = 0;
+        while j < ne {
+            if let Val::Obj(c) = self.objs[x as usize].elems[j] {
+                self.drop_ref(c, work);
+            }
+            j += 1;
+        }
+        let ne2 = self.objs[x as usize].elems2.len();
+        j = 0;
+        while j < ne2 {
+            if let Val::Obj(c) = self.objs[x as usize].elems2[j] {
+                self.drop_ref(c, work);
+            }
+            j += 1;
+        }
+    }
+
+    #[inline]
+    fn drop_ref(&mut self, c: int, work: &mut Vec<int>) {
+        if c < 0 {
+            return;
+        }
+        let ob = &mut self.objs[c as usize];
+        ob.rc -= 1;
+        if ob.rc > 0 || ob.free {
+            return;
+        }
+        if ob.marked {
+            // a root holds it
+            if !ob.zct {
+                ob.zct = true;
+                self.zct.push(c);
+            }
+            return;
+        }
+        ob.free = true;
+        work.push(c);
+    }
+
+    /// rc_check: which objects a full mark reaches (the marks set by
+    /// mark_roots stay).
+    fn reachable(&mut self) -> Vec<bool> {
+        let total = self.objs.len();
+        let mut work: Vec<int> = Vec::new();
+        let mut i: usize = 0;
+        while i < total {
+            if self.objs[i].marked {
+                work.push(i as int);
+            }
+            i += 1;
+        }
+        let roots = work.clone();
+        self.trace(&mut work, false);
+        let mut out: Vec<bool> = Vec::new();
+        i = 0;
+        while i < total {
+            out.push(self.objs[i].marked);
+            i += 1;
+        }
+        // back to the roots' marks only
+        i = 0;
+        while i < total {
+            self.objs[i].marked = false;
+            i += 1;
+        }
+        for r in roots {
+            self.objs[r as usize].marked = true;
+        }
+        out
+    }
+
+    /// Counts every object's references again and puts the objects with
+    /// none in `zct` (a restored snapshot).
+    pub fn recount(&mut self) {
+        let total = self.objs.len();
+        let mut i: usize = 0;
+        while i < total {
+            self.objs[i].rc = 0;
+            self.objs[i].zct = false;
+            i += 1;
+        }
+        self.zct = Vec::new();
+        let mut live: int = 0;
+        i = 0;
+        while i < total {
+            if !self.objs[i].free {
+                live += 1;
+                self.count_refs(i as int);
+            }
+            i += 1;
+        }
+        i = 0;
+        while i < total {
+            if !self.objs[i].free && self.objs[i].rc == 0 && self.rc_on {
+                self.objs[i].zct = true;
+                self.zct.push(i as int);
+            }
+            i += 1;
+        }
+        self.live = live;
+        self.zct_limit = self.next_zct_limit();
+    }
+
+    fn count_refs(&mut self, o: int) {
+        let (proto, env, home) = {
+            let ob = &self.objs[o as usize];
+            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { ob.home })
+        };
+        let prim = obj_of(&self.objs[o as usize].prim);
+        self.inc_o(proto);
+        self.inc_o(env);
+        self.inc_o(home);
+        self.inc_o(prim);
+        let nv = self.objs[o as usize].vals.len();
+        let mut j: usize = 0;
+        while j < nv {
+            if let Val::Obj(c) = self.objs[o as usize].vals[j] {
+                self.objs[c as usize].rc += 1;
+            }
+            j += 1;
+        }
+        let ne = self.objs[o as usize].elems.len();
+        j = 0;
+        while j < ne {
+            if let Val::Obj(c) = self.objs[o as usize].elems[j] {
+                self.objs[c as usize].rc += 1;
+            }
+            j += 1;
+        }
+        let ne2 = self.objs[o as usize].elems2.len();
+        j = 0;
+        while j < ne2 {
+            if let Val::Obj(c) = self.objs[o as usize].elems2[j] {
+                self.objs[c as usize].rc += 1;
+            }
+            j += 1;
+        }
     }
 }
+
+/// The smallest zct that makes a reclaim.
+pub const ZCT_MIN: int = 8192;
 
 pub fn pow2(n: int) -> double {
     let mut r: double = 1.0;

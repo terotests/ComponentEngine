@@ -68,6 +68,28 @@ pub const P_ACCESSOR: int = 8;
 /// Past this many properties an object keeps a hash index of its keys.
 pub const INDEX_AT: int = 32;
 
+/// The rarely used parts of an object (a Map's or Set's index, an
+/// ArrayBuffer's contents), in `Vm.colds` by `JsObj.cold`: most objects
+/// have none, and a JsObj stays small.
+pub struct Cold {
+    /// a Map's or Set's entries by map_key, and which are deleted (1)
+    pub index: HashMap<int, int>,
+    pub marks: Vec<int>,
+    /// an ArrayBuffer's contents: its bytes, or the elements of the one
+    /// typed array kind that has used it (typed.rs)
+    pub nums: Vec<double>,
+}
+
+impl Cold {
+    pub fn new() -> Cold {
+        Cold {
+            index: HashMap::new(),
+            marks: Vec::new(),
+            nums: Vec::new(),
+        }
+    }
+}
+
 pub struct JsObj {
     pub class: int,
     /// the prototype, -1 for none; for a scope, the enclosing scope
@@ -76,17 +98,13 @@ pub struct JsObj {
     /// and their attributes; `vals` holds the values, slot by slot
     pub shape: int,
     pub vals: Vec<Val>,
-    /// a Map's or Set's entries by map_key, and which are deleted (1)
-    pub index: HashMap<int, int>,
-    pub marks: Vec<int>,
+    /// the object's Cold (`Vm.colds`), 0 for none
+    pub cold: int,
     /// array elements, scope slots, a bound function's arguments, an
     /// accessor's getter and setter, a map's keys
     pub elems: Vec<Val>,
     /// a map's values
     pub elems2: Vec<Val>,
-    /// an ArrayBuffer's contents: its bytes, or the elements of the one
-    /// typed array kind that has used it (typed.rs)
-    pub nums: Vec<double>,
     /// the compiled function (index into `Vm.protos`) or the native id
     pub func: int,
     /// a closure's scope; a bound function's target; an iterator's source
@@ -98,6 +116,11 @@ pub struct JsObj {
     pub home: int,
     /// an iterator's position; a regexp's flags as bits
     pub pos: int,
+    /// references to the object from other objects (the heap): stack slots
+    /// and the machine's roots are not counted (Vm::reclaim)
+    pub rc: int,
+    /// in `Vm.zct`, the objects whose count is 0
+    pub zct: bool,
     pub extensible: bool,
     pub marked: bool,
     pub free: bool,
@@ -112,16 +135,16 @@ impl JsObj {
             proto: proto,
             shape: 0,
             vals: Vec::new(),
-            index: HashMap::new(),
-            marks: Vec::new(),
+            cold: 0,
             elems: Vec::new(),
             elems2: Vec::new(),
-            nums: Vec::new(),
             func: -1,
             env: -1,
             prim: Val::Undef,
             home: -1,
             pos: 0,
+            rc: 0,
+            zct: false,
             extensible: true,
             marked: false,
             free: false,
@@ -130,19 +153,14 @@ impl JsObj {
     }
 
     pub fn clear(&mut self) {
-        // a small object's values stay allocated for the next one; the
-        // shape is the caller's (Vm::free_shape)
+        // small vectors stay allocated for the next object in the slot;
+        // the shape and the Cold are the caller's (Vm::free_shape,
+        // Vm::free_cold)
         self.shape = 0;
         if self.vals.len() as int <= INDEX_AT {
             self.vals.truncate(0);
         } else {
             self.vals = Vec::new();
-        }
-        if !self.index.is_empty() {
-            self.index = HashMap::new();
-        }
-        if !self.marks.is_empty() {
-            self.marks = Vec::new();
         }
         if self.elems.len() <= 16 {
             self.elems.truncate(0);
@@ -150,13 +168,13 @@ impl JsObj {
             self.elems = Vec::new();
         }
         self.elems2 = Vec::new();
-        self.nums = Vec::new();
         self.prim = Val::Undef;
         self.env = -1;
         self.home = -1;
         self.func = -1;
         self.proto = -1;
         self.pos = 0;
+        self.rc = 0;
         self.extensible = true;
         self.has_proto_obj = false;
     }

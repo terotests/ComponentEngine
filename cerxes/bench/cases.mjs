@@ -24,6 +24,7 @@ const CRATE = path.resolve(HERE, "..");
 const BIN = path.join(CRATE, "bin");
 const args = process.argv.slice(2);
 const rebuild = args.includes("--build");
+const RC = process.env.CER_RC_CHECK === "1";
 const targets = (args.find((a) => a.startsWith("--targets="))?.slice(10) || "js").split(",");
 
 function run(cmd, argv, cwd) {
@@ -42,9 +43,12 @@ for (const t of targets) {
       const e = Engine.new_();
       // CER_THROUGH_TEXT=1: each case from its compiled unit's text
       e.through_text = process.env.CER_THROUGH_TEXT === "1";
+      // CER_RC_CHECK=1: a reclaim at every safe point, checked
+      if (RC) e.vm.rc_stress();
       e.set_syntax(mode.includes("ts"), mode.includes("x"));
       try {
-        return e.eval(src);
+        const r = e.eval(src);
+        return RC && e.vm.rc_errors > 0 ? "rc-error " + e.vm.rc_errors : r;
       } catch (ex) {
         return "host exception: " + ex;
       }
@@ -74,7 +78,7 @@ for (const t of targets) {
     engines[t] = (mode, src) => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cerxes-case-"));
       fs.writeFileSync(path.join(dir, "case.txt"), src);
-      const r = spawnSync(bin, [dir, "case.txt", mode], { encoding: "utf8", timeout: 60000 });
+      const r = spawnSync(bin, [dir, "case.txt", mode, ...(RC ? ["rc"] : [])], { encoding: "utf8", timeout: 60000 });
       fs.rmSync(dir, { recursive: true });
       return r.status === 0 ? r.stdout.replace(/\n$/, "") : "exited with " + (r.status ?? r.signal) + ": " + r.stderr.slice(-300);
     };

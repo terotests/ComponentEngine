@@ -45,8 +45,14 @@ npm run cer:octane           # the Octane suites of Ranger's interp/bench/zoo_oc
   `f.call` / `f.apply` run inside the loop. `x += v;` on a local appends to x's
   string in place when nothing else holds it (`OP_ADD_LOCAL_POP`), so
   building a string in a loop is linear; the other targets, whose strings
-  are immutable, take the ordinary path (`#[ranger::target]`). A mark-and-sweep collector runs
-  at calls and backward jumps.
+  are immutable, take the ordinary path (`#[ranger::target]`). Objects are reference counted, the
+  stack and the frames not (deferred counting): an object whose count is 0
+  waits in a table, and at a safe point (a call, a backward jump) the ones
+  no root holds are freed with what only they held. A mark-and-sweep
+  collection frees cycles and counts every reference again. `Vm::rc_stress`
+  (tests, `CER_RC_CHECK=1` for the probes) checks every reclaim against a
+  full mark. A Map's index and an ArrayBuffer's contents live beside the
+  object (`Vm.colds`), so an object is 168 bytes.
 - `builtins.rs`, `builtins2.rs`: Object, Function, Array, String, Number,
   Boolean, Symbol, the Error family, Math, JSON, Reflect, RegExp, Date
   (UTC), Map / Set / WeakMap / WeakSet, a small Promise with a job queue,

@@ -6,6 +6,8 @@
 ;   cerxes_main <dir> <file>                 the script's output
 ;   cerxes_main <dir> <file> tsx|ts|jsx|js   only the value it answers, read
 ;                                            with that syntax
+;   cerxes_main <dir> <file> <syntax> rc     … with a reclaim at every safe
+;                                            point, checked (Vm::rc_stress)
 ;
 ; bench/cases.mjs --targets=cpp,go builds this for C++ and Go and runs
 ; tests/cases.txt through it.
@@ -39,7 +41,16 @@ class CerxesMain {
         if (valueOnly == false) {
             e.set_echo(true)
         }
+        def rc:boolean false
+        if ((shell_arg_cnt) > 3) {
+            rc = true
+            e.vm.rc_stress()
+        }
         def r:string (e.eval(src))
+        if (rc && (e.vm.rc_errors > 0)) {
+            print ("rc-error " + (e.vm.rc_errors + ""))
+            return
+        }
         if valueOnly {
             print r
             return
