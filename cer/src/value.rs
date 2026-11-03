@@ -67,6 +67,8 @@ pub const P_ACCESSOR: int = 8;
 
 /// Past this many properties an object keeps a hash index of its keys.
 pub const INDEX_AT: int = 32;
+/// a shape with more keys than this finds them by its table (Shape.itab)
+pub const SHAPE_HASH_AT: int = 8;
 
 /// The rarely used parts of an object (a Map's or Set's index, an
 /// ArrayBuffer's contents), in `Vm.colds` by `JsObj.cold`: most objects
@@ -195,8 +197,9 @@ pub const T_LINEAR: int = 8;
 pub struct Shape {
     pub keys: Vec<int>,
     pub attrs: Vec<int>,
-    /// past INDEX_AT keys, slot by key
-    pub index: HashMap<int, int>,
+    /// past SHAPE_HASH_AT keys, slot + 1 by key: an open-addressing table
+    /// of a power-of-two size at least twice the keys, 0 for empty
+    pub itab: Vec<int>,
     /// transitions: adding t_atom[i] with t_attr[i] leads to t_to[i];
     /// past T_LINEAR of them, t_map by atom * 16 + attr
     pub t_atom: Vec<int>,
@@ -211,7 +214,7 @@ impl Shape {
         Shape {
             keys: Vec::new(),
             attrs: Vec::new(),
-            index: HashMap::new(),
+            itab: Vec::new(),
             t_atom: Vec::new(),
             t_attr: Vec::new(),
             t_to: Vec::new(),
@@ -224,11 +227,19 @@ impl Shape {
     #[inline]
     pub fn find(&self, atom: int) -> int {
         let n = self.keys.len() as int;
-        if n > INDEX_AT {
-            return match self.index.get(&atom) {
-                Some(i) => *i,
-                None => -1,
-            };
+        if n > SHAPE_HASH_AT {
+            let mask = (self.itab.len() as int) - 1;
+            let mut h = atom & mask;
+            loop {
+                let e = self.itab[h as usize];
+                if e == 0 {
+                    return -1;
+                }
+                if self.keys[(e - 1) as usize] == atom {
+                    return e - 1;
+                }
+                h = (h + 1) & mask;
+            }
         }
         let mut i: int = 0;
         while i < n {
@@ -244,31 +255,53 @@ impl Shape {
         let slot = self.keys.len() as int;
         self.keys.push(atom);
         self.attrs.push(attr);
-        if slot + 1 > INDEX_AT {
-            if slot == INDEX_AT {
-                let mut i: int = 0;
-                while i < slot {
-                    self.index.insert(self.keys[i as usize], i);
-                    i += 1;
-                }
+        if slot + 1 > SHAPE_HASH_AT {
+            if 2 * (slot + 1) > self.itab.len() as int {
+                self.rehash();
+            } else {
+                self.tab_put(atom, slot);
             }
-            self.index.insert(atom, slot);
         }
         slot
+    }
+
+    fn tab_put(&mut self, atom: int, slot: int) {
+        let mask = (self.itab.len() as int) - 1;
+        let mut h = atom & mask;
+        while self.itab[h as usize] != 0 {
+            h = (h + 1) & mask;
+        }
+        self.itab[h as usize] = slot + 1;
+    }
+
+    /// The table again for the keys there are now.
+    fn rehash(&mut self) {
+        let n = self.keys.len() as int;
+        self.itab = Vec::new();
+        if n <= SHAPE_HASH_AT {
+            return;
+        }
+        let mut size: int = 16;
+        while size < 2 * n {
+            size = size * 2;
+        }
+        let mut i: int = 0;
+        while i < size {
+            self.itab.push(0);
+            i += 1;
+        }
+        i = 0;
+        while i < n {
+            let a = self.keys[i as usize];
+            self.tab_put(a, i);
+            i += 1;
+        }
     }
 
     pub fn remove(&mut self, slot: int) {
         self.keys.remove(slot as usize);
         self.attrs.remove(slot as usize);
-        self.index = HashMap::new();
-        let n = self.keys.len() as int;
-        if n > INDEX_AT {
-            let mut i: int = 0;
-            while i < n {
-                self.index.insert(self.keys[i as usize], i);
-                i += 1;
-            }
-        }
+        self.rehash();
     }
 
     /// An owned copy of the keys and attributes, without transitions.
