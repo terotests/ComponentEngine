@@ -944,6 +944,13 @@ impl Vm {
             return r;
         }
         let strict = code == OP_SEQ || code == OP_SNE;
+        if strict {
+            let (oa, ob) = (is_obj(self.rget(bp, x)), is_obj(self.rget(bp, y)));
+            if !oa || !ob {
+                let same = !oa && !ob && self.strict_equals(self.rget(bp, x), self.rget(bp, y));
+                return same == (code == OP_SEQ);
+            }
+        }
         let q = if strict || code == OP_EQ || code == OP_NE { quick_eq(self.rget(bp, x), self.rget(bp, y), strict) } else { -1 };
         if q >= 0 {
             return (q == 1) == (code == OP_SEQ || code == OP_EQ);
