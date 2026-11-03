@@ -18,11 +18,11 @@ use crate::vm::*;
 impl Vm {
     /// Register x of the frame at bp: a slot, or a constant when negative.
     #[inline]
-    pub fn rget(&self, pi: usize, bp: int, x: int) -> &Val {
+    pub fn rget(&self, bp: int, x: int) -> &Val {
         if x >= 0 {
             &self.stack[(bp + x) as usize]
         } else {
-            &self.protos[pi].kvals[(-1 - x) as usize]
+            &self.kvals[(-1 - x) as usize]
         }
     }
 
@@ -79,18 +79,19 @@ impl Vm {
             let bp = self.frames[fi].bp;
             let mut pc = self.frames[fi].pc;
             if self.protos[pi].rstate == 0 {
-                let e = translate(&mut self.protos[pi]);
+                let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals);
                 if !e.is_empty() {
                     self.throw_type(e.as_str());
                     continue 'frames;
                 }
             }
             let want = (bp + self.protos[pi].fsize) as usize;
+            let rb = self.protos[pi].rbase;
             while self.stack.len() < want {
                 self.stack.push(Val::Undef);
             }
             loop {
-                let ins = self.protos[pi].rcode[pc as usize];
+                let ins = self.rcode[(rb + pc) as usize];
                 let w0 = ins.code;
                 let w1 = ins.a;
                 let w2 = ins.b;
@@ -103,14 +104,14 @@ impl Vm {
                         continue;
                     }
                     R_MOVE => {
-                        let v = self.rget(pi, bp, w2).clone();
+                        let v = self.rget(bp, w2).clone();
                         self.stack[(bp + w1) as usize] = v;
                         pc = next;
                         continue;
                     }
                     R_LOAD2 => {
-                        let v = self.rget(pi, bp, w2).clone();
-                        let u = self.rget(pi, bp, w3).clone();
+                        let v = self.rget(bp, w2).clone();
+                        let u = self.rget(bp, w3).clone();
                         self.stack[(bp + w1) as usize] = v;
                         self.stack[(bp + w1 + 1) as usize] = u;
                         pc = next;
@@ -119,7 +120,7 @@ impl Vm {
                     R_ADD => {
                         let mut r = Val::Undef;
                         let mut done = false;
-                        if let (Val::Num(x), Val::Num(y)) = (self.rget(pi, bp, w2), self.rget(pi, bp, w3)) {
+                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, w2), self.rget(bp, w3)) {
                             r = Val::Num(*x + *y);
                             done = true;
                         }
@@ -128,8 +129,8 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        let a = self.rget(pi, bp, w2).clone();
-                        let b = self.rget(pi, bp, w3).clone();
+                        let a = self.rget(bp, w2).clone();
+                        let b = self.rget(bp, w3).clone();
                         self.frames[fi].pc = pc + 1;
                         let r = self.add_vals(&a, &b);
                         if !self.throwing {
@@ -146,8 +147,21 @@ impl Vm {
                         };
                         let mut r = Val::Undef;
                         let mut done = false;
-                        if let (Val::Num(x), Val::Num(y)) = (self.rget(pi, bp, w2), self.rget(pi, bp, w3)) {
-                            r = Val::Num(arith_num(code, *x, *y));
+                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, w2), self.rget(bp, w3)) {
+                            let (a, b) = (*x, *y);
+                            // bit operations on numbers that are int32 already
+                            if code >= OP_BAND && code <= OP_SHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
+                                let (p, q) = (a as int, b as int);
+                                r = Val::Num(match code {
+                                    OP_BAND => (p & q) as double,
+                                    OP_BOR => (p | q) as double,
+                                    OP_BXOR => (p ^ q) as double,
+                                    OP_SHL => wrap32(p << (q & 31)) as double,
+                                    _ => (p >> (q & 31)) as double,
+                                });
+                            } else {
+                                r = Val::Num(arith_num(code, a, b));
+                            }
                             done = true;
                         }
                         if done {
@@ -155,8 +169,8 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        let a = self.rget(pi, bp, w2).clone();
-                        let b = self.rget(pi, bp, w3).clone();
+                        let a = self.rget(bp, w2).clone();
+                        let b = self.rget(bp, w3).clone();
                         self.frames[fi].pc = pc + 1;
                         let r = self.arith(code, &a, &b);
                         if !self.throwing {
@@ -174,7 +188,7 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Val::Num(a), Val::Num(b)) = (self.rget(pi, bp, w1), self.rget(pi, bp, w2)) {
+                        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, w1), self.rget(bp, w2)) {
                             num = true;
                             r = match code {
                                 OP_LT => *a < *b,
@@ -202,7 +216,7 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Val::Num(a), Val::Num(b)) = (self.rget(pi, bp, w1), self.rget(pi, bp, w2)) {
+                        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, w1), self.rget(bp, w2)) {
                             num = true;
                             r = match code {
                                 OP_LT => *a < *b,
@@ -240,23 +254,23 @@ impl Vm {
                         continue;
                     }
                     R_JF => {
-                        pc = if truthy(self.rget(pi, bp, w1)) { next } else { w2 };
+                        pc = if truthy(self.rget(bp, w1)) { next } else { w2 };
                         continue;
                     }
                     R_JT => {
-                        pc = if truthy(self.rget(pi, bp, w1)) { w2 } else { next };
+                        pc = if truthy(self.rget(bp, w1)) { w2 } else { next };
                         continue;
                     }
                     R_JF_KEEP => {
-                        pc = if truthy(self.rget(pi, bp, w1)) { next } else { w2 };
+                        pc = if truthy(self.rget(bp, w1)) { next } else { w2 };
                         continue;
                     }
                     R_JT_KEEP => {
-                        pc = if truthy(self.rget(pi, bp, w1)) { w2 } else { next };
+                        pc = if truthy(self.rget(bp, w1)) { w2 } else { next };
                         continue;
                     }
                     R_JNN_KEEP => {
-                        let nullish = match self.rget(pi, bp, w1) {
+                        let nullish = match self.rget(bp, w1) {
                             Val::Undef | Val::Null => true,
                             _ => false,
                         };
@@ -285,7 +299,7 @@ impl Vm {
                     }
                     R_CASE_INT_JT => {
                         let mut hit = false;
-                        if let Val::Num(x) = self.rget(pi, bp, w1) {
+                        if let Val::Num(x) = self.rget(bp, w1) {
                             hit = *x == (w2 as double);
                         }
                         pc = if hit { w3 } else { next };
@@ -301,13 +315,20 @@ impl Vm {
                         let c = self.protos[pi].code[pc as usize].c;
                         let mut o: int = -1;
                         if (w0 & 255) == R_GET_PROP {
-                            if let Val::Obj(x) = self.rget(pi, bp, w2) {
+                            if let Val::Obj(x) = self.rget(bp, w2) {
                                 o = *x;
                             }
                         } else if let Val::Obj(x) = &self.frames[fi].this_val {
                             o = *x;
                         }
                         let mut done = false;
+                        if o >= 0 && c >= 65536 && (c >> 16) == self.objs[o as usize].shape {
+                            // the cache's shape: the slot without a call
+                            let r = self.objs[o as usize].vals[(c & 65535) as usize].clone();
+                            self.stack[(bp + w1) as usize] = r;
+                            pc = next;
+                            continue;
+                        }
                         if o >= 0 {
                             let slot = self.ic_get(o, w3, c, pi, pc + 1);
                             if slot >= 0 {
@@ -324,7 +345,7 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        let v = if (w0 & 255) == R_GET_PROP { self.rget(pi, bp, w2).clone() } else { self.frames[fi].this_val.clone() };
+                        let v = if (w0 & 255) == R_GET_PROP { self.rget(bp, w2).clone() } else { self.frames[fi].this_val.clone() };
                         self.frames[fi].pc = pc + 1;
                         let r = self.get(&v, w3);
                         if !self.throwing {
@@ -332,19 +353,19 @@ impl Vm {
                         }
                     }
                     R_SET_PROP => {
-                        let val = self.rget(pi, bp, w2).clone();
-                        let o = obj_of(self.rget(pi, bp, w1));
+                        let val = self.rget(bp, w2).clone();
+                        let o = obj_of(self.rget(bp, w1));
                         let mut done = false;
                         if o >= 0 {
                             let c = self.protos[pi].code[pc as usize].c;
-                            let slot = self.ic_set(o, w3, c, pi, pc + 1);
+                            let slot = if c >= 65536 && (c >> 16) == self.objs[o as usize].shape { c & 65535 } else { self.ic_set(o, w3, c, pi, pc + 1) };
                             if slot >= 0 {
                                 self.put_slot(o, slot, val.clone());
                                 done = true;
                             }
                         }
                         if !done {
-                            let target = self.rget(pi, bp, w1).clone();
+                            let target = self.rget(bp, w1).clone();
                             self.frames[fi].pc = pc + 1;
                             self.set(&target, w3, val);
                         }
@@ -352,7 +373,7 @@ impl Vm {
                     R_GET_ELEM => {
                         let mut r = Val::Undef;
                         let mut done = false;
-                        if let (Val::Obj(o), Val::Num(n)) = (self.rget(pi, bp, w2), self.rget(pi, bp, w3)) {
+                        if let (Val::Obj(o), Val::Num(n)) = (self.rget(bp, w2), self.rget(bp, w3)) {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
@@ -367,8 +388,8 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        let v = self.rget(pi, bp, w2).clone();
-                        let kv = self.rget(pi, bp, w3).clone();
+                        let v = self.rget(bp, w2).clone();
+                        let kv = self.rget(bp, w3).clone();
                         self.frames[fi].pc = pc + 1;
                         let r = self.get_elem(&v, &kv);
                         if !self.throwing {
@@ -376,11 +397,11 @@ impl Vm {
                         }
                     }
                     R_SET_ELEM => {
-                        let val = self.rget(pi, bp, w3).clone();
-                        let o = obj_of(self.rget(pi, bp, w1));
+                        let val = self.rget(bp, w3).clone();
+                        let o = obj_of(self.rget(bp, w1));
                         let mut n: double = 0.0;
                         let mut num = false;
-                        if let Val::Num(x) = self.rget(pi, bp, w2) {
+                        if let Val::Num(x) = self.rget(bp, w2) {
                             n = *x;
                             num = true;
                         }
@@ -412,14 +433,14 @@ impl Vm {
                             }
                         }
                         if !done {
-                            let target = self.rget(pi, bp, w1).clone();
-                            let kv = self.rget(pi, bp, w2).clone();
+                            let target = self.rget(bp, w1).clone();
+                            let kv = self.rget(bp, w2).clone();
                             self.frames[fi].pc = pc + 1;
                             self.set_elem(&target, &kv, val);
                         }
                     }
                     R_GET_METHOD => {
-                        let v = self.rget(pi, bp, w2).clone();
+                        let v = self.rget(bp, w2).clone();
                         self.frames[fi].pc = pc + 1;
                         let atom = w3;
                         let mut f = Val::Undef;
@@ -484,7 +505,7 @@ impl Vm {
                         continue;
                     }
                     R_RET | R_RET_UNDEF => {
-                        let mut v = if (w0 & 255) == R_RET { self.rget(pi, bp, w1).clone() } else { Val::Undef };
+                        let mut v = if (w0 & 255) == R_RET { self.rget(bp, w1).clone() } else { Val::Undef };
                         let fr = self.frames.pop().unwrap();
                         if fr.construct && !is_obj(&v) {
                             if !matches!(v, Val::Undef) && self.protos[fr.proto as usize].derived {
@@ -537,7 +558,7 @@ impl Vm {
                     }
                     R_SET_ENV => {
                         let e = self.get_env(w2);
-                        let v = self.rget(pi, bp, w1).clone();
+                        let v = self.rget(bp, w1).clone();
                         self.put_elem(e, w3, v);
                         pc = next;
                         continue;
@@ -562,7 +583,7 @@ impl Vm {
                         }
                     }
                     R_NOT => {
-                        let r = !truthy(self.rget(pi, bp, w2));
+                        let r = !truthy(self.rget(bp, w2));
                         self.stack[(bp + w1) as usize] = Val::Bool(r);
                         pc = next;
                         continue;
@@ -574,8 +595,8 @@ impl Vm {
                         continue;
                     }
                     R_INIT_PROP => {
-                        let v = self.rget(pi, bp, w2).clone();
-                        let o = obj_of(self.rget(pi, bp, w1));
+                        let v = self.rget(bp, w2).clone();
+                        let o = obj_of(self.rget(bp, w1));
                         // c caches the transition: shape before * 2^24 + after
                         let sh = self.objs[o as usize].shape;
                         let c = self.protos[pi].code[pc as usize].c;
@@ -630,7 +651,7 @@ impl Vm {
                         }
                     }
                     R_ADD_LOCAL_POP => {
-                        let b = self.rget(pi, bp, w2).clone();
+                        let b = self.rget(bp, w2).clone();
                         let i = (bp + w1) as usize;
                         let mut done = false;
                         if let Val::Str(bs) = &b {
@@ -717,7 +738,7 @@ impl Vm {
     pub fn renter(&mut self, fo: int, fpos: int, argc: int) {
         let pi = self.objs[fo as usize].func as usize;
         if self.protos[pi].rstate == 0 {
-            let e = translate(&mut self.protos[pi]);
+            let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals);
             if !e.is_empty() {
                 self.throw_type(e.as_str());
                 return;
@@ -793,10 +814,10 @@ impl Vm {
 
     /// A comparison of two registers (OP_LT … OP_SNE).
     #[inline]
-    pub fn rcompare(&mut self, code: int, pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
+    pub fn rcompare(&mut self, code: int, _pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
         let mut num = false;
         let mut r = false;
-        if let (Val::Num(a), Val::Num(b)) = (self.rget(pi, bp, x), self.rget(pi, bp, y)) {
+        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, x), self.rget(bp, y)) {
             num = true;
             r = match code {
                 OP_LT => *a < *b,
@@ -811,12 +832,12 @@ impl Vm {
             return r;
         }
         let strict = code == OP_SEQ || code == OP_SNE;
-        let q = if strict || code == OP_EQ || code == OP_NE { quick_eq(self.rget(pi, bp, x), self.rget(pi, bp, y), strict) } else { -1 };
+        let q = if strict || code == OP_EQ || code == OP_NE { quick_eq(self.rget(bp, x), self.rget(bp, y), strict) } else { -1 };
         if q >= 0 {
             return (q == 1) == (code == OP_SEQ || code == OP_EQ);
         }
-        let a = self.rget(pi, bp, x).clone();
-        let b = self.rget(pi, bp, y).clone();
+        let a = self.rget(bp, x).clone();
+        let b = self.rget(bp, y).clone();
         self.frames[fi].pc = pc + 1;
         self.compare(code, &a, &b)
     }

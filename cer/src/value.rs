@@ -324,9 +324,9 @@ pub struct Proto {
     pub src_start: int,
     pub src_end: int,
     /// the register code (regs.rs), made when the function first runs on
-    /// the register machine; rstate 0 before, 1 made
-    pub rcode: Vec<Op>,
-    pub kvals: Vec<Val>,
+    /// the register machine, lies in Vm.rcode from rbase; rstate 0 before,
+    /// 1 made
+    pub rbase: int,
     /// the frame's slots: locals, then the stack's depths
     pub fsize: int,
     /// where a call starts in rcode
@@ -363,8 +363,7 @@ impl Proto {
             src: Val::Undef,
             src_start: 0,
             src_end: 0,
-            rcode: Vec::new(),
-            kvals: Vec::new(),
+            rbase: 0,
             fsize: 0,
             rentry: 0,
             rstate: 0,

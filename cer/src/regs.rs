@@ -152,6 +152,8 @@ pub struct Tr {
     pub maxd: int,
     pub rc: Vec<Op>,
     pub kv: Vec<Val>,
+    /// where kv starts in Vm.kvals
+    pub kbase: int,
     /// kv index of consts[i] + 1, 0 when not yet in kv
     pub kc: Vec<int>,
     /// the abstract stack: where each value is read from (a register),
@@ -166,7 +168,7 @@ pub struct Tr {
 }
 
 impl Tr {
-    pub fn new(p: &Proto) -> Tr {
+    pub fn new(p: &Proto, kbase: int) -> Tr {
         let n = p.code.len() as int;
         let mut t = Tr {
             code: p.code.clone(),
@@ -178,6 +180,7 @@ impl Tr {
             maxd: 0,
             rc: Vec::new(),
             kv: Vec::new(),
+            kbase: kbase,
             kc: Vec::new(),
             es: Vec::new(),
             el: Vec::new(),
@@ -335,12 +338,12 @@ impl Tr {
                 _ => false,
             };
             if same {
-                return -1 - (i as int);
+                return -1 - (self.kbase + i as int);
             }
             i += 1;
         }
         self.kv.push(v);
-        -(self.kv.len() as int)
+        -(self.kbase + self.kv.len() as int)
     }
 
     fn kconst(&mut self, ci: int) -> int {
@@ -350,7 +353,7 @@ impl Tr {
         }
         let v = self.consts[ci as usize].clone();
         self.kv.push(v);
-        let k = self.kv.len() as int;
+        let k = self.kbase + self.kv.len() as int;
         self.kc[ci as usize] = k;
         -k
     }
@@ -649,7 +652,7 @@ impl Tr {
                 let mut sub = 0;
                 let tk = (w + 1) as usize;
                 if self.el[tk] >= 0 && self.es[tk] < 0 {
-                    if let Val::Undef = self.kv[(-1 - self.es[tk]) as usize] {
+                    if let Val::Undef = self.kv[(-1 - self.es[tk] - self.kbase) as usize] {
                         sub = 1;
                         self.es[tk] = ns + w + 1;
                         self.el[tk] = -1;
@@ -811,16 +814,28 @@ impl Tr {
     }
 }
 
-/// Fills `p.rcode`, `p.kvals` and `p.fsize`; an error when the code is not
-/// one this translator knows.
-pub fn translate(p: &mut Proto) -> String {
-    let mut t = Tr::new(p);
+/// Appends the register code of p to rcode and its constants to kvals,
+/// and sets `p.rbase`, `p.fsize` and `p.rentry`; an error when the code is
+/// not one this translator knows.
+pub fn translate(p: &mut Proto, rcode: &mut Vec<Op>, kvals: &mut Vec<Val>) -> String {
+    let mut t = Tr::new(p, kvals.len() as int);
     t.translate();
     if !t.err.is_empty() {
         return t.err.clone();
     }
-    p.rcode = t.rc;
-    p.kvals = t.kv;
+    let rb = rcode.len() as int;
+    let mut i: usize = 0;
+    while i < t.rc.len() {
+        let o = t.rc[i];
+        rcode.push(o);
+        i += 1;
+    }
+    i = 0;
+    while i < t.kv.len() {
+        kvals.push(t.kv[i].clone());
+        i += 1;
+    }
+    p.rbase = rb;
     p.fsize = p.nslots + t.maxd + 1;
     p.rentry = t.entry;
     p.rstate = 1;
@@ -829,12 +844,12 @@ pub fn translate(p: &mut Proto) -> String {
 
 /// The register code of a function as text, one instruction a line (for
 /// looking at what the translation made).
-pub fn dump(p: &Proto) -> String {
-    let mut out = format!("{} nslots {} fsize {} kvals {}\n", p.name, p.nslots, p.fsize, p.kvals.len());
+pub fn dump(p: &Proto, rcode: &Vec<Op>) -> String {
+    let mut out = format!("{} nslots {} fsize {} rbase {}\n", p.name, p.nslots, p.fsize, p.rbase);
     let n = p.code.len() as int;
     let mut i: int = 0;
     while i < n {
-        let r = if (i as usize) < p.rcode.len() { p.rcode[i as usize] } else { Op { code: 0, a: 0, b: 0, c: 0 } };
+        let r = if p.rstate == 1 { rcode[(p.rbase + i) as usize] } else { Op { code: 0, a: 0, b: 0, c: 0 } };
         let w0 = r.code;
         out.push_str(format!("{:4} op{:3} {:>3} sub {:3} skip {:3} | {} {} {}  ({} {} {})\n", i, p.code[i as usize].code, w0 % 256, (w0 / 256) % 256, w0 / 65536, r.a, r.b, r.c, p.code[i as usize].a, p.code[i as usize].b, p.code[i as usize].c).as_str());
         i += 1;

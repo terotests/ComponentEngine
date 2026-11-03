@@ -224,6 +224,10 @@ pub struct Vm {
     pub echo: bool,
     /// run frames on the register machine (rvm.rs)
     pub regs: bool,
+    /// the register code of every translated function (Proto.rbase) and
+    /// the constants it reads (a register x < 0 is kvals[-1 - x])
+    pub rcode: Vec<Op>,
+    pub kvals: Vec<Val>,
     pub alloc_count: int,
     pub gc_threshold: int,
     pub native_depth: int,
@@ -404,6 +408,8 @@ impl Vm {
             out: Vec::new(),
             echo: false,
             regs: false,
+            rcode: Vec::new(),
+            kvals: Vec::new(),
             alloc_count: 0,
             gc_threshold: 200000,
             native_depth: 0,

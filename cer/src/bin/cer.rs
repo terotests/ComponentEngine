@@ -16,7 +16,7 @@ fn main() {
         let first = e.vm.prelude_protos as usize;
         for p in e.vm.protos.iter().skip(first) {
             if p.rstate == 1 || std::env::var("CER_RDUMP_ALL").is_ok() {
-                eprintln!("{}", cer::regs::dump(p));
+                eprintln!("{}", cer::regs::dump(p, &e.vm.rcode));
             }
         }
     }
