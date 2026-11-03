@@ -182,7 +182,7 @@ impl Vm {
                     }
                     R_CMP => {
                         let code = (w0 >> 8) & 255;
-                        let r = self.rcompare(code, pi, bp, w2, w3, fi, pc);
+                        let r = self.rcmp(code, pi, bp, w2, w3, fi, pc);
                         if !self.throwing {
                             self.stack[(bp + w1) as usize] = Val::Bool(r);
                         }
@@ -203,7 +203,7 @@ impl Vm {
                             };
                         }
                         if !num {
-                            r = self.rcompare(code, pi, bp, w1, w2, fi, pc);
+                            r = self.rcmp(code, pi, bp, w1, w2, fi, pc);
                         }
                         if r == ((w0 & 255) == R_CMP_JT) && !self.throwing {
                             if w3 <= pc {
@@ -231,7 +231,7 @@ impl Vm {
                             };
                         }
                         if !num {
-                            r = self.rcompare(code, pi, bp, w1, w2, fi, pc);
+                            r = self.rcmp(code, pi, bp, w1, w2, fi, pc);
                             if self.throwing {
                                 self.frames[fi].pc = pc + 1;
                                 if !self.unwind(base) {
@@ -281,7 +281,7 @@ impl Vm {
                             };
                         }
                         if !num {
-                            r = self.rcompare(code, pi, bp, w2, w3, fi, pc);
+                            r = self.rcmp(code, pi, bp, w2, w3, fi, pc);
                         }
                         if r == ((w0 & 255) == R_CMP_JTK) && !self.throwing {
                             self.stack[(bp + (w1 & 65535)) as usize] = Val::Bool(r);
@@ -348,7 +348,7 @@ impl Vm {
                         continue;
                     }
                     R_CASE_JT => {
-                        let r = self.rcompare(OP_SEQ, pi, bp, w1, w2, fi, pc);
+                        let r = self.rcmp(OP_SEQ, pi, bp, w1, w2, fi, pc);
                         if r && !self.throwing {
                             npc = w3;
                         }
@@ -1047,6 +1047,17 @@ impl Vm {
         self.gc();
     }
 
+    /// A comparison of two registers: strict and null equality here, the
+    /// rest by rcompare.
+    #[inline(always)]
+    pub fn rcmp(&mut self, code: int, pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
+        let q = fast_cmp(code, self.rget(bp, x), self.rget(bp, y));
+        if q >= 0 {
+            return q == 1;
+        }
+        self.rcompare(code, pi, bp, x, y, fi, pc)
+    }
+
     /// A comparison of two registers (OP_LT … OP_SNE).
     #[inline]
     pub fn rcompare(&mut self, code: int, _pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
@@ -1082,5 +1093,41 @@ impl Vm {
         let b = self.rget(bp, y).clone();
         self.frames[fi].pc = pc + 1;
         self.compare(code, &a, &b)
+    }
+}
+
+/// A comparison decided by the values' kinds alone: 1 true, 0 false, -1 when
+/// it needs rcompare. Strict equality always decides; loose equality when
+/// one side is null or undefined.
+#[inline(always)]
+pub fn fast_cmp(code: int, a: &Val, b: &Val) -> int {
+    let eq: int = if code == OP_SEQ || code == OP_SNE {
+        match (a, b) {
+            (Val::Num(x), Val::Num(y)) => if *x == *y { 1 } else { 0 },
+            (Val::Obj(x), Val::Obj(y)) => if *x == *y { 1 } else { 0 },
+            (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => 1,
+            (Val::Bool(x), Val::Bool(y)) => if *x == *y { 1 } else { 0 },
+            (Val::Str(x), Val::Str(y)) => if x.as_str() == y.as_str() { 1 } else { 0 },
+            _ => 0,
+        }
+    } else if code == OP_EQ || code == OP_NE {
+        match (a, b) {
+            (Val::Undef, Val::Undef) | (Val::Null, Val::Null) | (Val::Undef, Val::Null) | (Val::Null, Val::Undef) => 1,
+            (Val::Undef, Val::Obj(_)) | (Val::Null, Val::Obj(_)) | (Val::Obj(_), Val::Undef) | (Val::Obj(_), Val::Null) => 0,
+            (Val::Undef, Val::Num(_)) | (Val::Null, Val::Num(_)) | (Val::Num(_), Val::Undef) | (Val::Num(_), Val::Null) => 0,
+            (Val::Undef, Val::Str(_)) | (Val::Null, Val::Str(_)) | (Val::Str(_), Val::Undef) | (Val::Str(_), Val::Null) => 0,
+            (Val::Undef, Val::Bool(_)) | (Val::Null, Val::Bool(_)) | (Val::Bool(_), Val::Undef) | (Val::Bool(_), Val::Null) => 0,
+            _ => -1,
+        }
+    } else {
+        -1
+    };
+    if eq < 0 {
+        return -1;
+    }
+    if code == OP_SEQ || code == OP_EQ {
+        eq
+    } else {
+        1 - eq
     }
 }
