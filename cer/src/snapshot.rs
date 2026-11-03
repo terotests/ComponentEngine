@@ -345,6 +345,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     }
     vm.atoms = HashMap::new();
     vm.atom_names = Vec::new();
+    vm.atom_cache = Vec::new();
     vm.atom_vals = Vec::new();
     let na = r.num();
     i = 0;

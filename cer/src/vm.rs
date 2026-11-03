@@ -152,6 +152,8 @@ pub struct Vm {
     pub protos: Vec<Proto>,
     pub atoms: HashMap<String, int>,
     pub atom_names: Vec<String>,
+    /// intern's cache: atom by a hash of the text, -1 for none
+    pub atom_cache: Vec<int>,
     /// atom names as string values, made on first use (atom_val)
     pub atom_vals: Vec<Val>,
     /// "undefined", "object", … as string values for typeof (type_val)
@@ -357,6 +359,7 @@ impl Vm {
             free_shapes: Vec::new(),
             protos: Vec::new(),
             atoms: HashMap::new(),
+            atom_cache: Vec::new(),
             atom_names: Vec::new(),
             atom_vals: Vec::new(),
             type_vals: Vec::new(),
@@ -793,7 +796,33 @@ impl Vm {
     }
 
     pub fn intern(&mut self, s: &str) -> int {
-        match self.atoms.get(s) {
+        // a direct-mapped cache in front of the map, by a cheap hash of the
+        // length and some of the bytes
+        let b = s.as_bytes();
+        let n = b.len();
+        let mut h: int = (n as int) & 65535;
+        if n > 0 {
+            h = (h * 31 + (b[0] as int)) & 65535;
+            h = (h * 31 + (b[n - 1] as int)) & 65535;
+            h = (h * 31 + (b[n / 2] as int)) & 65535;
+            if n > 3 {
+                h = (h * 31 + (b[1] as int)) & 65535;
+                h = (h * 31 + (b[n - 2] as int)) & 65535;
+            }
+        }
+        let k = (h & 4095) as usize;
+        if self.atom_cache.is_empty() {
+            let mut i = 0;
+            while i < 4096 {
+                self.atom_cache.push(-1);
+                i += 1;
+            }
+        }
+        let c = self.atom_cache[k];
+        if c >= 0 && (c as usize) < self.atom_names.len() && self.atom_names[c as usize].as_str() == s {
+            return c;
+        }
+        let a = match self.atoms.get(s) {
             Some(a) => *a,
             None => {
                 let a = self.atom_names.len() as int;
@@ -801,7 +830,9 @@ impl Vm {
                 self.atoms.insert(String::from(s), a);
                 a
             }
-        }
+        };
+        self.atom_cache[k] = a;
+        a
     }
 
     /// The name of atom `a` as a string value, shared.
