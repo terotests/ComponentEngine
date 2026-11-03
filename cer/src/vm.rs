@@ -2372,6 +2372,19 @@ impl Vm {
         r
     }
 
+    /// A call from the host, with no native code under it (native_depth
+    /// 0): the frames it runs are safe points, so what it leaves behind is
+    /// reclaimed while it runs. Inside a native call it is call_value.
+    pub fn call_top(&mut self, f: Val, this: Val, args: Vec<Val>) -> Val {
+        if self.native_depth != 0 {
+            return self.call_value(f, this, args);
+        }
+        self.native_depth -= 1;
+        let r = self.call_value(f, this, args);
+        self.native_depth += 1;
+        r
+    }
+
     /// `new f(...args)` from native code.
     pub fn construct(&mut self, f: Val, args: Vec<Val>, new_target: Val) -> Val {
         let fo = obj_of(&f);

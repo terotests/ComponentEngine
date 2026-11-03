@@ -2531,6 +2531,13 @@ impl Vm {
             let b = self.jobs.remove(0);
             let c = self.jobs.remove(0);
             let d = self.jobs.remove(0);
+            // from the host (native_depth 0) the jobs' frames are safe
+            // points: what the loop still needs after a call is rooted
+            let top = self.native_depth == 0;
+            if top {
+                self.temp_roots.push(d.clone());
+                self.native_depth -= 1;
+            }
             if let Val::Num(neg) = a {
                 // a reaction
                 let state = (-neg) as int;
@@ -2567,6 +2574,10 @@ impl Vm {
                     self.call_value(d, Val::Undef, vec![e]);
                     self.throwing = false;
                 }
+            }
+            if top {
+                self.native_depth += 1;
+                self.temp_roots.pop();
             }
         }
     }

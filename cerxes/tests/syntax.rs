@@ -186,3 +186,24 @@ fn snapshot_keeps_a_realm() {
     let bad = Engine::from_snapshot(&snap[..snap.len() / 2]);
     assert!(!bad.error.is_empty());
 }
+
+/// A host's call (Engine::call) and the promise jobs after it run with safe
+/// points: reclaims there, checked, free nothing still reachable.
+#[test]
+fn host_calls_reclaim_checked() {
+    let mut e = Engine::new();
+    e.vm.rc_stress();
+    e.eval(
+        "var keep = []; function work() { var t = []; for (var i = 0; i < 200; i++) { t.push({ i: i, a: [i, { q: i }] }); } keep.push(t[7]); \
+         Promise.resolve(t[9]).then(function (o) { keep.push(o); return { r: o.a[1] }; }).then(function (x) { keep.push(x.r); }); \
+         return keep.length; } \
+         function sum() { var s = 0; for (var i = 0; i < keep.length; i++) { s += keep[i].i !== undefined ? keep[i].i : keep[i].q; } return s; }",
+    );
+    for _ in 0..20 {
+        e.call("work");
+    }
+    let got = e.call("sum");
+    assert_eq!(got, "500");
+    assert!(e.vm.reclaims > 0);
+    assert_eq!(e.vm.rc_errors, 0, "{}", e.vm.rc_log.join("; "));
+}
