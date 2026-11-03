@@ -135,8 +135,8 @@ impl Vm {
             return v.clone();
         }
         let o = obj_of(v);
-        if o >= 0 && self.objs[o as usize].class == C_OBJECT && self.class_of(&self.objs[o as usize].prim.clone()) == C_SYMBOL {
-            return self.objs[o as usize].prim.clone();
+        if o >= 0 && self.objs[o as usize].class == C_OBJECT && self.class_of(&self.colds[self.objs[o as usize].cold as usize].prim.clone()) == C_SYMBOL {
+            return self.colds[self.objs[o as usize].cold as usize].prim.clone();
         }
         self.throw_type("Symbol.prototype method called on incompatible receiver");
         Val::Undef
@@ -220,7 +220,7 @@ impl Vm {
             }
             let n = obj_of(&fresh);
             let func = self.objs[n as usize].func;
-            let prim = self.objs[n as usize].prim.clone();
+            let prim = self.colds[self.objs[n as usize].cold as usize].prim.clone();
             let pos = self.objs[n as usize].pos;
             let keys = self.keys_of(n);
             let vals = self.objs[n as usize].vals.clone();

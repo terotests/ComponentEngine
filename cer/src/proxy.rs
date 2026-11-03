@@ -52,7 +52,7 @@ impl Vm {
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
     pub fn proxy_call(&mut self, p: int, which: int, args: Vec<Val>) -> Val {
         let target = self.objs[p as usize].env;
-        let handler = self.objs[p as usize].home;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
         if handler < 0 || target < 0 || self.proxy_hooks < 0 {
             self.throw_type("Cannot perform an operation on a proxy that has been revoked");
             return Val::Undef;

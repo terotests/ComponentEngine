@@ -27,16 +27,9 @@ pub struct Tok {
     /// a line break before this token (automatic semicolons, `return`)
     pub nl: bool,
     pub line: int,
-    /// a template: the cooked strings around the substitutions
-    pub parts: Vec<String>,
-    /// a template: the source text of each `${…}`
-    pub exprs: Vec<String>,
-    /// a template: the raw strings, and whether each cooked string is
-    /// valid (an invalid escape is allowed in a tagged template only)
-    pub raws: Vec<String>,
-    pub cooked_ok: Vec<bool>,
-    /// a regular expression: its flags
-    pub flags: String,
+    /// a template's or a regular expression's extra (Lexer.xs), -1 for
+    /// none: most tokens have none, and the token stays small
+    pub x: int,
     /// an identifier written with an escape, or a string with an octal
     /// escape: not a keyword
     pub escaped: bool,
@@ -61,11 +54,7 @@ impl Tok {
             num: 0.0,
             nl: nl,
             line: line,
-            parts: Vec::new(),
-            exprs: Vec::new(),
-            raws: Vec::new(),
-            cooked_ok: Vec::new(),
-            flags: String::new(),
+            x: -1,
             escaped: false,
             start: 0,
             paren: PAREN_NONE,
@@ -73,7 +62,29 @@ impl Tok {
     }
 }
 
+/// What a template or a regular expression token has besides its text.
+pub struct TokX {
+    /// a template: the cooked strings around the substitutions
+    pub parts: Vec<String>,
+    /// a template: the source text of each `${…}`
+    pub exprs: Vec<String>,
+    /// a template: the raw strings, and whether each cooked string is
+    /// valid (an invalid escape is allowed in a tagged template only)
+    pub raws: Vec<String>,
+    pub cooked_ok: Vec<bool>,
+    /// a regular expression: its flags
+    pub flags: String,
+}
+
+impl TokX {
+    pub fn new() -> TokX {
+        TokX { parts: Vec::new(), exprs: Vec::new(), raws: Vec::new(), cooked_ok: Vec::new(), flags: String::new() }
+    }
+}
+
 pub struct Lexer {
+    /// the tokens' extras (Tok.x)
+    pub xs: Vec<TokX>,
     pub src: Vec<char>,
     pub pos: int,
     pub line: int,
@@ -151,7 +162,7 @@ pub fn push_code_point(out: &mut String, cp: int) {
 
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
-        Lexer { src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), regex_ok: true, parens: Vec::new(), paren_keyword: false, puncts: puncts() }
+        Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), regex_ok: true, parens: Vec::new(), paren_keyword: false, puncts: puncts() }
     }
 
     pub fn at(&self, i: int) -> char {
@@ -767,6 +778,7 @@ impl Lexer {
     }
 
     fn read_template(&mut self, t: &mut Tok) {
+        let mut x = TokX::new();
         self.pos += 1;
         let n = self.src.len() as int;
         let mut cur = String::new();
@@ -780,7 +792,7 @@ impl Lexer {
             let c = self.cur();
             if c == '`' {
                 let raw = self.raw_between(start, self.pos);
-                t.raws.push(raw);
+                x.raws.push(raw);
                 self.pos += 1;
                 break;
             }
@@ -793,10 +805,10 @@ impl Lexer {
             }
             if c == '$' && self.at(self.pos + 1) == '{' {
                 let raw = self.raw_between(start, self.pos);
-                t.raws.push(raw);
+                x.raws.push(raw);
                 self.pos += 2;
-                t.parts.push(cur.clone());
-                t.cooked_ok.push(ok);
+                x.parts.push(cur.clone());
+                x.cooked_ok.push(ok);
                 ok = true;
                 cur = String::new();
                 // the substitution's source: its tokens up to the `}` that
@@ -851,7 +863,7 @@ impl Lexer {
                         k += 1;
                     }
                 }
-                t.exprs.push(e);
+                x.exprs.push(e);
                 start = self.pos;
                 continue;
             }
@@ -871,11 +883,13 @@ impl Lexer {
             cur.push(c);
             self.pos += 1;
         }
-        t.parts.push(cur);
-        t.cooked_ok.push(ok);
-        if t.raws.len() < t.parts.len() {
-            t.raws.push(String::new());
+        x.parts.push(cur);
+        x.cooked_ok.push(ok);
+        if x.raws.len() < x.parts.len() {
+            x.raws.push(String::new());
         }
+        t.x = self.xs.len() as int;
+        self.xs.push(x);
     }
 
     fn read_regex(&mut self, t: &mut Tok) {
@@ -912,7 +926,10 @@ impl Lexer {
             self.pos += 1;
         }
         t.text = body;
-        t.flags = flags;
+        let mut x = TokX::new();
+        x.flags = flags;
+        t.x = self.xs.len() as int;
+        self.xs.push(x);
     }
 }
 
@@ -1081,3 +1098,16 @@ pub fn decode_entities(s: &str) -> String {
     }
     out
 }
+
+/// Rust: the token buffer grows by a quarter (at least 256 tokens), not by
+/// doubling.
+#[ranger::target(rust)]
+pub fn grow_toks(v: &mut Vec<Tok>) {
+    if v.len() == v.capacity() {
+        let n = v.len() / 4;
+        v.reserve_exact(if n < 256 { 256 } else { n });
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_toks(_v: &mut Vec<Tok>) {}

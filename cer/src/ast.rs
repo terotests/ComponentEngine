@@ -124,6 +124,7 @@ impl Ast {
     }
 
     pub fn add(&mut self, kind: int, line: int) -> int {
+        grow_nodes(&mut self.nodes);
         self.nodes.push(Node {
             kind: kind,
             op: String::new(),
@@ -148,3 +149,16 @@ impl Ast {
         self.nodes[i as usize].kind
     }
 }
+
+/// Rust: the node table grows by a quarter (at least 256 nodes), not by
+/// doubling: a Node is big and a parse is short.
+#[ranger::target(rust)]
+pub fn grow_nodes(v: &mut Vec<Node>) {
+    if v.len() == v.capacity() {
+        let n = v.len() / 4;
+        v.reserve_exact(if n < 256 { 256 } else { n });
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_nodes(_v: &mut Vec<Node>) {}

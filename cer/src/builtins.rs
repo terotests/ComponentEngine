@@ -807,7 +807,7 @@ impl Vm {
             Val::Num(n) => *n,
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_NUMBER {
-                    if let Val::Num(n) = self.objs[*o as usize].prim {
+                    if let Val::Num(n) = self.colds[self.objs[*o as usize].cold as usize].prim {
                         return n;
                     }
                 }
@@ -894,7 +894,7 @@ impl Vm {
             Val::Obj(o) => {
                 let c = self.objs[*o as usize].class;
                 if c == C_SYMBOL {
-                    let d = self.objs[*o as usize].prim.clone();
+                    let d = self.colds[self.objs[*o as usize].cold as usize].prim.clone();
                     let ds = if let Val::Str(s) = d { self.sref(s).to_string() } else { String::new() };
                     return format!("Symbol({})", ds);
                 }
@@ -1528,7 +1528,7 @@ impl Vm {
         while i < n {
             if self.colds[self.objs[m as usize].cold as usize].marks[i] == 0 {
                 let k = self.objs[m as usize].elems[i].clone();
-                let v = if is_set { k.clone() } else { self.objs[m as usize].elems2[i].clone() };
+                let v = if is_set { k.clone() } else { self.colds[self.objs[m as usize].cold as usize].elems2[i].clone() };
                 if kind == 0 {
                     items.push(k);
                 } else if kind == 1 {
@@ -1715,7 +1715,7 @@ impl Vm {
             return Val::Obj(d);
         }
         if i >= 0 && class == C_STRING {
-            if let Val::Str(s) = self.objs[o as usize].prim.clone() {
+            if let Val::Str(s) = self.colds[self.objs[o as usize].cold as usize].prim.clone() {
                 let s = self.sget(s.clone());
                 let c = jsstr::at(s.as_str(), i);
                 if c >= 0 {
@@ -1911,7 +1911,7 @@ impl Vm {
                     let s = self.to_str(&v);
                     self.rc_val(s)
                 } else {
-                    self.objs[*o as usize].prim.clone()
+                    self.colds[self.objs[*o as usize].cold as usize].prim.clone()
                 };
             }
         }
@@ -2315,7 +2315,7 @@ impl Vm {
             self.throw_type("this is not a Date object.");
             return nan();
         }
-        match self.objs[o as usize].prim {
+        match self.colds[self.objs[o as usize].cold as usize].prim {
             Val::Num(n) => n,
             _ => nan(),
         }
@@ -2611,7 +2611,7 @@ impl Vm {
             self.push_elem(p, on_err);
             self.push_elem(p, Val::Obj(d));
         } else {
-            let v = self.objs[p as usize].prim.clone();
+            let v = self.colds[self.objs[p as usize].cold as usize].prim.clone();
             self.queue_reaction(on_ok, on_err, Val::Obj(d), state, v);
         }
         Val::Obj(d)
@@ -2723,7 +2723,7 @@ impl Vm {
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && !(id == NF_AP_FOREACH || id == NF_AP_MAP || id == NF_AP_FILTER || id == NF_AP_SOME || id == NF_AP_EVERY || id == NF_AP_REDUCE || id == NF_AP_REDUCERIGHT || id == NF_AP_INDEXOF || id == NF_AP_LASTINDEXOF) {
             // the rest read and write `elems` directly: holes become undefined
             let t = obj_of(&this);
-            if t >= 0 && self.objs[t as usize].class == C_ARRAY && !self.objs[t as usize].elems2.is_empty() {
+            if t >= 0 && self.objs[t as usize].class == C_ARRAY && !self.colds[self.objs[t as usize].cold as usize].elems2.is_empty() {
                 self.put_elems2(t, Vec::new());
             }
         }
@@ -3165,7 +3165,7 @@ impl Vm {
                 }
                 let name = self.atom_str(self.objs[o as usize].pos);
                 if name.starts_with("@@for:") {
-                    return self.objs[o as usize].prim.clone();
+                    return self.colds[self.objs[o as usize].cold as usize].prim.clone();
                 }
                 Val::Undef
             }
@@ -3181,7 +3181,7 @@ impl Vm {
                 let t = self.this_symbol(&this);
                 let o = obj_of(&t);
                 if o >= 0 && self.objs[o as usize].class == C_SYMBOL {
-                    return self.objs[o as usize].prim.clone();
+                    return self.colds[self.objs[o as usize].cold as usize].prim.clone();
                 }
                 Val::Undef
             }

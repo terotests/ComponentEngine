@@ -351,7 +351,7 @@ impl Vm {
         if b < 0 || (self.objs[b as usize].pos & 1) != 0 {
             return 0;
         }
-        match self.objs[o as usize].prim {
+        match self.colds[self.objs[o as usize].cold as usize].prim {
             Val::Num(n) => n as int,
             _ => 0,
         }
@@ -364,7 +364,7 @@ impl Vm {
 
     /// The byte length of buffer `b`.
     pub fn buf_size(&self, b: int) -> int {
-        let mode = self.objs[b as usize].home;
+        let mode = self.colds[self.objs[b as usize].cold as usize].home;
         let n = self.colds[self.objs[b as usize].cold as usize].nums.len() as int;
         if mode < 0 {
             n
@@ -375,9 +375,10 @@ impl Vm {
 
     /// Makes buffer `b` hold its bytes, if it holds elements.
     pub fn buf_to_bytes(&mut self, b: int) {
-        let mode = self.objs[b as usize].home;
+        let mode = self.colds[self.objs[b as usize].cold as usize].home;
         if mode < 0 || mode == TK_UINT8 {
-            self.objs[b as usize].home = TK_UINT8;
+            let cid = self.cold_id(b) as usize;
+            self.colds[cid].home = TK_UINT8;
             return;
         }
         let size = kind_size(mode);
@@ -392,7 +393,8 @@ impl Vm {
             }
         }
         { let c = self.cold_id(b) as usize; self.colds[c].nums = bytes; }
-        self.objs[b as usize].home = TK_UINT8;
+        let cid = self.cold_id(b) as usize;
+        self.colds[cid].home = TK_UINT8;
     }
 
     /// Reads a `kind` element at byte `at` of buffer `b`.
@@ -459,7 +461,7 @@ impl Vm {
         let size = kind_size(kind);
         let at = self.objs[o as usize].func + i * size;
         let b = self.objs[o as usize].env;
-        let mode = self.objs[b as usize].home;
+        let mode = self.colds[self.objs[b as usize].cold as usize].home;
         if mode == kind {
             return Val::Num(self.colds[self.objs[b as usize].cold as usize].nums[(at / size) as usize]);
         }
@@ -492,9 +494,10 @@ impl Vm {
         let size = kind_size(kind);
         let at = self.objs[o as usize].func + i * size;
         let b = self.objs[o as usize].env;
-        let mode = self.objs[b as usize].home;
+        let mode = self.colds[self.objs[b as usize].cold as usize].home;
         if mode == kind || (mode < 0 && kind == TK_UINT8) {
-            self.objs[b as usize].home = kind;
+            let cid = self.cold_id(b) as usize;
+            self.colds[cid].home = kind;
             { let c = self.cold_id(b) as usize; self.colds[c].nums[(at / size) as usize] = element_value(kind, x); }
             return;
         }
@@ -545,7 +548,8 @@ impl Vm {
                 i += 1;
             }
             { let c = self.cold_id(b) as usize; self.colds[c].nums = bytes; }
-            self.objs[b as usize].home = -1;
+            let cid = self.cold_id(b) as usize;
+            self.colds[cid].home = -1;
             if truthy(&a[2]) {
                 self.objs[b as usize].pos = 2;
             }
@@ -612,8 +616,8 @@ impl Vm {
             let (fs, ts, n) = (num(&a[1]) as int, num(&a[3]) as int, num(&a[4]) as int);
             // whole elements between buffers of one kind are copied as they
             // are; a new buffer copied whole takes the source's kind
-            let ms = self.objs[s as usize].home;
-            let mut md = self.objs[d as usize].home;
+            let ms = self.colds[self.objs[s as usize].cold as usize].home;
+            let mut md = self.colds[self.objs[d as usize].cold as usize].home;
             if ms > TK_UINT8 || ms == TK_INT8 {
                 let size = kind_size(ms);
                 if md < 0 && ts == 0 && n == self.buf_size(d) && n % size == 0 {
@@ -624,7 +628,8 @@ impl Vm {
                         j += 1;
                     }
                     { let c = self.cold_id(d) as usize; self.colds[c].nums = z; }
-                    self.objs[d as usize].home = ms;
+                    let cid = self.cold_id(d) as usize;
+                    self.colds[cid].home = ms;
                     md = ms;
                 }
                 if md == ms && fs % size == 0 && ts % size == 0 && n % size == 0 {
@@ -661,7 +666,8 @@ impl Vm {
             let b = self.buffer_of(&a[0]);
             if b >= 0 {
                 { let c = self.cold_id(b) as usize; self.colds[c].nums = Vec::new(); }
-                self.objs[b as usize].home = TK_UINT8;
+                let cid = self.cold_id(b) as usize;
+                self.colds[cid].home = TK_UINT8;
                 self.objs[b as usize].pos |= 1;
             }
             return Val::Undef;
@@ -677,7 +683,7 @@ impl Vm {
             let off = num(&a[2]) as int;
             let len = num(&a[3]) as int;
             // the first view over all of a new buffer: it holds this kind
-            if self.objs[b as usize].home < 0 && kind < TK_BIGINT64 && off == 0 && len * kind_size(kind) == self.buf_size(b) {
+            if self.colds[self.objs[b as usize].cold as usize].home < 0 && kind < TK_BIGINT64 && off == 0 && len * kind_size(kind) == self.buf_size(b) {
                 let mut z: Vec<double> = Vec::new();
                 let mut j = 0;
                 while j < len {
@@ -685,7 +691,8 @@ impl Vm {
                     j += 1;
                 }
                 { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
-                self.objs[b as usize].home = kind;
+                let cid = self.cold_id(b) as usize;
+                self.colds[cid].home = kind;
             }
             let t = self.alloc(C_TYPED, proto);
             self.objs[t as usize].pos = kind;

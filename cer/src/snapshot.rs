@@ -212,16 +212,16 @@ pub fn snapshot(vm: &Vm) -> String {
         put_vals(&mut b, &mut st, vm, &o.vals);
         put_ints(&mut b, &vm.shapes[o.shape as usize].attrs);
         put_vals(&mut b, &mut st, vm, &o.elems);
-        put_vals(&mut b, &mut st, vm, &o.elems2);
         let cold = &vm.colds[o.cold as usize];
+        put_vals(&mut b, &mut st, vm, &cold.elems2);
         put_num(&mut b, cold.nums.len() as int);
         for x in cold.nums.iter() {
             put_number(&mut b, *x);
         }
         put_num(&mut b, o.func);
         put_num(&mut b, o.env);
-        put_val(&mut b, &mut st, vm, &o.prim);
-        put_num(&mut b, o.home);
+        put_val(&mut b, &mut st, vm, &cold.prim);
+        put_num(&mut b, cold.home);
         put_num(&mut b, o.pos);
         put_num(&mut b, (if o.extensible { 1 } else { 0 }) + (if o.has_proto_obj { 2 } else { 0 }));
         // a Map's or Set's index (by map_key) is kept; an object's is
@@ -438,9 +438,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         let vals = get_vals(&mut r, &strs);
         let attrs = get_ints(&mut r);
         o.elems = get_vals(&mut r, &strs);
-        o.elems2 = get_vals(&mut r, &strs);
         let mut cold = Cold::new();
-        let mut has_cold = false;
+        cold.elems2 = get_vals(&mut r, &strs);
+        let mut has_cold = !cold.elems2.is_empty();
         let nn = r.num();
         let mut k: int = 0;
         while k < nn && !r.bad {
@@ -454,8 +454,11 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         }
         o.func = r.num();
         o.env = r.num();
-        o.prim = get_val(&mut r, &strs);
-        o.home = r.num();
+        cold.prim = get_val(&mut r, &strs);
+        cold.home = r.num();
+        if !matches!(cold.prim, Val::Undef) || cold.home != -1 {
+            has_cold = true;
+        }
         o.pos = r.num();
         let bits = r.num();
         o.extensible = bits % 2 == 1;
@@ -623,7 +626,7 @@ fn valid_heap(vm: &Vm) -> bool {
         if o.free {
             continue;
         }
-        if o.proto < -1 || o.proto >= no || o.env < -1 || o.env >= no || o.home < -1 || o.home >= no || !in_objs(&o.prim, no) {
+        if o.proto < -1 || o.proto >= no || o.env < -1 || o.env >= no || vm.colds[o.cold as usize].home < -1 || vm.colds[o.cold as usize].home >= no || !in_objs(&vm.colds[o.cold as usize].prim, no) {
             return false;
         }
         if o.class == C_FUNCTION && (o.func < 0 || o.func >= np) {
@@ -644,7 +647,7 @@ fn valid_heap(vm: &Vm) -> bool {
                 return false;
             }
         }
-        for v in o.elems2.iter() {
+        for v in vm.colds[o.cold as usize].elems2.iter() {
             if !in_objs(v, no) {
                 return false;
             }

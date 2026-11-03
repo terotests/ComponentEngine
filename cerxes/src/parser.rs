@@ -249,9 +249,16 @@ impl Parser {
     // ---- tokens
 
     /// The token `i`, read on demand.
+    /// The template token at pos has no substitutions.
+    pub(crate) fn template_plain(&mut self) -> bool {
+        let x = self.tk(self.pos).x;
+        x < 0 || self.lx.xs[x as usize].exprs.is_empty()
+    }
+
     pub(crate) fn tk(&mut self, i: int) -> &Tok {
         while (self.toks.len() as int) <= i {
             let t = self.lx.next_token();
+            grow_toks(&mut self.toks);
             self.toks.push(t);
         }
         &self.toks[i as usize]
@@ -1924,10 +1931,11 @@ impl Parser {
     /// cooked string is undefined) and the substitutions.
     fn template(&mut self, tagged: bool) -> int {
         let n = self.node(N_TEMPLATE);
-        let parts = self.tk(self.pos).parts.clone();
-        let exprs = self.tk(self.pos).exprs.clone();
-        let raws = self.tk(self.pos).raws.clone();
-        let oks = self.tk(self.pos).cooked_ok.clone();
+        let xi = self.tk(self.pos).x as usize;
+        let parts = self.lx.xs[xi].parts.clone();
+        let exprs = self.lx.xs[xi].exprs.clone();
+        let raws = self.lx.xs[xi].raws.clone();
+        let oks = self.lx.xs[xi].cooked_ok.clone();
         let line = self.line();
         self.next();
         let mut strs: Vec<int> = Vec::new();
@@ -2000,7 +2008,8 @@ impl Parser {
         if k == T_REGEX {
             let n = self.node(N_REGEX);
             let s = self.text();
-            let f = self.tk(self.pos).flags.clone();
+            let fx = self.tk(self.pos).x;
+            let f = if fx >= 0 { self.lx.xs[fx as usize].flags.clone() } else { String::new() };
             self.ast.nodes[n as usize].s = s;
             self.ast.nodes[n as usize].op = f;
             self.next();

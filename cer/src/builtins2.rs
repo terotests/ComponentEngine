@@ -508,7 +508,7 @@ impl Vm {
                         }
                     } else {
                         self.put_elem(o, i, a0.clone());
-                        if (i as usize) < self.objs[o as usize].elems2.len() {
+                        if (i as usize) < self.colds[self.objs[o as usize].cold as usize].elems2.len() {
                             self.put_elem2(o, i, Val::Bool(false));
                         }
                     }
@@ -651,7 +651,7 @@ impl Vm {
             }
             NF_SP_TOSTRING => match &this {
                 Val::Str(_) => this,
-                Val::Obj(o) if self.objs[*o as usize].class == C_STRING => self.objs[*o as usize].prim.clone(),
+                Val::Obj(o) if self.objs[*o as usize].class == C_STRING => self.colds[self.objs[*o as usize].cold as usize].prim.clone(),
                 _ => {
                     self.throw_type("String.prototype.toString requires that 'this' be a String");
                     Val::Undef
@@ -859,7 +859,7 @@ impl Vm {
                     }
                     let mut out: Vec<Val> = Vec::new();
                     let sv2 = self.str_val("g");
-                    let copy = self.new_regexp(&self.objs[ro as usize].prim.clone(), &sv2);
+                    let copy = self.new_regexp(&self.colds[self.objs[ro as usize].cold as usize].prim.clone(), &sv2);
                     let co = obj_of(&copy);
                     loop {
                         let m = self.regexp_exec(co, &s);
@@ -1042,7 +1042,7 @@ impl Vm {
             NF_BP_TOSTRING | NF_BP_VALUEOF => {
                 let b = match &this {
                     Val::Bool(b) => *b,
-                    Val::Obj(o) if self.objs[*o as usize].class == C_BOOLEAN => truthy(&self.objs[*o as usize].prim.clone()),
+                    Val::Obj(o) if self.objs[*o as usize].class == C_BOOLEAN => truthy(&self.colds[self.objs[*o as usize].cold as usize].prim.clone()),
                     _ => {
                         self.throw_type("Boolean.prototype method called on incompatible receiver");
                         return Val::Undef;
@@ -1135,7 +1135,7 @@ impl Vm {
                     }
                 }
                 let (src, fl) = if self.class_of(&a0) == C_REGEXP {
-                    let src = self.objs[obj_of(&a0) as usize].prim.clone();
+                    let src = self.colds[self.objs[obj_of(&a0) as usize].cold as usize].prim.clone();
                     let fl = if matches!(a1, Val::Undef) { self.string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
                     (src, fl)
                 } else if is_re {
@@ -1205,7 +1205,7 @@ impl Vm {
                 } else if args.len() == 1 {
                     match &a0 {
                         Val::Str(s) => Vm::parse_date(self.sref(*s)),
-                        Val::Obj(o) if self.objs[*o as usize].class == C_DATE => match self.objs[*o as usize].prim {
+                        Val::Obj(o) if self.objs[*o as usize].class == C_DATE => match self.colds[self.objs[*o as usize].cold as usize].prim {
                             Val::Num(n) => n,
                             _ => nan(),
                         },
@@ -1360,7 +1360,7 @@ impl Vm {
                         if i < 0 {
                             Val::Undef
                         } else {
-                            self.objs[o as usize].elems2[i as usize].clone()
+                            self.colds[self.objs[o as usize].cold as usize].elems2[i as usize].clone()
                         }
                     }
                     NF_MP_SET => {
@@ -1398,7 +1398,7 @@ impl Vm {
                         while i < self.objs[o as usize].elems.len() {
                             if self.colds[self.objs[o as usize].cold as usize].marks[i] == 0 {
                                 let k = self.objs[o as usize].elems[i].clone();
-                                let v = if is_set { k.clone() } else { self.objs[o as usize].elems2[i].clone() };
+                                let v = if is_set { k.clone() } else { self.colds[self.objs[o as usize].cold as usize].elems2[i].clone() };
                                 self.call_value(a0.clone(), a1.clone(), vec![v, k, this.clone()]);
                                 if self.throwing {
                                     return Val::Undef;
@@ -1439,7 +1439,7 @@ impl Vm {
             }
             NF_PR_RESOLVE_FN | NF_PR_REJECT_FN => {
                 let p = self.objs[fobj as usize].env;
-                let cell = self.objs[fobj as usize].home;
+                let cell = self.colds[self.objs[fobj as usize].cold as usize].home;
                 if cell >= 0 {
                     if self.objs[cell as usize].pos != 0 {
                         return Val::Undef;
@@ -1483,9 +1483,9 @@ impl Vm {
                         let o = obj_of(it);
                         let st = self.objs[o as usize].pos;
                         if st == 1 {
-                            values.push(self.objs[o as usize].prim.clone());
+                            values.push(self.colds[self.objs[o as usize].cold as usize].prim.clone());
                         } else if st == 2 {
-                            let e = self.objs[o as usize].prim.clone();
+                            let e = self.colds[self.objs[o as usize].cold as usize].prim.clone();
                             self.settle(p, 2, e);
                             return Val::Obj(p);
                         } else {

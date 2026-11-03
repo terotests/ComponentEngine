@@ -445,8 +445,9 @@ impl Vm {
                                 if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == n && ob.pos != 2 {
                                     old = obj_of(&ob.elems[i as usize]);
                                     ob.elems[i as usize] = val.clone();
-                                    if (i as usize) < ob.elems2.len() {
-                                        ob.elems2[i as usize] = Val::Bool(false);
+                                    let oc = ob.cold as usize;
+                                    if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
+                                        self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
                                 } else if i >= 0 && (i as usize) == ob.elems.len() && (i as double) == n && ob.extensible {
@@ -1079,7 +1080,7 @@ impl Vm {
     fn r_iter_next(&mut self, bp: int, fi: usize, pc: int, w1: int, w3: int) -> bool {
         let it = self.stack[(bp + w1) as usize].clone();
         let o = obj_of(&it);
-        let src_obj = if o >= 0 { self.objs[o as usize].home } else { -1 };
+        let src_obj = if o >= 0 { self.colds[self.objs[o as usize].cold as usize].home } else { -1 };
         self.frames[fi].pc = pc + 1;
         loop {
             match self.iter_next(&it) {
@@ -1159,10 +1160,10 @@ impl Vm {
             self.stack.push(Val::Undef);
         }
         let mut nt = Val::Undef;
-        if arrow && !self.objs[fo as usize].elems2.is_empty() {
-            nt = self.objs[fo as usize].elems2[0].clone();
+        if arrow && !self.colds[self.objs[fo as usize].cold as usize].elems2.is_empty() {
+            nt = self.colds[self.objs[fo as usize].cold as usize].elems2[0].clone();
         }
-        let mut this_val = if arrow { self.objs[fo as usize].prim.clone() } else { self.stack[(bp - 1) as usize].clone() };
+        let mut this_val = if arrow { self.colds[self.objs[fo as usize].cold as usize].prim.clone() } else { self.stack[(bp - 1) as usize].clone() };
         if !arrow && !strict {
             if matches!(this_val, Val::Undef) || matches!(this_val, Val::Null) {
                 this_val = Val::Obj(self.global);

@@ -207,8 +207,8 @@ impl Vm {
             i += 1;
         }
         self.stack.truncate(start);
-        let promise = if self.objs[g as usize].elems2.len() > G_PROMISE { self.objs[g as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
-        let awaiting = if self.objs[g as usize].elems2.len() > G_AWAIT { self.objs[g as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
+        let promise = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_PROMISE { self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
+        let awaiting = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_AWAIT { self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
         let mut rest: Vec<Val> = Vec::new();
         {
             let f = &self.frames[fi];
@@ -266,7 +266,7 @@ impl Vm {
         for x in saved {
             self.stack.push(x);
         }
-        let rest = self.objs[g as usize].elems2.clone();
+        let rest = self.colds[self.objs[g as usize].cold as usize].elems2.clone();
         let args_obj = obj_of(&rest[G_ARGS]);
         self.frames.push(Frame {
             proto: self.objs[g as usize].func,
@@ -325,7 +325,7 @@ impl Vm {
     fn gen_finish(&mut self, g: int) {
         self.objs[g as usize].pos = GS_DONE;
         self.put_elems(g, Vec::new());
-        let n = self.objs[g as usize].elems2.len();
+        let n = self.colds[self.objs[g as usize].cold as usize].elems2.len();
         if n > G_HANDLERS {
             self.cut_elems2(g, (G_HANDLERS) as int);
         }
@@ -427,7 +427,7 @@ impl Vm {
 
     /// Resumes an async call's coroutine and wires the next `await`.
     pub fn async_step(&mut self, g: int, mode: int, v: Val) {
-        let p = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+        let p = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
         let r = self.gen_resume(g, mode, v);
         if self.throwing {
             self.throwing = false;
@@ -467,7 +467,7 @@ impl Vm {
         let mut v = v0;
         let mut resuming = after_await;
         loop {
-            let q = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+            let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             if q < 0 {
                 return;
             }
@@ -483,7 +483,7 @@ impl Vm {
             self.temp_roots.push(Val::Obj(g));
             let r = self.gen_resume(g, mode, v.clone());
             self.temp_roots.pop();
-            let q2 = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+            let q2 = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             if q2 < 0 || self.objs[q2 as usize].elems.is_empty() {
                 return;
             }
@@ -556,9 +556,9 @@ impl Vm {
                 GM_NEXT
             };
             let req = self.new_array(vec![Val::Num(mode as double), a0, Val::Obj(p)]);
-            let q = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+            let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             self.push_elem(q, Val::Obj(req));
-            let idle = self.objs[g as usize].pos != GS_RUNNING && !truthy(&self.objs[g as usize].elems2[G_AWAIT].clone());
+            let idle = self.objs[g as usize].pos != GS_RUNNING && !truthy(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
             if idle && self.objs[q as usize].elems.len() == 1 {
                 self.agen_run(g, GM_NEXT, Val::Undef, false);
             }

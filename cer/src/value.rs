@@ -76,6 +76,15 @@ pub struct Cold {
     /// an ArrayBuffer's contents: its bytes, or the elements of the one
     /// typed array kind that has used it (typed.rs)
     pub nums: Vec<double>,
+    /// a map's values, an array's hole markers, a generator's state, a
+    /// function's fields (an arrow's new.target, a class's initializer)
+    pub elems2: Vec<Val>,
+    /// an arrow's `this`, a bound `this`, a boxed primitive, a date's time,
+    /// a regexp's source
+    pub prim: Val,
+    /// the object a method's `super` looks up from; a proxy's handler; an
+    /// ArrayBuffer's typed-array kind (a number, not an object)
+    pub home: int,
 }
 
 impl Cold {
@@ -84,6 +93,9 @@ impl Cold {
             index: HashMap::new(),
             marks: Vec::new(),
             nums: Vec::new(),
+            elems2: Vec::new(),
+            prim: Val::Undef,
+            home: -1,
         }
     }
 }
@@ -101,17 +113,10 @@ pub struct JsObj {
     /// array elements, scope slots, a bound function's arguments, an
     /// accessor's getter and setter, a map's keys
     pub elems: Vec<Val>,
-    /// a map's values
-    pub elems2: Vec<Val>,
     /// the compiled function (index into `Vm.protos`) or the native id
     pub func: int,
     /// a closure's scope; a bound function's target; an iterator's source
     pub env: int,
-    /// an arrow's `this`, a bound `this`, a boxed primitive, a date's time,
-    /// a regexp's source
-    pub prim: Val,
-    /// the object a method's `super` looks up from
-    pub home: int,
     /// an iterator's position; a regexp's flags as bits
     pub pos: int,
     /// references to the object from other objects (the heap): stack slots
@@ -135,11 +140,8 @@ impl JsObj {
             vals: Vec::new(),
             cold: 0,
             elems: Vec::new(),
-            elems2: Vec::new(),
             func: -1,
             env: -1,
-            prim: Val::Undef,
-            home: -1,
             pos: 0,
             rc: 0,
             zct: false,
@@ -165,10 +167,7 @@ impl JsObj {
         } else {
             self.elems = Vec::new();
         }
-        self.elems2 = Vec::new();
-        self.prim = Val::Undef;
         self.env = -1;
-        self.home = -1;
         self.func = -1;
         self.proto = -1;
         self.pos = 0;

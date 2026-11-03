@@ -556,7 +556,7 @@ impl Vm {
     pub fn big_text(&self, v: &Val) -> String {
         let o = obj_of(v);
         if o >= 0 {
-            if let Val::Str(s) = &self.objs[o as usize].prim {
+            if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
                 let s = self.sget(s.clone());
                 return s.as_ref().clone();
             }
@@ -597,8 +597,8 @@ impl Vm {
             return v.clone();
         }
         let o = obj_of(v);
-        if o >= 0 && self.objs[o as usize].class == C_OBJECT && self.is_bigint(&self.objs[o as usize].prim.clone()) {
-            return self.objs[o as usize].prim.clone();
+        if o >= 0 && self.objs[o as usize].class == C_OBJECT && self.is_bigint(&self.colds[self.objs[o as usize].cold as usize].prim.clone()) {
+            return self.colds[self.objs[o as usize].cold as usize].prim.clone();
         }
         self.throw_type("BigInt.prototype method called on incompatible receiver");
         Val::Undef

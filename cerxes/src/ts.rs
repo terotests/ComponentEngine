@@ -211,7 +211,7 @@ impl Parser {
             let value: int;
             let mut is_string = false;
             if self.eat("=") {
-                is_string = self.kind() == T_STR || (self.kind() == T_TEMPLATE && self.tk(self.pos).exprs.is_empty());
+                is_string = self.kind() == T_STR || (self.kind() == T_TEMPLATE && self.template_plain());
                 value = self.assign();
             } else if first {
                 value = self.ast.add(N_NUM, l);

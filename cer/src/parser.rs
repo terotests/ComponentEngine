@@ -12,6 +12,8 @@ use crate::lexer::*;
 
 pub struct Parser {
     toks: Vec<Tok>,
+    /// the lexer, for the tokens' extras (Lexer.xs)
+    lx: Lexer,
     pos: int,
     pub ast: Ast,
     pub error: String,
@@ -139,6 +141,7 @@ impl Parser {
         let toks = lx.tokenize();
         let mut p = Parser {
             toks: toks,
+            lx: lx,
             pos: 0,
             ast: Ast::new(),
             error: String::new(),
@@ -152,8 +155,8 @@ impl Parser {
             member_start: 0,
         };
         p.ast.source = String::from(src);
-        if !lx.error.is_empty() {
-            p.error = lx.error.clone();
+        if !p.lx.error.is_empty() {
+            p.error = p.lx.error.clone();
         }
         p
     }
@@ -1771,10 +1774,11 @@ impl Parser {
     /// cooked string is undefined) and the substitutions.
     fn template(&mut self, tagged: bool) -> int {
         let n = self.node(N_TEMPLATE);
-        let parts = self.toks[self.pos as usize].parts.clone();
-        let exprs = self.toks[self.pos as usize].exprs.clone();
-        let raws = self.toks[self.pos as usize].raws.clone();
-        let oks = self.toks[self.pos as usize].cooked_ok.clone();
+        let xi = self.toks[self.pos as usize].x as usize;
+        let parts = self.lx.xs[xi].parts.clone();
+        let exprs = self.lx.xs[xi].exprs.clone();
+        let raws = self.lx.xs[xi].raws.clone();
+        let oks = self.lx.xs[xi].cooked_ok.clone();
         let line = self.line();
         self.next();
         let mut strs: Vec<int> = Vec::new();
@@ -1851,7 +1855,8 @@ impl Parser {
         if k == T_REGEX {
             let n = self.node(N_REGEX);
             let s = self.text();
-            let f = self.toks[self.pos as usize].flags.clone();
+            let fx = self.toks[self.pos as usize].x;
+            let f = if fx >= 0 { self.lx.xs[fx as usize].flags.clone() } else { String::new() };
             self.ast.nodes[n as usize].s = s;
             self.ast.nodes[n as usize].op = f;
             self.next();
