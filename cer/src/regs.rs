@@ -113,6 +113,12 @@ pub const R_CMP_JT: int = 42;
 /// the next op is the one after the R_JF_KEEP / R_JT_KEEP it stands for
 pub const R_CMP_JFK: int = 43;
 pub const R_CMP_JTK: int = 44;
+/// a run of R_CASE_INT_JT on one value as a table: w1 x, w2 where the
+/// table is in Vm.rtab (its size n, n targets, the default), w3 the key of
+/// the table's first target
+pub const R_SWITCH: int = 45;
+/// w1 dst, w2 x
+pub const R_TYPEOF: int = 46;
 
 const BAD: int = 1000000;
 
@@ -162,6 +168,9 @@ pub struct Tr {
     pub kv: Vec<Val>,
     /// where kv starts in Vm.kvals
     pub kbase: int,
+    /// switch tables, and where they start in Vm.rtab
+    pub tab: Vec<int>,
+    pub tbase: int,
     /// kv index of consts[i] + 1, 0 when not yet in kv
     pub kc: Vec<int>,
     /// the abstract stack: where each value is read from (a register),
@@ -176,7 +185,7 @@ pub struct Tr {
 }
 
 impl Tr {
-    pub fn new(p: &Proto, kbase: int) -> Tr {
+    pub fn new(p: &Proto, kbase: int, tbase: int) -> Tr {
         let n = p.code.len() as int;
         let mut t = Tr {
             code: p.code.clone(),
@@ -189,6 +198,8 @@ impl Tr {
             rc: Vec::new(),
             kv: Vec::new(),
             kbase: kbase,
+            tab: Vec::new(),
+            tbase: tbase,
             kc: Vec::new(),
             es: Vec::new(),
             el: Vec::new(),
@@ -612,6 +623,9 @@ impl Tr {
                     (R_ARITH, c)
                 };
                 self.result(i, rop, sub, 2, x, y);
+            } else if c == OP_TYPEOF {
+                let x = self.opnd(d - 1);
+                self.result(i, R_TYPEOF, 0, 1, x, 0);
             } else if c == OP_NOT {
                 let x = self.opnd(d - 1);
                 self.result(i, R_NOT, 0, 1, x, 0);
@@ -824,6 +838,62 @@ impl Tr {
         }
     }
 
+    /// A run of at least four R_CASE_INT_JT on one value with keys close
+    /// together starts with an R_SWITCH that jumps where the run would.
+    fn switch_tables(&mut self) {
+        let n = self.n;
+        let mut i: int = 0;
+        while i < n {
+            let o = self.rc[i as usize];
+            if o.code % 256 == R_CASE_INT_JT {
+                let x = o.a;
+                let mut keys: Vec<int> = Vec::new();
+                let mut tgts: Vec<int> = Vec::new();
+                let mut j = i;
+                while j < n && self.rc[j as usize].code % 256 == R_CASE_INT_JT && self.rc[j as usize].a == x && keys.len() < 1024 {
+                    keys.push(self.rc[j as usize].b);
+                    tgts.push(self.rc[j as usize].c);
+                    j = self.after(j);
+                }
+                let mut lo = keys[0];
+                let mut hi = keys[0];
+                let mut k: usize = 0;
+                while k < keys.len() {
+                    if keys[k] < lo {
+                        lo = keys[k];
+                    }
+                    if keys[k] > hi {
+                        hi = keys[k];
+                    }
+                    k += 1;
+                }
+                let size = hi - lo + 1;
+                if keys.len() >= 4 && size <= 4 * (keys.len() as int) + 8 {
+                    let at = self.tbase + self.tab.len() as int;
+                    self.tab.push(size);
+                    let base = self.tab.len();
+                    let mut m: int = 0;
+                    while m < size {
+                        self.tab.push(j);
+                        m += 1;
+                    }
+                    self.tab.push(j);
+                    // the first case with a key wins, as the run does
+                    k = keys.len();
+                    while k > 0 {
+                        k -= 1;
+                        self.tab[base + (keys[k] - lo) as usize] = tgts[k];
+                    }
+                    let skip = self.rc[i as usize].code / 65536;
+                    self.rc[i as usize] = Op { code: R_SWITCH + 65536 * skip, a: x, b: at, c: lo };
+                }
+                i = j;
+                continue;
+            }
+            i += 1;
+        }
+    }
+
     /// Skips over the instructions that do nothing, and jumps to the
     /// first that does.
     fn finish(&mut self) {
@@ -869,6 +939,7 @@ impl Tr {
             i += 1;
         }
         self.fuse_branches();
+        self.switch_tables();
         // a jump to a compare-and-branch does the compare itself
         i = 0;
         while i < n {
@@ -894,8 +965,8 @@ impl Tr {
 /// Appends the register code of p to rcode and its constants to kvals,
 /// and sets `p.rbase`, `p.fsize` and `p.rentry`; an error when the code is
 /// not one this translator knows.
-pub fn translate(p: &mut Proto, rcode: &mut Vec<Op>, kvals: &mut Vec<Val>) -> String {
-    let mut t = Tr::new(p, kvals.len() as int);
+pub fn translate(p: &mut Proto, rcode: &mut Vec<Op>, kvals: &mut Vec<Val>, rtab: &mut Vec<int>) -> String {
+    let mut t = Tr::new(p, kvals.len() as int, rtab.len() as int);
     t.translate();
     if !t.err.is_empty() {
         return t.err.clone();
@@ -910,6 +981,11 @@ pub fn translate(p: &mut Proto, rcode: &mut Vec<Op>, kvals: &mut Vec<Val>) -> St
     i = 0;
     while i < t.kv.len() {
         kvals.push(t.kv[i].clone());
+        i += 1;
+    }
+    i = 0;
+    while i < t.tab.len() {
+        rtab.push(t.tab[i]);
         i += 1;
     }
     p.rbase = rb;

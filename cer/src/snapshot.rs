@@ -366,6 +366,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.protos = Vec::new();
     vm.rcode = Vec::new();
     vm.kvals = Vec::new();
+    vm.rtab = Vec::new();
     let np = r.num();
     i = 0;
     while i < np && !r.bad {

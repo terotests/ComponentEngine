@@ -228,6 +228,8 @@ pub struct Vm {
     /// the constants it reads (a register x < 0 is kvals[-1 - x])
     pub rcode: Vec<Op>,
     pub kvals: Vec<Val>,
+    /// the register code's switch tables
+    pub rtab: Vec<int>,
     pub alloc_count: int,
     pub gc_threshold: int,
     pub native_depth: int,
@@ -410,6 +412,7 @@ impl Vm {
             regs: false,
             rcode: Vec::new(),
             kvals: Vec::new(),
+            rtab: Vec::new(),
             alloc_count: 0,
             gc_threshold: 200000,
             native_depth: 0,

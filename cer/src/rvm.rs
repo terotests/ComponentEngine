@@ -79,7 +79,7 @@ impl Vm {
             let mut bp = self.frames[fi].bp;
             let mut pc = self.frames[fi].pc;
             if self.protos[pi].rstate == 0 {
-                let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals);
+                let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
                 if !e.is_empty() {
                     self.throw_type(e.as_str());
                     continue 'frames;
@@ -332,6 +332,21 @@ impl Vm {
                             hit = *x == (w2 as double);
                         }
                         pc = if hit { w3 } else { next };
+                        continue;
+                    }
+                    R_SWITCH => {
+                        let mut t = -1;
+                        if let Val::Num(x) = self.rget(bp, w1) {
+                            let k = *x - (w3 as double);
+                            let size = self.rtab[w2 as usize];
+                            if k >= 0.0 && k < (size as double) && k == ((k as int) as double) {
+                                t = self.rtab[(w2 + 1 + (k as int)) as usize];
+                            }
+                        }
+                        if t < 0 {
+                            t = self.rtab[(w2 + 1 + self.rtab[w2 as usize]) as usize];
+                        }
+                        pc = t;
                         continue;
                     }
                     R_CASE_JT => {
@@ -642,6 +657,13 @@ impl Vm {
                             self.stack[(bp + w1) as usize] = v;
                         }
                     }
+                    R_TYPEOF => {
+                        let v = self.rget(bp, w2).clone();
+                        let t = self.type_val(&v);
+                        self.stack[(bp + w1) as usize] = t;
+                        pc = next;
+                        continue;
+                    }
                     R_NOT => {
                         let r = !truthy(self.rget(bp, w2));
                         self.stack[(bp + w1) as usize] = Val::Bool(r);
@@ -798,7 +820,7 @@ impl Vm {
     pub fn renter(&mut self, fo: int, fpos: int, argc: int, ret: int) -> bool {
         let pi = self.objs[fo as usize].func as usize;
         if self.protos[pi].rstate == 0 {
-            let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals);
+            let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
             if !e.is_empty() {
                 self.throw_type(e.as_str());
                 return false;
