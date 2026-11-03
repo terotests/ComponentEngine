@@ -842,6 +842,20 @@ impl Tr {
                         }
                     }
                 }
+            } else if rop == R_JUMP {
+                // through jumps to jumps; a jump to a return returns
+                let mut t = self.rc[k].a;
+                let mut m = 0;
+                while m < 8 && t < n && self.rc[t as usize].code % 256 == R_JUMP && t != i {
+                    t = self.rc[t as usize].a;
+                    m += 1;
+                }
+                let tr = if t < n { self.rc[t as usize].code % 256 } else { -1 };
+                if tr == R_RET || tr == R_RET_UNDEF {
+                    self.rc[k] = self.rc[t as usize];
+                } else {
+                    self.rc[k].a = t;
+                }
             } else if rop == R_JF_KEEP || rop == R_JT_KEEP {
                 let x = self.rc[k].a;
                 let t = self.thread(self.rc[k].b, x, rop == R_JT_KEEP);
