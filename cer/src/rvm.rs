@@ -189,7 +189,7 @@ impl Vm {
                             self.stack[(bp + w1) as usize] = Val::Bool(r);
                         }
                     }
-                    R_CMP_JF => {
+                    R_CMP_JF | R_CMP_JT => {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
@@ -207,7 +207,7 @@ impl Vm {
                         if !num {
                             r = self.rcompare(code, pi, bp, w1, w2, fi, pc);
                         }
-                        if !r && !self.throwing {
+                        if r == ((w0 & 255) == R_CMP_JT) && !self.throwing {
                             if w3 <= pc {
                                 self.frames[fi].pc = w3;
                                 if self.gc_due() {
@@ -265,6 +265,30 @@ impl Vm {
                     R_JT => {
                         pc = if truthy(self.rget(bp, w1)) { w2 } else { next };
                         continue;
+                    }
+                    R_CMP_JFK | R_CMP_JTK => {
+                        // the kept value is written only when the jump is taken
+                        let code = (w0 >> 8) & 255;
+                        let mut num = false;
+                        let mut r = false;
+                        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, w2), self.rget(bp, w3)) {
+                            num = true;
+                            r = match code {
+                                OP_LT => *a < *b,
+                                OP_GT => *a > *b,
+                                OP_LE => *a <= *b,
+                                OP_GE => *a >= *b,
+                                OP_SEQ | OP_EQ => *a == *b,
+                                _ => *a != *b,
+                            };
+                        }
+                        if !num {
+                            r = self.rcompare(code, pi, bp, w2, w3, fi, pc);
+                        }
+                        if r == ((w0 & 255) == R_CMP_JTK) && !self.throwing {
+                            self.stack[(bp + (w1 & 65535)) as usize] = Val::Bool(r);
+                            npc = w1 >> 16;
+                        }
                     }
                     R_JF_KEEP => {
                         pc = if truthy(self.rget(bp, w1)) { next } else { w2 };

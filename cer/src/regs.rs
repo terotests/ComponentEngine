@@ -105,6 +105,14 @@ pub const R_CASE_JT: int = 40;
 /// a loop's back edge: a jump to an R_CMP_JF done here; w1 x, w2 y, w3 the
 /// exit, sub the comparison, and the skip field holds the body's start
 pub const R_LOOP: int = 41;
+/// a comparison and a jump when it holds; w1 x, w2 y, w3 target, sub the
+/// comparison (R_CMP_JF jumps when it does not)
+pub const R_CMP_JT: int = 42;
+/// a comparison and a jump that keeps its value: w1 dst + 65536 * target,
+/// w2 x, w3 y, sub the comparison; JFK jumps when false, JTK when true, and
+/// the next op is the one after the R_JF_KEEP / R_JT_KEEP it stands for
+pub const R_CMP_JFK: int = 43;
+pub const R_CMP_JTK: int = 44;
 
 const BAD: int = 1000000;
 
@@ -753,6 +761,69 @@ impl Tr {
         self.finish();
     }
 
+    /// The instruction after the one at i.
+    fn after(&self, i: int) -> int {
+        i + 1 + self.rc[i as usize].code / 65536
+    }
+
+    /// Where a keeping jump from register x ends up when it lands on t with
+    /// a value whose truth is v: past the conditional jumps on x there.
+    fn thread(&self, t0: int, x: int, v: bool) -> int {
+        let mut t = t0;
+        let mut k = 0;
+        while k < 8 && t < self.n {
+            let o = self.rc[t as usize];
+            let rop = o.code % 256;
+            if !(rop == R_JF || rop == R_JT || rop == R_JF_KEEP || rop == R_JT_KEEP) || o.a != x {
+                break;
+            }
+            let jumps = if rop == R_JF || rop == R_JF_KEEP { !v } else { v };
+            t = if jumps { o.b } else { self.after(t) };
+            k += 1;
+        }
+        t
+    }
+
+    /// A comparison followed by a conditional jump on its result becomes
+    /// one instruction, and a keeping jump onto a jump on the same value
+    /// goes where that one would.
+    fn fuse_branches(&mut self) {
+        let n = self.n;
+        let mut i: int = 0;
+        while i < n {
+            let k = i as usize;
+            let rop = self.rc[k].code % 256;
+            if rop == R_CMP {
+                let j = self.after(i);
+                if j < n {
+                    let o = self.rc[j as usize];
+                    let jr = o.code % 256;
+                    let sub = (self.rc[k].code / 256) % 256;
+                    let (dst, x, y) = (self.rc[k].a, self.rc[k].b, self.rc[k].c);
+                    let skip = self.after(j) - i - 1;
+                    if o.a == dst && skip < 32000 {
+                        if jr == R_JF || jr == R_JT {
+                            let r2 = if jr == R_JF { R_CMP_JF } else { R_CMP_JT };
+                            self.rc[k] = Op { code: r2 + 256 * sub + 65536 * skip, a: x, b: y, c: o.b };
+                        } else if (jr == R_JF_KEEP || jr == R_JT_KEEP) && dst < 65536 {
+                            let jt = jr == R_JT_KEEP;
+                            let t = self.thread(o.b, dst, jt);
+                            if t < 32000 {
+                                let r2 = if jt { R_CMP_JTK } else { R_CMP_JFK };
+                                self.rc[k] = Op { code: r2 + 256 * sub + 65536 * skip, a: dst + 65536 * t, b: x, c: y };
+                            }
+                        }
+                    }
+                }
+            } else if rop == R_JF_KEEP || rop == R_JT_KEEP {
+                let x = self.rc[k].a;
+                let t = self.thread(self.rc[k].b, x, rop == R_JT_KEEP);
+                self.rc[k].b = t;
+            }
+            i += 1;
+        }
+    }
+
     /// Skips over the instructions that do nothing, and jumps to the
     /// first that does.
     fn finish(&mut self) {
@@ -797,6 +868,7 @@ impl Tr {
             }
             i += 1;
         }
+        self.fuse_branches();
         // a jump to a compare-and-branch does the compare itself
         i = 0;
         while i < n {
