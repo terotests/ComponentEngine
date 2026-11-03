@@ -387,6 +387,13 @@ pub struct Frame {
     pub construct: bool,
     /// the coroutine this frame runs for, -1 for none
     pub gen: int,
+    /// register code: the stack slot its result goes to (-1: the caller's
+    /// slot of f, or the stack's top when nothing in this run called it)
+    pub ret: int,
+    /// register code: a value to move from slot mv_from to mv_to when this
+    /// frame goes on (a call's result that came back without a return)
+    pub mv_from: int,
+    pub mv_to: int,
 }
 
 pub struct Handler {

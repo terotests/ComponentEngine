@@ -272,6 +272,9 @@ impl Vm {
             args_obj: args_obj,
             construct: false,
             gen: g,
+            ret: -1,
+            mv_from: -1,
+            mv_to: -1,
         });
         let mut i = G_HANDLERS;
         while i + 2 < rest.len() {

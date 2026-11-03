@@ -545,7 +545,12 @@ impl Tr {
                 self.mat_local(x);
                 let p = self.fusable_top(i);
                 if p >= 0 {
-                    self.rc[p as usize].a = x;
+                    if self.rop_at(p) == R_CALL {
+                        // the call writes its result to x (c holds x + 1)
+                        self.rc[p as usize].c = x + 1;
+                    } else {
+                        self.rc[p as usize].a = x;
+                    }
                     self.popn(1);
                     if c == OP_SET_LOCAL {
                         self.push_pend(x, i);
@@ -661,7 +666,7 @@ impl Tr {
                 self.mat_from(w);
                 self.popn(op.a + 2);
                 self.set(i, R_CALL, sub, ns + w, op.a, 0);
-                self.push_own(-1);
+                self.push_own(i);
             } else if c == OP_GET_METHOD {
                 let o = self.opnd(d - 1);
                 self.popn(1);

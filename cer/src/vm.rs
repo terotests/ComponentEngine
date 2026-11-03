@@ -2563,6 +2563,9 @@ impl Vm {
             args_obj: args_obj,
             construct: construct,
             gen: -1,
+            ret: -1,
+            mv_from: -1,
+            mv_to: -1,
         });
         if construct && class_ctor && !derived {
             self.run_fields(fo, &this_val);
@@ -2621,6 +2624,9 @@ impl Vm {
             args_obj: -1,
             construct: false,
             gen: -1,
+            ret: -1,
+            mv_from: -1,
+            mv_to: -1,
         });
         true
     }

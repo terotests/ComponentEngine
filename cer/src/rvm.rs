@@ -74,9 +74,9 @@ impl Vm {
             if (self.frames.len() as int) <= base {
                 return;
             }
-            let fi = self.frames.len() - 1;
-            let pi = self.frames[fi].proto as usize;
-            let bp = self.frames[fi].bp;
+            let mut fi = self.frames.len() - 1;
+            let mut pi = self.frames[fi].proto as usize;
+            let mut bp = self.frames[fi].bp;
             let mut pc = self.frames[fi].pc;
             if self.protos[pi].rstate == 0 {
                 let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals);
@@ -85,10 +85,15 @@ impl Vm {
                     continue 'frames;
                 }
             }
-            let want = (bp + self.protos[pi].fsize) as usize;
-            let rb = self.protos[pi].rbase;
+            let mut want = (bp + self.protos[pi].fsize) as usize;
+            let mut rb = self.protos[pi].rbase;
             while self.stack.len() < want {
                 self.stack.push(Val::Undef);
+            }
+            if self.frames[fi].mv_to >= 0 {
+                let v = self.stack[self.frames[fi].mv_from as usize].clone();
+                self.stack[self.frames[fi].mv_to as usize] = v;
+                self.frames[fi].mv_to = -1;
             }
             loop {
                 let ins = self.rcode[(rb + pc) as usize];
@@ -480,16 +485,37 @@ impl Vm {
                                 let p = &self.protos[fp];
                                 !p.uses_args && p.rest < 0 && !p.class_ctor
                             };
+                            // the result goes to the slot of f, or to w3 - 1
+                            let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
                             if plain {
-                                self.renter(fo, fpos, argc);
-                                continue 'frames;
+                                let co = self.protos[fp].generator || self.protos[fp].is_async;
+                                if co && dst != fpos {
+                                    self.frames[fi].mv_from = fpos;
+                                    self.frames[fi].mv_to = dst;
+                                }
+                                if !self.renter(fo, fpos, argc, if co { -1 } else { dst }) {
+                                    continue 'frames;
+                                }
+                                // the callee runs in this loop
+                                fi = self.frames.len() - 1;
+                                pi = fp;
+                                bp = fpos + 2;
+                                pc = self.frames[fi].pc;
+                                want = (bp + self.protos[pi].fsize) as usize;
+                                rb = self.protos[pi].rbase;
+                                continue;
                             }
+                            let nf = self.frames.len();
                             self.stack.truncate((fpos + argc + 2) as usize);
                             self.enter_function(fo, argc, false, Val::Undef);
+                            self.call_result(nf, fpos, dst, want);
                             continue 'frames;
                         }
+                        let nf = self.frames.len();
                         self.stack.truncate((fpos + argc + 2) as usize);
                         if self.call_op(argc) {
+                            let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
+                            self.call_result(nf, fpos, dst, want);
                             continue 'frames;
                         }
                         if self.throwing {
@@ -500,6 +526,10 @@ impl Vm {
                         }
                         while self.stack.len() < want {
                             self.stack.push(Val::Undef);
+                        }
+                        if w3 > 0 {
+                            let v = self.stack[fpos as usize].clone();
+                            self.stack[(bp + w3 - 1) as usize] = v;
                         }
                         pc = next;
                         continue;
@@ -525,15 +555,21 @@ impl Vm {
                         }
                         let fpos = (fr.bp - 2) as usize;
                         if (self.frames.len() as int) > base {
-                            // into the caller's slot of f; the stack ends at
-                            // the caller's frame again
-                            let ci = self.frames.len() - 1;
-                            let cp = self.frames[ci].proto as usize;
-                            let cend = (self.frames[ci].bp + self.protos[cp].fsize) as usize;
-                            self.stack[fpos] = v;
-                            while self.stack.len() < cend {
+                            // into the caller's slot of f (or the one the
+                            // call named); the stack ends at the caller's
+                            // frame again and the caller goes on here
+                            fi = self.frames.len() - 1;
+                            pi = self.frames[fi].proto as usize;
+                            bp = self.frames[fi].bp;
+                            want = (bp + self.protos[pi].fsize) as usize;
+                            rb = self.protos[pi].rbase;
+                            pc = self.frames[fi].pc;
+                            let to = if fr.ret >= 0 { fr.ret as usize } else { fpos };
+                            self.stack[to] = v;
+                            while self.stack.len() < want {
                                 self.stack.push(Val::Undef);
                             }
+                            continue;
                         } else {
                             self.stack.truncate(fpos);
                             self.stack.push(v);
@@ -735,13 +771,13 @@ impl Vm {
     /// class constructor's checks, from register code: [f, this, args…] at
     /// fpos. The callee's frame starts after `this` and the stack ends
     /// where the frame does.
-    pub fn renter(&mut self, fo: int, fpos: int, argc: int) {
+    pub fn renter(&mut self, fo: int, fpos: int, argc: int, ret: int) -> bool {
         let pi = self.objs[fo as usize].func as usize;
         if self.protos[pi].rstate == 0 {
             let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals);
             if !e.is_empty() {
                 self.throw_type(e.as_str());
-                return;
+                return false;
             }
         }
         let (nparams, nslots, fsize, env_size, arrow, strict, entry) = {
@@ -799,7 +835,37 @@ impl Vm {
             args_obj: -1,
             construct: false,
             gen: -1,
+            ret: ret,
+            mv_from: -1,
+            mv_to: -1,
         });
+        true
+    }
+
+    /// After a call that may have pushed the callee's frame (nf is the
+    /// frame count before it): its result goes to dst, by the frame's
+    /// return or here when it is in the slot of f already.
+    pub fn call_result(&mut self, nf: usize, fpos: int, dst: int, want: usize) {
+        if self.throwing || dst == fpos {
+            return;
+        }
+        if self.frames.len() > nf {
+            let p = &self.protos[self.frames[nf].proto as usize];
+            if self.frames[nf].gen < 0 && !p.generator && !p.is_async {
+                self.frames[nf].ret = dst;
+                return;
+            }
+            // a coroutine's frame leaves its result in the slot of f
+            // without a return: it moves when the caller goes on
+            self.frames[nf - 1].mv_from = fpos;
+            self.frames[nf - 1].mv_to = dst;
+            return;
+        }
+        while self.stack.len() < want {
+            self.stack.push(Val::Undef);
+        }
+        let v = self.stack[fpos as usize].clone();
+        self.stack[dst as usize] = v;
     }
 
     /// A collection at a safe point of register code: the stack past the
