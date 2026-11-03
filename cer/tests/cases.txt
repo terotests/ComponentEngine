@@ -399,3 +399,9 @@ var r3 = []; for (var k in { z: 1, [Symbol('q')]: 2, 0: 1 }) r3.push(k);
 [r1.join(), r2.join(), r3.join()].join('|')
 ----
 1,2,b,a,s,p|y,x|0,z
+
+==== js a comparison kept in a local and then branched on
+function f(o) { var back = o.d === 'b'; var at = back ? 1 : 2; var fw = o.d !== 'b'; var k = fw ? 3 : 4; return [back, at, fw, k].join(); }
+f({ d: 'b' }) + ';' + f({ d: 'x' })
+----
+true,1,false,4;false,2,true,3

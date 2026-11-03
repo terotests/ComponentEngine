@@ -64,3 +64,26 @@ fn cases_txt_rc_checked() {
     }
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
 }
+
+/// The same cases on the register VM (Vm.regs), with and without the
+/// reference counting check.
+#[test]
+fn cases_txt_regs() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases.txt")).unwrap();
+    let all = parse(&text);
+    let mut failed = Vec::new();
+    for stress in [false, true] {
+        for (title, src, want) in all.iter() {
+            let mut e = Engine::new();
+            e.vm.regs = true;
+            if stress {
+                e.vm.rc_stress();
+            }
+            let got = e.eval(src);
+            if &got != want || e.vm.rc_errors > 0 {
+                failed.push(format!("[{}{}]\n  want: {}\n  got:  {}", title, if stress { ", rc checked" } else { "" }, want, got));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
+}

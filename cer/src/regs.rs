@@ -828,8 +828,18 @@ impl Tr {
                     let sub = (self.rc[k].code / 256) % 256;
                     let (dst, x, y) = (self.rc[k].a, self.rc[k].b, self.rc[k].c);
                     let skip = self.after(j) - i - 1;
+                    // a temp dies at its jump; a local (var b = x === y)
+                    // keeps the value, so it fuses only as a keeping jump
+                    let temp = dst >= self.nslots;
                     if o.a == dst && skip < 32000 {
-                        if jr == R_JF || jr == R_JT {
+                        if (jr == R_JF || jr == R_JT) && !temp {
+                            let jt = jr == R_JT;
+                            let t = self.thread(o.b, dst, jt);
+                            if t < 32000 && dst < 65536 {
+                                let r2 = if jt { R_CMP_JTK } else { R_CMP_JFK };
+                                self.rc[k] = Op { code: r2 + 256 * sub + 65536 * skip, a: dst + 65536 * t, b: x, c: y };
+                            }
+                        } else if jr == R_JF || jr == R_JT {
                             let r2 = if jr == R_JF { R_CMP_JF } else { R_CMP_JT };
                             self.rc[k] = Op { code: r2 + 256 * sub + 65536 * skip, a: x, b: y, c: o.b };
                         } else if (jr == R_JF_KEEP || jr == R_JT_KEEP) && dst < 65536 {

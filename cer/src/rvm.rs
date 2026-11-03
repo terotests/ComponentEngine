@@ -275,7 +275,8 @@ impl Vm {
                         continue;
                     }
                     R_CMP_JFK | R_CMP_JTK => {
-                        // the kept value is written only when the jump is taken
+                        // the value is written either way: it may be a local
+                        // (var b = x === y) that is read after the jump
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
@@ -293,9 +294,11 @@ impl Vm {
                         if !num {
                             r = self.rcmp(code, pi, bp, w2, w3, fi, pc);
                         }
-                        if r == ((w0 & 255) == R_CMP_JTK) && !self.throwing {
+                        if !self.throwing {
                             self.stack[(bp + (w1 & 65535)) as usize] = Val::Bool(r);
-                            npc = w1 >> 16;
+                            if r == ((w0 & 255) == R_CMP_JTK) {
+                                npc = w1 >> 16;
+                            }
                         }
                     }
                     R_JF_KEEP => {
