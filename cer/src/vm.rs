@@ -256,6 +256,8 @@ pub struct Vm {
     pub rpic: Vec<int>,
     pub pic: Vec<int>,
     pub shape_epoch: int,
+    /// a collection or reclaim is due at the next safe point (gc_due)
+    pub gc_flag: bool,
     /// where in pic the last pic_get hit or filled
     pub pic_way: int,
     pub alloc_count: int,
@@ -456,6 +458,7 @@ impl Vm {
             rpic: Vec::new(),
             pic: Vec::new(),
             shape_epoch: 0,
+            gc_flag: false,
             pic_way: 0,
             alloc_count: 0,
             gc_threshold: 200000,
@@ -868,6 +871,9 @@ impl Vm {
             self.reset_strs();
         }
         self.snew += 1;
+        if self.snew >= self.slimit {
+            self.gc_flag = true;
+        }
         if !self.sfree.is_empty() {
             let h = self.sfree.pop().unwrap();
             let i = h as usize;
@@ -1236,6 +1242,9 @@ impl Vm {
         if self.rc_on {
             self.objs[i as usize].zct = true;
             self.zct.push(i);
+        }
+        if self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit {
+            self.gc_flag = true;
         }
         i
     }
@@ -3910,7 +3919,13 @@ impl Vm {
     }
 
     pub fn gc_due(&self) -> bool {
-        (self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.snew >= self.slimit) && self.native_depth == 0
+        self.gc_flag && self.native_depth == 0
+    }
+
+    /// gc_flag from the counts (Vm::gc_due): after a collection, and where
+    /// a limit changes.
+    pub fn gc_recheck(&mut self) {
+        self.gc_flag = self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.snew >= self.slimit;
     }
 
     /// The calling part of OP_CALL; true when a frame was pushed or the
@@ -5241,6 +5256,9 @@ impl Vm {
             if ob.rc <= 0 && !ob.zct && !ob.free {
                 ob.zct = true;
                 self.zct.push(o);
+                if (self.zct.len() as int) >= self.zct_limit {
+                    self.gc_flag = true;
+                }
             }
         }
     }
@@ -5702,6 +5720,7 @@ impl Vm {
         self.alloc_count = 0;
         self.gc_threshold = if live * 2 > 200000 { live * 2 } else { 200000 };
         self.zct_limit = self.next_zct_limit();
+        self.gc_recheck();
     }
 
     /// Tests: every safe point reclaims and checks the counts (rc_errors,
@@ -5713,6 +5732,7 @@ impl Vm {
         // and the string table is swept after every few strings
         self.slimit_min = 16;
         self.slimit = 16;
+        self.gc_recheck();
     }
 
     fn next_zct_limit(&self) -> int {
@@ -5802,6 +5822,7 @@ impl Vm {
             i += 1;
         }
         self.zct_limit = self.next_zct_limit();
+        self.gc_recheck();
     }
 
     /// The references `x` (being freed) holds are let go; what only it
@@ -5926,6 +5947,7 @@ impl Vm {
         }
         self.live = live;
         self.zct_limit = self.next_zct_limit();
+        self.gc_recheck();
     }
 
     fn count_refs(&mut self, o: int) {

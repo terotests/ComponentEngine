@@ -2923,6 +2923,7 @@ impl Vm {
                 if self.native_depth <= 1 {
                     // collected at the next safe point
                     self.alloc_count = self.gc_threshold;
+                    self.gc_flag = true;
                 }
                 Val::Undef
             }

@@ -536,6 +536,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.array_values_fn = ints[33];
     vm.alloc_count = ints[34];
     vm.gc_threshold = ints[35];
+    vm.gc_recheck();
     vm.prelude_protos = ints[36];
     vm.rng = ints[37];
     vm.gc_runs = ints[38];
