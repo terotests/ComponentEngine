@@ -102,6 +102,9 @@ pub const R_LOCAL_NULL_JF: int = 38;
 pub const R_CASE_INT_JT: int = 39;
 /// w1 x, w2 y, w3 target
 pub const R_CASE_JT: int = 40;
+/// a loop's back edge: a jump to an R_CMP_JF done here; w1 x, w2 y, w3 the
+/// exit, sub the comparison, and the skip field holds the body's start
+pub const R_LOOP: int = 41;
 
 const BAD: int = 1000000;
 
@@ -158,6 +161,8 @@ pub struct Tr {
     pub el: Vec<int>,
     pub ep: Vec<int>,
     pub err: String,
+    /// the first instruction that does something
+    pub entry: int,
 }
 
 impl Tr {
@@ -178,6 +183,7 @@ impl Tr {
             el: Vec::new(),
             ep: Vec::new(),
             err: String::new(),
+            entry: 0,
         };
         let mut i: int = 0;
         while i < n {
@@ -639,9 +645,19 @@ impl Tr {
                 next = -1;
             } else if c == OP_CALL {
                 let w = d - op.a - 2;
+                // an undefined `this` is written by the call itself
+                let mut sub = 0;
+                let tk = (w + 1) as usize;
+                if self.el[tk] >= 0 && self.es[tk] < 0 {
+                    if let Val::Undef = self.kv[(-1 - self.es[tk]) as usize] {
+                        sub = 1;
+                        self.es[tk] = ns + w + 1;
+                        self.el[tk] = -1;
+                    }
+                }
                 self.mat_from(w);
                 self.popn(op.a + 2);
-                self.set(i, R_CALL, 0, ns + w, op.a, 0);
+                self.set(i, R_CALL, sub, ns + w, op.a, 0);
                 self.push_own(-1);
             } else if c == OP_GET_METHOD {
                 let o = self.opnd(d - 1);
@@ -773,6 +789,25 @@ impl Tr {
             }
             i += 1;
         }
+        // a jump to a compare-and-branch does the compare itself
+        i = 0;
+        while i < n {
+            let k = i as usize;
+            if self.rc[k].code % 256 == R_JUMP {
+                let t = self.rc[k].a;
+                let tk = t as usize;
+                if self.rc[tk].code % 256 == R_CMP_JF {
+                    let body = t + 1 + self.rc[tk].code / 65536;
+                    if body < 32000 {
+                        let sub = (self.rc[tk].code / 256) % 256;
+                        let (x, y, exit) = (self.rc[tk].a, self.rc[tk].b, self.rc[tk].c);
+                        self.rc[k] = Op { code: R_LOOP + 256 * sub + 65536 * body, a: x, b: y, c: exit };
+                    }
+                }
+            }
+            i += 1;
+        }
+        self.entry = run[0];
     }
 }
 
@@ -786,7 +821,8 @@ pub fn translate(p: &mut Proto) -> String {
     }
     p.rcode = t.rc;
     p.kvals = t.kv;
-    p.fsize = p.nslots + t.maxd + 2;
+    p.fsize = p.nslots + t.maxd + 1;
+    p.rentry = t.entry;
     p.rstate = 1;
     String::new()
 }

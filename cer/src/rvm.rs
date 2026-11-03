@@ -89,9 +89,6 @@ impl Vm {
             while self.stack.len() < want {
                 self.stack.push(Val::Undef);
             }
-            if self.stack.len() > want {
-                self.stack.truncate(want);
-            }
             loop {
                 let ins = self.protos[pi].rcode[pc as usize];
                 let w0 = ins.code;
@@ -195,16 +192,49 @@ impl Vm {
                             if w3 <= pc {
                                 self.frames[fi].pc = w3;
                                 if self.gc_due() {
-                                    self.gc();
+                                    self.rgc(want);
                                 }
                             }
                             npc = w3;
                         }
                     }
+                    R_LOOP => {
+                        let code = (w0 >> 8) & 255;
+                        let mut num = false;
+                        let mut r = false;
+                        if let (Val::Num(a), Val::Num(b)) = (self.rget(pi, bp, w1), self.rget(pi, bp, w2)) {
+                            num = true;
+                            r = match code {
+                                OP_LT => *a < *b,
+                                OP_GT => *a > *b,
+                                OP_LE => *a <= *b,
+                                OP_GE => *a >= *b,
+                                OP_SEQ | OP_EQ => *a == *b,
+                                _ => *a != *b,
+                            };
+                        }
+                        if !num {
+                            r = self.rcompare(code, pi, bp, w1, w2, fi, pc);
+                            if self.throwing {
+                                self.frames[fi].pc = pc + 1;
+                                if !self.unwind(base) {
+                                    return;
+                                }
+                                continue 'frames;
+                            }
+                        }
+                        let t = if r { w0 >> 16 } else { w3 };
+                        if t <= pc && self.gc_due() {
+                            self.frames[fi].pc = t;
+                            self.rgc(want);
+                        }
+                        pc = t;
+                        continue;
+                    }
                     R_JUMP => {
                         if w1 <= pc && self.gc_due() {
                             self.frames[fi].pc = w1;
-                            self.gc();
+                            self.rgc(want);
                         }
                         pc = w1;
                         continue;
@@ -244,7 +274,7 @@ impl Vm {
                             if w3 <= pc {
                                 self.frames[fi].pc = w3;
                                 if self.gc_due() {
-                                    self.gc();
+                                    self.rgc(want);
                                 }
                             }
                             pc = w3;
@@ -416,9 +446,12 @@ impl Vm {
                         let argc = w2;
                         self.frames[fi].pc = next;
                         if self.gc_due() {
-                            self.gc();
+                            self.rgc(want);
                         }
                         let fpos = bp + w1;
+                        if ((w0 >> 8) & 255) == 1 {
+                            self.stack[(fpos + 1) as usize] = Val::Undef;
+                        }
                         let fo = obj_of(&self.stack[fpos as usize]);
                         if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION {
                             let fp = self.objs[fo as usize].func as usize;
@@ -477,9 +510,6 @@ impl Vm {
                             let cp = self.frames[ci].proto as usize;
                             let cend = (self.frames[ci].bp + self.protos[cp].fsize) as usize;
                             self.stack[fpos] = v;
-                            if self.stack.len() > cend {
-                                self.stack.truncate(cend);
-                            }
                             while self.stack.len() < cend {
                                 self.stack.push(Val::Undef);
                             }
@@ -693,25 +723,26 @@ impl Vm {
                 return;
             }
         }
-        let (nparams, nslots, fsize, env_size, arrow, strict) = {
+        let (nparams, nslots, fsize, env_size, arrow, strict, entry) = {
             let p = &self.protos[pi];
-            (p.nparams, p.nslots, p.fsize, p.env_size, p.arrow, p.strict)
+            (p.nparams, p.nslots, p.fsize, p.env_size, p.arrow, p.strict, p.rentry)
         };
         let bp = fpos + 2;
         let end = (bp + fsize) as usize;
+        // the parameters that came stay and the other locals start
+        // undefined; the slots after them are written before they are read.
+        // What lies past the frame's end is left (a frame's return does not
+        // shorten the stack); a collection cuts it first (rgc)
+        let keep = bp + if argc < nparams { argc } else { nparams };
+        let mut i = keep;
+        let have = self.stack.len() as int;
+        let upto = if bp + nslots < have { bp + nslots } else { have };
+        while i < upto {
+            self.stack[i as usize] = Val::Undef;
+            i += 1;
+        }
         while self.stack.len() < end {
             self.stack.push(Val::Undef);
-        }
-        if self.stack.len() > end {
-            self.stack.truncate(end);
-        }
-        // missing parameters and the other locals start undefined; the
-        // arguments past the parameters go
-        let mut i = if argc < nparams { argc } else { nparams };
-        let last = if argc > nslots { argc } else { nslots };
-        while i < last && bp + i < (end as int) {
-            self.stack[(bp + i) as usize] = Val::Undef;
-            i += 1;
         }
         let mut nt = Val::Undef;
         if arrow && !self.objs[fo as usize].elems2.is_empty() {
@@ -739,7 +770,7 @@ impl Vm {
         self.frames.push(Frame {
             proto: pi as int,
             fobj: fo,
-            pc: 0,
+            pc: entry,
             bp: bp,
             env: env,
             this_val: this_val,
@@ -748,6 +779,16 @@ impl Vm {
             construct: false,
             gen: -1,
         });
+    }
+
+    /// A collection at a safe point of register code: the stack past the
+    /// running frame's end holds only what returned frames left, so it goes
+    /// first and keeps nothing alive.
+    pub fn rgc(&mut self, end: usize) {
+        if self.stack.len() > end {
+            self.stack.truncate(end);
+        }
+        self.gc();
     }
 
     /// A comparison of two registers (OP_LT … OP_SNE).

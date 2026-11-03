@@ -329,6 +329,8 @@ pub struct Proto {
     pub kvals: Vec<Val>,
     /// the frame's slots: locals, then the stack's depths
     pub fsize: int,
+    /// where a call starts in rcode
+    pub rentry: int,
     pub rstate: int,
 }
 
@@ -364,6 +366,7 @@ impl Proto {
             rcode: Vec::new(),
             kvals: Vec::new(),
             fsize: 0,
+            rentry: 0,
             rstate: 0,
         }
     }
