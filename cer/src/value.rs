@@ -323,6 +323,13 @@ pub struct Proto {
     pub src: Val,
     pub src_start: int,
     pub src_end: int,
+    /// the register code (regs.rs), made when the function first runs on
+    /// the register machine; rstate 0 before, 1 made
+    pub rcode: Vec<Op>,
+    pub kvals: Vec<Val>,
+    /// the frame's slots: locals, then the stack's depths
+    pub fsize: int,
+    pub rstate: int,
 }
 
 impl Proto {
@@ -354,6 +361,10 @@ impl Proto {
             src: Val::Undef,
             src_start: 0,
             src_end: 0,
+            rcode: Vec::new(),
+            kvals: Vec::new(),
+            fsize: 0,
+            rstate: 0,
         }
     }
 }

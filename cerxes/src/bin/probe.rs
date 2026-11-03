@@ -24,6 +24,10 @@ fn main() {
             // CER_THROUGH_TEXT=1: each probe from its unit's text, as a
             // host's code cache runs a script
             e.through_text = std::env::var("CER_THROUGH_TEXT").map(|v| v == "1").unwrap_or(false);
+            // CER_REGS=1 / 0: on the register machine (rvm.rs) or the stack one
+            if let Ok(v) = std::env::var("CER_REGS") {
+        e.vm.regs = v == "1";
+    }
             // CER_RC_CHECK=1: a reclaim at every safe point, each checked
             // against a full mark (Vm::rc_stress)
             let check = std::env::var("CER_RC_CHECK").map(|v| v == "1").unwrap_or(false);

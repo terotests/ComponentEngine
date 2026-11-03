@@ -39,6 +39,10 @@ fn main() {
     if std::env::var("CERXES_RC_CHECK").map(|v| v == "stress").unwrap_or(false) {
         e.vm.rc_stress();
     }
+    // CER_REGS=1 / 0: on the register machine (rvm.rs) or the stack one
+    if let Ok(v) = std::env::var("CER_REGS") {
+        e.vm.regs = v == "1";
+    }
     e.set_syntax_for_path(path.as_str());
     e.set_echo(true);
     let r = e.eval(src.as_str());

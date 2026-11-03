@@ -222,6 +222,8 @@ pub struct Vm {
     pub(crate) host_sync: Box<dyn HostSync>,
     pub(crate) host_sync_set: bool,
     pub echo: bool,
+    /// run frames on the register machine (rvm.rs)
+    pub regs: bool,
     pub alloc_count: int,
     pub gc_threshold: int,
     pub native_depth: int,
@@ -401,6 +403,7 @@ impl Vm {
             exc: Val::Undef,
             out: Vec::new(),
             echo: false,
+            regs: false,
             alloc_count: 0,
             gc_threshold: 200000,
             native_depth: 0,
@@ -2627,7 +2630,7 @@ impl Vm {
 
     /// Unwinds to the innermost handler of this run; false when there is
     /// none and the exception leaves the run.
-    fn unwind(&mut self, base: int) -> bool {
+    pub fn unwind(&mut self, base: int) -> bool {
         loop {
             if self.handlers.is_empty() {
                 break;
@@ -2672,7 +2675,7 @@ impl Vm {
         fo
     }
 
-    fn closure(&mut self, pi: int) -> int {
+    pub fn closure(&mut self, pi: int) -> int {
         let fp = self.closure_proto(pi);
         let f = self.alloc(C_FUNCTION, fp);
         let fi = self.frames.len() - 1;
@@ -2853,7 +2856,7 @@ impl Vm {
         out
     }
 
-    fn get_env(&self, depth: int) -> int {
+    pub fn get_env(&self, depth: int) -> int {
         let fi = self.frames.len() - 1;
         let mut e = self.frames[fi].env;
         let mut d = depth;
@@ -2864,7 +2867,7 @@ impl Vm {
         e
     }
 
-    fn pop(&mut self) -> Val {
+    pub fn pop(&mut self) -> Val {
         self.stack.pop().unwrap()
     }
 
@@ -2876,6 +2879,10 @@ impl Vm {
 
     /// Runs frames until the frame count falls back to `base`.
     pub fn run(&mut self, base: int) {
+        if self.regs {
+            self.rrun(base);
+            return;
+        }
         'frames: loop {
             if self.throwing {
                 if !self.unwind(base) {
@@ -3503,7 +3510,7 @@ impl Vm {
 
     /// The calling part of OP_CALL; true when a frame was pushed or the
     /// stack changed frames.
-    fn call_op(&mut self, argc_in: int) -> bool {
+    pub fn call_op(&mut self, argc_in: int) -> bool {
         let mut argc = argc_in;
         loop {
             let fpos = (self.stack.len() as int) - argc - 2;
@@ -3697,7 +3704,7 @@ impl Vm {
     }
 
     /// `new` in the loop: [f, args…]
-    fn new_op(&mut self, argc: int) -> bool {
+    pub fn new_op(&mut self, argc: int) -> bool {
         let fpos = (self.stack.len() as int) - argc - 1;
         let f = self.stack[fpos as usize].clone();
         let fo = obj_of(&f);
@@ -3734,7 +3741,7 @@ impl Vm {
     // the bodies of run()'s string-append ops; run() stays small enough for
     // Go's inliner to keep its per-op copies on the stack
     #[inline]
-    fn add_local_pop(&mut self, op: Op, bp: int) {
+    pub fn add_local_pop(&mut self, op: Op, bp: int) {
         let b = self.pop();
         let i = (bp + op.a) as usize;
         let mut done = false;
@@ -3749,7 +3756,7 @@ impl Vm {
     }
 
     #[inline]
-    fn add_env_pop(&mut self, op: Op) {
+    pub fn add_env_pop(&mut self, op: Op) {
         let b = self.pop();
         let e = self.get_env(op.a);
         let i = op.b as usize;
@@ -3776,7 +3783,7 @@ impl Vm {
     }
 
     #[inline]
-    fn add_prop_pop(&mut self, op: Op) {
+    pub fn add_prop_pop(&mut self, op: Op) {
         let b = self.pop();
         let atom = op.a;
         let mut done = false;
@@ -3809,7 +3816,7 @@ impl Vm {
 
     // the common case of a few ops run() would otherwise send to step()
     #[inline]
-    fn quick_op(&mut self, op: Op, pi: usize, pc: int) -> bool {
+    pub fn quick_op(&mut self, op: Op, pi: usize, pc: int) -> bool {
         let mut done = false;
         let n = self.stack.len();
         if op.code == OP_GET_GLOBAL {
@@ -3856,7 +3863,7 @@ impl Vm {
     }
 
     /// The rarer operations; true when the current frame changed.
-    fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
+    pub fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
         match op.code {
             OP_TDZ => {
                 self.stack.push(Val::Obj(self.tdz_obj));
@@ -5592,7 +5599,7 @@ pub fn arith_num(code: int, x: double, y: double) -> double {
 /// so `s += …` does not copy `s`; answers false (and changes nothing) when
 /// it cannot, and the caller adds the two the ordinary way.
 #[ranger::target(rust)]
-fn append_in_place(slot: &mut Val, b: &str) -> bool {
+pub fn append_in_place(slot: &mut Val, b: &str) -> bool {
     if let Val::Str(rc) = slot {
         if let Some(s) = Rc::get_mut(rc) {
             s.push_str(b);
@@ -5606,7 +5613,7 @@ fn append_in_place(slot: &mut Val, b: &str) -> bool {
 /// lets an append in place stand for `x = x + v`; the other targets append
 /// as values and never ask.
 #[ranger::target(rust)]
-fn same_rc(a: &Val, b: &Val) -> bool {
+pub fn same_rc(a: &Val, b: &Val) -> bool {
     if let (Val::Str(x), Val::Str(y)) = (a, b) {
         return Rc::ptr_eq(x, y);
     }
@@ -5614,13 +5621,13 @@ fn same_rc(a: &Val, b: &Val) -> bool {
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn same_rc(_a: &Val, _b: &Val) -> bool {
+pub fn same_rc(_a: &Val, _b: &Val) -> bool {
     false
 }
 
 /// The other targets' strings are immutable values (and their engines
 /// concatenate without copying where they can): always the ordinary way.
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn append_in_place(_slot: &mut Val, _b: &str) -> bool {
+pub fn append_in_place(_slot: &mut Val, _b: &str) -> bool {
     false
 }

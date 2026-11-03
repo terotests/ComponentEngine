@@ -43,6 +43,8 @@ pub mod parser;
 pub mod prelude;
 pub mod proxy;
 pub mod regex;
+pub mod regs;
+pub mod rvm;
 pub mod snapshot;
 pub mod ts;
 pub mod typed;

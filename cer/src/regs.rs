@@ -1,0 +1,807 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Register code for a function, made from its stack bytecode when the
+//! function first runs (rvm.rs runs it).
+//!
+//! A frame is a fixed window of the stack: slots 0..nslots are the locals,
+//! slot nslots + d holds what the stack bytecode keeps at depth d. Every op
+//! keeps its index, so a frame's pc, a handler's catch_pc, a generator's
+//! saved pc, the inline caches (`code[i].c`) and the jump targets mean the
+//! same in both codes.
+//!
+//! An instruction is an Op in `rcode` (one bounds check and one load per
+//! dispatch): `code` is `op + 256 * sub + 65536 * skip`, a b c the three
+//! operands. `skip` is how many instructions after this one do
+//! nothing (R_NOP), so falling through steps over them. An operand register
+//! x >= 0 is slot x of the frame, x < 0 is `kvals[-1 - x]`.
+//!
+//! The translation follows the stack bytecode with an abstract stack. A
+//! value pushed by a load (a local, a constant, a DUP) is not copied at
+//! once: the op that uses it reads its source directly, and the load does
+//! nothing. Only when the value must be in its own slot (at a jump, a join,
+//! before an op this file does not translate, the operands of a call, or
+//! before its source local is written) is the load rewritten into R_MOVE.
+//! A result stored into a local right away is written there by the op that
+//! makes it. Ops without a register form run their stack handler on the
+//! frame's window (R_WIN).
+
+use ranger::prelude::*;
+use crate::ops::*;
+use crate::value::*;
+
+pub const R_NOP: int = 0;
+/// w1 the window's top: the stack is cut there, the stack op runs, the
+/// frame is padded back
+pub const R_WIN: int = 1;
+/// an op that neither reads nor writes the stack
+pub const R_STEP0: int = 2;
+/// w1 dst: an op that only pushes, its value moved to dst
+pub const R_STEP_PUSH: int = 3;
+/// w1 dst, w2 src
+pub const R_MOVE: int = 4;
+/// w1 dst, w2 src, w3 src of dst + 1
+pub const R_LOAD2: int = 5;
+/// w1 dst, w2 obj, w3 atom
+pub const R_GET_PROP: int = 6;
+/// w1 dst, w3 atom
+pub const R_GET_THIS_PROP: int = 7;
+/// w1 obj, w2 value, w3 atom
+pub const R_SET_PROP: int = 8;
+/// w1 dst, w2 obj, w3 key
+pub const R_GET_ELEM: int = 9;
+/// w1 obj, w2 key, w3 value
+pub const R_SET_ELEM: int = 10;
+/// w1 dst, w2 x, w3 y
+pub const R_ADD: int = 11;
+pub const R_SUB: int = 12;
+pub const R_MUL: int = 13;
+/// sub the OP_ code
+pub const R_ARITH: int = 14;
+pub const R_CMP: int = 15;
+/// w1 x, w2 y, w3 target, sub the comparison
+pub const R_CMP_JF: int = 16;
+/// w1 target
+pub const R_JUMP: int = 17;
+/// w1 x, w2 target
+pub const R_JF: int = 18;
+pub const R_JT: int = 19;
+pub const R_JF_KEEP: int = 20;
+pub const R_JT_KEEP: int = 21;
+pub const R_JNN_KEEP: int = 22;
+/// w1 x
+pub const R_RET: int = 23;
+pub const R_RET_UNDEF: int = 24;
+/// w1 the slot of f (this and the arguments after it), w2 argc
+pub const R_CALL: int = 25;
+/// w1 dst (f; the receiver in dst + 1), w2 obj, w3 atom, sub OP_GET_METHOD's b
+pub const R_GET_METHOD: int = 26;
+/// w1 dst
+pub const R_THIS: int = 27;
+/// w1 dst, w2 depth, w3 slot; sub 1: undefined in dst + 1 too
+pub const R_GET_ENV: int = 28;
+/// w1 value, w2 depth, w3 slot
+pub const R_SET_ENV: int = 29;
+/// w1 dst, w3 atom
+pub const R_GET_GLOBAL: int = 30;
+/// w1 dst, w2 x
+pub const R_NOT: int = 31;
+/// w1 dst
+pub const R_NEW_OBJECT: int = 32;
+/// w1 obj, w2 value, w3 atom
+pub const R_INIT_PROP: int = 33;
+/// w1 dst, w2 proto
+pub const R_CLOSURE: int = 34;
+/// w1 local, w2 delta
+pub const R_INC_LOCAL: int = 35;
+/// w1 dst, w2 local, w3 delta; sub 1: the new value (++x)
+pub const R_POSTINC: int = 36;
+/// w1 local, w2 value
+pub const R_ADD_LOCAL_POP: int = 37;
+/// w1 local, w2 comparison, w3 target
+pub const R_LOCAL_NULL_JF: int = 38;
+/// w1 x, w2 k, w3 target
+pub const R_CASE_INT_JT: int = 39;
+/// w1 x, w2 y, w3 target
+pub const R_CASE_JT: int = 40;
+
+const BAD: int = 1000000;
+
+/// The net stack effect of an op that falls through to the next one; BAD
+/// for ops handled by `Tr::flow` or unknown.
+pub fn net_effect(op: &Op) -> int {
+    let c = op.code;
+    if c >= OP_ADD && c <= OP_GE {
+        return -1;
+    }
+    match c {
+        OP_UNDEF | OP_NULL | OP_TRUE | OP_FALSE | OP_INT | OP_CONST | OP_GET_LOCAL | OP_GET_ENV | OP_GET_GLOBAL | OP_TYPEOF_GLOBAL | OP_CLOSURE | OP_THIS | OP_NEW_TARGET | OP_ARGUMENTS | OP_NEW_OBJECT | OP_CALLEE | OP_GET_THIS_PROP | OP_TDZ | OP_REGEX | OP_GET_SUPER | OP_POSTINC_LOCAL | OP_PREINC_LOCAL | OP_GET_LOCAL_PROP | OP_DUP | OP_OVER | OP_ARRAY_REST | OP_GET_METHOD => 1,
+        OP_GET_LOCAL2 | OP_GET_ENV_UNDEF | OP_DUP2 => 2,
+        OP_SET_LOCAL | OP_SET_ENV | OP_SET_GLOBAL | OP_DECL_GLOBAL | OP_INC_LOCAL | OP_CHECK_TDZ | OP_REQUIRE_OBJ | OP_SET_NAME | OP_CONST_ERROR | OP_NOP | OP_END_TRY | OP_PUSH_ENV | OP_POP_ENV | OP_COPY_ENV | OP_GEN_START | OP_ITER_CLOSE_AT | OP_ARRAY_HOLE | OP_SWAP | OP_ROT3 | OP_ROT4 | OP_GET_METHOD_ELEM => 0,
+        OP_GET_PROP | OP_NEG | OP_TONUM | OP_NOT | OP_BNOT | OP_TYPEOF | OP_INC | OP_DEC | OP_TOSTR | OP_BIGINT | OP_DEL_PROP | OP_GET_PRIVATE | OP_ITER_KEYS | OP_ITER_VALUES | OP_ASYNC_ITER | OP_TO_ARRAY | OP_GET_SUPER_ELEM | OP_SUPER_CALL_SPREAD => 0,
+        OP_INSTANCEOF | OP_IN | OP_GET_ELEM | OP_SET_PROP | OP_DEL_ELEM | OP_INIT_PROP | OP_DEFINE_FIELD | OP_INIT_GETTER | OP_INIT_SETTER | OP_INIT_SPREAD | OP_DEFINE_METHOD | OP_ARRAY_PUSH | OP_ARRAY_SPREAD | OP_SET_FIELDS | OP_NEW_SPREAD | OP_POP | OP_ITER_CLOSE | OP_ADD_LOCAL_POP => -1,
+        OP_SET_ELEM | OP_INIT_ELEM | OP_DEFINE_FIELD_ELEM | OP_INIT_GETTER_ELEM | OP_INIT_SETTER_ELEM | OP_DEFINE_METHOD_ELEM | OP_CALL_SPREAD | OP_ADD_ENV_POP => -2,
+        OP_ADD_PROP_POP => -3,
+        OP_YIELD => 1,
+        OP_CALL => -op.a - 1,
+        OP_NEW => -op.a,
+        OP_SUPER_CALL | OP_NEW_ARRAY | OP_OBJ_REST => 1 - op.a,
+        OP_CLASS => {
+            if op.a == 1 {
+                0
+            } else {
+                1
+            }
+        }
+        _ => BAD,
+    }
+}
+
+/// The translation of one function.
+pub struct Tr {
+    pub code: Vec<Op>,
+    pub consts: Vec<Val>,
+    pub n: int,
+    pub nslots: int,
+    /// the stack depth before each op, -1 where no path reaches
+    pub depth: Vec<int>,
+    /// reached by a jump, a handler or a join: the abstract stack starts
+    /// over there with every value in its own slot
+    pub label: Vec<bool>,
+    pub maxd: int,
+    pub rc: Vec<Op>,
+    pub kv: Vec<Val>,
+    /// kv index of consts[i] + 1, 0 when not yet in kv
+    pub kc: Vec<int>,
+    /// the abstract stack: where each value is read from (a register),
+    /// the load that copies it into its own slot when it must be there (-1
+    /// when it is), and the op whose result it is (-1 if none or unknown)
+    pub es: Vec<int>,
+    pub el: Vec<int>,
+    pub ep: Vec<int>,
+    pub err: String,
+}
+
+impl Tr {
+    pub fn new(p: &Proto) -> Tr {
+        let n = p.code.len() as int;
+        let mut t = Tr {
+            code: p.code.clone(),
+            consts: p.consts.clone(),
+            n: n,
+            nslots: p.nslots,
+            depth: Vec::new(),
+            label: Vec::new(),
+            maxd: 0,
+            rc: Vec::new(),
+            kv: Vec::new(),
+            kc: Vec::new(),
+            es: Vec::new(),
+            el: Vec::new(),
+            ep: Vec::new(),
+            err: String::new(),
+        };
+        let mut i: int = 0;
+        while i < n {
+            t.depth.push(-1);
+            t.label.push(false);
+            t.rc.push(Op { code: R_NOP, a: 0, b: 0, c: 0 });
+            i += 1;
+        }
+        let mut k: usize = 0;
+        while k < t.consts.len() {
+            t.kc.push(0);
+            k += 1;
+        }
+        t
+    }
+
+    fn fail(&mut self, what: &str, at: int) {
+        if self.err.is_empty() {
+            self.err = format!("register code: {} at {}", what, at);
+        }
+    }
+
+    fn edge(&mut self, to: int, d: int, jump: bool, work: &mut Vec<int>, from: int) {
+        if to < 0 || to >= self.n || d < 0 {
+            self.fail("bad edge", from);
+            return;
+        }
+        if jump {
+            self.label[to as usize] = true;
+        }
+        if d > self.maxd {
+            self.maxd = d;
+        }
+        let cur = self.depth[to as usize];
+        if cur < 0 {
+            self.depth[to as usize] = d;
+            work.push(to);
+        } else if cur != d {
+            self.fail("stack depths differ", to);
+        }
+    }
+
+    /// The stack depth at every op (a worklist over the edges).
+    pub fn flow(&mut self) {
+        if self.n == 0 {
+            return;
+        }
+        let mut work: Vec<int> = Vec::new();
+        self.depth[0] = 0;
+        work.push(0);
+        while !work.is_empty() && self.err.is_empty() {
+            let i = work.pop().unwrap();
+            let d = self.depth[i as usize];
+            let op = self.code[i as usize];
+            let c = op.code;
+            if c == OP_JUMP {
+                self.edge(op.a, d, true, &mut work, i);
+            } else if c == OP_JF || c == OP_JT || c == OP_JNOT_UNDEF {
+                self.edge(op.a, d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if c == OP_JF_KEEP || c == OP_JT_KEEP || c == OP_JNN_KEEP {
+                self.edge(op.a, d, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if c == OP_JNULLISH {
+                if op.b == 1 {
+                    self.edge(op.a, d, true, &mut work, i);
+                    self.edge(i + 1, d, false, &mut work, i);
+                } else {
+                    let m = if op.b > 1 { op.b } else { 1 };
+                    self.edge(op.a, d - m + 1, true, &mut work, i);
+                    self.edge(i + 1, d - 1, false, &mut work, i);
+                }
+            } else if c == OP_CMP_JF {
+                self.edge(op.a, d - 2, true, &mut work, i);
+                self.edge(i + 1, d - 2, false, &mut work, i);
+            } else if c == OP_LOCAL_NULL_JF || c == OP_CASE_INT_JT {
+                self.edge(op.a, d, true, &mut work, i);
+                self.edge(i + 1, d, false, &mut work, i);
+            } else if c == OP_CASE_JT {
+                self.edge(op.a, d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if c == OP_ITER_NEXT {
+                self.edge(op.a, d, true, &mut work, i);
+                self.edge(i + 1, d + 1, false, &mut work, i);
+            } else if c == OP_TEMPLATE_OBJ {
+                if op.b >= 0 {
+                    self.edge(op.a, d + 1, true, &mut work, i);
+                    self.edge(i + 1, d, false, &mut work, i);
+                } else {
+                    self.edge(i + 1, d + 1 - 2 * op.a, false, &mut work, i);
+                }
+            } else if c == OP_GEN_RESUME {
+                self.edge(op.a, d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if c == OP_YIELD_STAR {
+                self.edge(op.a, d - 2, true, &mut work, i);
+                self.edge(op.b, d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if c == OP_TRY {
+                self.edge(op.a, d + 1, true, &mut work, i);
+                self.edge(i + 1, d, false, &mut work, i);
+            } else if c == OP_RETURN || c == OP_RETURN_UNDEF || c == OP_THROW {
+                // no successor
+            } else if c == OP_SET_LOCAL_POP {
+                self.edge(i + 2, d - 1, false, &mut work, i);
+            } else if c == OP_SET_PROP_POP {
+                self.edge(i + 2, d - 2, false, &mut work, i);
+            } else if c == OP_SET_ELEM_POP {
+                self.edge(i + 2, d - 3, false, &mut work, i);
+            } else {
+                let e = net_effect(&op);
+                if e == BAD {
+                    self.fail("unknown op", i);
+                    return;
+                }
+                if d + e + 1 > self.maxd {
+                    self.maxd = d + e + 1;
+                }
+                self.edge(i + 1, d + e, false, &mut work, i);
+            }
+        }
+        // a store that steps over its POP joins the POP's path after it
+        let mut i: int = 0;
+        while i + 2 < self.n {
+            let c = self.code[i as usize].code;
+            if (c == OP_SET_LOCAL_POP || c == OP_SET_PROP_POP || c == OP_SET_ELEM_POP) && self.depth[i as usize] >= 0 && self.depth[(i + 1) as usize] >= 0 {
+                self.label[(i + 2) as usize] = true;
+            }
+            i += 1;
+        }
+    }
+
+    fn set(&mut self, i: int, rop: int, sub: int, a: int, b: int, c: int) {
+        self.rc[i as usize] = Op { code: rop + 256 * sub, a: a, b: b, c: c };
+    }
+
+    fn rop_at(&self, i: int) -> int {
+        self.rc[i as usize].code % 256
+    }
+
+    fn kval(&mut self, v: Val) -> int {
+        let mut i: usize = 0;
+        while i < self.kv.len() && i < 32 {
+            let same = match (&self.kv[i], &v) {
+                (Val::Undef, Val::Undef) => true,
+                (Val::Null, Val::Null) => true,
+                (Val::Bool(x), Val::Bool(y)) => *x == *y,
+                (Val::Num(x), Val::Num(y)) => *x == *y && (1.0 / *x) == (1.0 / *y),
+                _ => false,
+            };
+            if same {
+                return -1 - (i as int);
+            }
+            i += 1;
+        }
+        self.kv.push(v);
+        -(self.kv.len() as int)
+    }
+
+    fn kconst(&mut self, ci: int) -> int {
+        let have = self.kc[ci as usize];
+        if have > 0 {
+            return -have;
+        }
+        let v = self.consts[ci as usize].clone();
+        self.kv.push(v);
+        let k = self.kv.len() as int;
+        self.kc[ci as usize] = k;
+        -k
+    }
+
+    fn top(&self) -> int {
+        self.es.len() as int
+    }
+
+    fn push_pend(&mut self, src: int, load: int) {
+        self.es.push(src);
+        self.el.push(load);
+        self.ep.push(-1);
+    }
+
+    /// a value in its own slot, made by op `prod` (-1: not one that can
+    /// write elsewhere)
+    fn push_own(&mut self, prod: int) {
+        let k = self.es.len() as int;
+        self.es.push(self.nslots + k);
+        self.el.push(-1);
+        self.ep.push(prod);
+    }
+
+    fn popn(&mut self, m: int) {
+        let mut i: int = 0;
+        while i < m {
+            self.es.pop();
+            self.el.pop();
+            self.ep.pop();
+            i += 1;
+        }
+    }
+
+    fn opnd(&self, k: int) -> int {
+        self.es[k as usize]
+    }
+
+    fn reset(&mut self, d: int) {
+        self.es = Vec::new();
+        self.el = Vec::new();
+        self.ep = Vec::new();
+        let mut k: int = 0;
+        while k < d {
+            self.push_own(-1);
+            k += 1;
+        }
+    }
+
+    /// Value k into its own slot: its load becomes a move.
+    fn mat(&mut self, k: int) {
+        let l = self.el[k as usize];
+        if l < 0 {
+            return;
+        }
+        let dst = self.nslots + k;
+        let src = self.es[k as usize];
+        let cur = self.rop_at(l);
+        if cur == R_NOP {
+            self.set(l, R_MOVE, 0, dst, src, 0);
+        } else if cur == R_MOVE {
+            // the other half of a GET_LOCAL2
+            let d0 = self.rc[l as usize].a;
+            let s0 = self.rc[l as usize].b;
+            if d0 + 1 == dst {
+                self.set(l, R_LOAD2, 0, d0, s0, src);
+            } else if dst + 1 == d0 {
+                self.set(l, R_LOAD2, 0, dst, src, s0);
+            } else {
+                self.fail("load shared", l);
+            }
+        } else {
+            self.fail("load is used", l);
+        }
+        self.es[k as usize] = dst;
+        self.el[k as usize] = -1;
+    }
+
+    fn mat_all(&mut self) {
+        let mut k: int = 0;
+        while k < self.top() {
+            self.mat(k);
+            k += 1;
+        }
+    }
+
+    fn mat_from(&mut self, from: int) {
+        let mut k = from;
+        while k < self.top() {
+            self.mat(k);
+            k += 1;
+        }
+    }
+
+    /// Before local x is written: the values still read from it get their
+    /// own slots.
+    fn mat_local(&mut self, x: int) {
+        let mut k: int = 0;
+        while k < self.top() {
+            if self.el[k as usize] >= 0 && self.es[k as usize] == x {
+                self.mat(k);
+            }
+            k += 1;
+        }
+    }
+
+    /// The top value is the result of the op just before `i` with nothing
+    /// run since: that op may write it to local x instead. Answers the op.
+    fn fusable_top(&self, i: int) -> int {
+        let t = self.top();
+        if t == 0 {
+            return -1;
+        }
+        let p = self.ep[(t - 1) as usize];
+        if p < 0 || self.el[(t - 1) as usize] >= 0 {
+            return -1;
+        }
+        let mut j = p + 1;
+        while j < i {
+            if self.rop_at(j) != R_NOP {
+                return -1;
+            }
+            j += 1;
+        }
+        p
+    }
+
+    fn result(&mut self, i: int, rop: int, sub: int, pops: int, b: int, c: int) {
+        self.popn(pops);
+        let dst = self.nslots + self.top();
+        self.set(i, rop, sub, dst, b, c);
+        self.push_own(i);
+    }
+
+    /// The register code, or err set.
+    pub fn translate(&mut self) {
+        self.flow();
+        if !self.err.is_empty() {
+            return;
+        }
+        let ns = self.nslots;
+        let mut expect: int = -1;
+        let mut i: int = 0;
+        while i < self.n && self.err.is_empty() {
+            let d = self.depth[i as usize];
+            if d < 0 {
+                i += 1;
+                continue;
+            }
+            if expect != i || self.label[i as usize] {
+                if expect > i && !self.label[expect as usize] {
+                    self.fail("a path crosses", i);
+                    return;
+                }
+                self.reset(d);
+            }
+            if self.top() != d {
+                self.fail("depth", i);
+                return;
+            }
+            let op = self.code[i as usize];
+            let c = op.code;
+            let mut next = i + 1;
+            if c == OP_UNDEF || c == OP_NULL || c == OP_TRUE || c == OP_FALSE || c == OP_INT {
+                let v = match c {
+                    OP_UNDEF => Val::Undef,
+                    OP_NULL => Val::Null,
+                    OP_TRUE => Val::Bool(true),
+                    OP_FALSE => Val::Bool(false),
+                    _ => Val::Num(op.a as double),
+                };
+                let k = self.kval(v);
+                self.push_pend(k, i);
+            } else if c == OP_CONST {
+                let k = self.kconst(op.a);
+                self.push_pend(k, i);
+            } else if c == OP_GET_LOCAL {
+                self.push_pend(op.a, i);
+            } else if c == OP_GET_LOCAL2 {
+                self.push_pend(op.a, i);
+                self.push_pend(op.b, i);
+            } else if c == OP_DUP || c == OP_OVER {
+                let from = if c == OP_DUP { d - 1 } else { d - 2 };
+                let s = self.opnd(from);
+                self.push_pend(s, i);
+            } else if c == OP_POP {
+                self.popn(1);
+            } else if c == OP_SET_LOCAL || c == OP_SET_LOCAL_POP {
+                let x = op.a;
+                self.mat_local(x);
+                let p = self.fusable_top(i);
+                if p >= 0 {
+                    self.rc[p as usize].a = x;
+                    self.popn(1);
+                    if c == OP_SET_LOCAL {
+                        self.push_pend(x, i);
+                    }
+                } else {
+                    let s = self.opnd(d - 1);
+                    self.set(i, R_MOVE, 0, x, s, 0);
+                    if c == OP_SET_LOCAL_POP {
+                        self.popn(1);
+                    }
+                }
+                if c == OP_SET_LOCAL_POP {
+                    next = i + 2;
+                }
+            } else if c == OP_GET_PROP {
+                let o = self.opnd(d - 1);
+                self.result(i, R_GET_PROP, 0, 1, o, op.a);
+            } else if c == OP_GET_LOCAL_PROP {
+                self.result(i, R_GET_PROP, 0, 0, op.a, op.b);
+            } else if c == OP_GET_THIS_PROP {
+                self.result(i, R_GET_THIS_PROP, 0, 0, 0, op.a);
+            } else if c == OP_SET_PROP_POP {
+                let o = self.opnd(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(2);
+                self.set(i, R_SET_PROP, 0, o, v, op.a);
+                next = i + 2;
+            } else if c == OP_GET_ELEM {
+                let o = self.opnd(d - 2);
+                let k = self.opnd(d - 1);
+                self.result(i, R_GET_ELEM, 0, 2, o, k);
+            } else if c == OP_SET_ELEM_POP {
+                let o = self.opnd(d - 3);
+                let k = self.opnd(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(3);
+                self.set(i, R_SET_ELEM, 0, o, k, v);
+                next = i + 2;
+            } else if c >= OP_ADD && c <= OP_GE {
+                let x = self.opnd(d - 2);
+                let y = self.opnd(d - 1);
+                let (rop, sub) = if c == OP_ADD {
+                    (R_ADD, 0)
+                } else if c == OP_SUB {
+                    (R_SUB, 0)
+                } else if c == OP_MUL {
+                    (R_MUL, 0)
+                } else if c >= OP_EQ {
+                    (R_CMP, c)
+                } else {
+                    (R_ARITH, c)
+                };
+                self.result(i, rop, sub, 2, x, y);
+            } else if c == OP_NOT {
+                let x = self.opnd(d - 1);
+                self.result(i, R_NOT, 0, 1, x, 0);
+            } else if c == OP_CMP_JF {
+                let x = self.opnd(d - 2);
+                let y = self.opnd(d - 1);
+                self.popn(2);
+                self.mat_all();
+                self.set(i, R_CMP_JF, op.b, x, y, op.a);
+            } else if c == OP_JUMP {
+                self.mat_all();
+                self.set(i, R_JUMP, 0, op.a, 0, 0);
+                next = -1;
+            } else if c == OP_JF || c == OP_JT {
+                let x = self.opnd(d - 1);
+                self.popn(1);
+                self.mat_all();
+                self.set(i, if c == OP_JF { R_JF } else { R_JT }, 0, x, op.a, 0);
+            } else if c == OP_JF_KEEP || c == OP_JT_KEEP || c == OP_JNN_KEEP {
+                self.mat_all();
+                let rop = if c == OP_JF_KEEP {
+                    R_JF_KEEP
+                } else if c == OP_JT_KEEP {
+                    R_JT_KEEP
+                } else {
+                    R_JNN_KEEP
+                };
+                self.set(i, rop, 0, ns + d - 1, op.a, 0);
+                self.popn(1);
+            } else if c == OP_LOCAL_NULL_JF {
+                self.mat_all();
+                self.set(i, R_LOCAL_NULL_JF, 0, op.b / 256, op.b % 256, op.a);
+            } else if c == OP_CASE_INT_JT {
+                self.mat_all();
+                self.set(i, R_CASE_INT_JT, 0, ns + d - 1, op.b, op.a);
+            } else if c == OP_CASE_JT {
+                let y = self.opnd(d - 1);
+                self.popn(1);
+                self.mat_all();
+                self.set(i, R_CASE_JT, 0, ns + d - 2, y, op.a);
+            } else if c == OP_RETURN {
+                let x = self.opnd(d - 1);
+                self.set(i, R_RET, 0, x, 0, 0);
+                next = -1;
+            } else if c == OP_RETURN_UNDEF {
+                self.set(i, R_RET_UNDEF, 0, 0, 0, 0);
+                next = -1;
+            } else if c == OP_CALL {
+                let w = d - op.a - 2;
+                self.mat_from(w);
+                self.popn(op.a + 2);
+                self.set(i, R_CALL, 0, ns + w, op.a, 0);
+                self.push_own(-1);
+            } else if c == OP_GET_METHOD {
+                let o = self.opnd(d - 1);
+                self.popn(1);
+                self.set(i, R_GET_METHOD, op.b, ns + d - 1, o, op.a);
+                self.push_own(-1);
+                self.push_own(-1);
+            } else if c == OP_THIS {
+                self.result(i, R_THIS, 0, 0, 0, 0);
+            } else if c == OP_GET_ENV {
+                self.result(i, R_GET_ENV, 0, 0, op.a, op.b);
+            } else if c == OP_GET_ENV_UNDEF {
+                self.set(i, R_GET_ENV, 1, ns + d, op.a, op.b);
+                self.push_own(-1);
+                self.push_own(-1);
+            } else if c == OP_SET_ENV {
+                let v = self.opnd(d - 1);
+                self.set(i, R_SET_ENV, 0, v, op.a, op.b);
+            } else if c == OP_GET_GLOBAL {
+                self.result(i, R_GET_GLOBAL, 0, 0, 0, op.a);
+            } else if c == OP_NEW_OBJECT {
+                self.result(i, R_NEW_OBJECT, 0, 0, 0, 0);
+            } else if c == OP_INIT_PROP && op.b != 1 {
+                let o = self.opnd(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(1);
+                self.set(i, R_INIT_PROP, 0, o, v, op.a);
+                // the object stays where it was; nothing writes it elsewhere
+                let t = self.top();
+                self.ep[(t - 1) as usize] = -1;
+            } else if c == OP_CLOSURE {
+                self.result(i, R_CLOSURE, 0, 0, op.a, 0);
+            } else if c == OP_INC_LOCAL {
+                self.mat_local(op.a);
+                self.set(i, R_INC_LOCAL, 0, op.a, op.b, 0);
+            } else if c == OP_POSTINC_LOCAL || c == OP_PREINC_LOCAL {
+                self.mat_local(op.a);
+                let sub = if c == OP_PREINC_LOCAL { 1 } else { 0 };
+                self.result(i, R_POSTINC, sub, 0, op.a, op.b);
+            } else if c == OP_ADD_LOCAL_POP {
+                let v = self.opnd(d - 1);
+                self.popn(1);
+                self.mat_local(op.a);
+                self.set(i, R_ADD_LOCAL_POP, 0, op.a, v, 0);
+            } else if c == OP_NOP || c == OP_END_TRY || c == OP_PUSH_ENV || c == OP_POP_ENV || c == OP_COPY_ENV || c == OP_DECL_GLOBAL || c == OP_CONST_ERROR {
+                self.set(i, R_STEP0, 0, 0, 0, 0);
+                if c == OP_CONST_ERROR {
+                    // it throws; nothing after it on this path
+                    self.mat_all();
+                }
+            } else if c == OP_TDZ || c == OP_NEW_TARGET || c == OP_ARGUMENTS || c == OP_CALLEE || c == OP_REGEX || c == OP_TYPEOF_GLOBAL || c == OP_GET_SUPER {
+                self.result(i, R_STEP_PUSH, 0, 0, 0, 0);
+            } else {
+                // the stack op on the frame's window
+                self.mat_all();
+                self.set(i, R_WIN, 0, ns + d, 0, 0);
+                if c == OP_RETURN || c == OP_THROW {
+                    next = -1;
+                } else if c == OP_SET_PROP || c == OP_SET_ELEM || c == OP_INIT_PROP || c == OP_GET_METHOD_ELEM || c == OP_ADD_ENV_POP || c == OP_ADD_PROP_POP {
+                    let e = net_effect(&op);
+                    self.reset(d + e);
+                } else if c == OP_THROW {
+                    next = -1;
+                } else {
+                    // the fall-through depth
+                    let nd = if i + 1 < self.n { self.depth[(i + 1) as usize] } else { -1 };
+                    if c == OP_JNULLISH || c == OP_JNOT_UNDEF || c == OP_ITER_NEXT || c == OP_TEMPLATE_OBJ || c == OP_GEN_RESUME || c == OP_YIELD_STAR || c == OP_TRY || net_effect(&op) != BAD {
+                        if nd < 0 {
+                            next = -1;
+                        } else {
+                            self.reset(nd);
+                        }
+                    } else {
+                        self.fail("op", i);
+                        return;
+                    }
+                }
+            }
+            if next >= 0 && next < self.n && self.label[next as usize] {
+                self.mat_all();
+            }
+            expect = next;
+            i += 1;
+        }
+        self.finish();
+    }
+
+    /// Skips over the instructions that do nothing, and jumps to the
+    /// first that does.
+    fn finish(&mut self) {
+        let n = self.n;
+        let mut run: Vec<int> = Vec::new();
+        let mut i: int = 0;
+        while i <= n {
+            run.push(0);
+            i += 1;
+        }
+        i = n - 1;
+        while i >= 0 {
+            if self.rop_at(i) == R_NOP {
+                let r = run[(i + 1) as usize] + 1;
+                run[i as usize] = if r > 32000 { 32000 } else { r };
+            }
+            i -= 1;
+        }
+        i = 0;
+        while i < n {
+            let k = i as usize;
+            let rop = self.rc[k].code % 256;
+            self.rc[k].code += 65536 * run[(i + 1) as usize];
+            let w = if rop == R_JUMP {
+                1
+            } else if rop == R_JF || rop == R_JT || rop == R_JF_KEEP || rop == R_JT_KEEP || rop == R_JNN_KEEP {
+                2
+            } else if rop == R_CMP_JF || rop == R_LOCAL_NULL_JF || rop == R_CASE_INT_JT || rop == R_CASE_JT {
+                3
+            } else {
+                0
+            };
+            if w == 1 {
+                let t = self.rc[k].a;
+                self.rc[k].a = t + run[t as usize];
+            } else if w == 2 {
+                let t = self.rc[k].b;
+                self.rc[k].b = t + run[t as usize];
+            } else if w == 3 {
+                let t = self.rc[k].c;
+                self.rc[k].c = t + run[t as usize];
+            }
+            i += 1;
+        }
+    }
+}
+
+/// Fills `p.rcode`, `p.kvals` and `p.fsize`; an error when the code is not
+/// one this translator knows.
+pub fn translate(p: &mut Proto) -> String {
+    let mut t = Tr::new(p);
+    t.translate();
+    if !t.err.is_empty() {
+        return t.err.clone();
+    }
+    p.rcode = t.rc;
+    p.kvals = t.kv;
+    p.fsize = p.nslots + t.maxd + 2;
+    p.rstate = 1;
+    String::new()
+}
+
+/// The register code of a function as text, one instruction a line (for
+/// looking at what the translation made).
+pub fn dump(p: &Proto) -> String {
+    let mut out = format!("{} nslots {} fsize {} kvals {}\n", p.name, p.nslots, p.fsize, p.kvals.len());
+    let n = p.code.len() as int;
+    let mut i: int = 0;
+    while i < n {
+        let r = if (i as usize) < p.rcode.len() { p.rcode[i as usize] } else { Op { code: 0, a: 0, b: 0, c: 0 } };
+        let w0 = r.code;
+        out.push_str(format!("{:4} op{:3} {:>3} sub {:3} skip {:3} | {} {} {}  ({} {} {})\n", i, p.code[i as usize].code, w0 % 256, (w0 / 256) % 256, w0 / 65536, r.a, r.b, r.c, p.code[i as usize].a, p.code[i as usize].b, p.code[i as usize].c).as_str());
+        i += 1;
+    }
+    out
+}

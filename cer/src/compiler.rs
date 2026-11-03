@@ -2192,15 +2192,23 @@ impl Compiler {
                 self.block(d);
                 let j2 = self.emit(OP_JUMP, 0, 0);
                 self.patch(t2);
-                self.block(d);
-                self.op(OP_THROW);
+                self.finally_on_exception(d);
                 self.patch(j2);
             }
         } else {
-            self.block(d);
-            self.op(OP_THROW);
+            self.finally_on_exception(d);
         }
         self.patch(j_end);
+    }
+
+    /// A finally block run for an exception, [exception] under it, then
+    /// the rethrow. A break or continue out of the block pops the
+    /// exception, so every path to a jump target has the same stack.
+    fn finally_on_exception(&mut self, d: int) {
+        self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
+        self.block(d);
+        self.f().ctl.pop();
+        self.op(OP_THROW);
     }
 
     fn switch_statement(&mut self, n: int) {
