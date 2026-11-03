@@ -1138,16 +1138,15 @@ impl Vm {
     pub fn intern(&mut self, s: &str) -> int {
         // a direct-mapped cache in front of the map, by a cheap hash of the
         // length and some of the bytes
-        let b = s.as_bytes();
-        let n = b.len();
+        let n = s.as_bytes().len();
         let mut h: int = (n as int) & 65535;
         if n > 0 {
-            h = (h * 31 + (b[0] as int)) & 65535;
-            h = (h * 31 + (b[n - 1] as int)) & 65535;
-            h = (h * 31 + (b[n / 2] as int)) & 65535;
+            h = (h * 31 + (s.as_bytes()[0] as int)) & 65535;
+            h = (h * 31 + (s.as_bytes()[n - 1] as int)) & 65535;
+            h = (h * 31 + (s.as_bytes()[n / 2] as int)) & 65535;
             if n > 3 {
-                h = (h * 31 + (b[1] as int)) & 65535;
-                h = (h * 31 + (b[n - 2] as int)) & 65535;
+                h = (h * 31 + (s.as_bytes()[1] as int)) & 65535;
+                h = (h * 31 + (s.as_bytes()[n - 2] as int)) & 65535;
             }
         }
         let k = (h & 4095) as usize;
