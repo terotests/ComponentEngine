@@ -249,6 +249,15 @@ pub struct Vm {
     pub slimit: int,
     pub slimit_min: int,
     pub sempty: Rc<String>,
+    /// prototype-chain caches of the register code's reads (rvm.rs
+    /// pic_get): rpic[i] is rcode[i]'s entry in pic (PIC_W ints), -1 none;
+    /// an entry holds while shape_epoch, which every change of an owned
+    /// shape moves, stays
+    pub rpic: Vec<int>,
+    pub pic: Vec<int>,
+    pub shape_epoch: int,
+    /// where in pic the last pic_get hit or filled
+    pub pic_way: int,
     pub alloc_count: int,
     pub gc_threshold: int,
     pub native_depth: int,
@@ -444,6 +453,10 @@ impl Vm {
             slimit: SLIMIT_MIN,
             slimit_min: SLIMIT_MIN,
             sempty: Rc::new(String::new()),
+            rpic: Vec::new(),
+            pic: Vec::new(),
+            shape_epoch: 0,
+            pic_way: 0,
             alloc_count: 0,
             gc_threshold: 200000,
             native_depth: 0,
@@ -695,6 +708,7 @@ impl Vm {
     pub fn add_own(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
         let sh = self.objs[o as usize].shape;
         if self.shapes[sh as usize].owned {
+            self.shape_epoch += 1;
             self.push_val(o, v);
             return self.shapes[sh as usize].push(atom, attr);
         }
@@ -721,6 +735,7 @@ impl Vm {
             if slot >= SHAPE_MAX {
                 // a dictionary
                 self.own_shape(o);
+                self.shape_epoch += 1;
                 let sh2 = self.objs[o as usize].shape;
                 self.push_val(o, v);
                 return self.shapes[sh2 as usize].push(atom, attr);
@@ -757,6 +772,7 @@ impl Vm {
         } else {
             let i = self.free_shapes.pop().unwrap();
             self.shapes[i as usize] = ns;
+            self.shape_epoch += 1;
             i
         };
         self.objs[o as usize].shape = id;
@@ -767,12 +783,14 @@ impl Vm {
             return;
         }
         self.own_shape(o);
+        self.shape_epoch += 1;
         let sh = self.objs[o as usize].shape;
         self.shapes[sh as usize].attrs[slot as usize] = attr;
     }
 
     pub fn remove_own(&mut self, o: int, slot: int) {
         self.own_shape(o);
+        self.shape_epoch += 1;
         let sh = self.objs[o as usize].shape;
         self.shapes[sh as usize].remove(slot);
         self.remove_val(o, slot);
@@ -784,6 +802,7 @@ impl Vm {
         if self.shapes[sh as usize].owned {
             self.shapes[sh as usize] = Shape::new();
             self.free_shapes.push(sh);
+            self.shape_epoch += 1;
         }
         self.objs[o as usize].shape = 0;
     }
@@ -932,7 +951,7 @@ impl Vm {
         if h <= 0 || self.sup[i] >= 0 || self.sflag[i] != 0 {
             return -1;
         }
-        let n = self.strs[i].len() as int;
+        let n = self.strs[i].as_bytes().len() as int;
         if !rc_push(&mut self.strs[i], b) {
             return -1;
         }
@@ -1034,11 +1053,41 @@ impl Vm {
         }
         let x = self.exc;
         self.smark_val(x);
-        let lists = vec![self.temp_roots.clone(), self.jobs.clone(), self.atom_vals.clone(), self.type_vals.clone(), self.kvals.clone(), self.regex_shown.clone()];
-        for l in lists {
-            for v in l {
-                self.smark_val(v);
-            }
+        i = 0;
+        while i < self.temp_roots.len() {
+            let v = self.temp_roots[i];
+            self.smark_val(v);
+            i += 1;
+        }
+        i = 0;
+        while i < self.jobs.len() {
+            let v = self.jobs[i];
+            self.smark_val(v);
+            i += 1;
+        }
+        i = 0;
+        while i < self.atom_vals.len() {
+            let v = self.atom_vals[i];
+            self.smark_val(v);
+            i += 1;
+        }
+        i = 0;
+        while i < self.type_vals.len() {
+            let v = self.type_vals[i];
+            self.smark_val(v);
+            i += 1;
+        }
+        i = 0;
+        while i < self.kvals.len() {
+            let v = self.kvals[i];
+            self.smark_val(v);
+            i += 1;
+        }
+        i = 0;
+        while i < self.regex_shown.len() {
+            let v = self.regex_shown[i];
+            self.smark_val(v);
+            i += 1;
         }
         // a prefix keeps the handles its text lies in
         let ns = self.strs.len();

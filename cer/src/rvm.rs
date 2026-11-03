@@ -15,6 +15,16 @@ use crate::regs::*;
 use crate::value::*;
 use crate::vm::*;
 
+/// prototypes a chain cache entry follows, at most
+pub const PIC_DEPTH: int = 4;
+/// ints per prototype-chain cache entry (Vm.pic): the receiver's shape, the
+/// shape epoch, the depth, the slot (-1: absent, the chain ends there), 1
+/// for an accessor, then each prototype and its shape; a site's first
+/// entry's last int is whose turn it is to be refilled
+pub const PIC_W: int = 5 + 2 * PIC_DEPTH + 1;
+/// entries per site, filled in turn
+pub const PIC_WAYS: int = 4;
+
 impl Vm {
     /// Register x of the frame at bp: a slot, or a constant when negative.
     #[inline]
@@ -371,7 +381,9 @@ impl Vm {
                             pc = next;
                             continue;
                         }
-                        self.r_get_prop_slow(o, pi, rb, bp, fi, pc, w0, w1, w2);
+                        if self.r_get_prop_slow(o, pi, rb, bp, fi, pc, w0, w1, w2) {
+                            continue 'frames;
+                        }
                     }
                     R_SET_PROP => {
                         let o = obj_of(self.rget(bp, w1));
@@ -530,9 +542,7 @@ impl Vm {
                             pc = self.frames[fi].pc;
                             let to = if fr.ret >= 0 { fr.ret as usize } else { fpos };
                             self.stack[to] = v;
-                            while self.stack.len() < want {
-                                self.stack.push(Val::Undef);
-                            }
+                            self.grow_stack(want);
                             continue;
                         } else {
                             self.stack.truncate(fpos);
@@ -740,7 +750,7 @@ impl Vm {
 
     /// R_GET_PROP / R_GET_THIS_PROP past its inline cache.
     #[inline(never)]
-    fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) {
+    fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
         let atom = self.ratom(pi, pc);
         if o >= 0 {
             let c = self.rcode[(rb + pc) as usize].c;
@@ -749,12 +759,44 @@ impl Vm {
             if slot >= 0 {
                 let r = self.objs[o as usize].vals[slot as usize].clone();
                 self.stack[(bp + w1) as usize] = r;
-                return;
+                return false;
             }
             if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
                 let r = Val::Num(self.objs[o as usize].elems.len() as double);
                 self.stack[(bp + w1) as usize] = r;
-                return;
+                return false;
+            }
+        }
+        if o >= 0 {
+            let h = self.pic_get(rb + pc, o, atom);
+            if h != -1 {
+                let way = self.pic_way as usize;
+                let r = if h >= 0 { self.objs[h as usize].vals[self.pic[way + 3] as usize] } else { Val::Undef };
+                if h < 0 || self.pic[way + 4] == 0 {
+                    self.stack[(bp + w1) as usize] = r;
+                    return false;
+                }
+                // a getter: a plain function runs as a call in this loop
+                let g = self.objs[obj_of(&r) as usize].elems[0];
+                let go = obj_of(&g);
+                if go >= 0 && self.objs[go as usize].class == C_FUNCTION {
+                    let gp = self.objs[go as usize].func as usize;
+                    let plain = {
+                        let p = &self.protos[gp];
+                        !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
+                    };
+                    if plain {
+                        let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
+                        self.frames[fi].pc = pc + 1;
+                        let fpos = bp + self.protos[pi].fsize;
+                        while (self.stack.len() as int) < fpos + 2 {
+                            self.stack.push(Val::Undef);
+                        }
+                        self.stack[fpos as usize] = g;
+                        self.stack[(fpos + 1) as usize] = recv;
+                        return self.renter(go, fpos, 0, bp + w1);
+                    }
+                }
             }
         }
         let v = if (w0 & 255) == R_GET_PROP { self.rget(bp, w2).clone() } else { self.frames[fi].this_val.clone() };
@@ -763,6 +805,143 @@ impl Vm {
         if !self.throwing {
             self.stack[(bp + w1) as usize] = r;
         }
+        false
+    }
+
+    /// The stack at least `want` long, undefined past its end.
+    #[inline]
+    pub fn grow_stack(&mut self, want: usize) {
+        while self.stack.len() < want {
+            self.stack.push(Val::Undef);
+        }
+    }
+
+    /// Where frame fi's register code starts in rcode.
+    #[inline]
+    fn rbase_of(&self, fi: usize) -> int {
+        self.protos[self.frames[fi].proto as usize].rbase
+    }
+
+    /// A read of `atom`, which `o` does not have itself, from o's
+    /// prototype or the one after it, through the cache of rcode site
+    /// `site`: the object holding it (its slot is the entry's 5th int), or
+    /// -1 when the cache does not know and could not learn it.
+    fn pic_get(&mut self, site: int, o: int, atom: int) -> int {
+        let si = site as usize;
+        if si >= self.rpic.len() {
+            while self.rpic.len() < self.rcode.len() {
+                self.rpic.push(-1);
+            }
+        }
+        let e0 = self.rpic[si];
+        let mut w: int = 0;
+        while e0 >= 0 && w < PIC_WAYS {
+            let b = ((e0 + w) * PIC_W) as usize;
+            w += 1;
+            if self.pic[b + 1] != self.shape_epoch || self.objs[o as usize].shape != self.pic[b] {
+                continue;
+            }
+            let depth = self.pic[b + 2] as usize;
+            let mut cur = o;
+            let mut k: usize = 0;
+            let mut ok = true;
+            while k < depth {
+                let pk = self.pic[b + 5 + 2 * k];
+                if self.objs[cur as usize].proto != pk || self.objs[pk as usize].shape != self.pic[b + 6 + 2 * k] {
+                    ok = false;
+                    break;
+                }
+                cur = pk;
+                k += 1;
+            }
+            if !ok {
+                continue;
+            }
+            if self.pic[b + 3] >= 0 {
+                self.pic_way = b as int;
+                return cur;
+            }
+            if self.objs[cur as usize].proto < 0 {
+                return -2;
+            }
+        }
+        // learn it: plain objects on the way, then a property or the end of
+        // the chain
+        if !self.pic_plain(o, atom) || self.find(o, atom) >= 0 {
+            return -1;
+        }
+        let mut chain: Vec<int> = Vec::new();
+        let mut cur = o;
+        let mut slot: int = -1;
+        loop {
+            let nx = self.objs[cur as usize].proto;
+            if nx < 0 {
+                break;
+            }
+            if (chain.len() as int) >= PIC_DEPTH || self.objs[nx as usize].class == C_PROXY {
+                return -1;
+            }
+            chain.push(nx);
+            cur = nx;
+            slot = self.find(cur, atom);
+            if slot >= 0 {
+                break;
+            }
+            if !self.pic_plain(cur, atom) {
+                return -1;
+            }
+        }
+        if chain.is_empty() {
+            return -1;
+        }
+        let acc = slot >= 0 && (self.attr_at(cur, slot) & P_ACCESSOR) != 0;
+        let base = if e0 >= 0 {
+            e0
+        } else {
+            let n = self.pic.len() as int / PIC_W;
+            let mut k: int = 0;
+            while k < PIC_W * PIC_WAYS {
+                self.pic.push(-1);
+                k += 1;
+            }
+            self.pic[(n * PIC_W + PIC_W - 1) as usize] = 0;
+            self.rpic[si] = n;
+            n
+        };
+        // the next way in turn (the first entry's last int counts)
+        let ti = (base * PIC_W + PIC_W - 1) as usize;
+        let turn = self.pic[ti];
+        self.pic[ti] = (turn + 1) % PIC_WAYS;
+        let b = ((base + turn) * PIC_W) as usize;
+        self.pic[b] = self.objs[o as usize].shape;
+        self.pic[b + 1] = self.shape_epoch;
+        self.pic[b + 2] = chain.len() as int;
+        self.pic[b + 3] = slot;
+        self.pic[b + 4] = if acc { 1 } else { 0 };
+        let mut k: usize = 0;
+        while k < chain.len() {
+            let x = chain[k];
+            self.pic[b + 5 + 2 * k] = x;
+            self.pic[b + 6 + 2 * k] = self.objs[x as usize].shape;
+            k += 1;
+        }
+        self.pic_way = b as int;
+        if slot < 0 {
+            -2
+        } else {
+            cur
+        }
+    }
+
+    /// Whether a miss of `atom` on `x` just goes on to its prototype
+    /// (get_obj): no proxy, no property made on demand.
+    #[inline]
+    fn pic_plain(&self, x: int, atom: int) -> bool {
+        let c = self.objs[x as usize].class;
+        if c == C_OBJECT {
+            return true;
+        }
+        c != C_PROXY && c != C_STRING && atom != A_LENGTH && atom != A_NAME && atom != A_PROTOTYPE
     }
 
     /// R_SET_PROP past its inline cache, or one that keeps its value.
@@ -816,6 +995,13 @@ impl Vm {
             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
                 f = self.objs[o as usize].vals[slot as usize].clone();
                 done = true;
+            } else if slot < 0 {
+                let site = self.rbase_of(fi) + pc;
+                let h = self.pic_get(site, o, atom);
+                if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
+                    f = if h >= 0 { self.objs[h as usize].vals[self.pic[(self.pic_way + 3) as usize] as usize] } else { Val::Undef };
+                    done = true;
+                }
             }
         }
         if !done {
@@ -1046,11 +1232,48 @@ impl Vm {
         self.gc();
     }
 
+    /// A comparison decided by the values' kinds alone: 1 true, 0 false, -1 when
+    /// it needs rcompare. Strict equality always decides; loose equality when
+    /// one side is null or undefined.
+    #[inline(always)]
+    fn fast_cmp(&self, code: int, a: &Val, b: &Val) -> int {
+        let eq: int = if code == OP_SEQ || code == OP_SNE {
+            match (a, b) {
+                (Val::Num(x), Val::Num(y)) => if *x == *y { 1 } else { 0 },
+                (Val::Obj(x), Val::Obj(y)) => if *x == *y { 1 } else { 0 },
+                (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => 1,
+                (Val::Bool(x), Val::Bool(y)) => if *x == *y { 1 } else { 0 },
+                (Val::Str(x), Val::Str(y)) => if *x == *y || self.sref(*x) == self.sref(*y) { 1 } else { 0 },
+                _ => 0,
+            }
+        } else if code == OP_EQ || code == OP_NE {
+            match (a, b) {
+                (Val::Undef, Val::Undef) | (Val::Null, Val::Null) | (Val::Undef, Val::Null) | (Val::Null, Val::Undef) => 1,
+                (Val::Undef, Val::Obj(_)) | (Val::Null, Val::Obj(_)) | (Val::Obj(_), Val::Undef) | (Val::Obj(_), Val::Null) => 0,
+                (Val::Undef, Val::Num(_)) | (Val::Null, Val::Num(_)) | (Val::Num(_), Val::Undef) | (Val::Num(_), Val::Null) => 0,
+                (Val::Undef, Val::Str(_)) | (Val::Null, Val::Str(_)) | (Val::Str(_), Val::Undef) | (Val::Str(_), Val::Null) => 0,
+                (Val::Undef, Val::Bool(_)) | (Val::Null, Val::Bool(_)) | (Val::Bool(_), Val::Undef) | (Val::Bool(_), Val::Null) => 0,
+                (Val::Str(x), Val::Str(y)) => if *x == *y || self.sref(*x) == self.sref(*y) { 1 } else { 0 },
+                _ => -1,
+            }
+        } else {
+            -1
+        };
+        if eq < 0 {
+            return -1;
+        }
+        if code == OP_SEQ || code == OP_EQ {
+            eq
+        } else {
+            1 - eq
+        }
+    }
+
     /// A comparison of two registers: strict and null equality here, the
     /// rest by rcompare.
     #[inline(always)]
     pub fn rcmp(&mut self, code: int, pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
-        let q = fast_cmp(code, self.rget(bp, x), self.rget(bp, y));
+        let q = self.fast_cmp(code, self.rget(bp, x), self.rget(bp, y));
         if q >= 0 {
             return q == 1;
         }
@@ -1095,38 +1318,3 @@ impl Vm {
     }
 }
 
-/// A comparison decided by the values' kinds alone: 1 true, 0 false, -1 when
-/// it needs rcompare. Strict equality always decides; loose equality when
-/// one side is null or undefined.
-#[inline(always)]
-pub fn fast_cmp(code: int, a: &Val, b: &Val) -> int {
-    let eq: int = if code == OP_SEQ || code == OP_SNE {
-        match (a, b) {
-            (Val::Num(x), Val::Num(y)) => if *x == *y { 1 } else { 0 },
-            (Val::Obj(x), Val::Obj(y)) => if *x == *y { 1 } else { 0 },
-            (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => 1,
-            (Val::Bool(x), Val::Bool(y)) => if *x == *y { 1 } else { 0 },
-            (Val::Str(x), Val::Str(y)) => if *x == *y { 1 } else { -1 },
-            _ => 0,
-        }
-    } else if code == OP_EQ || code == OP_NE {
-        match (a, b) {
-            (Val::Undef, Val::Undef) | (Val::Null, Val::Null) | (Val::Undef, Val::Null) | (Val::Null, Val::Undef) => 1,
-            (Val::Undef, Val::Obj(_)) | (Val::Null, Val::Obj(_)) | (Val::Obj(_), Val::Undef) | (Val::Obj(_), Val::Null) => 0,
-            (Val::Undef, Val::Num(_)) | (Val::Null, Val::Num(_)) | (Val::Num(_), Val::Undef) | (Val::Num(_), Val::Null) => 0,
-            (Val::Undef, Val::Str(_)) | (Val::Null, Val::Str(_)) | (Val::Str(_), Val::Undef) | (Val::Str(_), Val::Null) => 0,
-            (Val::Undef, Val::Bool(_)) | (Val::Null, Val::Bool(_)) | (Val::Bool(_), Val::Undef) | (Val::Bool(_), Val::Null) => 0,
-            _ => -1,
-        }
-    } else {
-        -1
-    };
-    if eq < 0 {
-        return -1;
-    }
-    if code == OP_SEQ || code == OP_EQ {
-        eq
-    } else {
-        1 - eq
-    }
-}

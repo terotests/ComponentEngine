@@ -54,6 +54,7 @@ fn main() {
             v.rc_errors, v.rc_freed, v.reclaims, v.gc_runs, v.objs.len(), free, v.live, v.zct.len(),
             std::mem::size_of::<cerxes::value::JsObj>()
         );
+        eprintln!("strs={} free={} shape_epoch={} pic={}", v.strs.len(), v.sfree.len() + v.sfreed.len(), v.shape_epoch, v.pic.len() / 14);
         for l in v.rc_log.iter() {
             eprintln!("{}", l);
         }

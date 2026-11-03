@@ -1168,11 +1168,11 @@ impl Vm {
                     i += 1;
                     continue;
                 }
-                for (gn, gv) in groups.iter() {
-                    if gn.as_str() == name.as_str() {
+                for g in groups.iter() {
+                    let gv = g.1;
+                    if g.0.as_str() == name.as_str() {
                         if let Val::Str(s) = gv {
-                            let s = self.sget(s.clone());
-                            out.push_str(s.as_str());
+                            out.push_str(self.sref(s));
                         }
                     }
                 }
@@ -1238,9 +1238,10 @@ impl Vm {
                     args.push(self.rc_val(s.clone()));
                     if !groups.is_empty() {
                         let go = self.new_object();
-                        for (gn, gv) in groups.iter() {
-                            let a = self.intern(gn.as_str());
-                            self.add_own(go, a, gv.clone(), 0);
+                        for g in groups.iter() {
+                            let gv = g.1;
+                            let a = self.intern(g.0.as_str());
+                            self.add_own(go, a, gv, 0);
                         }
                         args.push(Val::Obj(go));
                     }
@@ -2137,7 +2138,9 @@ impl Vm {
         }
         if c == 't' || c == 'f' || c == 'n' {
             let words = vec![("true", Val::Bool(true)), ("false", Val::Bool(false)), ("null", Val::Null)];
-            for (w, v) in words {
+            for e in words.iter() {
+                let w = e.0;
+                let v = e.1;
                 let wc = w.chars().collect::<Vec<char>>();
                 let mut ok = *pos + wc.len() <= cs.len();
                 let mut i: usize = 0;
