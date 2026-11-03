@@ -110,7 +110,9 @@ impl Vm {
         self.atoms = c.atoms;
         self.atom_names = c.atom_names;
         for pr in c.protos {
-            self.protos.push(pr);
+            let mut p2 = pr;
+            self.link_strs(&mut p2);
+            self.protos.push(p2);
         }
         let fp = self.function_proto;
         let f = self.alloc(C_FUNCTION, fp);
@@ -210,7 +212,7 @@ impl Vm {
                 let f = self.get(&a0, self.atoms["flags"]);
                 (s, f)
             } else {
-                (if matches!(a0, Val::Undef) { str_val("") } else { a0.clone() }, a1)
+                (if matches!(a0, Val::Undef) { self.str_val("") } else { a0.clone() }, a1)
             };
             let fresh = self.new_regexp(&src, &fl);
             if self.throwing {
@@ -251,6 +253,7 @@ impl Vm {
                 return Val::Undef;
             }
             if let Val::Str(s) = &args[0] {
+                let s = self.sget(s.clone());
                 let src = s.as_ref().clone();
                 // the caller's strictness (a direct eval's; an indirect one
                 // from strict code is taken as direct)

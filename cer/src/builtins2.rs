@@ -270,7 +270,7 @@ impl Vm {
                 let sep = if matches!(a0, Val::Undef) { String::from(",") } else { self.to_string(&a0) };
                 let mut seen: Vec<int> = Vec::new();
                 let s = self.array_join(o, sep.as_str(), &mut seen);
-                string_val(s)
+                self.string_val(s)
             }
             NF_AP_TOSTRING => {
                 let o = self.this_array(&this);
@@ -279,11 +279,11 @@ impl Vm {
                     if self.is_callable(&jf) {
                         return self.call_value(jf, this.clone(), Vec::new());
                     }
-                    return string_val(String::from("[object Object]"));
+                    return self.string_val(String::from("[object Object]"));
                 }
                 let mut seen: Vec<int> = Vec::new();
                 let s = self.array_join(o, ",", &mut seen);
-                string_val(s)
+                self.string_val(s)
             }
             NF_AP_REVERSE => {
                 let o = self.this_array(&this);
@@ -619,7 +619,7 @@ impl Vm {
                     u.push((to_uint32(n) % 65536.0) as int);
                 }
                 let len = u.len() as int;
-                string_val(jsstr::from_units(&u, 0, len))
+                self.string_val(jsstr::from_units(&u, 0, len))
             }
             NF_S_FROMCODEPOINT => {
                 let mut s = String::new();
@@ -631,7 +631,7 @@ impl Vm {
                     }
                     jsstr::push_cp(&mut s, n as int);
                 }
-                string_val(s)
+                self.string_val(s)
             }
             NF_S_RAW => {
                 let raw = self.get(&a0, A_RAW);
@@ -647,7 +647,7 @@ impl Vm {
                     }
                     i += 1;
                 }
-                string_val(s)
+                self.string_val(s)
             }
             NF_SP_TOSTRING => match &this {
                 Val::Str(_) => this,
@@ -670,16 +670,16 @@ impl Vm {
                 match id {
                     NF_SP_CHARAT => {
                         if c < 0 {
-                            str_val("")
+                            self.str_val("")
                         } else {
-                            string_val(jsstr::from_unit(c))
+                            self.string_val(jsstr::from_unit(c))
                         }
                     }
                     NF_SP_AT => {
                         if c < 0 {
                             Val::Undef
                         } else {
-                            string_val(jsstr::from_unit(c))
+                            self.string_val(jsstr::from_unit(c))
                         }
                     }
                     NF_SP_CHARCODEAT => Val::Num(if c < 0 { nan() } else { c as double }),
@@ -745,7 +745,7 @@ impl Vm {
                 let len = self.str_len(&s);
                 let a = self.rel_index(&a0, len, 0);
                 let b = self.rel_index(&a1, len, len);
-                string_val(self.str_slice(&s, a, b))
+                { let tw2 = self.str_slice(&s, a, b); self.string_val(tw2) }
             }
             NF_SP_SUBSTRING => {
                 let s = self.this_str(&this);
@@ -756,9 +756,9 @@ impl Vm {
                 let a = self.rel_index_pos(&a0, len, 0);
                 let b = self.rel_index_pos(&a1, len, len);
                 if a < b {
-                    string_val(self.str_slice(&s, a, b))
+                    { let tw3 = self.str_slice(&s, a, b); self.string_val(tw3) }
                 } else {
-                    string_val(self.str_slice(&s, b, a))
+                    { let tw4 = self.str_slice(&s, b, a); self.string_val(tw4) }
                 }
             }
             NF_SP_SUBSTR => {
@@ -770,29 +770,29 @@ impl Vm {
                 let a = self.rel_index(&a0, len, 0);
                 let n = if matches!(a1, Val::Undef) { len - a } else { to_integer(self.to_number(&a1)) as int };
                 if n <= 0 {
-                    return str_val("");
+                    return self.str_val("");
                 }
-                string_val(self.str_slice(&s, a, a + n))
+                { let tw0 = self.str_slice(&s, a, a + n); self.string_val(tw0) }
             }
             NF_SP_UPPER => {
                 let s = self.this_str(&this);
-                string_val(jsstr::to_upper(s.as_str()))
+                self.string_val(jsstr::to_upper(s.as_str()))
             }
             NF_SP_LOWER => {
                 let s = self.this_str(&this);
-                string_val(jsstr::to_lower(s.as_str()))
+                self.string_val(jsstr::to_lower(s.as_str()))
             }
             NF_SP_TRIM => {
                 let s = self.this_str(&this);
-                string_val(js_trim(s.as_str()))
+                self.string_val(js_trim(s.as_str()))
             }
             NF_SP_TRIMSTART => {
                 let s = self.this_str(&this);
-                string_val(js_trim_start(s.as_str()))
+                self.string_val(js_trim_start(s.as_str()))
             }
             NF_SP_TRIMEND => {
                 let s = self.this_str(&this);
-                string_val(js_trim_end(s.as_str()))
+                self.string_val(js_trim_end(s.as_str()))
             }
             NF_SP_NORMALIZE => {
                 let s = self.this_str(&this);
@@ -808,7 +808,7 @@ impl Vm {
                     return Val::Undef;
                 }
                 let compose = form == "NFC" || form == "NFKC";
-                string_val(crate::normalize::normalize(&mut self.norm, s.as_str(), compose))
+                { let tw1 = crate::normalize::normalize(&mut self.norm, s.as_str(), compose); self.string_val(tw1) }
             }
             NF_SP_SPLIT => {
                 let s = self.this_str(&this);
@@ -832,8 +832,13 @@ impl Vm {
                 let re = if self.class_of(&a0) == C_REGEXP {
                     a0.clone()
                 } else {
-                    let flags = if id == NF_SP_MATCHALL { str_val("g") } else { Val::Undef };
-                    let src = if matches!(a0, Val::Undef) { Val::Undef } else { Val::Str(self.to_str(&a0)) };
+                    let flags = if id == NF_SP_MATCHALL { self.str_val("g") } else { Val::Undef };
+                    let src = if matches!(a0, Val::Undef) {
+                        Val::Undef
+                    } else {
+                        let t = self.to_str(&a0);
+                        self.rc_val(t)
+                    };
                     self.new_regexp(&src, &flags)
                 };
                 if self.throwing {
@@ -853,7 +858,8 @@ impl Vm {
                         return Val::Undef;
                     }
                     let mut out: Vec<Val> = Vec::new();
-                    let copy = self.new_regexp(&self.objs[ro as usize].prim.clone(), &str_val("g"));
+                    let sv2 = self.str_val("g");
+                    let copy = self.new_regexp(&self.objs[ro as usize].prim.clone(), &sv2);
                     let co = obj_of(&copy);
                     loop {
                         let m = self.regexp_exec(co, &s);
@@ -862,6 +868,7 @@ impl Vm {
                         }
                         let m0 = self.get_index(&m, 0);
                         if let Val::Str(ms) = &m0 {
+                            let ms = self.sget(ms.clone());
                             if ms.is_empty() {
                                 let li = self.get_obj(co, A_LASTINDEX, &copy);
                                 let n = self.to_number(&li);
@@ -888,7 +895,7 @@ impl Vm {
                     if caps.is_empty() {
                         break;
                     }
-                    out.push(string_val(jsstr::from_units(&units, caps[0], caps[1])));
+                    out.push(self.string_val(jsstr::from_units(&units, caps[0], caps[1])));
                     start = if caps[1] == caps[0] { caps[1] + 1 } else { caps[1] };
                 }
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
@@ -909,7 +916,7 @@ impl Vm {
                     self.throw_range("Invalid string length");
                     return Val::Undef;
                 }
-                string_val(s.repeat(n as usize))
+                self.string_val(s.repeat(n as usize))
             }
             NF_SP_PADSTART | NF_SP_PADEND => {
                 let s = self.this_str(&this);
@@ -917,7 +924,7 @@ impl Vm {
                 let fill = if matches!(a1, Val::Undef) { String::from(" ") } else { self.to_string(&a1) };
                 let len = jsstr::len(s.as_str());
                 if target <= len || fill.is_empty() {
-                    return Val::Str(s);
+                    return self.rc_val(s);
                 }
                 let need = target - len;
                 let fu = jsstr::units(fill.as_str());
@@ -929,9 +936,9 @@ impl Vm {
                 }
                 let ps = jsstr::from_units(&pad, 0, need);
                 if id == NF_SP_PADSTART {
-                    string_val(format!("{}{}", ps, s))
+                    self.string_val(format!("{}{}", ps, s))
                 } else {
-                    string_val(format!("{}{}", s, ps))
+                    self.string_val(format!("{}{}", s, ps))
                 }
             }
             NF_SP_CONCAT => {
@@ -941,7 +948,7 @@ impl Vm {
                     let x = self.to_str(a);
                     out.push_str(x.as_str());
                 }
-                string_val(out)
+                self.string_val(out)
             }
             NF_SP_LOCALECOMPARE => {
                 let s = self.this_str(&this);
@@ -954,7 +961,7 @@ impl Vm {
                 for c in s.chars() {
                     let mut t = String::new();
                     t.push(c);
-                    items.push(string_val(t));
+                    items.push(self.string_val(t));
                 }
                 let arr = self.new_array(items);
                 let ip = self.string_iter_proto;
@@ -990,7 +997,7 @@ impl Vm {
                     self.throw_range("toString() radix must be between 2 and 36");
                     return Val::Undef;
                 }
-                string_val(radix_string(n, radix))
+                self.string_val(radix_string(n, radix))
             }
             NF_NP_TOFIXED => {
                 let n = self.this_num(&this);
@@ -999,22 +1006,22 @@ impl Vm {
                     self.throw_range("toFixed() digits argument must be between 0 and 100");
                     return Val::Undef;
                 }
-                string_val(to_fixed(n, d as int))
+                self.string_val(to_fixed(n, d as int))
             }
             NF_NP_TOPRECISION => {
                 let n = self.this_num(&this);
                 if matches!(a0, Val::Undef) {
-                    return string_val(number_to_string(n));
+                    return self.string_val(number_to_string(n));
                 }
                 let p = to_integer(self.to_number(&a0)) as int;
                 if !is_finite(n) {
-                    return string_val(number_to_string(n));
+                    return self.string_val(number_to_string(n));
                 }
                 if p < 1 || p > 100 {
                     self.throw_range("toPrecision() argument must be between 1 and 100");
                     return Val::Undef;
                 }
-                string_val(to_precision(n, p))
+                self.string_val(to_precision(n, p))
             }
             NF_NP_TOEXPONENTIAL => {
                 let n = self.this_num(&this);
@@ -1023,14 +1030,14 @@ impl Vm {
                     return Val::Undef;
                 }
                 if !is_finite(n) {
-                    return string_val(number_to_string(n));
+                    return self.string_val(number_to_string(n));
                 }
                 if !matches!(a0, Val::Undef) && (fd < 0.0 || fd > 100.0) {
                     self.throw_range("toExponential() argument must be between 0 and 100");
                     return Val::Undef;
                 }
                 let d = fd as int;
-                string_val(to_exponential(n, d))
+                self.string_val(to_exponential(n, d))
             }
             NF_BP_TOSTRING | NF_BP_VALUEOF => {
                 let b = match &this {
@@ -1044,7 +1051,7 @@ impl Vm {
                 if id == NF_BP_VALUEOF {
                     Val::Bool(b)
                 } else {
-                    str_val(if b { "true" } else { "false" })
+                    self.str_val(if b { "true" } else { "false" })
                 }
             }
             // ---- JSON
@@ -1064,6 +1071,7 @@ impl Vm {
                         " ".repeat(if k > 0 { k as usize } else { 0 })
                     }
                     Val::Str(s) => {
+                        let s = self.sget(s.clone());
                         let t = s.as_ref().clone();
                         jsstr::slice(t.as_str(), 0, 10)
                     }
@@ -1073,11 +1081,12 @@ impl Vm {
                 self.add_own(holder, self.atoms[""], a0.clone(), 0);
                 let mut out = String::new();
                 let mut stack: Vec<int> = Vec::new();
-                let ok = self.json_str(&Val::Obj(holder), &str_val(""), a0, &a1, &allow, gap.as_str(), "", &mut stack, &mut out);
+                let sv1 = self.str_val("");
+                let ok = self.json_str(&Val::Obj(holder), &sv1, a0, &a1, &allow, gap.as_str(), "", &mut stack, &mut out);
                 if self.throwing || !ok {
                     return Val::Undef;
                 }
-                string_val(out)
+                self.string_val(out)
             }
             NF_JSON_PARSE => {
                 let s = self.to_string(&a0);
@@ -1097,7 +1106,8 @@ impl Vm {
                 if self.is_callable(&a1) {
                     let holder = self.new_object();
                     self.add_own(holder, self.atoms[""], v, 0);
-                    return self.json_revive(&Val::Obj(holder), &str_val(""), &a1);
+                    let sv0 = self.str_val("");
+                    return self.json_revive(&Val::Obj(holder), &sv0, &a1);
                 }
                 v
             }
@@ -1126,7 +1136,7 @@ impl Vm {
                 }
                 let (src, fl) = if self.class_of(&a0) == C_REGEXP {
                     let src = self.objs[obj_of(&a0) as usize].prim.clone();
-                    let fl = if matches!(a1, Val::Undef) { string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
+                    let fl = if matches!(a1, Val::Undef) { self.string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
                     (src, fl)
                 } else if is_re {
                     let a_source = self.intern("source");
@@ -1175,26 +1185,26 @@ impl Vm {
                 let ss = self.to_string(&src);
                 let fl = self.get(&this, self.atoms["flags"]);
                 let fs = self.to_string(&fl);
-                string_val(format!("/{}/{}", ss, fs))
+                self.string_val(format!("/{}/{}", ss, fs))
             }
             NF_RP_FLAGS => {
                 let ro = obj_of(&this);
                 if ro < 0 || self.objs[ro as usize].class != C_REGEXP {
-                    return str_val("");
+                    return self.str_val("");
                 }
-                string_val(self.regexp_flags(ro))
+                self.string_val(self.regexp_flags(ro))
             }
             // ---- Date
             NF_DATE => {
                 if !construct {
                     let t = now_ms();
-                    return string_val(date_string(t));
+                    return self.string_val(date_string(t));
                 }
                 let t = if args.is_empty() {
                     now_ms().floor()
                 } else if args.len() == 1 {
                     match &a0 {
-                        Val::Str(s) => Vm::parse_date(s.as_str()),
+                        Val::Str(s) => Vm::parse_date(self.sref(*s)),
                         Val::Obj(o) if self.objs[*o as usize].class == C_DATE => match self.objs[*o as usize].prim {
                             Val::Num(n) => n,
                             _ => nan(),
@@ -1202,6 +1212,7 @@ impl Vm {
                         _ => {
                             let p = self.to_primitive(&a0, "default");
                             if let Val::Str(s) = &p {
+                                let s = self.sget(s.clone());
                                 Vm::parse_date(s.as_str())
                             } else {
                                 let n = self.to_number(&p);
@@ -1263,14 +1274,14 @@ impl Vm {
                     self.throw_range("Invalid time value");
                     return Val::Undef;
                 }
-                string_val(Vm::iso_string(t))
+                self.string_val(Vm::iso_string(t))
             }
             NF_DP_TOSTRING => {
                 let t = self.date_value(&this);
                 if is_nan(t) {
-                    return str_val("Invalid Date");
+                    return self.str_val("Invalid Date");
                 }
-                string_val(date_string(t))
+                self.string_val(date_string(t))
             }
             // ---- Map / Set
             NF_MAP | NF_SET | NF_WEAKMAP | NF_WEAKSET => {

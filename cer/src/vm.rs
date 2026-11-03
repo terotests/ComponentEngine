@@ -232,6 +232,23 @@ pub struct Vm {
     pub kvals: Vec<Val>,
     /// the register code's switch tables
     pub rtab: Vec<int>,
+    /// the string table: Val::Str(h) is strs[h] (0 is ""); sup[h] >= 0
+    /// when an append in place moved h's buffer on to that newer handle
+    /// (h is then its first slen[h] bytes); sflag 1 pinned (constants,
+    /// atoms), 2 free. collect() sweeps it (mark_strs).
+    pub strs: Vec<Rc<String>>,
+    pub sup: Vec<int>,
+    pub slen: Vec<int>,
+    pub sflag: Vec<int>,
+    pub smark: Vec<bool>,
+    pub sfree: Vec<int>,
+    /// freed by the last collection, reused after the next one
+    pub sfreed: Vec<int>,
+    /// strings made since the last collection, and how many make one due
+    pub snew: int,
+    pub slimit: int,
+    pub slimit_min: int,
+    pub sempty: Rc<String>,
     pub alloc_count: int,
     pub gc_threshold: int,
     pub native_depth: int,
@@ -332,7 +349,7 @@ pub fn truthy(v: &Val) -> bool {
         Val::Null => false,
         Val::Bool(b) => *b,
         Val::Num(n) => *n != 0.0 && *n == *n,
-        Val::Str(s) => !s.is_empty(),
+        Val::Str(h) => *h != 0,
         Val::Obj(_) => true,
     }
 }
@@ -416,6 +433,17 @@ impl Vm {
             rcode: Vec::new(),
             kvals: Vec::new(),
             rtab: Vec::new(),
+            strs: Vec::new(),
+            sup: Vec::new(),
+            slen: Vec::new(),
+            sflag: Vec::new(),
+            smark: Vec::new(),
+            sfree: Vec::new(),
+            sfreed: Vec::new(),
+            snew: 0,
+            slimit: SLIMIT_MIN,
+            slimit_min: SLIMIT_MIN,
+            sempty: Rc::new(String::new()),
             alloc_count: 0,
             gc_threshold: 200000,
             native_depth: 0,
@@ -795,6 +823,263 @@ impl Vm {
         }
     }
 
+    // ---- the string table
+
+    /// An empty string table (handle 0 is "").
+    pub fn reset_strs(&mut self) {
+        self.strs = Vec::new();
+        self.sup = Vec::new();
+        self.slen = Vec::new();
+        self.sflag = Vec::new();
+        self.smark = Vec::new();
+        self.sfree = Vec::new();
+        self.sfreed = Vec::new();
+        self.snew = 0;
+        self.slimit = self.slimit_min;
+        let e = self.sempty.clone();
+        self.strs.push(e);
+        self.sup.push(-1);
+        self.slen.push(0);
+        self.sflag.push(1);
+        self.smark.push(false);
+    }
+
+    fn new_handle(&mut self, s: Rc<String>, flag: int) -> int {
+        if self.strs.is_empty() {
+            self.reset_strs();
+        }
+        self.snew += 1;
+        if !self.sfree.is_empty() {
+            let h = self.sfree.pop().unwrap();
+            let i = h as usize;
+            self.strs[i] = s;
+            self.sup[i] = -1;
+            self.slen[i] = 0;
+            self.sflag[i] = flag;
+            return h;
+        }
+        self.strs.push(s);
+        self.sup.push(-1);
+        self.slen.push(0);
+        self.sflag.push(flag);
+        self.smark.push(false);
+        (self.strs.len() - 1) as int
+    }
+
+    /// A string value for a shared string.
+    pub fn rc_val(&mut self, s: Rc<String>) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        Val::Str(self.new_handle(s, 0))
+    }
+
+    pub fn str_val(&mut self, s: &str) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        Val::Str(self.new_handle(Rc::new(String::from(s)), 0))
+    }
+
+    pub fn string_val(&mut self, s: String) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        Val::Str(self.new_handle(Rc::new(s), 0))
+    }
+
+    /// A string value that is never swept (constants, atoms' names).
+    pub fn pin_rc(&mut self, s: Rc<String>) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        Val::Str(self.new_handle(s, 1))
+    }
+
+    /// The text of string handle `h`.
+    #[inline]
+    pub fn sref(&self, h: int) -> &str {
+        if self.sup[h as usize] < 0 {
+            self.strs[h as usize].as_str()
+        } else {
+            self.sref_up(h)
+        }
+    }
+
+    fn sref_up(&self, h: int) -> &str {
+        let mut x = self.sup[h as usize];
+        while self.sup[x as usize] >= 0 {
+            x = self.sup[x as usize];
+        }
+        jsstr::prefix(self.strs[x as usize].as_str(), self.slen[h as usize])
+    }
+
+    /// String handle `h` as a shared string.
+    #[inline]
+    pub fn sget(&self, h: int) -> Rc<String> {
+        if self.sup[h as usize] < 0 {
+            self.strs[h as usize].clone()
+        } else {
+            Rc::new(String::from(self.sref_up(h)))
+        }
+    }
+
+    /// Handle `h`'s string with `b` appended in h's own buffer, when
+    /// nothing else holds that buffer: the new string's handle (h stays the
+    /// old text, a prefix of it), or -1 and nothing changed.
+    pub fn str_append(&mut self, h: int, b: &str) -> int {
+        let i = h as usize;
+        if h <= 0 || self.sup[i] >= 0 || self.sflag[i] != 0 {
+            return -1;
+        }
+        let n = self.strs[i].len() as int;
+        if !rc_push(&mut self.strs[i], b) {
+            return -1;
+        }
+        let rc = self.strs[i].clone();
+        let e = self.sempty.clone();
+        self.strs[i] = e;
+        let h2 = self.new_handle(rc, 0);
+        self.sup[i] = h2;
+        self.slen[i] = n;
+        h2
+    }
+
+    /// Links the strings of protos from a compiler (Proto.cstrs): their
+    /// constants and sources become pinned string values.
+    pub fn link_strs(&mut self, p: &mut Proto) {
+        let n = p.cstrs.len();
+        if n == 0 {
+            return;
+        }
+        let mut map: Vec<Val> = Vec::new();
+        let mut i: usize = 0;
+        while i < n {
+            let s = p.cstrs[i].clone();
+            map.push(self.pin_rc(s));
+            i += 1;
+        }
+        let nc = p.consts.len();
+        i = 0;
+        while i < nc {
+            if let Val::Str(k) = p.consts[i] {
+                p.consts[i] = map[k as usize];
+            }
+            i += 1;
+        }
+        if let Val::Str(k) = p.src {
+            p.src = map[k as usize];
+        }
+        p.cstrs = Vec::new();
+    }
+
+    #[inline]
+    fn smark_val(&mut self, v: Val) {
+        if let Val::Str(h) = v {
+            self.smark[h as usize] = true;
+        }
+    }
+
+    /// collect(): marks the strings the roots and the live objects (marked)
+    /// hold, then frees the rest of the table.
+    fn mark_strs(&mut self) {
+        let total = self.objs.len();
+        let mut i: usize = 0;
+        while i < total {
+            if self.objs[i].marked {
+                let p = self.objs[i].prim;
+                self.smark_val(p);
+                let nv = self.objs[i].vals.len();
+                let mut j: usize = 0;
+                while j < nv {
+                    if let Val::Str(h) = self.objs[i].vals[j] {
+                        self.smark[h as usize] = true;
+                    }
+                    j += 1;
+                }
+                let ne = self.objs[i].elems.len();
+                j = 0;
+                while j < ne {
+                    if let Val::Str(h) = self.objs[i].elems[j] {
+                        self.smark[h as usize] = true;
+                    }
+                    j += 1;
+                }
+                let ne2 = self.objs[i].elems2.len();
+                j = 0;
+                while j < ne2 {
+                    if let Val::Str(h) = self.objs[i].elems2[j] {
+                        self.smark[h as usize] = true;
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        let n = self.stack.len();
+        i = 0;
+        while i < n {
+            let v = self.stack[i];
+            self.smark_val(v);
+            i += 1;
+        }
+        let nf = self.frames.len();
+        i = 0;
+        while i < nf {
+            let t = self.frames[i].this_val;
+            let nt = self.frames[i].new_target;
+            self.smark_val(t);
+            self.smark_val(nt);
+            i += 1;
+        }
+        let x = self.exc;
+        self.smark_val(x);
+        let lists = vec![self.temp_roots.clone(), self.jobs.clone(), self.atom_vals.clone(), self.type_vals.clone(), self.kvals.clone(), self.regex_shown.clone()];
+        for l in lists {
+            for v in l {
+                self.smark_val(v);
+            }
+        }
+        // a prefix keeps the handles its text lies in
+        let ns = self.strs.len();
+        i = 1;
+        while i < ns {
+            if self.smark[i] && self.sup[i] >= 0 {
+                let mut u = self.sup[i];
+                while u >= 0 && !self.smark[u as usize] {
+                    self.smark[u as usize] = true;
+                    u = self.sup[u as usize];
+                }
+            }
+            i += 1;
+        }
+        let nfr = self.sfreed.len();
+        i = 0;
+        while i < nfr {
+            let h = self.sfreed[i];
+            self.sfree.push(h);
+            i += 1;
+        }
+        self.sfreed = Vec::new();
+        let mut live: int = 0;
+        i = 1;
+        while i < ns {
+            if self.sflag[i] == 0 && !self.smark[i] {
+                let e = self.sempty.clone();
+                self.strs[i] = e;
+                self.sup[i] = -1;
+                self.sflag[i] = 2;
+                self.sfreed.push(i as int);
+            } else if self.sflag[i] != 2 {
+                live += 1;
+            }
+            self.smark[i] = false;
+            i += 1;
+        }
+        self.snew = 0;
+        self.slimit = if live > self.slimit_min { live } else { self.slimit_min };
+    }
+
     pub fn intern(&mut self, s: &str) -> int {
         // a direct-mapped cache in front of the map, by a cheap hash of the
         // length and some of the bytes
@@ -841,7 +1126,8 @@ impl Vm {
             self.atom_vals.push(Val::Undef);
         }
         if let Val::Undef = self.atom_vals[a as usize] {
-            self.atom_vals[a as usize] = str_val(self.atom_names[a as usize].as_str());
+            let rc = Rc::new(self.atom_names[a as usize].clone());
+            self.atom_vals[a as usize] = self.pin_rc(rc);
         }
         self.atom_vals[a as usize].clone()
     }
@@ -849,14 +1135,22 @@ impl Vm {
     /// `typeof v` as a string value, shared.
     pub fn type_val(&mut self, v: &Val) -> Val {
         if self.type_vals.is_empty() {
-            self.type_vals.push(str_val("undefined"));
-            self.type_vals.push(str_val("object"));
-            self.type_vals.push(str_val("boolean"));
-            self.type_vals.push(str_val("number"));
-            self.type_vals.push(str_val("string"));
-            self.type_vals.push(str_val("function"));
-            self.type_vals.push(str_val("symbol"));
-            self.type_vals.push(str_val("bigint"));
+            let sv27 = self.str_val("undefined");
+            self.type_vals.push(sv27);
+            let sv26 = self.str_val("object");
+            self.type_vals.push(sv26);
+            let sv25 = self.str_val("boolean");
+            self.type_vals.push(sv25);
+            let sv24 = self.str_val("number");
+            self.type_vals.push(sv24);
+            let sv23 = self.str_val("string");
+            self.type_vals.push(sv23);
+            let sv22 = self.str_val("function");
+            self.type_vals.push(sv22);
+            let sv21 = self.str_val("symbol");
+            self.type_vals.push(sv21);
+            let sv20 = self.str_val("bigint");
+            self.type_vals.push(sv20);
         }
         let i = self.type_index(v);
         self.type_vals[i].clone()
@@ -912,7 +1206,8 @@ impl Vm {
     pub fn new_error(&mut self, proto: int, msg: &str) -> int {
         let e = self.alloc(C_ERROR, proto);
         if !msg.is_empty() {
-            self.add_own(e, A_MESSAGE, str_val(msg), P_HIDDEN);
+            let sv19 = self.str_val(msg);
+            self.add_own(e, A_MESSAGE, sv19, P_HIDDEN);
         }
         self.add_stack(e);
         e
@@ -928,11 +1223,11 @@ impl Vm {
             return;
         }
         let name = match &nv {
-            Val::Str(s) => s.as_str().to_string(),
+            Val::Str(s) => self.sref(*s).to_string(),
             _ => String::from("Error"),
         };
         let msg = match &mv {
-            Val::Str(s) => s.as_str().to_string(),
+            Val::Str(s) => self.sref(*s).to_string(),
             _ => String::new(),
         };
         let mut text = if msg.is_empty() { name } else if name.is_empty() { msg } else { format!("{}: {}", name, msg) };
@@ -952,7 +1247,8 @@ impl Vm {
             }
             k -= 1;
         }
-        self.add_own(e, A_STACK, string_val(text), P_HIDDEN);
+        let sv14 = self.string_val(text);
+        self.add_own(e, A_STACK, sv14, P_HIDDEN);
     }
 
     pub fn throw_val(&mut self, v: Val) {
@@ -1066,7 +1362,8 @@ impl Vm {
             return Val::Undef;
         }
         if self.is_callable(&tp) {
-            let r = self.call_value(tp, v.clone(), vec![str_val(hint)]);
+            let sv18 = self.str_val(hint);
+            let r = self.call_value(tp, v.clone(), vec![sv18]);
             if self.throwing {
                 return Val::Undef;
             }
@@ -1108,7 +1405,7 @@ impl Vm {
                     0.0
                 }
             }
-            Val::Str(s) => string_to_number(s.as_str()),
+            Val::Str(s) => string_to_number(self.sref(*s)),
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_SYMBOL {
                     self.throw_type("Cannot convert a Symbol value to a number");
@@ -1129,7 +1426,7 @@ impl Vm {
 
     pub fn to_str(&mut self, v: &Val) -> Rc<String> {
         match v {
-            Val::Str(s) => s.clone(),
+            Val::Str(s) => self.sget(*s),
             Val::Num(n) => Rc::new(number_to_string(*n)),
             Val::Undef => Rc::new(String::from("undefined")),
             Val::Null => Rc::new(String::from("null")),
@@ -1140,8 +1437,8 @@ impl Vm {
                     return Rc::new(String::new());
                 }
                 if self.objs[*o as usize].class == C_BIGINT {
-                    if let Val::Str(s) = &self.objs[*o as usize].prim {
-                        return s.clone();
+                    if let Val::Str(s) = self.objs[*o as usize].prim {
+                        return self.sget(s);
                     }
                 }
                 let p = self.to_primitive(v, "string");
@@ -1204,7 +1501,7 @@ impl Vm {
     pub fn strict_equals(&self, a: &Val, b: &Val) -> bool {
         match (a, b) {
             (Val::Num(x), Val::Num(y)) => x == y,
-            (Val::Str(x), Val::Str(y)) => x.as_str() == y.as_str(),
+            (Val::Str(x), Val::Str(y)) => x == y || self.sref(*x) == self.sref(*y),
             (Val::Undef, Val::Undef) => true,
             (Val::Null, Val::Null) => true,
             (Val::Bool(x), Val::Bool(y)) => x == y,
@@ -1241,7 +1538,7 @@ impl Vm {
             (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => return true,
             (Val::Undef, _) | (Val::Null, _) | (_, Val::Undef) | (_, Val::Null) => return false,
             (Val::Num(x), Val::Num(y)) => return x == y,
-            (Val::Str(x), Val::Str(y)) => return x.as_str() == y.as_str(),
+            (Val::Str(x), Val::Str(y)) => return x == y || self.sref(*x) == self.sref(*y),
             (Val::Bool(x), Val::Bool(y)) => return x == y,
             (Val::Obj(x), Val::Obj(y)) => {
                 if x == y {
@@ -1271,8 +1568,8 @@ impl Vm {
             return self.loose_equals(a, &n);
         }
         match (a, b) {
-            (Val::Num(x), Val::Str(s)) => return *x == string_to_number(s.as_str()),
-            (Val::Str(s), Val::Num(y)) => return string_to_number(s.as_str()) == *y,
+            (Val::Num(x), Val::Str(s)) => return *x == string_to_number(self.sref(*s)),
+            (Val::Str(s), Val::Num(y)) => return string_to_number(self.sref(*s)) == *y,
             _ => {}
         }
         if (self.class_of(a) == C_BIGINT) != (self.class_of(b) == C_BIGINT) && !(is_obj(a) && self.class_of(a) != C_BIGINT) && !(is_obj(b) && self.class_of(b) != C_BIGINT) {
@@ -1319,6 +1616,7 @@ impl Vm {
                 (-1, a)
             }
             Val::Str(s) => {
+                let s = self.sget(s.clone());
                 let i = jsstr::array_index(s.as_str());
                 if i >= 0 {
                     return (i, -1);
@@ -1349,10 +1647,10 @@ impl Vm {
         self.intern(s.as_str())
     }
 
-    pub fn key_val(&self, a: int) -> Val {
+    pub fn key_val(&mut self, a: int) -> Val {
         match self.symbol_atoms.get(&a) {
             Some(sym) => Val::Obj(*sym),
-            None => str_val(self.atom_names[a as usize].as_str()),
+            None => self.atom_val(a),
         }
     }
 
@@ -1397,7 +1695,8 @@ impl Vm {
                 return Val::Num(self.protos[pi as usize].length as double);
             }
             if atom == A_NAME {
-                return str_val(self.protos[pi as usize].name.as_str());
+                let nm = self.protos[pi as usize].name.clone();
+                return self.string_val(nm);
             }
             if atom == A_PROTOTYPE && !self.objs[f as usize].has_proto_obj {
                 let p = &self.protos[pi as usize];
@@ -1410,7 +1709,7 @@ impl Vm {
                 let t = self.objs[f as usize].env;
                 let n = self.get_obj(t, A_NAME, &Val::Obj(t));
                 let s = self.to_string(&n);
-                return string_val(format!("bound {}", s));
+                return self.string_val(format!("bound {}", s));
             }
             if atom == A_LENGTH {
                 let t = self.objs[f as usize].env;
@@ -1459,6 +1758,7 @@ impl Vm {
                 }
                 if class == C_STRING && atom == A_LENGTH {
                     if let Val::Str(s) = self.objs[cur as usize].prim.clone() {
+                        let s = self.sget(s.clone());
                         return Val::Num(self.str_len(&s) as double);
                     }
                 }
@@ -1477,7 +1777,8 @@ impl Vm {
             Val::Obj(o) => self.get_obj(*o, atom, v),
             Val::Str(s) => {
                 if atom == A_LENGTH {
-                    return Val::Num(self.str_len(s) as double);
+                    let s = self.sget(*s);
+                    return Val::Num(self.str_len(&s) as double);
                 }
                 let p = self.string_proto;
                 self.get_obj(p, atom, v)
@@ -1515,9 +1816,10 @@ impl Vm {
                 let class = ob.class;
                 if class == C_STRING {
                     if let Val::Str(s) = ob.prim.clone() {
+                        let s = self.sget(s.clone());
                         let c = self.str_at(&s, i);
                         if c >= 0 {
-                            return string_val(jsstr::from_unit(c));
+                            return self.string_val(jsstr::from_unit(c));
                         }
                     }
                 }
@@ -1528,9 +1830,10 @@ impl Vm {
                 self.get_obj(*o, a, v)
             }
             Val::Str(s) => {
-                let c = self.str_at(s, i);
+                let s = self.sget(s.clone());
+                let c = self.str_at(&s, i);
                 if c >= 0 {
-                    return string_val(jsstr::from_unit(c));
+                    return self.string_val(jsstr::from_unit(c));
                 }
                 Val::Undef
             }
@@ -1870,6 +2173,7 @@ impl Vm {
             }
             if class == C_STRING {
                 if let Val::Str(s) = &self.objs[o as usize].prim {
+                    let s = self.sget(s.clone());
                     if i < jsstr::len(s.as_str()) {
                         return true;
                     }
@@ -1921,6 +2225,7 @@ impl Vm {
             }
             if class == C_STRING {
                 if let Val::Str(s) = &self.objs[o as usize].prim {
+                    let s = self.sget(s.clone());
                     if i < jsstr::len(s.as_str()) {
                         return true;
                     }
@@ -2000,17 +2305,18 @@ impl Vm {
             let mut i: usize = 0;
             while i < n {
                 if !self.is_hole(o, i as int) {
-                    out.push(string_val(format!("{}", i)));
+                    out.push(self.string_val(format!("{}", i)));
                 }
                 i += 1;
             }
         }
         if class == C_STRING {
             if let Val::Str(s) = &self.objs[o as usize].prim {
+                let s = self.sget(s.clone());
                 let n = jsstr::len(s.as_str());
                 let mut i: int = 0;
                 while i < n {
-                    out.push(string_val(format!("{}", i)));
+                    out.push(self.string_val(format!("{}", i)));
                     i += 1;
                 }
             }
@@ -2019,7 +2325,7 @@ impl Vm {
             let n = self.ta_length(o);
             let mut i: int = 0;
             while i < n {
-                out.push(string_val(format!("{}", i)));
+                out.push(self.string_val(format!("{}", i)));
                 i += 1;
             }
         }
@@ -2094,11 +2400,13 @@ impl Vm {
             let mut vis: HashMap<String, bool> = HashMap::new();
             for v in visible.iter() {
                 if let Val::Str(s) = v {
+                    let s = self.sget(s.clone());
                     vis.insert(s.as_ref().clone(), true);
                 }
             }
             for v in all {
                 if let Val::Str(s) = &v {
+                    let s = self.sget(s.clone());
                     let key = s.as_ref().clone();
                     if seen.contains_key(&key) {
                         continue;
@@ -2208,9 +2516,9 @@ impl Vm {
             (Val::Num(x), Val::Num(y)) => return Val::Num(x + y),
             (Val::Str(x), Val::Str(y)) => {
                 let mut s = String::new();
-                s.push_str(x.as_str());
-                s.push_str(y.as_str());
-                return string_val(s);
+                s.push_str(self.sref(*x));
+                s.push_str(self.sref(*y));
+                return self.string_val(s);
             }
             _ => {}
         }
@@ -2231,7 +2539,7 @@ impl Vm {
             let mut s = String::new();
             s.push_str(x.as_str());
             s.push_str(y.as_str());
-            return string_val(s);
+            return self.string_val(s);
         }
         if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
             return self.big_arith(OP_ADD, &pa, &pb);
@@ -2258,7 +2566,7 @@ impl Vm {
             return -1;
         }
         if let (Val::Str(x), Val::Str(y)) = (&pa, &pb) {
-            return if jsstr::compare(x.as_str(), y.as_str()) < 0 { 1 } else { 0 };
+            return if jsstr::compare(self.sref(*x), self.sref(*y)) < 0 { 1 } else { 0 };
         }
         if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
             return self.big_less(&pa, &pb);
@@ -2759,11 +3067,12 @@ impl Vm {
             }
         }
         if let Val::Str(s) = v {
+            let s = self.sget(s.clone());
             let mut items: Vec<Val> = Vec::new();
             for c in s.chars() {
                 let mut t = String::new();
                 t.push(c);
-                items.push(string_val(t));
+                items.push(self.string_val(t));
             }
             let arr = self.new_array(items);
             let ip = self.iter_proto;
@@ -3487,7 +3796,8 @@ impl Vm {
         } else {
             self.to_string(k)
         };
-        self.add_prop(fo, A_NAME, string_val(name), P_HIDDEN | P_READONLY);
+        let sv17 = self.string_val(name);
+        self.add_prop(fo, A_NAME, sv17, P_HIDDEN | P_READONLY);
     }
 
     /// ToNumeric(v) and it plus `delta`: numbers or BigInts.
@@ -3551,7 +3861,7 @@ impl Vm {
     }
 
     pub fn gc_due(&self) -> bool {
-        (self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit) && self.native_depth == 0
+        (self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.snew >= self.slimit) && self.native_depth == 0
     }
 
     /// The calling part of OP_CALL; true when a frame was pushed or the
@@ -3786,16 +4096,30 @@ impl Vm {
 
     // the bodies of run()'s string-append ops; run() stays small enough for
     // Go's inliner to keep its per-op copies on the stack
+    /// `cur + b` appended in cur's own buffer when both are strings and
+    /// nothing else holds it (Vm::str_append): the new string's handle, or
+    /// -1 for the ordinary way.
+    #[inline]
+    pub fn append_val(&mut self, cur: Val, b: Val) -> int {
+        if let (Val::Str(h), Val::Str(hb)) = (cur, b) {
+            if hb == 0 {
+                return h;
+            }
+            let bs = self.sget(hb);
+            return self.str_append(h, bs.as_str());
+        }
+        -1
+    }
+
     #[inline]
     pub fn add_local_pop(&mut self, op: Op, bp: int) {
         let b = self.pop();
         let i = (bp + op.a) as usize;
-        let mut done = false;
-        if let Val::Str(bs) = &b {
-            done = append_in_place(&mut self.stack[i], bs.as_str());
-        }
-        if !done {
-            let a = self.stack[i].clone();
+        let h = self.append_val(self.stack[i], b);
+        if h >= 0 {
+            self.stack[i] = Val::Str(h);
+        } else {
+            let a = self.stack[i];
             let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
             self.stack[i] = r;
         }
@@ -3807,15 +4131,17 @@ impl Vm {
         let e = self.get_env(op.a);
         let i = op.b as usize;
         let mut done = false;
-        if let Val::Str(bs) = &b {
+        if let Val::Str(_) = b {
             let n = self.stack.len() - 1;
-            if same_rc(&self.stack[n], &self.objs[e as usize].elems[i]) {
-                // the stack's copy goes, so the slot may hold the only one
-                self.stack.pop();
-                done = append_in_place(&mut self.objs[e as usize].elems[i], bs.as_str());
-                if !done {
-                    let a = self.objs[e as usize].elems[i].clone();
-                    self.stack.push(a);
+            let cur = self.objs[e as usize].elems[i];
+            if let (Val::Str(x), Val::Str(y)) = (self.stack[n], cur) {
+                if x == y {
+                    let h = self.append_val(cur, b);
+                    if h >= 0 {
+                        self.stack.pop();
+                        self.objs[e as usize].elems[i] = Val::Str(h);
+                        done = true;
+                    }
                 }
             }
         }
@@ -3833,19 +4159,23 @@ impl Vm {
         let b = self.pop();
         let atom = op.a;
         let mut done = false;
-        if let Val::Str(bs) = &b {
+        if let Val::Str(_) = b {
             let n = self.stack.len();
             let o = obj_of(&self.stack[n - 2]);
             if o >= 0 {
                 let slot = self.find(o, atom);
-                if slot >= 0 && self.attr_at(o, slot) == 0 && same_rc(&self.stack[n - 1], &self.objs[o as usize].vals[slot as usize]) {
-                    self.stack.pop();
-                    done = append_in_place(&mut self.objs[o as usize].vals[slot as usize], bs.as_str());
-                    if done {
-                        self.stack.pop();
-                    } else {
-                        let a = self.objs[o as usize].vals[slot as usize].clone();
-                        self.stack.push(a);
+                if slot >= 0 && self.attr_at(o, slot) == 0 {
+                    let cur = self.objs[o as usize].vals[slot as usize];
+                    if let (Val::Str(x), Val::Str(y)) = (self.stack[n - 1], cur) {
+                        if x == y {
+                            let h = self.append_val(cur, b);
+                            if h >= 0 {
+                                self.stack.pop();
+                                self.stack.pop();
+                                self.objs[o as usize].vals[slot as usize] = Val::Str(h);
+                                done = true;
+                            }
+                        }
                     }
                 }
             }
@@ -4083,9 +4413,11 @@ impl Vm {
                 if self.has_atom(g, op.a) {
                     let v = self.get_obj(g, op.a, &Val::Obj(g));
                     let t = self.type_of(&v);
-                    self.stack.push(string_val(t));
+                    let sv13 = self.string_val(t);
+                    self.stack.push(sv13);
                 } else {
-                    self.stack.push(str_val("undefined"));
+                    let sv12 = self.str_val("undefined");
+                    self.stack.push(sv12);
                 }
             }
             OP_DEL_PROP => {
@@ -4207,7 +4539,8 @@ impl Vm {
                     self.stack.push(v);
                 } else {
                     let s = self.to_str(&v);
-                    self.stack.push(Val::Str(s));
+                    let sv11 = self.rc_val(s);
+                    self.stack.push(sv11);
                 }
             }
             OP_JF_KEEP => {
@@ -4437,11 +4770,13 @@ impl Vm {
                         self.define_elem(o, &k, v, 0);
                     }
                 } else if let Val::Str(s) = &src {
+                    let s = self.sget(s.clone());
                     let mut i: int = 0;
                     for c in s.chars() {
                         let mut t = String::new();
                         t.push(c);
-                        self.set_index(o, i, string_val(t));
+                        let sv10 = self.string_val(t);
+                        self.set_index(o, i, sv10);
                         i += 1;
                     }
                 }
@@ -4547,11 +4882,12 @@ impl Vm {
                 let keys = match &v {
                     Val::Obj(o) => self.for_in_keys(*o),
                     Val::Str(s) => {
+                        let s = self.sget(s.clone());
                         let mut ks: Vec<Val> = Vec::new();
                         let n = jsstr::len(s.as_str());
                         let mut i = 0;
                         while i < n {
-                            ks.push(string_val(format!("{}", i)));
+                            ks.push(self.string_val(format!("{}", i)));
                             i += 1;
                         }
                         ks
@@ -4730,7 +5066,7 @@ impl Vm {
                 if let Val::Obj(s) = &src {
                     let keys = self.own_keys(*s, false, true);
                     for k in keys {
-                        let ks = if let Val::Str(x) = &k { x.as_ref().clone() } else { String::new() };
+                        let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else { String::new() };
                         let mut skipped = false;
                         for x in skip.iter() {
                             if x.as_str() == ks.as_str() && !ks.is_empty() {
@@ -4780,6 +5116,7 @@ impl Vm {
                         let fp = self.objs[f as usize].func;
                         if self.protos[fp as usize].name.is_empty() {
                             if let Val::Str(s) = &name {
+                                let s = self.sget(s.clone());
                                 self.protos[fp as usize].name = s.as_ref().clone();
                             }
                         }
@@ -5248,7 +5585,7 @@ impl Vm {
     /// A collection when one is due, else a reclaim (the safe points call
     /// this when gc_due).
     pub fn gc(&mut self) {
-        if self.rc_on && self.alloc_count < self.gc_threshold {
+        if self.rc_on && self.alloc_count < self.gc_threshold && self.snew < self.slimit {
             self.reclaim();
             return;
         }
@@ -5272,6 +5609,9 @@ impl Vm {
         let mut work: Vec<int> = Vec::new();
         self.mark_roots(&mut work);
         self.trace(&mut work, true);
+        if !self.strs.is_empty() {
+            self.mark_strs();
+        }
         let mut live: int = 0;
         self.zct = Vec::new();
         i2 = 0;
@@ -5321,6 +5661,9 @@ impl Vm {
         self.rc_check = true;
         self.zct_min = 1;
         self.zct_limit = 1;
+        // and the string table is swept after every few strings
+        self.slimit_min = 16;
+        self.slimit = 16;
     }
 
     fn next_zct_limit(&self) -> int {
@@ -5575,6 +5918,8 @@ impl Vm {
 
 /// The smallest zct that makes a reclaim.
 pub const ZCT_MIN: int = 8192;
+/// strings made that make a collection due, at least (Vm.slimit)
+pub const SLIMIT_MIN: int = 65536;
 
 pub fn pow2(n: int) -> double {
     let mut r: double = 1.0;
@@ -5641,39 +5986,22 @@ pub fn arith_num(code: int, x: double, y: double) -> double {
     }
 }
 
-/// Appends `b` to the string in `slot` when nothing else holds that string,
-/// so `s += …` does not copy `s`; answers false (and changes nothing) when
-/// it cannot, and the caller adds the two the ordinary way.
+/// Appends `b` to the shared string `rc` when nothing else holds it, so
+/// `s += …` does not copy `s` (Vm::str_append); false (and nothing changed)
+/// when it cannot.
 #[ranger::target(rust)]
-pub fn append_in_place(slot: &mut Val, b: &str) -> bool {
-    if let Val::Str(rc) = slot {
-        if let Some(s) = Rc::get_mut(rc) {
-            s.push_str(b);
-            return true;
-        }
+pub fn rc_push(rc: &mut Rc<String>, b: &str) -> bool {
+    if let Some(s) = Rc::get_mut(rc) {
+        s.push_str(b);
+        return true;
     }
-    false
-}
-
-/// Whether two values are the same string object (Rust's Rc), which is what
-/// lets an append in place stand for `x = x + v`; the other targets append
-/// as values and never ask.
-#[ranger::target(rust)]
-pub fn same_rc(a: &Val, b: &Val) -> bool {
-    if let (Val::Str(x), Val::Str(y)) = (a, b) {
-        return Rc::ptr_eq(x, y);
-    }
-    false
-}
-
-#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn same_rc(_a: &Val, _b: &Val) -> bool {
     false
 }
 
 /// The other targets' strings are immutable values (and their engines
-/// concatenate without copying where they can): always the ordinary way.
+/// concatenate without copying where they can): always the ordinary way,
+/// so no handle there is ever a prefix.
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn append_in_place(_slot: &mut Val, _b: &str) -> bool {
+pub fn rc_push(_rc: &mut Rc<String>, _b: &str) -> bool {
     false
 }

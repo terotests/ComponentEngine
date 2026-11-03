@@ -10,6 +10,7 @@
 //! writes the code.
 
 use ranger::prelude::*;
+use std::rc::Rc;
 use std::collections::HashMap;
 
 use crate::ast::*;
@@ -115,7 +116,8 @@ pub struct Compiler {
     /// that receives it when the declaration is evaluated
     annex_var: HashMap<int, int>,
     /// the source text, shared by the functions' protos
-    src_val: Val,
+    src_rc: Rc<String>,
+    src_made: bool,
     fs: Vec<FnState>,
     pub error: String,
     /// completion value of the script: slot 0 of the program
@@ -152,7 +154,8 @@ impl Compiler {
             hoist_root: -1,
             nested_funcs: Vec::new(),
             annex_var: HashMap::new(),
-            src_val: Val::Undef,
+            src_rc: Rc::new(String::new()),
+            src_made: false,
             fs: Vec::new(),
             error: String::new(),
             keep_completion: true,
@@ -946,7 +949,9 @@ impl Compiler {
         }
         let f = self.f();
         let i = f.proto.consts.len() as int;
-        f.proto.consts.push(str_val(s));
+        let k = f.proto.cstrs.len() as int;
+        f.proto.cstrs.push(Rc::new(String::from(s)));
+        f.proto.consts.push(Val::Str(k));
         f.str_consts.insert(String::from(s), i);
         i
     }
@@ -1322,14 +1327,17 @@ impl Compiler {
             None => -1,
         };
         if let Some(t) = self.ast.span_text.get(&n) {
-            proto.src = string_val(t.clone());
+            proto.src = Val::Str(proto.cstrs.len() as int);
+            proto.cstrs.push(Rc::new(t.clone()));
             proto.src_start = 0;
             proto.src_end = t.chars().count() as int;
         } else if ss >= 0 {
-            if matches!(self.src_val, Val::Undef) {
-                self.src_val = string_val(self.ast.source.clone());
+            if !self.src_made {
+                self.src_rc = Rc::new(self.ast.source.clone());
+                self.src_made = true;
             }
-            proto.src = self.src_val.clone();
+            proto.src = Val::Str(proto.cstrs.len() as int);
+            proto.cstrs.push(self.src_rc.clone());
             proto.src_start = ss;
             proto.src_end = match self.ast.span_end.get(&n) {
                 Some(x) => *x,

@@ -656,13 +656,12 @@ impl Vm {
                         }
                     }
                     R_ADD_LOCAL_POP => {
-                        let b = self.rget(bp, w2).clone();
+                        let b = *self.rget(bp, w2);
                         let i = (bp + w1) as usize;
-                        let mut done = false;
-                        if let Val::Str(bs) = &b {
-                            done = append_in_place(&mut self.stack[i], bs.as_str());
-                        }
-                        if !done {
+                        let h = self.append_val(self.stack[i], b);
+                        if h >= 0 {
+                            self.stack[i] = Val::Str(h);
+                        } else {
                             let a = self.stack[i].clone();
                             let mut r = Val::Undef;
                             let mut quick = false;
@@ -1107,7 +1106,7 @@ pub fn fast_cmp(code: int, a: &Val, b: &Val) -> int {
             (Val::Obj(x), Val::Obj(y)) => if *x == *y { 1 } else { 0 },
             (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => 1,
             (Val::Bool(x), Val::Bool(y)) => if *x == *y { 1 } else { 0 },
-            (Val::Str(x), Val::Str(y)) => if x.as_str() == y.as_str() { 1 } else { 0 },
+            (Val::Str(x), Val::Str(y)) => if *x == *y { 1 } else { -1 },
             _ => 0,
         }
     } else if code == OP_EQ || code == OP_NE {

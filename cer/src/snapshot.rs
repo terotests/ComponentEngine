@@ -43,7 +43,7 @@ impl Strings {
     }
 }
 
-fn put_val(out: &mut String, st: &mut Strings, v: &Val) {
+fn put_val(out: &mut String, st: &mut Strings, vm: &Vm, v: &Val) {
     match v {
         Val::Undef => put_num(out, 0),
         Val::Null => put_num(out, 1),
@@ -51,7 +51,7 @@ fn put_val(out: &mut String, st: &mut Strings, v: &Val) {
         Val::Num(x) => put_number(out, *x),
         Val::Str(s) => {
             put_num(out, 5);
-            put_num(out, st.id(s.as_str()));
+            put_num(out, st.id(vm.sref(*s)));
         }
         Val::Obj(o) => {
             put_num(out, 6);
@@ -118,10 +118,10 @@ fn get_ints(r: &mut Reader) -> Vec<int> {
     v
 }
 
-fn put_vals(out: &mut String, st: &mut Strings, v: &Vec<Val>) {
+fn put_vals(out: &mut String, st: &mut Strings, vm: &Vm, v: &Vec<Val>) {
     put_num(out, v.len() as int);
     for x in v.iter() {
-        put_val(out, st, x);
+        put_val(out, st, vm, x);
     }
 }
 
@@ -136,16 +136,13 @@ fn get_vals(r: &mut Reader, strs: &Vec<Val>) -> Vec<Val> {
     v
 }
 
-fn get_str(r: &mut Reader, strs: &Vec<Val>) -> String {
+fn get_str(r: &mut Reader, texts: &Vec<Rc<String>>) -> String {
     let k = r.num();
-    if k < 0 || k >= strs.len() as int {
+    if k < 0 || k >= texts.len() as int {
         r.bad = true;
         return String::new();
     }
-    match &strs[k as usize] {
-        Val::Str(s) => s.as_str().to_string(),
-        _ => String::new(),
-    }
+    texts[k as usize].as_str().to_string()
 }
 
 fn in_objs(v: &Val, no: int) -> bool {
@@ -191,10 +188,10 @@ pub fn snapshot(vm: &Vm) -> String {
             bit = bit * 2;
         }
         put_num(&mut b, flags);
-        put_val(&mut b, &mut st, &p.src);
+        put_val(&mut b, &mut st, vm, &p.src);
         put_num(&mut b, p.src_start);
         put_num(&mut b, p.src_end);
-        put_vals(&mut b, &mut st, &p.consts);
+        put_vals(&mut b, &mut st, vm, &p.consts);
         put_num(&mut b, p.code.len() as int);
         for op in p.code.iter() {
             put_num(&mut b, op.code);
@@ -212,10 +209,10 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, o.class);
         put_num(&mut b, o.proto);
         put_ints(&mut b, &vm.shapes[o.shape as usize].keys);
-        put_vals(&mut b, &mut st, &o.vals);
+        put_vals(&mut b, &mut st, vm, &o.vals);
         put_ints(&mut b, &vm.shapes[o.shape as usize].attrs);
-        put_vals(&mut b, &mut st, &o.elems);
-        put_vals(&mut b, &mut st, &o.elems2);
+        put_vals(&mut b, &mut st, vm, &o.elems);
+        put_vals(&mut b, &mut st, vm, &o.elems2);
         let cold = &vm.colds[o.cold as usize];
         put_num(&mut b, cold.nums.len() as int);
         for x in cold.nums.iter() {
@@ -223,7 +220,7 @@ pub fn snapshot(vm: &Vm) -> String {
         }
         put_num(&mut b, o.func);
         put_num(&mut b, o.env);
-        put_val(&mut b, &mut st, &o.prim);
+        put_val(&mut b, &mut st, vm, &o.prim);
         put_num(&mut b, o.home);
         put_num(&mut b, o.pos);
         put_num(&mut b, (if o.extensible { 1 } else { 0 }) + (if o.has_proto_obj { 2 } else { 0 }));
@@ -299,7 +296,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
     }
-    put_vals(&mut b, &mut st, &vm.jobs);
+    put_vals(&mut b, &mut st, vm, &vm.jobs);
     // the regular expressions by their cache key ("source/flags"), in order
     let mut keys: Vec<String> = Vec::new();
     let mut i: usize = 0;
@@ -337,10 +334,17 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         return false;
     }
     let ns = r.num();
+    // the snapshot's strings stay (pinned): constants and names mostly
+    vm.reset_strs();
+    vm.type_vals = Vec::new();
     let mut strs: Vec<Val> = Vec::new();
+    let mut texts: Vec<Rc<String>> = Vec::new();
     let mut i: int = 0;
     while i < ns && !r.bad {
-        strs.push(Val::Str(Rc::new(r.string())));
+        let t = Rc::new(r.string());
+        texts.push(t.clone());
+        let v = vm.pin_rc(t);
+        strs.push(v);
         i += 1;
     }
     vm.atoms = HashMap::new();
@@ -350,7 +354,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let na = r.num();
     i = 0;
     while i < na && !r.bad {
-        let a = get_str(&mut r, &strs);
+        let a = get_str(&mut r, &texts);
         vm.atoms.insert(a.clone(), i);
         vm.atom_names.push(a);
         i += 1;
@@ -371,7 +375,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let np = r.num();
     i = 0;
     while i < np && !r.bad {
-        let name = get_str(&mut r, &strs);
+        let name = get_str(&mut r, &texts);
         let mut p = Proto::new(name.as_str());
         p.length = r.num();
         p.nparams = r.num();
@@ -538,7 +542,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nb = r.num();
     i = 0;
     while i < nb && !r.bad {
-        let k = get_str(&mut r, &strs);
+        let k = get_str(&mut r, &texts);
         let v = r.num();
         vm.bigints.insert(k, v);
         i += 1;
@@ -548,7 +552,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nout = r.num();
     i = 0;
     while i < nout && !r.bad {
-        let l = get_str(&mut r, &strs);
+        let l = get_str(&mut r, &texts);
         vm.out.push(l);
         i += 1;
     }
@@ -557,7 +561,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nr = r.num();
     i = 0;
     while i < nr && !r.bad {
-        let k = get_str(&mut r, &strs);
+        let k = get_str(&mut r, &texts);
         let v = r.num();
         vm.symbol_registry.insert(k, v);
         i += 1;
@@ -569,7 +573,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nx = r.num();
     i = 0;
     while i < nx && !r.bad {
-        let key = get_str(&mut r, &strs);
+        let key = get_str(&mut r, &texts);
         // "source/flags": the flags are the letters after the last '/'
         let cs: Vec<char> = key.chars().collect();
         let mut cut = cs.len();

@@ -80,14 +80,16 @@ impl Vm {
         self.iterator_proto = itp;
         let ip = self.iter_proto;
         self.put_proto(ip, itp);
-        self.add_prop(ip, a_tag, str_val("Array Iterator"), P_HIDDEN | P_READONLY);
+        let sv16 = self.str_val("Array Iterator");
+        self.add_prop(ip, a_tag, sv16, P_HIDDEN | P_READONLY);
         // the other built-in iterators: the same machinery, own prototypes
         let mut made: Vec<int> = Vec::new();
         for tagname in vec!["Map Iterator", "Set Iterator", "String Iterator"] {
             let p = self.alloc(C_OBJECT, itp);
             self.roots.push(p);
             self.method(p, "next", NF_ITER_NEXT, 0);
-            self.add_prop(p, a_tag, str_val(tagname), P_HIDDEN | P_READONLY);
+            let sv15 = self.str_val(tagname);
+            self.add_prop(p, a_tag, sv15, P_HIDDEN | P_READONLY);
             made.push(p);
         }
         self.map_iter_proto = made[0];
@@ -99,7 +101,8 @@ impl Vm {
         self.method(gp, "next", NF_GEN_NEXT, 1);
         self.method(gp, "return", NF_GEN_RETURN, 1);
         self.method(gp, "throw", NF_GEN_THROW, 1);
-        self.add_prop(gp, a_tag, str_val("Generator"), P_HIDDEN | P_READONLY);
+        let sv14 = self.str_val("Generator");
+        self.add_prop(gp, a_tag, sv14, P_HIDDEN | P_READONLY);
         self.generator_proto = gp;
         // %GeneratorFunction.prototype%
         // %AsyncIteratorPrototype%, %AsyncGeneratorPrototype% and the
@@ -113,24 +116,28 @@ impl Vm {
         self.method(agp, "next", NF_AGEN_NEXT, 1);
         self.method(agp, "return", NF_AGEN_RETURN, 1);
         self.method(agp, "throw", NF_AGEN_THROW, 1);
-        self.add_prop(agp, a_tag, str_val("AsyncGenerator"), P_HIDDEN | P_READONLY);
+        let sv13 = self.str_val("AsyncGenerator");
+        self.add_prop(agp, a_tag, sv13, P_HIDDEN | P_READONLY);
         self.async_generator_proto = agp;
         let agfp = self.alloc(C_OBJECT, fp);
         self.roots.push(agfp);
         self.add_prop(agfp, A_PROTOTYPE, Val::Obj(agp), P_HIDDEN | P_READONLY);
         self.add_prop(agp, A_CONSTRUCTOR, Val::Obj(agfp), P_HIDDEN | P_READONLY);
-        self.add_prop(agfp, a_tag, str_val("AsyncGeneratorFunction"), P_HIDDEN | P_READONLY);
+        let sv12 = self.str_val("AsyncGeneratorFunction");
+        self.add_prop(agfp, a_tag, sv12, P_HIDDEN | P_READONLY);
         self.async_generator_function_proto = agfp;
         let gfp = self.alloc(C_OBJECT, fp);
         self.roots.push(gfp);
         self.add_prop(gfp, A_PROTOTYPE, Val::Obj(gp), P_HIDDEN | P_READONLY);
         self.add_prop(gp, A_CONSTRUCTOR, Val::Obj(gfp), P_HIDDEN | P_READONLY);
-        self.add_prop(gfp, a_tag, str_val("GeneratorFunction"), P_HIDDEN | P_READONLY);
+        let sv11 = self.str_val("GeneratorFunction");
+        self.add_prop(gfp, a_tag, sv11, P_HIDDEN | P_READONLY);
         self.generator_function_proto = gfp;
         // %AsyncFunction.prototype%
         let afp = self.alloc(C_OBJECT, fp);
         self.roots.push(afp);
-        self.add_prop(afp, a_tag, str_val("AsyncFunction"), P_HIDDEN | P_READONLY);
+        let sv10 = self.str_val("AsyncFunction");
+        self.add_prop(afp, a_tag, sv10, P_HIDDEN | P_READONLY);
         self.async_function_proto = afp;
         let g = self.global;
         self.method(g, "__setAsyncFromSync", NF_ASYNC_FROM_SYNC, 1);

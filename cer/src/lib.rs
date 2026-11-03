@@ -197,7 +197,7 @@ impl Engine {
                     format!("n:{}", num::number_to_string(*n))
                 }
             }
-            Val::Str(s) => format!("s:{}", s),
+            Val::Str(s) => format!("s:{}", self.vm.sref(*s)),
             Val::Obj(o) => format!("o:{}", self.vm.objs[*o as usize].class),
         }
     }

@@ -184,7 +184,7 @@ impl Vm {
             return Val::Undef;
         }
         if i >= 0 {
-            return string_val(format!("{}", i));
+            return self.string_val(format!("{}", i));
         }
         self.key_val(a)
     }

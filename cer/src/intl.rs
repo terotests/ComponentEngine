@@ -553,7 +553,7 @@ impl Vm {
             let mut elems: Vec<Val> = Vec::new();
             if crate::intl_data::is_strings(name.as_str()) {
                 for line in text.split('\n') {
-                    elems.push(str_val(line));
+                    elems.push(self.str_val(line));
                 }
                 elems.pop();
             } else {

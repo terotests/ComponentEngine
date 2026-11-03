@@ -530,7 +530,8 @@ impl Vm {
         self.method(bp, "toLocaleString", NF_BIGINTP_TOSTRING, 0);
         self.method(bp, "valueOf", NF_BIGINTP_VALUEOF, 0);
         let a_tag = self.intern("@@toStringTag");
-        self.add_prop(bp, a_tag, str_val("BigInt"), P_HIDDEN | P_READONLY);
+        let sv1 = self.str_val("BigInt");
+        self.add_prop(bp, a_tag, sv1, P_HIDDEN | P_READONLY);
     }
 
     /// The BigInt with decimal text `s` (canonical), made once.
@@ -540,7 +541,8 @@ impl Vm {
         }
         let bp = self.bigint_proto;
         let o = self.alloc(C_BIGINT, bp);
-        self.put_prim(o, str_val(s));
+        let sv0 = self.str_val(s);
+        self.put_prim(o, sv0);
         self.bigints.insert(String::from(s), o);
         self.symbols.push(o);
         Val::Obj(o)
@@ -555,6 +557,7 @@ impl Vm {
         let o = obj_of(v);
         if o >= 0 {
             if let Val::Str(s) = &self.objs[o as usize].prim {
+                let s = self.sget(s.clone());
                 return s.as_ref().clone();
             }
         }
@@ -570,6 +573,7 @@ impl Vm {
         match &p {
             Val::Bool(b) => return self.bigint_val(if *b { "1" } else { "0" }),
             Val::Str(s) => {
+                let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 if t.is_empty() {
                     self.throw_syntax(format!("Cannot convert {} to a BigInt", s).as_str());
@@ -674,6 +678,7 @@ impl Vm {
             return self.big_text(v);
         }
         if let Val::Str(s) = v {
+            let s = self.sget(s.clone());
             return from_string(s.as_str());
         }
         String::new()
@@ -689,6 +694,7 @@ impl Vm {
                 !t.is_empty() && t == x
             }
             Val::Str(s) => {
+                let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 !t.is_empty() && t == x
             }
@@ -755,6 +761,6 @@ impl Vm {
             return Val::Undef;
         }
         let t = self.big_text(&v);
-        string_val(to_radix(t.as_str(), radix as int))
+        self.string_val(to_radix(t.as_str(), radix as int))
     }
 }

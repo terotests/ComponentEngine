@@ -2,7 +2,9 @@
 //! Values, heap objects and compiled functions.
 //!
 //! A value is a primitive or an index into the object arena (`Vm.objs`).
-//! Strings are shared (`Rc<String>`), so passing one around never copies it.
+//! A string is a handle into the machine's string table (`Vm.strs`, shared
+//! `Rc<String>`s), so a value is plain data: copying one costs nothing and
+//! dropping one does nothing. The table is swept by the full collection.
 //! Every object -- plain object, array, function, scope, error, iterator --
 //! is one `JsObj`; `class` tells which, and the fields a class does not use
 //! stay empty.
@@ -11,22 +13,16 @@ use ranger::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum Val {
     Undef,
     Null,
     Bool(bool),
     Num(double),
-    Str(Rc<String>),
+    /// a handle into Vm.strs (0 is the empty string); in a Proto not yet
+    /// linked (compiler, unit), an index into Proto.cstrs
+    Str(int),
     Obj(int),
-}
-
-pub fn str_val(s: &str) -> Val {
-    Val::Str(Rc::new(String::from(s)))
-}
-
-pub fn string_val(s: String) -> Val {
-    Val::Str(Rc::new(s))
 }
 
 // object classes
@@ -329,6 +325,9 @@ pub struct Op {
 pub struct Proto {
     pub code: Vec<Op>,
     pub consts: Vec<Val>,
+    /// the strings of consts and src until the proto is linked
+    /// (Vm::link_strs)
+    pub cstrs: Vec<Rc<String>>,
     pub name: String,
     /// the function's `length`
     pub length: int,
@@ -377,6 +376,7 @@ impl Proto {
         Proto {
             code: Vec::new(),
             consts: Vec::new(),
+            cstrs: Vec::new(),
             name: String::from(name),
             length: 0,
             nparams: 0,
