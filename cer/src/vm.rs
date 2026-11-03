@@ -4997,15 +4997,6 @@ impl Vm {
         }
     }
 
-    fn mark_val(&mut self, v: &Val, work: &mut Vec<int>) {
-        if let Val::Obj(o) = v {
-            if !self.objs[*o as usize].marked {
-                self.objs[*o as usize].marked = true;
-                work.push(*o);
-            }
-        }
-    }
-
     fn mark_obj(&mut self, o: int, work: &mut Vec<int>) {
         if o >= 0 && !self.objs[o as usize].marked {
             self.objs[o as usize].marked = true;

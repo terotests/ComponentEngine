@@ -191,7 +191,7 @@ impl Vm {
                 let o = self.this_array(&this);
                 let mut i: usize = 0;
                 for a in args {
-                    self.insert_elem(o, (i) as int, a);
+                    self.insert_elem(o, i as int, a);
                     i += 1;
                 }
                 Val::Num(self.objs[o as usize].elems.len() as double)
@@ -532,7 +532,7 @@ impl Vm {
                             return Val::Undef;
                         }
                     } else {
-                        self.put_elem(o, (t + i), items[(s + i) as usize].clone());
+                        self.put_elem(o, t + i, items[(s + i) as usize].clone());
                     }
                     i += 1;
                 }
