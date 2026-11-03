@@ -411,7 +411,10 @@ impl Vm {
                         if !done {
                             let target = self.rget(bp, w1).clone();
                             self.frames[fi].pc = pc + 1;
-                            self.set(&target, w3, val);
+                            self.set(&target, w3, val.clone());
+                        }
+                        if ((w0 >> 8) & 255) == 1 && !self.throwing {
+                            self.stack[(bp + w1) as usize] = val;
                         }
                     }
                     R_GET_ELEM => {
@@ -655,6 +658,31 @@ impl Vm {
                         if !self.throwing {
                             let v = self.stack.pop().unwrap();
                             self.stack[(bp + w1) as usize] = v;
+                        }
+                    }
+                    R_ITER_NEXT => {
+                        let it = self.stack[(bp + w1) as usize].clone();
+                        let o = obj_of(&it);
+                        let src_obj = if o >= 0 { self.objs[o as usize].home } else { -1 };
+                        self.frames[fi].pc = pc + 1;
+                        loop {
+                            match self.iter_next(&it) {
+                                Some(v) => {
+                                    if src_obj >= 0 && self.objs[o as usize].class == C_ITER {
+                                        // a key deleted since the loop began is skipped
+                                        if !self.has_property(src_obj, &v) {
+                                            continue;
+                                        }
+                                    }
+                                    self.stack[(bp + w3) as usize] = v;
+                                }
+                                None => {
+                                    if !self.throwing {
+                                        npc = w2;
+                                    }
+                                }
+                            }
+                            break;
                         }
                     }
                     R_TYPEOF => {

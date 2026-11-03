@@ -119,6 +119,8 @@ pub const R_CMP_JTK: int = 44;
 pub const R_SWITCH: int = 45;
 /// w1 dst, w2 x
 pub const R_TYPEOF: int = 46;
+/// w1 the iterator, w2 where to go when it is done, w3 the value's slot
+pub const R_ITER_NEXT: int = 47;
 
 const BAD: int = 1000000;
 
@@ -623,6 +625,17 @@ impl Tr {
                     (R_ARITH, c)
                 };
                 self.result(i, rop, sub, 2, x, y);
+            } else if c == OP_ITER_NEXT {
+                self.mat_all();
+                self.set(i, R_ITER_NEXT, 0, ns + d - 1, op.a, ns + d);
+                self.push_own(-1);
+            } else if c == OP_SET_PROP {
+                // the value stays where the object was
+                self.mat(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(2);
+                self.set(i, R_SET_PROP, 1, ns + d - 2, v, op.a);
+                self.push_own(-1);
             } else if c == OP_TYPEOF {
                 let x = self.opnd(d - 1);
                 self.result(i, R_TYPEOF, 0, 1, x, 0);
@@ -919,7 +932,7 @@ impl Tr {
             self.rc[k].code += 65536 * run[(i + 1) as usize];
             let w = if rop == R_JUMP {
                 1
-            } else if rop == R_JF || rop == R_JT || rop == R_JF_KEEP || rop == R_JT_KEEP || rop == R_JNN_KEEP {
+            } else if rop == R_JF || rop == R_JT || rop == R_JF_KEEP || rop == R_JT_KEEP || rop == R_JNN_KEEP || rop == R_ITER_NEXT {
                 2
             } else if rop == R_CMP_JF || rop == R_LOCAL_NULL_JF || rop == R_CASE_INT_JT || rop == R_CASE_JT {
                 3
