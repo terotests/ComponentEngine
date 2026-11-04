@@ -88,6 +88,9 @@ pub struct Parser {
     pub exports: Vec<(String, String)>,
     /// the modules a module's `export * from "m"` passes on
     pub export_stars: Vec<String>,
+    /// the script has what plain JavaScript (pcomp.rs) does not read: JSX,
+    /// a module's `import` or `export`
+    pub beyond_js: bool,
 }
 
 fn binary_prec(op: &str) -> int {
@@ -223,6 +226,7 @@ impl Parser {
             module_path: String::new(),
             exports: Vec::new(),
             export_stars: Vec::new(),
+            beyond_js: false,
         }
     }
 
