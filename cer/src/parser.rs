@@ -17,6 +17,9 @@ pub struct Parser {
     pos: int,
     pub ast: Ast,
     pub error: String,
+    /// what pcomp.rs does not read was found: never in CEr's JavaScript
+    /// (CErXes's parser sets it for JSX and modules)
+    pub beyond_js: bool,
     /// `in` is not an operator in the head of a `for`
     no_in: bool,
     in_function: bool,
@@ -145,6 +148,7 @@ impl Parser {
             pos: 0,
             ast: Ast::new(),
             error: String::new(),
+            beyond_js: false,
             no_in: false,
             in_function: false,
             in_class: false,

@@ -20,8 +20,8 @@ fn main() {
         let src = parts.next().unwrap_or("").to_string();
         let snap = snap.clone();
         let r = std::panic::catch_unwind(move || {
-            // CER_PCOMP=1: compiled in one pass from the tokens (pcomp.rs)
-            let pcomp = std::env::var("CER_PCOMP").map(|v| v == "1").unwrap_or(false);
+            // compiled in one pass from the tokens (pcomp.rs); CER_PCOMP=0: the tree compiler
+            let pcomp = std::env::var("CER_PCOMP").map(|v| v != "0").unwrap_or(true);
             let mut e = if snap.is_empty() { Engine::new_with(pcomp) } else { Engine::from_snapshot(&snap) };
             e.vm.pcomp = pcomp;
             // CER_THROUGH_TEXT=1: each probe from its unit's text, as a
