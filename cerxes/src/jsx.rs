@@ -130,6 +130,7 @@ fn clean_text(raw: &str) -> String {
 impl Parser {
     /// An element at the current `<` token.
     pub(crate) fn jsx_element(&mut self) -> int {
+        self.beyond_js = true;
         self.rewind_lexer();
         let e = self.jsx_at();
         // after an element a `/` divides

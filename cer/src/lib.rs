@@ -59,12 +59,13 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// An engine; its scripts compile with pcomp.rs (`new_with`).
     pub fn new() -> Engine {
-        Engine::new_with(false)
+        Engine::new_with(true)
     }
 
     /// An engine whose scripts, its prelude too, compile with pcomp.rs
-    /// (`pcomp`) or the tree compiler.
+    /// (`pcomp`) or with the parser and the tree compiler.
     pub fn new_with(pcomp: bool) -> Engine {
         let mut vm = Vm::new();
         vm.pcomp = pcomp;

@@ -88,16 +88,16 @@ fn cases_txt_regs() {
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
 }
 
-/// The same cases compiled in one pass from the tokens (pcomp.rs), on
-/// both machines.
+/// The same cases through the parser and the tree compiler (compiler.rs),
+/// on both machines.
 #[test]
-fn cases_txt_pcomp() {
+fn cases_txt_tree() {
     let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases.txt")).unwrap();
     let all = parse(&text);
     let mut failed = Vec::new();
     for regs in [false, true] {
         for (title, src, want) in all.iter() {
-            let mut e = Engine::new_with(true);
+            let mut e = Engine::new_with(false);
             e.vm.regs = regs;
             let got = e.eval(src);
             if &got != want {
