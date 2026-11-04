@@ -835,7 +835,7 @@ impl Vm {
         if let Val::Obj(o) = v {
             let c = self.objs[*o as usize].class;
             if c == C_ARRAY || c == C_ARGUMENTS {
-                return self.evecs[self.objs[*o as usize].elems as usize].len() as int;
+                return self.evecs[self.objs[*o as usize].elems as usize].v.len() as int;
             }
         }
         let l = self.get(v, A_LENGTH);
@@ -1476,7 +1476,7 @@ impl Vm {
             self.put_elem2(m, found, v);
             return;
         }
-        let pos = self.evecs[self.objs[m as usize].elems as usize].len() as int;
+        let pos = self.evecs[self.objs[m as usize].elems as usize].v.len() as int;
         let kk = if let Val::Num(n) = k {
             if n == 0.0 {
                 Val::Num(0.0)
@@ -1521,12 +1521,12 @@ impl Vm {
     pub fn collection_iter(&mut self, m: int, kind: int) -> Val {
         // a snapshot array iterated by an ITER object
         let mut items: Vec<Val> = Vec::new();
-        let n = self.evecs[self.objs[m as usize].elems as usize].len();
+        let n = self.evecs[self.objs[m as usize].elems as usize].v.len();
         let is_set = self.objs[m as usize].class == C_SET;
         let mut i: usize = 0;
         while i < n {
             if self.colds[self.objs[m as usize].cold as usize].marks[i] == 0 {
-                let k = self.evecs[self.objs[m as usize].elems as usize][i].clone();
+                let k = self.evecs[self.objs[m as usize].elems as usize].v[i].clone();
                 let v = if is_set { k.clone() } else { self.colds[self.objs[m as usize].cold as usize].elems2[i].clone() };
                 if kind == 0 {
                     items.push(k);
@@ -1595,7 +1595,7 @@ impl Vm {
         }
         let slot = self.find(o, atom);
         let existing_attr = if slot >= 0 { self.attr_at(o, slot) } else { -1 };
-        let in_elems = i >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].len();
+        let in_elems = i >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len();
         if slot < 0 && !in_elems && !self.objs[o as usize].extensible && !(self.objs[o as usize].class == C_ARRAY && atom == A_LENGTH) {
             let n = self.atom_str(atom);
             self.throw_type(format!("Cannot define property {}, object is not extensible", n).as_str());
@@ -1618,8 +1618,8 @@ impl Vm {
                     return;
                 }
                 let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
-                let g0 = self.evecs[self.objs[pair as usize].elems as usize][0].clone();
-                let s0 = self.evecs[self.objs[pair as usize].elems as usize][1].clone();
+                let g0 = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
+                let s0 = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                 if (has_get && !self.same_value(&get_v, &g0)) || (has_set && !self.same_value(&set_v, &s0)) {
                     self.throw_type(msg.as_str());
                     return;
@@ -1685,9 +1685,9 @@ impl Vm {
             self.set_index(o, i, value);
             return;
         }
-        if i >= 0 && class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].len() {
+        if i >= 0 && class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
             // an element with attributes: keep it as a property instead
-            let v = if has_value { value.clone() } else { self.evecs[self.objs[o as usize].elems as usize][i as usize].clone() };
+            let v = if has_value { value.clone() } else { self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone() };
             self.put_elem(o, i, v.clone());
             return;
         }
@@ -1705,8 +1705,8 @@ impl Vm {
         let (i, a) = self.to_key(key);
         let class = self.objs[o as usize].class;
         let d = self.new_object();
-        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].len() {
-            let v = self.evecs[self.objs[o as usize].elems as usize][i as usize].clone();
+        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+            let v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
             self.add_own(d, A_VALUE, v, 0);
             self.add_own(d, A_WRITABLE, Val::Bool(true), 0);
             self.add_own(d, A_ENUMERABLE, Val::Bool(true), 0);
@@ -1755,8 +1755,8 @@ impl Vm {
         let attr = self.attr_at(o, slot);
         if (attr & P_ACCESSOR) != 0 {
             let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
-            let g = self.evecs[self.objs[pair as usize].elems as usize][0].clone();
-            let s = self.evecs[self.objs[pair as usize].elems as usize][1].clone();
+            let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
+            let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
             self.add_own(d, A_GET, g, 0);
             self.add_own(d, A_SET, s, 0);
         } else {
@@ -2512,7 +2512,7 @@ impl Vm {
         }
         self.objs[p as usize].pos = state as i32;
         self.put_prim(p, v.clone());
-        let reactions = self.evecs[self.objs[p as usize].elems as usize].clone();
+        let reactions = self.evecs[self.objs[p as usize].elems as usize].v.clone();
         self.put_elems(p, Vec::new());
         let mut i: usize = 0;
         while i + 2 < reactions.len() {
@@ -2772,7 +2772,7 @@ impl Vm {
             if let Val::Obj(o) = &this {
                 let ob = &self.objs[*o as usize];
                 if ob.class == C_ARRAY && ob.pos == 2 {
-                    let n = self.evecs[ob.elems as usize].len();
+                    let n = self.evecs[ob.elems as usize].v.len();
                     let msg = if n == 0 && (id == NF_AP_POP || id == NF_AP_SHIFT) {
                         String::from("Cannot assign to read only property 'length' of object '[object Array]'")
                     } else if id == NF_AP_POP {
@@ -3513,7 +3513,7 @@ impl Vm {
                         return Val::Bool(false);
                     }
                     let class = self.objs[o as usize].class;
-                    if id == NF_O_ISFROZEN && class == C_ARRAY && !self.evecs[self.objs[o as usize].elems as usize].is_empty() && self.objs[o as usize].pos != 2 {
+                    if id == NF_O_ISFROZEN && class == C_ARRAY && !self.evecs[self.objs[o as usize].elems as usize].v.is_empty() && self.objs[o as usize].pos != 2 {
                         return Val::Bool(false);
                     }
                     let sh = self.objs[o as usize].shape as int;
@@ -3609,7 +3609,7 @@ impl Vm {
                 let (i, a) = self.to_key(&a0);
                 let class = self.objs[o as usize].class;
                 if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) {
-                    return Val::Bool((i as usize) < self.evecs[self.objs[o as usize].elems as usize].len());
+                    return Val::Bool((i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len());
                 }
                 let atom = if i >= 0 { self.index_atom(i) } else { a };
                 let slot = self.find(o, atom);

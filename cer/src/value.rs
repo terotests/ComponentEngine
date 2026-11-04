@@ -100,6 +100,12 @@ impl Cold {
     }
 }
 
+/// An object's elements (`Vm.evecs`, by `JsObj.elems`): a struct, so each
+/// target writes them where they are, not into a copy.
+pub struct Elems {
+    pub v: Vec<Val>,
+}
+
 pub struct JsObj {
     pub class: i32,
     /// the prototype, -1 for none; for a scope, the enclosing scope
