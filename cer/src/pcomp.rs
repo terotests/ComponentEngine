@@ -108,7 +108,7 @@ const E_PRIVATE: int = 14;
 const E_LITERAL: int = 15;
 
 /// before every sequence number
-const SEQ_NEVER: int = 1152921504606846976;
+const SEQ_NEVER: int = 2000000000;
 
 #[derive(Clone, Copy)]
 pub struct Ex {
