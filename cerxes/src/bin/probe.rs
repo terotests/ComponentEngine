@@ -20,7 +20,14 @@ fn main() {
         let src = parts.next().unwrap_or("").to_string();
         let snap = snap.clone();
         let r = std::panic::catch_unwind(move || {
-            let mut e = if snap.is_empty() { Engine::new() } else { Engine::from_snapshot(&snap) };
+            // CER_PCOMP=1: read as JavaScript (with JSX), compiled in one
+            // pass from the tokens where it is plain JavaScript (pcomp.rs);
+            // else as TSX, through the parser
+            let pcomp = std::env::var("CER_PCOMP").map(|v| v == "1").unwrap_or(false);
+            let mut e = if snap.is_empty() { Engine::new_with(pcomp) } else { Engine::from_snapshot(&snap) };
+            if pcomp {
+                e.set_syntax(false, true);
+            }
             // CER_THROUGH_TEXT=1: each probe from its unit's text, as a
             // host's code cache runs a script
             e.through_text = std::env::var("CER_THROUGH_TEXT").map(|v| v == "1").unwrap_or(false);
