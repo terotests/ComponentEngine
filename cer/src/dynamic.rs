@@ -86,11 +86,27 @@ impl Vm {
     /// completion value, or a thrown SyntaxError.
     pub fn eval_source(&mut self, src: &str, strict: bool, is_eval: bool) -> Val {
         let code = if strict { format!("'use strict';\n{}", src) } else { String::from(src) };
-        if self.pcomp {
-            return self.eval_pcomp(code.as_str(), strict, is_eval);
+        // a module's text (cerxes module.rs) goes to the parser, which
+        // wraps it
+        let module = code.starts_with("/*@cerxesModule ");
+        let mut pcomp_error = String::new();
+        if self.pcomp && !module {
+            let (entry, error) = self.pcomp_program(code.as_str(), strict, is_eval);
+            if entry >= 0 {
+                let fp = self.function_proto;
+                let f = self.alloc(C_FUNCTION, fp);
+                self.objs[f as usize].func = entry as i32;
+                let g = Val::Obj(self.global);
+                return self.call_value(Val::Obj(f), g, Vec::new());
+            }
+            pcomp_error = error;
         }
         let mut p = parser::Parser::new(code.as_str());
         let root = p.parse_program();
+        if p.error.is_empty() && !pcomp_error.is_empty() && !p.beyond_js {
+            // plain JavaScript pcomp rejected: its early errors stand
+            p.error = pcomp_error;
+        }
         if !p.error.is_empty() {
             let msg = p.error.replace("SyntaxError: ", "");
             self.throw_syntax(msg.as_str());
@@ -125,8 +141,10 @@ impl Vm {
         self.call_value(Val::Obj(f), g, Vec::new())
     }
 
-    /// eval_source with pcomp.rs.
-    fn eval_pcomp(&mut self, code: &str, strict: bool, is_eval: bool) -> Val {
+    /// eval_source's code compiled with pcomp.rs and linked: the program's
+    /// proto, or -1 (nothing changed) and the error when pcomp cannot
+    /// compile it.
+    fn pcomp_program(&mut self, code: &str, strict: bool, is_eval: bool) -> (int, String) {
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -135,9 +153,8 @@ impl Vm {
         c.local_if_strict = is_eval;
         let entry = c.compile_program();
         if !c.error.is_empty() || entry < 0 {
-            let msg = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
-            self.throw_syntax(msg.as_str());
-            return Val::Undef;
+            let e = if c.error.is_empty() { String::from("SyntaxError") } else { c.error.clone() };
+            return (-1, e);
         }
         self.atoms = c.atoms;
         self.atom_names = c.atom_names;
@@ -147,11 +164,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
-        let fp = self.function_proto;
-        let f = self.alloc(C_FUNCTION, fp);
-        self.objs[f as usize].func = entry as i32;
-        let g = Val::Obj(self.global);
-        self.call_value(Val::Obj(f), g, Vec::new())
+        (entry, String::new())
     }
 
     fn caller_strict(&self) -> bool {

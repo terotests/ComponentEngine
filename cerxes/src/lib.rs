@@ -72,8 +72,17 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// An engine; its JavaScript compiles with pcomp.rs (`new_with`).
     pub fn new() -> Engine {
+        Engine::new_with(true)
+    }
+
+    /// An engine whose JavaScript (the prelude too) compiles with pcomp.rs,
+    /// without a syntax tree (`pcomp`); TypeScript and JSX go through the
+    /// parser either way.
+    pub fn new_with(pcomp: bool) -> Engine {
         let mut vm = Vm::new();
+        vm.pcomp = pcomp;
         vm.setup();
         let mut e = Engine { vm: vm, error: String::new(), through_text: false, syntax: Syntax::new(false, false) };
         // the built-ins written in JavaScript: CEr's, then the JSX runtime
@@ -164,8 +173,22 @@ impl Engine {
     /// or another. Sets `error` when the script is not one.
     pub fn compile(&mut self, src: &str) -> unit::Unit {
         self.error = String::new();
+        let mut pcomp_error = String::new();
+        if self.vm.pcomp && !self.syntax.typescript {
+            // JavaScript; what pcomp does not read (JSX, a module's import
+            // and export) goes to the parser
+            let u = pcomp::compile_unit(src);
+            if u.error.is_empty() {
+                return u;
+            }
+            pcomp_error = u.error.clone();
+        }
         let mut p = parser::Parser::with_syntax(src, self.syntax.clone());
         let root = p.parse_program();
+        if p.error.is_empty() && !pcomp_error.is_empty() && !p.beyond_js {
+            // plain JavaScript pcomp rejected: its early errors stand
+            p.error = pcomp_error;
+        }
         if !p.error.is_empty() {
             self.error = p.error.clone();
             return unit::Unit::new();

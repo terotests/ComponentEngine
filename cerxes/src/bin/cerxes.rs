@@ -25,7 +25,9 @@ fn main() {
     }
     let path = args.get(1).expect(usage);
     let src = std::fs::read_to_string(path).expect("cannot read the script");
-    let mut e = Engine::new();
+    // CER_PCOMP=0: JavaScript through the parser and the tree compiler,
+    // not the single-pass compiler (pcomp.rs)
+    let mut e = Engine::new_with(std::env::var("CER_PCOMP").map(|v| v != "0").unwrap_or(true));
     // CERXES_RC=0: the collector alone frees objects; CERXES_RC_CHECK=1
     // checks the reference counts (slow); CERXES_STATS=1 prints the heap
     if std::env::var("CERXES_RC").map(|v| v == "0").unwrap_or(false) {
@@ -42,10 +44,6 @@ fn main() {
     // CER_REGS=1 / 0: on the register machine (rvm.rs) or the stack one
     if let Ok(v) = std::env::var("CER_REGS") {
         e.vm.regs = v == "1";
-    }
-    // CER_PCOMP=1: eval and Function code through the single-pass compiler
-    if let Ok(v) = std::env::var("CER_PCOMP") {
-        e.vm.pcomp = v == "1";
     }
     e.set_syntax_for_path(path.as_str());
     e.set_echo(true);
