@@ -343,8 +343,35 @@ fn is_jump(op: &Op) -> bool {
         || c == OP_TRY
 }
 
+/// A token as pcomp keeps it: its text (or number) by index into
+/// PComp.names (PComp.nums), so that a script's tokens stay small.
+pub struct PTok {
+    pub kind: i32,
+    pub line: i32,
+    /// where the token starts and ends in the source (chars)
+    pub start: i32,
+    pub end: i32,
+    /// the text's index in `names`
+    pub v: i32,
+    /// a template's or a regular expression's extra (xs), a number's
+    /// value in `nums`, -1 for none
+    pub x: i32,
+    /// PT_NL, PT_ESCAPED
+    pub flags: i32,
+}
+
+/// a line break before the token
+pub const PT_NL: i32 = 1;
+/// an identifier written with an escape, or a string with an octal escape
+pub const PT_ESCAPED: i32 = 2;
+
 pub struct PComp {
-    toks: Vec<Tok>,
+    toks: Vec<PTok>,
+    /// the tokens' texts, each once (`name_ids` finds one)
+    names: Vec<String>,
+    name_ids: HashMap<String, int>,
+    /// the number tokens' values
+    nums: Vec<double>,
     /// the token closing each bracket (and the one opening each closing
     /// one), -1 for others
     mate: Vec<int>,
@@ -354,7 +381,6 @@ pub struct PComp {
     seq: int,
     /// the source the tokens come from, shared by the functions' protos
     src_rc: Rc<String>,
-    pub source: String,
     pub error: String,
 
     pub atoms: HashMap<String, int>,
@@ -419,12 +445,14 @@ impl PComp {
         let toks = lx.tokenize();
         let mut c = PComp {
             toks: Vec::new(),
+            names: Vec::new(),
+            name_ids: HashMap::new(),
+            nums: Vec::new(),
             mate: Vec::new(),
             xs: Vec::new(),
             pos: 0,
             seq: 0,
             src_rc: Rc::new(String::from(src)),
-            source: String::from(src),
             error: String::new(),
             atoms: atoms,
             atom_names: atom_names,
@@ -475,30 +503,95 @@ impl PComp {
     }
 
     fn set_tokens(&mut self, toks: Vec<Tok>) {
-        self.toks = toks;
+        self.toks = Vec::new();
+        self.mate = Vec::new();
+        self.add_tokens(toks, 0);
+        self.pos = 0;
+    }
+
+    /// `toks` after the tokens there are, kept small (PTok), with their
+    /// brackets matched; `xbase` is where their extras start in `xs`.
+    fn add_tokens(&mut self, toks: Vec<Tok>, xbase: int) {
+        let base = self.toks.len();
+        reserve_toks(&mut self.toks, toks.len());
+        for t in toks.iter() {
+            let pt = self.small_tok(t, xbase);
+            self.toks.push(pt);
+        }
         let n = self.toks.len();
-        let mut mate: Vec<int> = Vec::new();
         let mut stack: Vec<int> = Vec::new();
-        let mut i: usize = 0;
+        let mut i: usize = base;
         while i < n {
-            mate.push(-1);
-            let t = &self.toks[i];
-            if t.kind == T_PUNCT {
-                let s = t.text.as_str();
+            self.mate.push(-1);
+            if (self.toks[i].kind as int) as int == T_PUNCT {
+                let s = self.names[self.toks[i].v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
                     stack.push(i as int);
                 } else if s == ")" || s == "]" || s == "}" {
                     if !stack.is_empty() {
                         let o = stack.pop().unwrap();
-                        mate[o as usize] = i as int;
-                        mate[i] = o;
+                        self.mate[o as usize] = i as int;
+                        self.mate[i] = o;
                     }
                 }
             }
             i += 1;
         }
-        self.mate = mate;
-        self.pos = 0;
+    }
+
+    fn small_tok(&mut self, t: &Tok, xbase: int) -> PTok {
+        let mut flags: i32 = 0;
+        if t.nl {
+            flags = flags | PT_NL;
+        }
+        if t.escaped {
+            flags = flags | PT_ESCAPED;
+        }
+        let v = self.name_id(t.text.as_str());
+        // a number's value is in `nums`, at its `x`
+        let x = if t.kind == T_NUM {
+            self.nums.push(t.num);
+            (self.nums.len() - 1) as int
+        } else if t.x >= 0 {
+            t.x + xbase
+        } else {
+            -1
+        };
+        PTok { kind: t.kind as i32, line: t.line as i32, start: t.start as i32, end: t.end as i32, v: v as i32, x: x as i32, flags: flags }
+    }
+
+    fn name_id(&mut self, s: &str) -> int {
+        match self.name_ids.get(s) {
+            Some(i) => *i,
+            None => {
+                let i = self.names.len() as int;
+                self.names.push(String::from(s));
+                self.name_ids.insert(String::from(s), i);
+                i
+            }
+        }
+    }
+
+    /// Token `i`'s text.
+    fn tok_text(&self, i: int) -> String {
+        self.names[self.toks[i as usize].v as usize].clone()
+    }
+
+    /// Token `i`'s text is `s`.
+    fn text_is(&self, i: int, s: &str) -> bool {
+        self.names[self.toks[i as usize].v as usize].as_str() == s
+    }
+
+    fn tok_num(&self, i: int) -> double {
+        self.nums[self.toks[i as usize].x as usize]
+    }
+
+    fn nl_at(&self, i: int) -> bool {
+        (self.toks[i as usize].flags & PT_NL) != 0
+    }
+
+    fn tok_escaped(&self, i: int) -> bool {
+        (self.toks[i as usize].flags & PT_ESCAPED) != 0
     }
 
     pub fn atom(&mut self, s: &str) -> int {
@@ -517,15 +610,15 @@ impl PComp {
     // tokens
 
     fn kind(&self) -> int {
-        self.toks[self.pos as usize].kind
+        self.toks[self.pos as usize].kind as int
     }
 
     fn text(&self) -> String {
-        self.toks[self.pos as usize].text.clone()
+        self.tok_text(self.pos)
     }
 
     fn line(&self) -> int {
-        self.toks[self.pos as usize].line
+        self.toks[self.pos as usize].line as int
     }
 
     fn tok_count(&self) -> int {
@@ -537,7 +630,7 @@ impl PComp {
         if i >= self.tok_count() {
             return T_EOF;
         }
-        self.toks[i as usize].kind
+        self.toks[i as usize].kind as int
     }
 
     fn tok_is(&self, i: int, s: &str) -> bool {
@@ -545,7 +638,7 @@ impl PComp {
             return false;
         }
         let t = &self.toks[i as usize];
-        (t.kind == T_PUNCT || (t.kind == T_IDENT && !t.escaped)) && t.text.as_str() == s
+        ((t.kind as int) == T_PUNCT || ((t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0)) && self.names[t.v as usize].as_str() == s
     }
 
     fn peek_is(&self, k: int, s: &str) -> bool {
@@ -557,18 +650,18 @@ impl PComp {
     }
 
     fn nl_before(&self) -> bool {
-        self.toks[self.pos as usize].nl
+        self.nl_at(self.pos)
     }
 
     fn tok_nl(&self, i: int) -> bool {
         if i < 0 || i >= self.tok_count() {
             return false;
         }
-        self.toks[i as usize].nl
+        self.nl_at(i)
     }
 
     fn escaped(&self) -> bool {
-        self.toks[self.pos as usize].escaped
+        self.tok_escaped(self.pos)
     }
 
     fn next(&mut self) {
@@ -680,11 +773,11 @@ impl PComp {
         let mut k = i;
         while k < n {
             let t = &self.toks[k as usize];
-            if t.kind == T_EOF {
+            if (t.kind as int) == T_EOF {
                 return k;
             }
-            if t.kind == T_PUNCT {
-                let s = t.text.as_str();
+            if (t.kind as int) == T_PUNCT {
+                let s = self.names[t.v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
                     let m = self.mate[k as usize];
                     if m < 0 {
@@ -708,7 +801,7 @@ impl PComp {
                 if hit {
                     return k;
                 }
-            } else if words && t.kind == T_IDENT && !t.escaped && (t.text.as_str() == "in" || t.text.as_str() == "of") {
+            } else if words && (t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "in" || self.names[t.v as usize].as_str() == "of") {
                 return k;
             }
             k += 1;
@@ -1840,8 +1933,8 @@ impl PComp {
         if first < 0 || self.pos < 1 || first >= self.pos {
             return;
         }
-        let st = self.toks[first as usize].start;
-        let en = self.toks[(self.pos - 1) as usize].end;
+        let st = self.toks[first as usize].start as int;
+        let en = self.toks[(self.pos - 1) as usize].end as int;
         if st < 0 || en < st {
             return;
         }
@@ -1870,36 +1963,9 @@ impl PComp {
         saved.push(base);
         saved.push(xbase);
         saved.push(self.pos);
-        for t in toks {
-            let mut t2 = t;
-            if t2.x >= 0 {
-                t2.x += xbase;
-            }
-            self.toks.push(t2);
-        }
+        self.add_tokens(toks, xbase);
         for x in lx.xs {
             self.xs.push(x);
-        }
-        // brackets of the new tokens
-        let n = self.toks.len();
-        let mut stack: Vec<int> = Vec::new();
-        let mut i = base as usize;
-        while i < n {
-            self.mate.push(-1);
-            let t = &self.toks[i];
-            if t.kind == T_PUNCT {
-                let s = t.text.as_str();
-                if s == "(" || s == "[" || s == "{" {
-                    stack.push(i as int);
-                } else if s == ")" || s == "]" || s == "}" {
-                    if !stack.is_empty() {
-                        let o = stack.pop().unwrap();
-                        self.mate[o as usize] = i as int;
-                        self.mate[i] = o;
-                    }
-                }
-            }
-            i += 1;
         }
         if self.error.is_empty() {
             self.pos = base;
@@ -1928,15 +1994,15 @@ impl PComp {
         let mut found = false;
         let mut k = self.pos;
         let n = self.tok_count();
-        while k < n && self.toks[k as usize].kind == T_STR {
-            if self.toks[k as usize].text.as_str() == "use strict" && !self.toks[k as usize].escaped {
+        while k < n && (self.toks[k as usize].kind as int) == T_STR {
+            if self.text_is(k, "use strict") && !self.tok_escaped(k) {
                 found = true;
                 self.strict = true;
             }
             k += 1;
-            if k < n && self.toks[k as usize].kind == T_PUNCT && self.toks[k as usize].text.as_str() == ";" {
+            if k < n && (self.toks[k as usize].kind as int) == T_PUNCT && self.text_is(k, ";") {
                 k += 1;
-            } else if !(k < n && self.toks[k as usize].nl) {
+            } else if !(k < n && self.tok_nl(k)) {
                 break;
             }
         }
@@ -2362,7 +2428,7 @@ impl PComp {
             let single = self.kind() == T_IDENT;
             self.skip_binding_target();
             if self.is("=") {
-                let name = if single { self.toks[ts as usize].text.clone() } else { String::new() };
+                let name = if single { self.tok_text(ts) } else { String::new() };
                 self.next();
                 let e = self.assign();
                 if !name.is_empty() {
@@ -2379,7 +2445,7 @@ impl PComp {
                 self.pattern_target(kind);
                 self.goto(after);
             } else if single {
-                let nm = self.toks[ts as usize].text.clone();
+                let nm = self.tok_text(ts);
                 if is_reserved(nm.as_str()) || (self.strict && is_strict_reserved(nm.as_str())) {
                     self.fail(format!("unexpected reserved word '{}'", nm).as_str());
                     return;
@@ -2590,13 +2656,13 @@ impl PComp {
             }
             let eq = self.scan_to(head + 1, "=", false);
             if eq < kw && self.tok_is(eq, "=") {
-                let ident = eq == head + 2 && self.toks[(head + 1) as usize].kind == T_IDENT;
+                let ident = eq == head + 2 && (self.toks[(head + 1) as usize].kind as int) == T_IDENT;
                 if of || kind != K_VAR || self.strict || !ident {
                     self.fail("for-in or for-of loop variable declaration may not have an initializer");
                     return;
                 }
                 // Annex B: the initializer is assigned first
-                let nm = self.toks[(head + 1) as usize].text.clone();
+                let nm = self.tok_text(head + 1);
                 let vs = self.f().var_scope;
                 self.declare(vs, nm.as_str(), K_VAR);
                 self.goto(eq + 1);
@@ -2841,8 +2907,8 @@ impl PComp {
         let mut k = i;
         while k < end {
             let t = &self.toks[k as usize];
-            if t.kind == T_PUNCT {
-                let s = t.text.as_str();
+            if (t.kind as int) == T_PUNCT {
+                let s = self.names[t.v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
                     let m = self.mate[k as usize];
                     if m < 0 {
@@ -2851,7 +2917,7 @@ impl PComp {
                     k = m + 1;
                     continue;
                 }
-            } else if t.kind == T_IDENT && !t.escaped && (t.text.as_str() == "case" || t.text.as_str() == "default") {
+            } else if (t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "case" || self.names[t.v as usize].as_str() == "default") {
                 if !(self.tok_is(k - 1, ".") || self.tok_is(k - 1, "?.")) {
                     return k;
                 }
@@ -2972,7 +3038,7 @@ impl PComp {
         if self.peek_is(1, "*") {
             flags |= F_GENERATOR;
         }
-        let name = if self.peek_is(1, "*") { self.toks[(self.pos + 2) as usize].text.clone() } else { self.toks[(self.pos + 1) as usize].text.clone() };
+        let name = if self.peek_is(1, "*") { self.tok_text(self.pos + 2) } else { self.tok_text(self.pos + 1) };
         let p = self.function_expr(true, extra);
         if !self.error.is_empty() {
             return;
@@ -2992,7 +3058,7 @@ impl PComp {
     }
 
     fn class_decl(&mut self) {
-        let name = self.toks[(self.pos + 1) as usize].text.clone();
+        let name = self.tok_text(self.pos + 1);
         let scope = self.cur_scope;
         self.class_expr(true);
         if !self.error.is_empty() {
@@ -3018,7 +3084,7 @@ impl PComp {
     fn pattern_elem(&mut self, pk: int) {
         let ts = self.pos;
         self.skip_target(pk);
-        let single = self.pos - ts == 1 && self.toks[ts as usize].kind == T_IDENT;
+        let single = self.pos - ts == 1 && (self.toks[ts as usize].kind as int) == T_IDENT;
         if self.is("=") {
             self.next();
             self.op(OP_DUP);
@@ -3026,7 +3092,7 @@ impl PComp {
             self.op(OP_POP);
             let e = self.assign();
             if single {
-                let nm = self.toks[ts as usize].text.clone();
+                let nm = self.tok_text(ts);
                 self.name_anonymous(e, nm.as_str());
             }
             self.patch(j);
@@ -3220,7 +3286,7 @@ impl PComp {
                     self.next();
                     s
                 } else if self.kind() == T_NUM {
-                    let v = self.toks[self.pos as usize].num;
+                    let v = self.tok_num(self.pos);
                     self.next();
                     number_to_string(v)
                 } else {
@@ -3233,7 +3299,7 @@ impl PComp {
             if self.eat(":") {
                 self.pattern_elem(pk);
             } else if key_ident {
-                let nm = self.toks[key_pos as usize].text.clone();
+                let nm = self.tok_text(key_pos);
                 if is_reserved(nm.as_str()) {
                     self.fail("unexpected reserved word");
                     return;
@@ -4003,7 +4069,7 @@ impl PComp {
     }
 
     fn template(&mut self) -> Ex {
-        let xi = self.toks[self.pos as usize].x as usize;
+        let xi = (self.toks[self.pos as usize].x as int) as usize;
         let parts = self.xs[xi].parts.clone();
         let exprs = self.xs[xi].exprs.clone();
         let oks = self.xs[xi].cooked_ok.clone();
@@ -4038,7 +4104,7 @@ impl PComp {
         } else {
             self.op(OP_UNDEF);
         }
-        let xi = self.toks[self.pos as usize].x as usize;
+        let xi = (self.toks[self.pos as usize].x as int) as usize;
         let parts = self.xs[xi].parts.clone();
         let exprs = self.xs[xi].exprs.clone();
         let raws = self.xs[xi].raws.clone();
@@ -4088,7 +4154,7 @@ impl PComp {
                 self.op(OP_BIGINT);
                 return ex(E_LITERAL);
             }
-            let v = self.toks[self.pos as usize].num;
+            let v = self.tok_num(self.pos);
             self.next();
             self.push_num(v);
             self.last_num = v;
@@ -4109,7 +4175,7 @@ impl PComp {
         }
         if k == T_REGEX {
             let s = self.text();
-            let fx = self.toks[self.pos as usize].x;
+            let fx = self.toks[self.pos as usize].x as int;
             let f = if fx >= 0 { self.xs[fx as usize].flags.clone() } else { String::new() };
             self.next();
             let cs = self.str_const(s.as_str());
@@ -4262,7 +4328,7 @@ impl PComp {
             return s;
         }
         if self.kind() == T_NUM {
-            let v = self.toks[self.pos as usize].num;
+            let v = self.tok_num(self.pos);
             self.next();
             return number_to_string(v);
         }
@@ -4882,3 +4948,12 @@ pub fn compile_unit(src: &str) -> crate::unit::Unit {
     u.source = String::from(src);
     u
 }
+
+/// Rust: room for `n` more tokens at once, not by doubling.
+#[ranger::target(rust)]
+fn reserve_toks(v: &mut Vec<PTok>, n: usize) {
+    v.reserve_exact(n);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn reserve_toks(_v: &mut Vec<PTok>, _n: usize) {}
