@@ -565,16 +565,15 @@ impl PComp {
 
     fn name_id(&mut self, s: &str) -> int {
         // most texts repeat: a direct-mapped cache by a cheap hash first
-        let b = s.as_bytes();
-        let n = b.len();
+        let n = s.as_bytes().len();
         let mut h: int = n as int;
         let mut i: usize = 0;
         while i < n && i < 8 {
-            h = (h * 131 + (b[i] as int)) & 16777215;
+            h = (h * 131 + (s.as_bytes()[i] as int)) & 16777215;
             i += 1;
         }
         if n > 8 {
-            h = (h * 131 + (b[n - 1] as int)) & 16777215;
+            h = (h * 131 + (s.as_bytes()[n - 1] as int)) & 16777215;
         }
         let slot = ((h ^ (h >> 14)) & 16383) as usize;
         if self.name_cache.is_empty() {
