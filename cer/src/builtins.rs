@@ -3518,7 +3518,7 @@ impl Vm {
                         return Val::Bool(false);
                     }
                     let sh = self.objs[o as usize].shape;
-                    for a in self.shapes[sh as usize].attrs.iter() {
+                    for a in self.shape_attrs(sh).iter() {
                         if (*a & P_FIXED) == 0 {
                             return Val::Bool(false);
                         }

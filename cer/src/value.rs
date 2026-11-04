@@ -190,6 +190,15 @@ pub const T_LINEAR: int = 8;
 /// next shape (a transition). An owned shape belongs to one object, which
 /// changes it in place.
 pub struct Shape {
+    /// the shape's property count: its keys are the first nkeys of its
+    /// holder's (kref)
+    pub nkeys: int,
+    /// the shape that holds the keys, -1 for this one. A transition from
+    /// the newest shape of a chain appends to the chain's holder instead of
+    /// copying its keys, so a chain of shapes made one property at a time
+    /// shares one key list (a shape tree, without a copy per transition).
+    pub kref: int,
+    /// the holder's keys and attributes, the whole chain's
     pub keys: Vec<int>,
     pub attrs: Vec<int>,
     /// past SHAPE_HASH_AT keys, slot + 1 by key: an open-addressing table
@@ -207,6 +216,8 @@ pub struct Shape {
 impl Shape {
     pub fn new() -> Shape {
         Shape {
+            nkeys: 0,
+            kref: -1,
             keys: Vec::new(),
             attrs: Vec::new(),
             itab: Vec::new(),
@@ -218,11 +229,11 @@ impl Shape {
         }
     }
 
-    /// The slot of `atom`, -1 when absent.
+    /// In a holder: the slot of `atom` among its first `n` keys, -1 when
+    /// absent (a chain has each key once, so a slot past n is absent).
     #[inline]
-    pub fn find(&self, atom: int) -> int {
-        let n = self.keys.len() as int;
-        if n > SHAPE_HASH_AT {
+    pub fn find(&self, atom: int, n: int) -> int {
+        if self.itab.len() > 0 {
             let mask = (self.itab.len() as int) - 1;
             let mut h = atom & mask;
             loop {
@@ -231,7 +242,7 @@ impl Shape {
                     return -1;
                 }
                 if self.keys[(e - 1) as usize] == atom {
-                    return e - 1;
+                    return if e - 1 < n { e - 1 } else { -1 };
                 }
                 h = (h + 1) & mask;
             }
@@ -246,6 +257,7 @@ impl Shape {
         -1
     }
 
+    /// In a holder: appends a key; its slot.
     pub fn push(&mut self, atom: int, attr: int) -> int {
         let slot = self.keys.len() as int;
         self.keys.push(atom);
@@ -293,24 +305,39 @@ impl Shape {
         }
     }
 
+    /// An owned shape's key at `slot` goes.
     pub fn remove(&mut self, slot: int) {
         self.keys.remove(slot as usize);
         self.attrs.remove(slot as usize);
+        self.nkeys -= 1;
         self.rehash();
     }
 
-    /// An owned copy of the keys and attributes, without transitions.
-    pub fn copy(&self) -> Shape {
+    /// In a holder: a holder of its own with the first `n` keys and
+    /// attributes, without transitions (owned).
+    pub fn copy(&self, n: int) -> Shape {
         let mut s = Shape::new();
+        reserve_ints(&mut s.keys, (n + 1) as usize);
+        reserve_ints(&mut s.attrs, (n + 1) as usize);
         let mut i: usize = 0;
-        while i < self.keys.len() {
+        while (i as int) < n {
             s.push(self.keys[i], self.attrs[i]);
             i += 1;
         }
+        s.nkeys = n;
         s.owned = true;
         s
     }
 }
+
+/// Room for `n` ints (Rust; the other targets grow as they push).
+#[ranger::target(rust)]
+pub fn reserve_ints(v: &mut Vec<int>, n: usize) {
+    v.reserve_exact(n);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn reserve_ints(_v: &mut Vec<int>, _n: usize) {}
 
 #[derive(Clone, Copy)]
 pub struct Op {

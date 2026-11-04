@@ -676,9 +676,9 @@ impl Vm {
         if c >= 65536 {
             return if (c >> 16) == sh { c & 65535 } else { -1 };
         }
-        if c >= 0 {
-            let s = &self.shapes[sh as usize];
-            if (c as usize) < s.keys.len() && s.keys[c as usize] == atom {
+        if c >= 0 && c < self.shapes[sh as usize].nkeys {
+            let s = &self.shapes[self.holder(sh)];
+            if s.keys[c as usize] == atom {
                 let a = s.attrs[c as usize];
                 if a == 0 || (!plain && (a & P_ACCESSOR) == 0) {
                     return c;
@@ -732,30 +732,68 @@ impl Vm {
     }
 
 
+    /// The shape that holds shape `sh`'s keys (Shape.kref).
+    #[inline]
+    pub fn holder(&self, sh: int) -> usize {
+        let k = self.shapes[sh as usize].kref;
+        if k < 0 {
+            sh as usize
+        } else {
+            k as usize
+        }
+    }
+
     /// The slot of own property `atom` of `o`, -1 when absent.
     #[inline]
     pub fn find(&self, o: int, atom: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].find(atom)
+        let sh = self.objs[o as usize].shape;
+        self.shapes[self.holder(sh)].find(atom, self.shapes[sh as usize].nkeys)
     }
 
     #[inline]
     pub fn nkeys(&self, o: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].keys.len() as int
+        self.shapes[self.objs[o as usize].shape as usize].nkeys
     }
 
     #[inline]
     pub fn key_at(&self, o: int, slot: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].keys[slot as usize]
+        self.shapes[self.holder(self.objs[o as usize].shape)].keys[slot as usize]
     }
 
     #[inline]
     pub fn attr_at(&self, o: int, slot: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].attrs[slot as usize]
+        self.shapes[self.holder(self.objs[o as usize].shape)].attrs[slot as usize]
     }
 
     /// The own keys of `o` in order.
     pub fn keys_of(&self, o: int) -> Vec<int> {
-        self.shapes[self.objs[o as usize].shape as usize].keys.clone()
+        self.shape_keys(self.objs[o as usize].shape)
+    }
+
+    /// Shape `sh`'s keys in order.
+    pub fn shape_keys(&self, sh: int) -> Vec<int> {
+        let n = self.shapes[sh as usize].nkeys as usize;
+        let h = &self.shapes[self.holder(sh)];
+        let mut out: Vec<int> = Vec::new();
+        let mut i: usize = 0;
+        while i < n {
+            out.push(h.keys[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Shape `sh`'s attributes in order.
+    pub fn shape_attrs(&self, sh: int) -> Vec<int> {
+        let n = self.shapes[sh as usize].nkeys as usize;
+        let h = &self.shapes[self.holder(sh)];
+        let mut out: Vec<int> = Vec::new();
+        let mut i: usize = 0;
+        while i < n {
+            out.push(h.attrs[i]);
+            i += 1;
+        }
+        out
     }
 
     /// Adds own property `atom` (absent) to `o`; its slot.
@@ -764,9 +802,10 @@ impl Vm {
         if self.shapes[sh as usize].owned {
             self.shape_epoch += 1;
             self.push_val(o, v);
+            self.shapes[sh as usize].nkeys += 1;
             return self.shapes[sh as usize].push(atom, attr);
         }
-        let slot = self.shapes[sh as usize].keys.len() as int;
+        let slot = self.shapes[sh as usize].nkeys;
         let mut next: int = -1;
         {
             let s = &self.shapes[sh as usize];
@@ -792,11 +831,22 @@ impl Vm {
                 self.shape_epoch += 1;
                 let sh2 = self.objs[o as usize].shape;
                 self.push_val(o, v);
+                self.shapes[sh2 as usize].nkeys += 1;
                 return self.shapes[sh2 as usize].push(atom, attr);
             }
-            let mut ns = self.shapes[sh as usize].copy();
-            ns.owned = false;
-            ns.push(atom, attr);
+            let h = self.holder(sh);
+            let mut ns = Shape::new();
+            if (self.shapes[h].keys.len() as int) == slot {
+                // the chain's newest shape: its holder gets the key
+                self.shapes[h].push(atom, attr);
+                ns.kref = h as int;
+            } else {
+                // a branch: a holder of its own
+                ns = self.shapes[h].copy(slot);
+                ns.owned = false;
+                ns.push(atom, attr);
+            }
+            ns.nkeys = slot + 1;
             next = self.shapes.len() as int;
             self.shapes.push(ns);
             let s = &mut self.shapes[sh as usize];
@@ -819,7 +869,8 @@ impl Vm {
         if self.shapes[sh as usize].owned {
             return;
         }
-        let ns = self.shapes[sh as usize].copy();
+        let n = self.shapes[sh as usize].nkeys;
+        let ns = self.shapes[self.holder(sh)].copy(n);
         let id = if self.free_shapes.is_empty() {
             self.shapes.push(ns);
             (self.shapes.len() as int) - 1
@@ -885,7 +936,8 @@ impl Vm {
         let mut si: usize = 0;
         while si < self.shapes.len() {
             let mut k: usize = 0;
-            while k < self.shapes[si].keys.len() {
+            // a holder's keys, the chain's (kref -1)
+            while self.shapes[si].kref < 0 && k < self.shapes[si].keys.len() {
                 if (self.shapes[si].attrs[k] & (P_READONLY | P_ACCESSOR)) != 0 {
                     let a = self.shapes[si].keys[k];
                     self.mark_setter(a);
@@ -2656,7 +2708,7 @@ impl Vm {
             }
         }
         let keys = self.keys_of(o);
-        let attrs = self.shapes[self.objs[o as usize].shape as usize].attrs.clone();
+        let attrs = self.shape_attrs(self.objs[o as usize].shape);
         let mut ints: Vec<int> = Vec::new();
         let mut others: Vec<int> = Vec::new();
         let mut syms: Vec<int> = Vec::new();

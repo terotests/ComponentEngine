@@ -208,9 +208,9 @@ pub fn snapshot(vm: &Vm) -> String {
         }
         put_num(&mut b, o.class);
         put_num(&mut b, o.proto);
-        put_ints(&mut b, &vm.shapes[o.shape as usize].keys);
+        put_ints(&mut b, &vm.shape_keys(o.shape));
         put_vals(&mut b, &mut st, vm, &o.vals);
-        put_ints(&mut b, &vm.shapes[o.shape as usize].attrs);
+        put_ints(&mut b, &vm.shape_attrs(o.shape));
         put_vals(&mut b, &mut st, vm, &o.elems);
         let cold = &vm.colds[o.cold as usize];
         put_vals(&mut b, &mut st, vm, &cold.elems2);
@@ -632,7 +632,7 @@ fn valid_heap(vm: &Vm) -> bool {
         if o.class == C_FUNCTION && (o.func < 0 || o.func >= np) {
             return false;
         }
-        for k in vm.shapes[o.shape as usize].keys.iter() {
+        for k in vm.shape_keys(o.shape).iter() {
             if *k < 0 || *k >= na {
                 return false;
             }
