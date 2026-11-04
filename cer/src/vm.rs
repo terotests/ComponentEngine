@@ -124,6 +124,11 @@ pub struct Vm {
     /// the objects' Colds (value.rs); 0 is the empty one, never written
     pub colds: Vec<Cold>,
     pub free_colds: Vec<int>,
+    /// the objects' elements (JsObj.elems): 0 is the empty one, never
+    /// written
+    pub evecs: Vec<Vec<Val>>,
+    /// `evecs` no object holds
+    pub efree: Vec<i32>,
     /// the objects whose count is 0 (JsObj.rc): garbage unless a root
     /// holds one (Vm::reclaim)
     pub zct: Vec<int>,
@@ -410,6 +415,8 @@ impl Vm {
             free_list: Vec::new(),
             colds: Vec::new(),
             free_colds: Vec::new(),
+            evecs: Vec::new(),
+            efree: Vec::new(),
             zct: Vec::new(),
             zct_spare: Vec::new(),
             zct_limit: ZCT_MIN,
@@ -540,6 +547,7 @@ impl Vm {
         };
         vm.shapes.push(Shape::new());
         vm.colds.push(Cold::new());
+        vm.evecs.push(Vec::new());
         for n in first_atoms() {
             vm.intern(n.as_str());
         }
@@ -1211,10 +1219,10 @@ impl Vm {
                     self.smark_count(v);
                     j += 1;
                 }
-                let ne = self.objs[i].elems.len();
+                let ne = self.evecs[self.objs[i].elems as usize].len();
                 j = 0;
                 while j < ne {
-                    let v = self.objs[i].elems[j];
+                    let v = self.evecs[self.objs[i].elems as usize][j];
                     self.smark_count(v);
                     j += 1;
                 }
@@ -2097,7 +2105,7 @@ impl Vm {
             if atom == A_LENGTH {
                 let t = self.objs[f as usize].env as int;
                 let l = self.get_obj(t, A_LENGTH, &Val::Obj(t));
-                let n = self.to_number(&l) - (self.objs[f as usize].elems.len() as double);
+                let n = self.to_number(&l) - (self.evecs[self.objs[f as usize].elems as usize].len() as double);
                 return Val::Num(if n < 0.0 { 0.0 } else { n });
             }
         }
@@ -2114,7 +2122,7 @@ impl Vm {
                 let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
-                    let g = self.objs[pair as usize].elems[0].clone();
+                    let g = self.evecs[self.objs[pair as usize].elems as usize][0].clone();
                     if self.is_callable(&g) {
                         return self.call_value(g, receiver.clone(), Vec::new());
                     }
@@ -2129,7 +2137,7 @@ impl Vm {
                     return self.proxy_call(cur, PH_GET, vec![k, receiver.clone()]);
                 }
                 if (class == C_ARRAY || class == C_ARGUMENTS) && atom == A_LENGTH {
-                    return Val::Num(self.objs[cur as usize].elems.len() as double);
+                    return Val::Num(self.evecs[self.objs[cur as usize].elems as usize].len() as double);
                 }
                 if class == C_FUNCTION || class == C_BOUND {
                     if atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE {
@@ -2188,8 +2196,8 @@ impl Vm {
             Val::Obj(o) => {
                 let ob = &self.objs[*o as usize];
                 if ob.class == C_ARRAY || ob.class == C_ARGUMENTS {
-                    if i < ob.elems.len() as int {
-                        return ob.elems[i as usize].clone();
+                    if i < self.evecs[ob.elems as usize].len() as int {
+                        return self.evecs[ob.elems as usize][i as usize].clone();
                     }
                     // an index far past the end is a property (set_index)
                     if ob.class == C_ARRAY && ob.shape == 0 {
@@ -2276,7 +2284,7 @@ impl Vm {
                 let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
-                    let s = self.objs[pair as usize].elems[1].clone();
+                    let s = self.evecs[self.objs[pair as usize].elems as usize][1].clone();
                     if self.is_callable(&s) {
                         self.call_value(s, receiver.clone(), vec![v.clone()]);
                     } else if self.strict_now() {
@@ -2318,7 +2326,7 @@ impl Vm {
             }
             if (attr & P_ACCESSOR) != 0 {
                 let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
-                let s = self.objs[pair as usize].elems[1].clone();
+                let s = self.evecs[self.objs[pair as usize].elems as usize][1].clone();
                 if self.is_callable(&s) {
                     self.call_value(s, Val::Obj(o), vec![v]);
                 } else if self.strict_now() {
@@ -2377,7 +2385,7 @@ impl Vm {
             return;
         }
         let len = n as int;
-        let cur = self.objs[o as usize].elems.len() as int;
+        let cur = self.evecs[self.objs[o as usize].elems as usize].len() as int;
         if len > cur + 100000000 {
             // elements are stored densely: a length this far out is refused
             self.throw_range("Invalid array length");
@@ -2426,7 +2434,7 @@ impl Vm {
             return;
         }
         if class == C_ARRAY || class == C_ARGUMENTS {
-            let len = self.objs[o as usize].elems.len() as int;
+            let len = self.evecs[self.objs[o as usize].elems as usize].len() as int;
             if i < len {
                 if class == C_ARRAY && self.objs[o as usize].pos == 2 {
                     // a frozen array's elements are read-only
@@ -2548,7 +2556,7 @@ impl Vm {
         let (i, a) = self.to_key(k);
         if i >= 0 {
             let class = self.objs[o as usize].class;
-            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int && !self.is_hole(o, i) {
+            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].len() as int && !self.is_hole(o, i) {
                 return true;
             }
             if class == C_TYPED {
@@ -2600,7 +2608,7 @@ impl Vm {
         let (i, a) = self.to_key(k);
         let class = self.objs[o as usize].class;
         if i >= 0 {
-            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int && !self.is_hole(o, i) {
+            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].len() as int && !self.is_hole(o, i) {
                 return true;
             }
             if class == C_TYPED {
@@ -2647,7 +2655,7 @@ impl Vm {
             return ok;
         }
         if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) {
-            let len = self.objs[o as usize].elems.len() as int;
+            let len = self.evecs[self.objs[o as usize].elems as usize].len() as int;
             if i < len {
                 if i == len - 1 && class == C_ARGUMENTS {
                     self.pop_elem(o);
@@ -2684,7 +2692,7 @@ impl Vm {
             return self.proxy_keys(o, !include_hidden, symbols);
         }
         if class == C_ARRAY || class == C_ARGUMENTS {
-            let n = self.objs[o as usize].elems.len();
+            let n = self.evecs[self.objs[o as usize].elems as usize].len();
             let mut i: usize = 0;
             while i < n {
                 if !self.is_hole(o, i as int) {
@@ -2819,7 +2827,7 @@ impl Vm {
             if c == C_PROXY || c == C_STRING || c == C_TYPED {
                 return false;
             }
-            if (c == C_ARRAY || c == C_ARGUMENTS) && !self.objs[cur as usize].elems.is_empty() {
+            if (c == C_ARRAY || c == C_ARGUMENTS) && !self.evecs[self.objs[cur as usize].elems as usize].is_empty() {
                 return false;
             }
             let n = self.nkeys(cur) as usize;
@@ -3068,7 +3076,7 @@ impl Vm {
         if class == C_BOUND {
             let target = self.objs[fo as usize].env as int;
             let bthis = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
-            let mut all = self.objs[fo as usize].elems.clone();
+            let mut all = self.evecs[self.objs[fo as usize].elems as usize].clone();
             for a in args {
                 all.push(a);
             }
@@ -3134,7 +3142,7 @@ impl Vm {
         }
         if class == C_BOUND {
             let target = self.objs[fo as usize].env as int;
-            let mut all = self.objs[fo as usize].elems.clone();
+            let mut all = self.evecs[self.objs[fo as usize].elems as usize].clone();
             for a in args {
                 all.push(a);
             }
@@ -3496,13 +3504,13 @@ impl Vm {
             if src < 0 {
                 return None;
             }
-            let len = self.objs[src as usize].elems.len() as int;
+            let len = self.evecs[self.objs[src as usize].elems as usize].len() as int;
             if i >= len {
                 self.put_env(o, -1);
                 return None;
             }
             self.objs[o as usize].func = (i + 1) as i32;
-            let v = self.objs[src as usize].elems[i as usize].clone();
+            let v = self.evecs[self.objs[src as usize].elems as usize][i as usize].clone();
             if kind == 1 {
                 return Some(Val::Num(i as double));
             }
@@ -3536,7 +3544,7 @@ impl Vm {
             if self.objs[*o as usize].class == C_ARRAY {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
-                    return self.objs[*o as usize].elems.clone();
+                    return self.evecs[self.objs[*o as usize].elems as usize].clone();
                 }
             }
         }
@@ -3566,7 +3574,7 @@ impl Vm {
             if self.objs[*o as usize].class == C_ARRAY {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
-                    return self.objs[*o as usize].elems.clone();
+                    return self.evecs[self.objs[*o as usize].elems as usize].clone();
                 }
             }
         }
@@ -3671,7 +3679,7 @@ impl Vm {
                     }
                     OP_GET_ENV => {
                         let e = self.get_env(op.a);
-                        let v = self.objs[e as usize].elems[op.b as usize].clone();
+                        let v = self.evecs[self.objs[e as usize].elems as usize][op.b as usize].clone();
                         self.stack.push(v);
                     }
                     OP_SET_ENV => {
@@ -3760,7 +3768,7 @@ impl Vm {
                     }
                     OP_GET_ENV_UNDEF => {
                         let e = self.get_env(op.a);
-                        let v = self.objs[e as usize].elems[op.b as usize].clone();
+                        let v = self.evecs[self.objs[e as usize].elems as usize][op.b as usize].clone();
                         self.stack.push(v);
                         self.stack.push(Val::Undef);
                     }
@@ -3918,7 +3926,7 @@ impl Vm {
                                 done = true;
                             } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
                                 // an array's length is its element count
-                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].len() as double);
                                 self.stack.push(r);
                                 done = true;
                             }
@@ -3942,7 +3950,7 @@ impl Vm {
                                 done = true;
                             } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
                                 // an array's length is its element count
-                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].len() as double);
                                 self.stack.push(r);
                                 done = true;
                             }
@@ -3966,7 +3974,7 @@ impl Vm {
                                 done = true;
                             } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
                                 // an array's length is its element count
-                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].len() as double);
                                 self.stack.push(r);
                                 done = true;
                             }
@@ -4008,8 +4016,8 @@ impl Vm {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n {
-                                    let r = ob.elems[i as usize].clone();
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].len() && (i as double) == *n {
+                                    let r = self.evecs[ob.elems as usize][i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
                                 }
@@ -4033,18 +4041,27 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n && ob.pos != 2 {
-                                    old = obj_of(&ob.elems[i as usize]);
-                                    old_s = str_of(&ob.elems[i as usize]);
-                                    ob.elems[i as usize] = val.clone();
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].len() && (i as double) == *n && ob.pos != 2 {
+                                    old = obj_of(&self.evecs[ob.elems as usize][i as usize]);
+                                    old_s = str_of(&self.evecs[ob.elems as usize][i as usize]);
+                                    self.evecs[ob.elems as usize][i as usize] = val.clone();
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
                                         // the element is no longer a hole
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == ob.elems.len() && (i as double) == *n && ob.extensible {
-                                    ob.elems.push(val.clone());
+                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].len() && (i as double) == *n && ob.extensible {
+                                    if ob.elems == 0 {
+                                        if !self.efree.is_empty() {
+                                            ob.elems = self.efree.pop().unwrap();
+                                        } else {
+                                            grow_evecs(&mut self.evecs);
+                                            self.evecs.push(Vec::new());
+                                            ob.elems = (self.evecs.len() - 1) as i32;
+                                        }
+                                    }
+                                    self.evecs[ob.elems as usize].push(val.clone());
                                     done = true;
                                 }
                             }
@@ -4219,7 +4236,7 @@ impl Vm {
     }
 
     pub fn mark_hole(&mut self, o: int, i: int) {
-        let n = self.objs[o as usize].elems.len();
+        let n = self.evecs[self.objs[o as usize].elems as usize].len();
         while self.colds[self.objs[o as usize].cold as usize].elems2.len() < n {
             self.push_elem2(o, Val::Bool(false));
         }
@@ -4237,7 +4254,7 @@ impl Vm {
     /// HasProperty(o, i) for an index, holes counted as missing.
     pub fn has_index(&mut self, o: int, i: int) -> bool {
         let class = self.objs[o as usize].class;
-        if class == C_ARRAY && (i as usize) < self.objs[o as usize].elems.len() && !self.is_hole(o, i) {
+        if class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].len() && !self.is_hole(o, i) {
             return true;
         }
         let k = Val::Num(i as double);
@@ -4345,7 +4362,7 @@ impl Vm {
                         if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
                             let a = self.stack[bp as usize].clone();
                             self.push_elem(tobj, a);
-                            r = Val::Num(self.objs[tobj as usize].elems.len() as double);
+                            r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].len() as double);
                             hit = true;
                         } else if (tclass == C_MAP || tclass == C_SET) && !weak {
                             if id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS {
@@ -4413,7 +4430,7 @@ impl Vm {
             if class == C_BOUND {
                 let target = self.objs[fo as usize].env as int;
                 let bthis = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
-                let bargs = self.objs[fo as usize].elems.clone();
+                let bargs = self.evecs[self.objs[fo as usize].elems as usize].clone();
                 self.stack[fpos as usize] = Val::Obj(target);
                 self.stack[(fpos + 1) as usize] = bthis;
                 let mut k: usize = 0;
@@ -4436,7 +4453,7 @@ impl Vm {
             Val::Obj(o) => {
                 let class = self.objs[*o as usize].class;
                 if class == C_ARRAY || class == C_ARGUMENTS {
-                    return self.objs[*o as usize].elems.clone();
+                    return self.evecs[self.objs[*o as usize].elems as usize].clone();
                 }
                 let l = self.get(v, A_LENGTH);
                 let n = to_integer(self.to_number(&l)) as int;
@@ -4529,13 +4546,13 @@ impl Vm {
         let mut done = false;
         if let Val::Str(_) = b {
             let n = self.stack.len() - 1;
-            let cur = self.objs[e as usize].elems[i];
+            let cur = self.evecs[self.objs[e as usize].elems as usize][i];
             if let (Val::Str(x), Val::Str(y)) = (self.stack[n], cur) {
                 if x == y {
                     let h = self.append_val(cur, b);
                     if h >= 0 {
                         self.stack.pop();
-                        self.objs[e as usize].elems[i] = Val::Str(h);
+                        self.evecs[self.objs[e as usize].elems as usize][i] = Val::Str(h);
                         // the slot holds the new handle, no longer the old
                         // (now its prefix)
                         self.sinc(h);
@@ -4768,7 +4785,7 @@ impl Vm {
             }
             OP_GET_ENV => {
                 let e = self.get_env(op.a);
-                let v = self.objs[e as usize].elems[op.b as usize].clone();
+                let v = self.evecs[self.objs[e as usize].elems as usize][op.b as usize].clone();
                 self.stack.push(v);
             }
             OP_SET_ENV => {
@@ -5002,7 +5019,7 @@ impl Vm {
             }
             OP_CALL_SPREAD => {
                 let arr = self.pop();
-                let items = self.objs[obj_of(&arr) as usize].elems.clone();
+                let items = self.evecs[self.objs[obj_of(&arr) as usize].elems as usize].clone();
                 let argc = items.len() as int;
                 for x in items {
                     self.stack.push(x);
@@ -5011,7 +5028,7 @@ impl Vm {
             }
             OP_NEW_SPREAD => {
                 let arr = self.pop();
-                let items = self.objs[obj_of(&arr) as usize].elems.clone();
+                let items = self.evecs[self.objs[obj_of(&arr) as usize].elems as usize].clone();
                 let argc = items.len() as int;
                 for x in items {
                     self.stack.push(x);
@@ -5022,7 +5039,7 @@ impl Vm {
                 let mut args: Vec<Val> = Vec::new();
                 if op.code == OP_SUPER_CALL_SPREAD {
                     let arr = self.pop();
-                    args = self.objs[obj_of(&arr) as usize].elems.clone();
+                    args = self.evecs[self.objs[obj_of(&arr) as usize].elems as usize].clone();
                 } else {
                     let n = self.stack.len() as int;
                     let mut i = n - op.a;
@@ -5205,7 +5222,7 @@ impl Vm {
                 let n = self.stack.len() as int;
                 let p = self.array_proto;
                 let a = self.alloc(C_ARRAY, p);
-                reserve_vals(&mut self.objs[a as usize].elems, op.a as usize);
+                reserve_vals(&mut self.evecs[self.objs[a as usize].elems as usize], op.a as usize);
                 let mut i = n - op.a;
                 while i < n {
                     let v = self.stack[i as usize];
@@ -5223,7 +5240,7 @@ impl Vm {
             OP_ARRAY_HOLE => {
                 let a = obj_of(self.top());
                 self.push_elem(a, Val::Undef);
-                let i = (self.objs[a as usize].elems.len() as int) - 1;
+                let i = (self.evecs[self.objs[a as usize].elems as usize].len() as int) - 1;
                 self.mark_hole(a, i);
             }
             OP_ARRAY_SPREAD => {
@@ -5360,8 +5377,8 @@ impl Vm {
                 let parent = self.objs[e as usize].proto as int;
                 let n = self.alloc(C_ENV, parent);
                 let mut i = 0;
-                while i < self.objs[e as usize].elems.len() {
-                    let v = self.objs[e as usize].elems[i].clone();
+                while i < self.evecs[self.objs[e as usize].elems as usize].len() {
+                    let v = self.evecs[self.objs[e as usize].elems as usize][i].clone();
                     self.push_elem(n, v);
                     i += 1;
                 }
@@ -5503,11 +5520,11 @@ impl Vm {
             }
             OP_ARRAY_REST => {
                 let a = obj_of(self.top());
-                let n = self.objs[a as usize].elems.len() as int;
+                let n = self.evecs[self.objs[a as usize].elems as usize].len() as int;
                 let mut items: Vec<Val> = Vec::new();
                 let mut i = op.a;
                 while i < n {
-                    items.push(self.objs[a as usize].elems[i as usize].clone());
+                    items.push(self.evecs[self.objs[a as usize].elems as usize][i as usize].clone());
                     i += 1;
                 }
                 let r = self.new_array(items);
@@ -5651,8 +5668,8 @@ impl Vm {
     #[inline]
     pub fn put_elem(&mut self, o: int, i: int, v: Val) {
         self.inc(&v);
-        let old = self.objs[o as usize].elems[i as usize];
-        self.objs[o as usize].elems[i as usize] = v;
+        let old = self.evecs[self.objs[o as usize].elems as usize][i as usize];
+        self.evecs[self.objs[o as usize].elems as usize][i as usize] = v;
         self.dec(&old);
     }
 
@@ -5667,10 +5684,34 @@ impl Vm {
         self.dec(&v);
     }
 
-    #[inline]
+    /// `o`'s elements' index in `evecs`, given one on its first element.
+    #[inline(always)]
+    pub fn elems_id(&mut self, o: int) -> usize {
+        let e = self.objs[o as usize].elems;
+        if e != 0 {
+            return e as usize;
+        }
+        let n = self.new_evec();
+        self.objs[o as usize].elems = n as i32;
+        n
+    }
+
+    /// An empty vector of elements in `evecs`, a free one when there is.
+    #[inline(never)]
+    pub fn new_evec(&mut self) -> usize {
+        if !self.efree.is_empty() {
+            return self.efree.pop().unwrap() as usize;
+        }
+        grow_evecs(&mut self.evecs);
+        self.evecs.push(Vec::new());
+        self.evecs.len() - 1
+    }
+
+    #[inline(always)]
     pub fn push_elem(&mut self, o: int, v: Val) {
         self.inc(&v);
-        self.objs[o as usize].elems.push(v);
+        let e = self.elems_id(o);
+        self.evecs[e].push(v);
     }
 
     pub fn put_elem2(&mut self, o: int, i: int, v: Val) {
@@ -5690,14 +5731,15 @@ impl Vm {
     /// `o`'s elements become `vs`.
     pub fn put_elems(&mut self, o: int, vs: Vec<Val>) {
         self.inc_all(&vs);
-        let n = self.objs[o as usize].elems.len();
+        let n = self.evecs[self.objs[o as usize].elems as usize].len();
         let mut i: usize = 0;
         while i < n {
-            let x = self.objs[o as usize].elems[i];
+            let x = self.evecs[self.objs[o as usize].elems as usize][i];
             self.dec(&x);
             i += 1;
         }
-        self.objs[o as usize].elems = vs;
+        let e = self.elems_id(o);
+        self.evecs[e] = vs;
     }
 
     pub fn put_elems2(&mut self, o: int, vs: Vec<Val>) {
@@ -5718,17 +5760,17 @@ impl Vm {
 
     /// `o`'s elements past `n` go.
     pub fn cut_elems(&mut self, o: int, n: int) {
-        let len = self.objs[o as usize].elems.len() as int;
+        let len = self.evecs[self.objs[o as usize].elems as usize].len() as int;
         if n >= len {
             return;
         }
         let mut i = n;
         while i < len {
-            let x = self.objs[o as usize].elems[i as usize];
+            let x = self.evecs[self.objs[o as usize].elems as usize][i as usize];
             self.dec(&x);
             i += 1;
         }
-        self.objs[o as usize].elems.truncate(n as usize);
+        self.evecs[self.objs[o as usize].elems as usize].truncate(n as usize);
     }
 
     pub fn cut_elems2(&mut self, o: int, n: int) {
@@ -5748,7 +5790,7 @@ impl Vm {
 
     /// The last element of `o`, taken out (the caller owns its count).
     pub fn pop_elem_val(&mut self, o: int) -> Val {
-        match self.objs[o as usize].elems.pop() {
+        match self.evecs[self.objs[o as usize].elems as usize].pop() {
             Some(v) => v,
             None => Val::Undef,
         }
@@ -5761,11 +5803,12 @@ impl Vm {
 
     pub fn insert_elem(&mut self, o: int, i: int, v: Val) {
         self.inc(&v);
-        self.objs[o as usize].elems.insert(i as usize, v);
+        let e = self.elems_id(o);
+        self.evecs[e].insert(i as usize, v);
     }
 
     pub fn remove_elem(&mut self, o: int, i: int) {
-        let v = self.objs[o as usize].elems.remove(i as usize);
+        let v = self.evecs[self.objs[o as usize].elems as usize].remove(i as usize);
         self.dec(&v);
     }
 
@@ -5992,10 +6035,10 @@ impl Vm {
                 }
                 j += 1;
             }
-            let ne = self.objs[o as usize].elems.len();
+            let ne = self.evecs[self.objs[o as usize].elems as usize].len();
             j = 0;
             while j < ne {
-                if let Val::Obj(x) = self.objs[o as usize].elems[j] {
+                if let Val::Obj(x) = self.evecs[self.objs[o as usize].elems as usize][j] {
                     if count {
                         self.objs[x as usize].rc += 1;
                     }
@@ -6071,15 +6114,26 @@ impl Vm {
                     self.objs[i2].zct = false;
                 }
                 // a survivor's buffers to their size (it lives on)
-                trim_obj(&mut self.objs[i2]);
+                let e = self.objs[i2].elems as usize;
+                trim_obj(&mut self.objs[i2], &mut self.evecs[e]);
             } else if !self.objs[i2].free {
                 self.release(i2 as int);
                 self.free_list.push(i2 as int);
-                drop_bufs(&mut self.objs[i2]);
+                let e = self.objs[i2].elems as usize;
+                drop_bufs(&mut self.objs[i2], &mut self.evecs[e]);
             } else {
-                drop_bufs(&mut self.objs[i2]);
+                let e = self.objs[i2].elems as usize;
+                drop_bufs(&mut self.objs[i2], &mut self.evecs[e]);
             }
             i2 += 1;
+        }
+        // the free element vectors' buffers go too
+        let ne = self.efree.len();
+        let mut q: usize = 0;
+        while q < ne {
+            let e = self.efree[q] as usize;
+            self.evecs[e] = Vec::new();
+            q += 1;
         }
         let nf = self.freed.len();
         let mut k: usize = 0;
@@ -6124,6 +6178,12 @@ impl Vm {
     fn release(&mut self, o: int) {
         self.free_shape(o);
         self.free_cold(o);
+        let e = self.objs[o as usize].elems as usize;
+        if e > 0 {
+            clear_elems(&mut self.evecs[e]);
+            self.efree.push(e as i32);
+            self.objs[o as usize].elems = 0;
+        }
         let ob = &mut self.objs[o as usize];
         ob.clear();
         ob.free = true;
@@ -6230,10 +6290,10 @@ impl Vm {
             }
             j += 1;
         }
-        let ne = self.objs[x as usize].elems.len();
+        let ne = self.evecs[self.objs[x as usize].elems as usize].len();
         j = 0;
         while j < ne {
-            match self.objs[x as usize].elems[j] {
+            match self.evecs[self.objs[x as usize].elems as usize][j] {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -6371,10 +6431,10 @@ impl Vm {
                     self.sinc(h);
                     j += 1;
                 }
-                let ne = self.objs[i].elems.len();
+                let ne = self.evecs[self.objs[i].elems as usize].len();
                 j = 0;
                 while j < ne {
-                    let h = str_of(&self.objs[i].elems[j]);
+                    let h = str_of(&self.evecs[self.objs[i].elems as usize][j]);
                     self.sinc(h);
                     j += 1;
                 }
@@ -6426,10 +6486,10 @@ impl Vm {
             }
             j += 1;
         }
-        let ne = self.objs[o as usize].elems.len();
+        let ne = self.evecs[self.objs[o as usize].elems as usize].len();
         j = 0;
         while j < ne {
-            if let Val::Obj(c) = self.objs[o as usize].elems[j] {
+            if let Val::Obj(c) = self.evecs[self.objs[o as usize].elems as usize][j] {
                 self.objs[c as usize].rc += 1;
             }
             j += 1;
@@ -6587,6 +6647,17 @@ pub fn grow_objs(v: &mut Vec<JsObj>) {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn grow_objs(_v: &mut Vec<JsObj>) {}
 
+#[ranger::target(rust)]
+pub fn grow_evecs(v: &mut Vec<Vec<Val>>) {
+    if v.len() == v.capacity() {
+        let n = v.len() / 8;
+        v.reserve_exact(if n < 1024 { 1024 } else { n });
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_evecs(_v: &mut Vec<Vec<Val>>) {}
+
 /// Rust: a compiled function's code and constants to their size (a
 /// compiler's buffers doubled as they grew).
 #[ranger::target(rust)]
@@ -6600,24 +6671,34 @@ pub fn trim_proto(_p: &mut Proto) {}
 
 /// A free slot's buffers go (a collection: the slot may wait long for its
 /// next object).
-pub fn drop_bufs(o: &mut JsObj) {
-    if !o.vals.is_empty() || !o.elems.is_empty() {
+pub fn drop_bufs(o: &mut JsObj, elems: &mut Vec<Val>) {
+    if !o.vals.is_empty() || !elems.is_empty() {
         o.vals = Vec::new();
-        o.elems = Vec::new();
+        elems.truncate(0);
     }
-    drop_caps(o);
+    drop_caps(o, elems);
+}
+
+/// A freed object's elements: small vectors stay allocated for the next
+/// object that takes them.
+pub fn clear_elems(elems: &mut Vec<Val>) {
+    if elems.len() <= 16 {
+        elems.truncate(0);
+    } else {
+        *elems = Vec::new();
+    }
 }
 
 /// Rust: a cleared Vec keeps its capacity; past KEEP_CAP it goes too.
 /// Keeping 4 saved Chart.js 1 % of its instructions but cost earley-boyer
 /// 12 MB (59 -> 71 MB), so a collection frees them all.
 #[ranger::target(rust)]
-pub fn drop_caps(o: &mut JsObj) {
+pub fn drop_caps(o: &mut JsObj, elems: &mut Vec<Val>) {
     if o.vals.capacity() > KEEP_CAP {
         o.vals = Vec::new();
     }
-    if o.elems.capacity() > KEEP_CAP {
-        o.elems = Vec::new();
+    if elems.capacity() > KEEP_CAP {
+        *elems = Vec::new();
     }
 }
 
@@ -6651,22 +6732,22 @@ pub fn reserve_vals(_v: &mut Vec<Val>, _n: usize) {}
 pub const KEEP_CAP: usize = 0;
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn drop_caps(_o: &mut JsObj) {}
+pub fn drop_caps(_o: &mut JsObj, _elems: &mut Vec<Val>) {}
 
 /// Rust: a live object's buffers shrink to what they hold, when a quarter
 /// or more is spare (Vm::collect); the other targets size their arrays.
 #[ranger::target(rust)]
-pub fn trim_obj(o: &mut JsObj) {
+pub fn trim_obj(o: &mut JsObj, elems: &mut Vec<Val>) {
     if o.vals.capacity() > o.vals.len() + o.vals.len() / 4 {
         o.vals.shrink_to_fit();
     }
-    if o.elems.capacity() > o.elems.len() + o.elems.len() / 4 {
-        o.elems.shrink_to_fit();
+    if elems.capacity() > elems.len() + elems.len() / 4 {
+        elems.shrink_to_fit();
     }
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn trim_obj(_o: &mut JsObj) {}
+pub fn trim_obj(_o: &mut JsObj, _elems: &mut Vec<Val>) {}
 
 /// Appends `b` to the shared string `rc` when nothing else holds it, so
 /// `s += …` does not copy `s` (Vm::str_append); false (and nothing changed)

@@ -111,8 +111,9 @@ pub struct JsObj {
     /// the object's Cold (`Vm.colds`), 0 for none
     pub cold: i32,
     /// array elements, scope slots, a bound function's arguments, an
-    /// accessor's getter and setter, a map's keys
-    pub elems: Vec<Val>,
+    /// accessor's getter and setter, a map's keys: its index in Vm.evecs,
+    /// 0 for none yet
+    pub elems: i32,
     /// the compiled function (index into `Vm.protos`) or the native id
     pub func: i32,
     /// a closure's scope; a bound function's target; an iterator's source
@@ -139,7 +140,7 @@ impl JsObj {
             shape: 0,
             vals: Vec::new(),
             cold: 0,
-            elems: Vec::new(),
+            elems: 0,
             func: -1,
             env: -1,
             pos: 0,
@@ -161,11 +162,6 @@ impl JsObj {
             self.vals.truncate(0);
         } else {
             self.vals = Vec::new();
-        }
-        if self.elems.len() <= 16 {
-            self.elems.truncate(0);
-        } else {
-            self.elems = Vec::new();
         }
         self.env = -1;
         self.func = -1;

@@ -406,8 +406,8 @@ impl Vm {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n {
-                                    r = ob.elems[i as usize].clone();
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].len() && (i as double) == *n {
+                                    r = self.evecs[ob.elems as usize][i as usize].clone();
                                     done = true;
                                 }
                             }
@@ -442,17 +442,26 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = n as int;
-                                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == n && ob.pos != 2 {
-                                    old = obj_of(&ob.elems[i as usize]);
-                                    old_s = str_of(&ob.elems[i as usize]);
-                                    ob.elems[i as usize] = val.clone();
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].len() && (i as double) == n && ob.pos != 2 {
+                                    old = obj_of(&self.evecs[ob.elems as usize][i as usize]);
+                                    old_s = str_of(&self.evecs[ob.elems as usize][i as usize]);
+                                    self.evecs[ob.elems as usize][i as usize] = val.clone();
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == ob.elems.len() && (i as double) == n && ob.extensible {
-                                    ob.elems.push(val.clone());
+                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].len() && (i as double) == n && ob.extensible {
+                                    if ob.elems == 0 {
+                                        if !self.efree.is_empty() {
+                                            ob.elems = self.efree.pop().unwrap();
+                                        } else {
+                                            grow_evecs(&mut self.evecs);
+                                            self.evecs.push(Vec::new());
+                                            ob.elems = (self.evecs.len() - 1) as i32;
+                                        }
+                                    }
+                                    self.evecs[ob.elems as usize].push(val.clone());
                                     done = true;
                                 }
                             }
@@ -564,7 +573,7 @@ impl Vm {
                     }
                     R_GET_ENV => {
                         let e = self.get_env(w2);
-                        let v = self.objs[e as usize].elems[w3 as usize].clone();
+                        let v = self.evecs[self.objs[e as usize].elems as usize][w3 as usize].clone();
                         self.stack[(bp + w1) as usize] = v;
                         if ((w0 >> 8) & 255) == 1 {
                             self.stack[(bp + w1 + 1) as usize] = Val::Undef;
@@ -768,7 +777,7 @@ impl Vm {
                 return false;
             }
             if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
-                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].len() as double);
                 self.stack[(bp + w1) as usize] = r;
                 return false;
             }
@@ -783,7 +792,7 @@ impl Vm {
                     return false;
                 }
                 // a getter: a plain function runs as a call in this loop
-                let g = self.objs[obj_of(&r) as usize].elems[0];
+                let g = self.evecs[self.objs[obj_of(&r) as usize].elems as usize][0];
                 let go = obj_of(&g);
                 if go >= 0 && self.objs[go as usize].class == C_FUNCTION {
                     let gp = self.objs[go as usize].func as usize;

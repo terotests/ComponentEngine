@@ -212,7 +212,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_ints(&mut b, &vm.shape_keys(o.shape as int));
         put_vals(&mut b, &mut st, vm, &o.vals);
         put_ints(&mut b, &vm.shape_attrs(o.shape as int));
-        put_vals(&mut b, &mut st, vm, &o.elems);
+        put_vals(&mut b, &mut st, vm, &vm.evecs[o.elems as usize]);
         let cold = &vm.colds[o.cold as usize];
         put_vals(&mut b, &mut st, vm, &cold.elems2);
         put_num(&mut b, cold.nums.len() as int);
@@ -418,6 +418,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.colds = Vec::new();
     vm.colds.push(Cold::new());
     vm.free_colds = Vec::new();
+    vm.evecs = Vec::new();
+    vm.evecs.push(Vec::new());
+    vm.efree = Vec::new();
     vm.zct = Vec::new();
     vm.freed = Vec::new();
     vm.shapes = Vec::new();
@@ -439,7 +442,11 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         let keys = get_ints(&mut r);
         let vals = get_vals(&mut r, &strs);
         let attrs = get_ints(&mut r);
-        o.elems = get_vals(&mut r, &strs);
+        let ev = get_vals(&mut r, &strs);
+        if !ev.is_empty() {
+            vm.evecs.push(ev);
+            o.elems = (vm.evecs.len() - 1) as i32;
+        }
         let mut cold = Cold::new();
         cold.elems2 = get_vals(&mut r, &strs);
         let mut has_cold = !cold.elems2.is_empty();
@@ -644,7 +651,7 @@ fn valid_heap(vm: &Vm) -> bool {
                 return false;
             }
         }
-        for v in o.elems.iter() {
+        for v in vm.evecs[o.elems as usize].iter() {
             if !in_objs(v, no) {
                 return false;
             }

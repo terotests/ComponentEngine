@@ -57,7 +57,7 @@ impl Vm {
             self.throw_type("Cannot perform an operation on a proxy that has been revoked");
             return Val::Undef;
         }
-        let hook = self.objs[self.proxy_hooks as usize].elems[which as usize].clone();
+        let hook = self.evecs[self.objs[self.proxy_hooks as usize].elems as usize][which as usize].clone();
         let mut all: Vec<Val> = vec![Val::Obj(target), Val::Obj(handler)];
         for a in args.iter() {
             all.push(*a);

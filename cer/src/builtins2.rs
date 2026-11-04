@@ -28,7 +28,7 @@ impl Vm {
         }
         let class = self.objs[o as usize].class;
         if class == C_ARRAY || class == C_ARGUMENTS {
-            return self.objs[o as usize].elems.clone();
+            return self.evecs[self.objs[o as usize].elems as usize].clone();
         }
         self.array_like_to_vec(&Val::Obj(o))
     }
@@ -50,7 +50,7 @@ impl Vm {
             if depth >= 1.0 {
                 if let Val::Obj(o) = &it {
                     if self.objs[*o as usize].class == C_ARRAY {
-                        let inner = self.objs[*o as usize].elems.clone();
+                        let inner = self.evecs[self.objs[*o as usize].elems as usize].clone();
                         self.flatten_into(out, inner, depth - 1.0);
                         continue;
                     }
@@ -143,14 +143,14 @@ impl Vm {
                 let o = self.this_array(&this);
                 if self.is_array_obj(o) {
                     if !self.objs[o as usize].extensible {
-                        let n = self.objs[o as usize].elems.len();
+                        let n = self.evecs[self.objs[o as usize].elems as usize].len();
                         self.throw_type(format!("Cannot add property {}, object is not extensible", n).as_str());
                         return Val::Undef;
                     }
                     for a in args.iter() {
                         self.push_elem(o, *a);
                     }
-                    return Val::Num(self.objs[o as usize].elems.len() as double);
+                    return Val::Num(self.evecs[self.objs[o as usize].elems as usize].len() as double);
                 }
                 let mut n = self.len_of(&Val::Obj(o));
                 for a in args.iter() {
@@ -180,10 +180,10 @@ impl Vm {
             }
             NF_AP_SHIFT => {
                 let o = self.this_array(&this);
-                if self.objs[o as usize].elems.is_empty() {
+                if self.evecs[self.objs[o as usize].elems as usize].is_empty() {
                     return Val::Undef;
                 }
-                let v = self.objs[o as usize].elems.remove(0);
+                let v = self.evecs[self.objs[o as usize].elems as usize].remove(0);
                 self.dec(&v);
                 v
             }
@@ -194,7 +194,7 @@ impl Vm {
                     self.insert_elem(o, i as int, *a);
                     i += 1;
                 }
-                Val::Num(self.objs[o as usize].elems.len() as double)
+                Val::Num(self.evecs[self.objs[o as usize].elems as usize].len() as double)
             }
             NF_AP_SLICE => {
                 let o = self.this_array(&this);
@@ -213,7 +213,7 @@ impl Vm {
             }
             NF_AP_SPLICE => {
                 let o = self.this_array(&this);
-                let len = self.objs[o as usize].elems.len() as int;
+                let len = self.evecs[self.objs[o as usize].elems as usize].len() as int;
                 let s = self.rel_index(&a0, len, 0);
                 let del = if args.is_empty() {
                     0
@@ -232,7 +232,7 @@ impl Vm {
                 let mut removed: Vec<Val> = Vec::new();
                 let mut k = 0;
                 while k < del {
-                    let v = self.objs[o as usize].elems.remove(s as usize);
+                    let v = self.evecs[self.objs[o as usize].elems as usize].remove(s as usize);
                     self.dec(&v);
                     removed.push(v);
                     k += 1;
@@ -253,7 +253,7 @@ impl Vm {
                 for a in args.iter() {
                     if let Val::Obj(x) = &a {
                         if self.objs[*x as usize].class == C_ARRAY {
-                            let items = self.objs[*x as usize].elems.clone();
+                            let items = self.evecs[self.objs[*x as usize].elems as usize].clone();
                             for it in items {
                                 out.push(it);
                             }
@@ -287,7 +287,7 @@ impl Vm {
             }
             NF_AP_REVERSE => {
                 let o = self.this_array(&this);
-                self.objs[o as usize].elems.reverse();
+                self.evecs[self.objs[o as usize].elems as usize].reverse();
                 Val::Obj(o)
             }
             NF_AP_TOREVERSED => {
@@ -355,7 +355,7 @@ impl Vm {
                     let present = if id == NF_AP_FIND || id == NF_AP_FINDINDEX || back {
                         true
                     } else if self.objs[o as usize].class == C_ARRAY {
-                        (i as usize) < self.objs[o as usize].elems.len() && !self.is_hole(o, i)
+                        (i as usize) < self.evecs[self.objs[o as usize].elems as usize].len() && !self.is_hole(o, i)
                     } else {
                         let kv = Val::Num(i as double);
                         self.has_property(o, &kv)
@@ -374,7 +374,7 @@ impl Vm {
                         NF_AP_FLATMAP => {
                             if let Val::Obj(x) = &r {
                                 if self.objs[*x as usize].class == C_ARRAY {
-                                    let items = self.objs[*x as usize].elems.clone();
+                                    let items = self.evecs[self.objs[*x as usize].elems as usize].clone();
                                     for it in items {
                                         out.push(it);
                                     }
@@ -496,7 +496,7 @@ impl Vm {
             NF_AP_FILL => {
                 let o = self.this_array(&this);
                 let generic = !self.is_array_obj(o);
-                let len = if generic { self.len_of(&Val::Obj(o)) } else { self.objs[o as usize].elems.len() as int };
+                let len = if generic { self.len_of(&Val::Obj(o)) } else { self.evecs[self.objs[o as usize].elems as usize].len() as int };
                 let s = self.rel_index(&a1, len, 0);
                 let e = self.rel_index(&arg(&args, 2), len, len);
                 let mut i = s;
@@ -1058,7 +1058,7 @@ impl Vm {
             NF_JSON_STRINGIFY => {
                 let mut allow: Vec<String> = Vec::new();
                 if self.class_of(&a1) == C_ARRAY {
-                    let items = self.objs[obj_of(&a1) as usize].elems.clone();
+                    let items = self.evecs[self.objs[obj_of(&a1) as usize].elems as usize].clone();
                     for it in items {
                         let s = self.to_string(&it);
                         allow.push(s);
@@ -1395,9 +1395,9 @@ impl Vm {
                         }
                         let is_set = self.objs[o as usize].class == C_SET;
                         let mut i: usize = 0;
-                        while i < self.objs[o as usize].elems.len() {
+                        while i < self.evecs[self.objs[o as usize].elems as usize].len() {
                             if self.colds[self.objs[o as usize].cold as usize].marks[i] == 0 {
-                                let k = self.objs[o as usize].elems[i].clone();
+                                let k = self.evecs[self.objs[o as usize].elems as usize][i].clone();
                                 let v = if is_set { k.clone() } else { self.colds[self.objs[o as usize].cold as usize].elems2[i].clone() };
                                 self.call_value(a0.clone(), a1.clone(), vec![v, k, this.clone()]);
                                 if self.throwing {

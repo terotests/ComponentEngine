@@ -262,7 +262,7 @@ impl Vm {
         }
         let base = self.frames.len() as int;
         let start = self.stack.len() as int;
-        let saved = self.objs[g as usize].elems.clone();
+        let saved = self.evecs[self.objs[g as usize].elems as usize].clone();
         for x in saved {
             self.stack.push(x);
         }
@@ -474,23 +474,23 @@ impl Vm {
                 return;
             }
             if !resuming {
-                if self.objs[q as usize].elems.is_empty() {
+                if self.evecs[self.objs[q as usize].elems as usize].is_empty() {
                     return;
                 }
-                let req = obj_of(&self.objs[q as usize].elems[0].clone());
-                mode = num_of(&self.objs[req as usize].elems[0].clone());
-                v = self.objs[req as usize].elems[1].clone();
+                let req = obj_of(&self.evecs[self.objs[q as usize].elems as usize][0].clone());
+                mode = num_of(&self.evecs[self.objs[req as usize].elems as usize][0].clone());
+                v = self.evecs[self.objs[req as usize].elems as usize][1].clone();
             }
             resuming = false;
             self.temp_roots.push(Val::Obj(g));
             let r = self.gen_resume(g, mode, v.clone());
             self.temp_roots.pop();
             let q2 = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
-            if q2 < 0 || self.objs[q2 as usize].elems.is_empty() {
+            if q2 < 0 || self.evecs[self.objs[q2 as usize].elems as usize].is_empty() {
                 return;
             }
-            let req = obj_of(&self.objs[q2 as usize].elems[0].clone());
-            let p = obj_of(&self.objs[req as usize].elems[2].clone());
+            let req = obj_of(&self.evecs[self.objs[q2 as usize].elems as usize][0].clone());
+            let p = obj_of(&self.evecs[self.objs[req as usize].elems as usize][2].clone());
             if self.throwing {
                 self.throwing = false;
                 let e = self.exc.clone();
@@ -561,7 +561,7 @@ impl Vm {
             let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             self.push_elem(q, Val::Obj(req));
             let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !truthy(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
-            if idle && self.objs[q as usize].elems.len() == 1 {
+            if idle && self.evecs[self.objs[q as usize].elems as usize].len() == 1 {
                 self.agen_run(g, GM_NEXT, Val::Undef, false);
             }
             return Val::Obj(p);
