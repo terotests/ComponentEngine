@@ -183,6 +183,21 @@ impl Engine {
             }
             pcomp_error = u.error.clone();
         }
+        if self.vm.pcomp {
+            // TypeScript, JSX or a module: the parser writes it as
+            // JavaScript, which pcomp compiles; the parser and its tree are
+            // gone by then
+            let (js, error) = parser::script_js(src, self.syntax.clone(), pcomp_error.as_str());
+            if !error.is_empty() {
+                self.error = error;
+                return unit::Unit::new();
+            }
+            let u = pcomp::compile_unit(js.as_str());
+            if !u.error.is_empty() {
+                self.error = u.error.clone();
+            }
+            return u;
+        }
         let mut p = parser::Parser::with_syntax(src, self.syntax.clone());
         let root = p.parse_program();
         if p.error.is_empty() && !pcomp_error.is_empty() && !p.beyond_js {

@@ -138,6 +138,15 @@ pub fn is_reserved(w: &str) -> bool {
         || w == "enum"
 }
 
+/// CEr's parser reads only JavaScript: there is no text to write back for
+/// pcomp (CErXes's parser writes TypeScript, JSX and modules as JavaScript).
+pub const WRITES_JS: bool = false;
+
+/// Not used in CEr (`WRITES_JS`).
+pub fn eval_js(_code: &str, js_error: &str) -> (String, String) {
+    (String::new(), String::from(js_error))
+}
+
 impl Parser {
     pub fn new(src: &str) -> Parser {
         let mut lx = Lexer::new(src);

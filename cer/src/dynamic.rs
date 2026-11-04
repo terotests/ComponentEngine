@@ -98,6 +98,26 @@ impl Vm {
             }
             pcomp_error = error;
         }
+        if self.pcomp && parser::WRITES_JS {
+            // TypeScript, JSX or a module: as JavaScript, for pcomp
+            let (js, err) = parser::eval_js(code.as_str(), pcomp_error.as_str());
+            if !err.is_empty() {
+                let msg = err.replace("SyntaxError: ", "");
+                self.throw_syntax(msg.as_str());
+                return Val::Undef;
+            }
+            let (entry, error) = self.pcomp_program(js.as_str(), strict, is_eval);
+            if entry < 0 {
+                let msg = error.replace("SyntaxError: ", "");
+                self.throw_syntax(msg.as_str());
+                return Val::Undef;
+            }
+            let fp = self.function_proto;
+            let f = self.alloc(C_FUNCTION, fp);
+            self.objs[f as usize].func = entry as i32;
+            let g = Val::Obj(self.global);
+            return self.call_value(Val::Obj(f), g, Vec::new());
+        }
         let mut p = parser::Parser::new(code.as_str());
         let root = p.parse_program();
         if p.error.is_empty() && !pcomp_error.is_empty() && !p.beyond_js {

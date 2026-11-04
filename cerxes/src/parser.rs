@@ -196,6 +196,39 @@ pub fn is_reserved(w: &str) -> bool {
         || w == "enum"
 }
 
+/// What the parser read (TypeScript, JSX, a module) is written back as
+/// JavaScript (emit.rs) for pcomp to compile: no tree is compiled.
+pub const WRITES_JS: bool = true;
+
+/// `src` read as `syntax` and written as JavaScript, on the source's lines,
+/// or the syntax error. `js_error` is pcomp's error for the same text read
+/// as JavaScript: it stands when the text uses nothing beyond JavaScript.
+pub fn script_js(src: &str, syntax: Syntax, js_error: &str) -> (String, String) {
+    let p = Parser::with_syntax(src, syntax);
+    parsed_js(p, js_error)
+}
+
+/// What the parser `p` reads (`Parser::new` reads a module's text as the
+/// module) as JavaScript, or the syntax error (`script_js`).
+pub fn parsed_js(p0: Parser, js_error: &str) -> (String, String) {
+    let mut p = p0;
+    let root = p.parse_program();
+    if p.error.is_empty() && !js_error.is_empty() && !p.beyond_js {
+        return (String::new(), String::from(js_error));
+    }
+    if !p.error.is_empty() {
+        return (String::new(), p.error.clone());
+    }
+    let mut e = crate::emit::Emitter::new(p.ast);
+    e.program(root);
+    (e.out, String::new())
+}
+
+/// `code` as `eval` reads it (TSX, or a module's text), as JavaScript.
+pub fn eval_js(code: &str, js_error: &str) -> (String, String) {
+    parsed_js(Parser::new(code), js_error)
+}
+
 impl Parser {
     /// A script read as TSX; a text that starts with `module::HEADER` (what
     /// the module registry hands `eval`) is read as that module.
