@@ -120,7 +120,7 @@ impl Vm {
         }
         let fp = self.function_proto;
         let f = self.alloc(C_FUNCTION, fp);
-        self.objs[f as usize].func = entry;
+        self.objs[f as usize].func = entry as i32;
         let g = Val::Obj(self.global);
         self.call_value(Val::Obj(f), g, Vec::new())
     }
@@ -149,7 +149,7 @@ impl Vm {
         }
         let fp = self.function_proto;
         let f = self.alloc(C_FUNCTION, fp);
-        self.objs[f as usize].func = entry;
+        self.objs[f as usize].func = entry as i32;
         let g = Val::Obj(self.global);
         self.call_value(Val::Obj(f), g, Vec::new())
     }
@@ -223,9 +223,9 @@ impl Vm {
                     self.throw_type("Cyclic __proto__ value");
                     return Val::Undef;
                 }
-                c = self.objs[c as usize].proto;
+                c = self.objs[c as usize].proto as int;
             }
-            if !self.objs[o as usize].extensible && self.objs[o as usize].proto != p {
+            if !self.objs[o as usize].extensible && self.objs[o as usize].proto != p as i32 {
                 self.throw_type("#<Object> is not extensible");
                 return Val::Undef;
             }
@@ -252,14 +252,14 @@ impl Vm {
                 return Val::Undef;
             }
             let n = obj_of(&fresh);
-            let func = self.objs[n as usize].func;
+            let func = self.objs[n as usize].func as int;
             let prim = self.colds[self.objs[n as usize].cold as usize].prim.clone();
-            let pos = self.objs[n as usize].pos;
+            let pos = self.objs[n as usize].pos as int;
             let keys = self.keys_of(n);
             let vals = self.objs[n as usize].vals.clone();
-            self.objs[o as usize].func = func;
+            self.objs[o as usize].func = func as i32;
             self.put_prim(o, prim);
-            self.objs[o as usize].pos = pos;
+            self.objs[o as usize].pos = pos as i32;
             let mut i: usize = 0;
             while i < keys.len() {
                 let slot = self.find(o, keys[i]);
@@ -328,7 +328,7 @@ impl Vm {
         // a subclass's instance
         let fo = obj_of(&f);
         if fo >= 0 && is_obj(&new_target) {
-            let dflt = self.objs[fo as usize].proto;
+            let dflt = self.objs[fo as usize].proto as int;
             let p = self.proto_from(&new_target, dflt);
             self.put_proto(fo, p);
         }

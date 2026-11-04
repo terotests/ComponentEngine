@@ -173,11 +173,11 @@ impl Vm {
             }
         }
         let g = self.alloc(C_GENERATOR, if is_async { -1 } else { proto });
-        self.objs[g as usize].func = pi;
+        self.objs[g as usize].func = pi as i32;
         self.frames[fi].gen = g;
         self.frames[fi].pc = pc;
         self.gen_save(g);
-        self.objs[g as usize].pos = GS_START;
+        self.objs[g as usize].pos = GS_START as i32;
         if async_gen {
             let q = self.new_array(Vec::new());
             self.put_elem2(g, (G_PROMISE) as int, Val::Obj(q));
@@ -245,7 +245,7 @@ impl Vm {
     /// the yielded or returned value; `gen_done` tells which. An exception
     /// out of the coroutine is left thrown.
     pub fn gen_resume(&mut self, g: int, mode: int, v: Val) -> Val {
-        let state = self.objs[g as usize].pos;
+        let state = self.objs[g as usize].pos as int;
         self.gen_done = true;
         self.gen_raw = false;
         if state == GS_RUNNING {
@@ -268,10 +268,10 @@ impl Vm {
         }
         let rest = self.colds[self.objs[g as usize].cold as usize].elems2.clone();
         let args_obj = obj_of(&rest[G_ARGS]);
-        let gp = self.objs[g as usize].func;
+        let gp = self.objs[g as usize].func as int;
         unpack_code(&mut self.protos[gp as usize]);
         self.frames.push(Frame {
-            proto: self.objs[g as usize].func,
+            proto: self.objs[g as usize].func as int,
             fobj: obj_of(&rest[G_FOBJ]),
             pc: num_of(&rest[G_PC]),
             bp: start + 2,
@@ -296,7 +296,7 @@ impl Vm {
             i += 3;
         }
         self.put_elems(g, Vec::new());
-        self.objs[g as usize].pos = GS_RUNNING;
+        self.objs[g as usize].pos = GS_RUNNING as i32;
         if state == GS_YIELD {
             self.stack.push(v);
             self.stack.push(Val::Num(mode as double));
@@ -314,7 +314,7 @@ impl Vm {
         }
         let r = self.stack.pop().unwrap();
         if yielded {
-            self.objs[g as usize].pos = GS_YIELD;
+            self.objs[g as usize].pos = GS_YIELD as i32;
             self.gen_done = false;
         } else {
             self.gen_finish(g);
@@ -325,7 +325,7 @@ impl Vm {
     }
 
     fn gen_finish(&mut self, g: int) {
-        self.objs[g as usize].pos = GS_DONE;
+        self.objs[g as usize].pos = GS_DONE as i32;
         self.put_elems(g, Vec::new());
         let n = self.colds[self.objs[g as usize].cold as usize].elems2.len();
         if n > G_HANDLERS {
@@ -526,7 +526,7 @@ impl Vm {
     pub fn call_native_co(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         if id == NF_AGEN_AWAIT_OK || id == NF_AGEN_AWAIT_ERR {
-            let g = self.objs[fobj as usize].env;
+            let g = self.objs[fobj as usize].env as int;
             self.put_elem2(g, (G_AWAIT) as int, Val::Bool(false));
             self.agen_run(g, if id == NF_AGEN_AWAIT_OK { GM_NEXT } else { GM_THROW }, a0, true);
             return Val::Undef;
@@ -560,14 +560,14 @@ impl Vm {
             let req = self.new_array(vec![Val::Num(mode as double), a0, Val::Obj(p)]);
             let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             self.push_elem(q, Val::Obj(req));
-            let idle = self.objs[g as usize].pos != GS_RUNNING && !truthy(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
+            let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !truthy(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
             if idle && self.objs[q as usize].elems.len() == 1 {
                 self.agen_run(g, GM_NEXT, Val::Undef, false);
             }
             return Val::Obj(p);
         }
         if id == NF_ASYNC_OK || id == NF_ASYNC_ERR {
-            let g = self.objs[fobj as usize].env;
+            let g = self.objs[fobj as usize].env as int;
             self.async_step(g, if id == NF_ASYNC_OK { GM_NEXT } else { GM_THROW }, a0);
             return Val::Undef;
         }

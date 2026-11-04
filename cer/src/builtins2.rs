@@ -845,7 +845,7 @@ impl Vm {
                     return Val::Undef;
                 }
                 let ro = obj_of(&re);
-                let idx = self.objs[ro as usize].func;
+                let idx = self.objs[ro as usize].func as int;
                 let global = self.regexes[idx as usize].global;
                 if id == NF_SP_SEARCH {
                     let units = jsstr::units(s.as_str());
@@ -1307,7 +1307,7 @@ impl Vm {
                         return Val::Undef;
                     }
                     let ao = obj_of(&adder);
-                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET || self.objs[ao as usize].func == NF_SETP_ADD);
+                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET as i32 || self.objs[ao as usize].func == NF_SETP_ADD as i32);
                     let plain = self.class_of(&a0) == C_ARRAY && obj_of(&self.get(&a0, A_ITERATOR)) == self.array_values_fn;
                     if !native_adder || !plain {
                         self.temp_roots.push(Val::Obj(m));
@@ -1438,7 +1438,7 @@ impl Vm {
                 Val::Obj(p)
             }
             NF_PR_RESOLVE_FN | NF_PR_REJECT_FN => {
-                let p = self.objs[fobj as usize].env;
+                let p = self.objs[fobj as usize].env as int;
                 let cell = self.colds[self.objs[fobj as usize].cold as usize].home;
                 if cell >= 0 {
                     if self.objs[cell as usize].pos != 0 {
@@ -1481,7 +1481,7 @@ impl Vm {
                 for it in items.iter() {
                     if self.class_of(it) == C_PROMISE {
                         let o = obj_of(it);
-                        let st = self.objs[o as usize].pos;
+                        let st = self.objs[o as usize].pos as int;
                         if st == 1 {
                             values.push(self.colds[self.objs[o as usize].cold as usize].prim.clone());
                         } else if st == 2 {

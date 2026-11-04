@@ -26,34 +26,34 @@ pub enum Val {
 }
 
 // object classes
-pub const C_OBJECT: int = 0;
-pub const C_ARRAY: int = 1;
-pub const C_FUNCTION: int = 2;
-pub const C_NATIVE: int = 3;
-pub const C_ENV: int = 4;
-pub const C_ERROR: int = 5;
-pub const C_REGEXP: int = 6;
-pub const C_DATE: int = 7;
-pub const C_BOUND: int = 8;
-pub const C_ARGUMENTS: int = 9;
-pub const C_BOOLEAN: int = 10;
-pub const C_NUMBER: int = 11;
-pub const C_STRING: int = 12;
-pub const C_ACCESSOR: int = 13;
-pub const C_ITER: int = 14;
-pub const C_MAP: int = 15;
-pub const C_SET: int = 16;
-pub const C_SYMBOL: int = 17;
-pub const C_PROMISE: int = 18;
+pub const C_OBJECT: i32 = 0;
+pub const C_ARRAY: i32 = 1;
+pub const C_FUNCTION: i32 = 2;
+pub const C_NATIVE: i32 = 3;
+pub const C_ENV: i32 = 4;
+pub const C_ERROR: i32 = 5;
+pub const C_REGEXP: i32 = 6;
+pub const C_DATE: i32 = 7;
+pub const C_BOUND: i32 = 8;
+pub const C_ARGUMENTS: i32 = 9;
+pub const C_BOOLEAN: i32 = 10;
+pub const C_NUMBER: i32 = 11;
+pub const C_STRING: i32 = 12;
+pub const C_ACCESSOR: i32 = 13;
+pub const C_ITER: i32 = 14;
+pub const C_MAP: i32 = 15;
+pub const C_SET: i32 = 16;
+pub const C_SYMBOL: i32 = 17;
+pub const C_PROMISE: i32 = 18;
 /// a generator object, or the coroutine of an async call
-pub const C_GENERATOR: int = 19;
+pub const C_GENERATOR: i32 = 19;
 /// an ArrayBuffer (bytes in elems) and a typed array over one (typed.rs)
-pub const C_ARRAYBUFFER: int = 20;
-pub const C_TYPED: int = 21;
+pub const C_ARRAYBUFFER: i32 = 20;
+pub const C_TYPED: i32 = 21;
 /// a Proxy (proxy.rs)
-pub const C_PROXY: int = 22;
+pub const C_PROXY: i32 = 22;
 /// a BigInt primitive (bigint.rs): its decimal text in prim, interned
-pub const C_BIGINT: int = 23;
+pub const C_BIGINT: i32 = 23;
 
 // property attributes
 pub const P_HIDDEN: int = 1;
@@ -101,27 +101,27 @@ impl Cold {
 }
 
 pub struct JsObj {
-    pub class: int,
+    pub class: i32,
     /// the prototype, -1 for none; for a scope, the enclosing scope
-    pub proto: int,
+    pub proto: i32,
     /// the shape (`Vm.shapes`): property keys (atoms) in insertion order
     /// and their attributes; `vals` holds the values, slot by slot
-    pub shape: int,
+    pub shape: i32,
     pub vals: Vec<Val>,
     /// the object's Cold (`Vm.colds`), 0 for none
-    pub cold: int,
+    pub cold: i32,
     /// array elements, scope slots, a bound function's arguments, an
     /// accessor's getter and setter, a map's keys
     pub elems: Vec<Val>,
     /// the compiled function (index into `Vm.protos`) or the native id
-    pub func: int,
+    pub func: i32,
     /// a closure's scope; a bound function's target; an iterator's source
-    pub env: int,
+    pub env: i32,
     /// an iterator's position; a regexp's flags as bits
-    pub pos: int,
+    pub pos: i32,
     /// references to the object from other objects (the heap): stack slots
     /// and the machine's roots are not counted (Vm::reclaim)
-    pub rc: int,
+    pub rc: i32,
     /// in `Vm.zct`, the objects whose count is 0
     pub zct: bool,
     pub extensible: bool,
@@ -132,7 +132,7 @@ pub struct JsObj {
 }
 
 impl JsObj {
-    pub fn new(class: int, proto: int) -> JsObj {
+    pub fn new(class: i32, proto: i32) -> JsObj {
         JsObj {
             class: class,
             proto: proto,

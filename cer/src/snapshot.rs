@@ -207,11 +207,11 @@ pub fn snapshot(vm: &Vm) -> String {
             put_num(&mut b, -1);
             continue;
         }
-        put_num(&mut b, o.class);
-        put_num(&mut b, o.proto);
-        put_ints(&mut b, &vm.shape_keys(o.shape));
+        put_num(&mut b, o.class as int);
+        put_num(&mut b, o.proto as int);
+        put_ints(&mut b, &vm.shape_keys(o.shape as int));
         put_vals(&mut b, &mut st, vm, &o.vals);
-        put_ints(&mut b, &vm.shape_attrs(o.shape));
+        put_ints(&mut b, &vm.shape_attrs(o.shape as int));
         put_vals(&mut b, &mut st, vm, &o.elems);
         let cold = &vm.colds[o.cold as usize];
         put_vals(&mut b, &mut st, vm, &cold.elems2);
@@ -219,11 +219,11 @@ pub fn snapshot(vm: &Vm) -> String {
         for x in cold.nums.iter() {
             put_number(&mut b, *x);
         }
-        put_num(&mut b, o.func);
-        put_num(&mut b, o.env);
+        put_num(&mut b, o.func as int);
+        put_num(&mut b, o.env as int);
         put_val(&mut b, &mut st, vm, &cold.prim);
         put_num(&mut b, cold.home);
-        put_num(&mut b, o.pos);
+        put_num(&mut b, o.pos as int);
         put_num(&mut b, (if o.extensible { 1 } else { 0 }) + (if o.has_proto_obj { 2 } else { 0 }));
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
@@ -435,7 +435,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             continue;
         }
         let proto = r.num();
-        let mut o = JsObj::new(class, proto);
+        let mut o = JsObj::new(class as i32, proto as i32);
         let keys = get_ints(&mut r);
         let vals = get_vals(&mut r, &strs);
         let attrs = get_ints(&mut r);
@@ -454,18 +454,18 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             });
             k += 1;
         }
-        o.func = r.num();
-        o.env = r.num();
+        o.func = r.num() as i32;
+        o.env = r.num() as i32;
         cold.prim = get_val(&mut r, &strs);
         cold.home = r.num();
         if !matches!(cold.prim, Val::Undef) || cold.home != -1 {
             has_cold = true;
         }
-        o.pos = r.num();
+        o.pos = r.num() as i32;
         let bits = r.num();
         o.extensible = bits % 2 == 1;
         o.has_proto_obj = (bits / 2) % 2 == 1;
-        if class == C_MAP || class == C_SET {
+        if class == C_MAP as int || class == C_SET as int {
             let ni = r.num();
             let mut j: int = 0;
             while j < ni && !r.bad {
@@ -478,7 +478,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             has_cold = true;
         }
         if has_cold {
-            o.cold = vm.colds.len() as int;
+            o.cold = (vm.colds.len() as int) as i32;
             vm.colds.push(cold);
         }
         if keys.len() != vals.len() || keys.len() != attrs.len() {
@@ -628,13 +628,13 @@ fn valid_heap(vm: &Vm) -> bool {
         if o.free {
             continue;
         }
-        if o.proto < -1 || o.proto >= no || o.env < -1 || o.env >= no || vm.colds[o.cold as usize].home < -1 || vm.colds[o.cold as usize].home >= no || !in_objs(&vm.colds[o.cold as usize].prim, no) {
+        if o.proto < -1 || o.proto >= no as i32 || o.env < -1 || o.env >= no as i32 || vm.colds[o.cold as usize].home < -1 || vm.colds[o.cold as usize].home >= no || !in_objs(&vm.colds[o.cold as usize].prim, no) {
             return false;
         }
-        if o.class == C_FUNCTION && (o.func < 0 || o.func >= np) {
+        if o.class == C_FUNCTION && (o.func < 0 || o.func >= np as i32) {
             return false;
         }
-        for k in vm.shape_keys(o.shape).iter() {
+        for k in vm.shape_keys(o.shape as int).iter() {
             if *k < 0 || *k >= na {
                 return false;
             }

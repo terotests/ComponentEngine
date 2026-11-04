@@ -378,7 +378,7 @@ impl Vm {
                         } else if let Val::Obj(x) = &self.frames[fi].this_val {
                             o = *x;
                         }
-                        if o >= 0 && c >= 65536 && (c >> 16) == self.objs[o as usize].shape {
+                        if o >= 0 && c >= 65536 && (c >> 16) == self.objs[o as usize].shape as int {
                             // the cache's shape: the slot without a call
                             let r = self.objs[o as usize].vals[(c & 65535) as usize].clone();
                             self.stack[(bp + w1) as usize] = r;
@@ -391,7 +391,7 @@ impl Vm {
                     }
                     R_SET_PROP => {
                         let o = obj_of(self.rget(bp, w1));
-                        if o >= 0 && w3 >= 65536 && (w3 >> 16) == self.objs[o as usize].shape && ((w0 >> 8) & 255) == 0 {
+                        if o >= 0 && w3 >= 65536 && (w3 >> 16) == self.objs[o as usize].shape as int && ((w0 >> 8) & 255) == 0 {
                             let val = self.rget(bp, w2).clone();
                             self.put_slot(o, w3 & 65535, val);
                             pc = next;
@@ -619,15 +619,15 @@ impl Vm {
                         let v = self.rget(bp, w2).clone();
                         let o = obj_of(self.rget(bp, w1));
                         // c caches the transition: shape before * 2^24 + after
-                        let sh = self.objs[o as usize].shape;
+                        let sh = self.objs[o as usize].shape as int;
                         let c = self.protos[pi].code[pc as usize].c;
                         if c >= 0 && (c >> 24) == sh {
-                            self.objs[o as usize].shape = c & 16777215;
+                            self.objs[o as usize].shape = (c & 16777215) as i32;
                             self.push_val(o, v);
                         } else {
                             self.frames[fi].pc = pc + 1;
                             self.define(o, w3, v, 0);
-                            let sh2 = self.objs[o as usize].shape;
+                            let sh2 = self.objs[o as usize].shape as int;
                             if sh2 != sh && sh2 < 16777216 && !self.shapes[sh as usize].owned && !self.shapes[sh2 as usize].owned {
                                 self.protos[pi].code[pc as usize].c = sh * 16777216 + sh2;
                             }
@@ -844,7 +844,7 @@ impl Vm {
         while e0 >= 0 && w < PIC_WAYS {
             let b = ((e0 + w) * PIC_W) as usize;
             w += 1;
-            if self.pic[b + 1] != self.shape_epoch || self.objs[o as usize].shape != self.pic[b] {
+            if self.pic[b + 1] != self.shape_epoch || self.objs[o as usize].shape != self.pic[b] as i32 {
                 continue;
             }
             let depth = self.pic[b + 2] as usize;
@@ -853,7 +853,7 @@ impl Vm {
             let mut ok = true;
             while k < depth {
                 let pk = self.pic[b + 5 + 2 * k];
-                if self.objs[cur as usize].proto != pk || self.objs[pk as usize].shape != self.pic[b + 6 + 2 * k] {
+                if self.objs[cur as usize].proto != pk as i32 || self.objs[pk as usize].shape != self.pic[b + 6 + 2 * k] as i32 {
                     ok = false;
                     break;
                 }
@@ -880,7 +880,7 @@ impl Vm {
         let mut cur = o;
         let mut slot: int = -1;
         loop {
-            let nx = self.objs[cur as usize].proto;
+            let nx = self.objs[cur as usize].proto as int;
             if nx < 0 {
                 break;
             }
@@ -919,7 +919,7 @@ impl Vm {
         let turn = self.pic[ti];
         self.pic[ti] = (turn + 1) % PIC_WAYS;
         let b = ((base + turn) * PIC_W) as usize;
-        self.pic[b] = self.objs[o as usize].shape;
+        self.pic[b] = self.objs[o as usize].shape as int;
         self.pic[b + 1] = self.shape_epoch;
         self.pic[b + 2] = chain.len() as int;
         self.pic[b + 3] = slot;
@@ -928,7 +928,7 @@ impl Vm {
         while k < chain.len() {
             let x = chain[k];
             self.pic[b + 5 + 2 * k] = x;
-            self.pic[b + 6 + 2 * k] = self.objs[x as usize].shape;
+            self.pic[b + 6 + 2 * k] = self.objs[x as usize].shape as int;
             k += 1;
         }
         self.pic_way = b as int;
@@ -956,7 +956,7 @@ impl Vm {
         let val = self.rget(bp, w2).clone();
         let mut done = false;
         if o >= 0 {
-            let slot = if w3 >= 65536 && (w3 >> 16) == self.objs[o as usize].shape {
+            let slot = if w3 >= 65536 && (w3 >> 16) == self.objs[o as usize].shape as int {
                 w3 & 65535
             } else {
                 let atom = self.ratom(pi, pc);
@@ -1175,7 +1175,7 @@ impl Vm {
                 this_val = Val::Obj(bo);
             }
         }
-        let mut env = self.objs[fo as usize].env;
+        let mut env = self.objs[fo as usize].env as int;
         if env_size > 0 {
             let e = self.alloc(C_ENV, env);
             let mut k = 0;

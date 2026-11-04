@@ -347,7 +347,7 @@ impl Vm {
     }
 
     pub fn ta_length(&self, o: int) -> int {
-        let b = self.objs[o as usize].env;
+        let b = self.objs[o as usize].env as int;
         if b < 0 || (self.objs[b as usize].pos & 1) != 0 {
             return 0;
         }
@@ -457,51 +457,51 @@ impl Vm {
         if i < 0 || i >= self.ta_length(o) {
             return Val::Undef;
         }
-        let kind = self.objs[o as usize].pos;
+        let kind = self.objs[o as usize].pos as int;
         let size = kind_size(kind);
-        let at = self.objs[o as usize].func + i * size;
-        let b = self.objs[o as usize].env;
+        let at = self.objs[o as usize].func + (i * size) as i32;
+        let b = self.objs[o as usize].env as int;
         let mode = self.colds[self.objs[b as usize].cold as usize].home;
         if mode == kind {
-            return Val::Num(self.colds[self.objs[b as usize].cold as usize].nums[(at / size) as usize]);
+            return Val::Num(self.colds[self.objs[b as usize].cold as usize].nums[(at / size as i32) as usize]);
         }
         if mode < 0 && kind == TK_UINT8 {
             return Val::Num(self.colds[self.objs[b as usize].cold as usize].nums[at as usize]);
         }
         if kind >= TK_BIGINT64 {
-            return self.buf_read_big(b, at, kind, true);
+            return self.buf_read_big(b, at as int, kind, true);
         }
-        Val::Num(self.buf_read(b, at, kind, true))
+        Val::Num(self.buf_read(b, at as int, kind, true))
     }
 
     /// `ta[i] = v`: the value is converted even when `i` is outside.
     pub fn ta_set(&mut self, o: int, i: int, v: &Val) {
-        if self.objs[o as usize].pos >= TK_BIGINT64 {
+        if self.objs[o as usize].pos >= TK_BIGINT64 as i32 {
             let big = self.to_bigint(v);
             if self.throwing || i < 0 || i >= self.ta_length(o) {
                 return;
             }
-            let at = self.objs[o as usize].func + i * 8;
-            let b = self.objs[o as usize].env;
-            self.buf_write_big(b, at, &big, true);
+            let at = self.objs[o as usize].func + (i * 8) as i32;
+            let b = self.objs[o as usize].env as int;
+            self.buf_write_big(b, at as int, &big, true);
             return;
         }
         let x = self.to_number(v);
         if self.throwing || i < 0 || i >= self.ta_length(o) {
             return;
         }
-        let kind = self.objs[o as usize].pos;
+        let kind = self.objs[o as usize].pos as int;
         let size = kind_size(kind);
-        let at = self.objs[o as usize].func + i * size;
-        let b = self.objs[o as usize].env;
+        let at = self.objs[o as usize].func + (i * size) as i32;
+        let b = self.objs[o as usize].env as int;
         let mode = self.colds[self.objs[b as usize].cold as usize].home;
         if mode == kind || (mode < 0 && kind == TK_UINT8) {
             let cid = self.cold_id(b) as usize;
             self.colds[cid].home = kind;
-            { let c = self.cold_id(b) as usize; self.colds[c].nums[(at / size) as usize] = element_value(kind, x); }
+            { let c = self.cold_id(b) as usize; self.colds[c].nums[(at / size as i32) as usize] = element_value(kind, x); }
             return;
         }
-        self.buf_write(b, at, kind, x, true);
+        self.buf_write(b, at as int, kind, x, true);
     }
 
     fn buffer_of(&mut self, v: &Val) -> int {
@@ -561,7 +561,7 @@ impl Vm {
             if b < 0 || self.objs[b as usize].class != C_ARRAYBUFFER {
                 return Val::Num(-1.0);
             }
-            let pos = self.objs[b as usize].pos;
+            let pos = self.objs[b as usize].pos as int;
             if (pos & 1) != 0 {
                 return Val::Num(-2.0);
             }
@@ -695,9 +695,9 @@ impl Vm {
                 self.colds[cid].home = kind;
             }
             let t = self.alloc(C_TYPED, proto);
-            self.objs[t as usize].pos = kind;
+            self.objs[t as usize].pos = kind as i32;
             self.put_env(t, b);
-            self.objs[t as usize].func = num(&a[2]) as int;
+            self.objs[t as usize].func = (num(&a[2]) as int) as i32;
             self.put_prim(t, Val::Num(num(&a[3])));
             return Val::Obj(t);
         }
@@ -708,7 +708,7 @@ impl Vm {
                 return Val::Undef;
             }
             let kind = Val::Num(self.objs[t as usize].pos as double);
-            let buf = obj_val_of(self.objs[t as usize].env);
+            let buf = obj_val_of(self.objs[t as usize].env as int);
             let off = Val::Num(self.objs[t as usize].func as double);
             let len = Val::Num(self.ta_length(t) as double);
             let arr = self.new_array(vec![kind, buf, off, len]);

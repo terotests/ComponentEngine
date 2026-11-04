@@ -672,7 +672,7 @@ impl Vm {
     /// property.
     #[inline(always)]
     pub fn ic_slot(&self, o: int, atom: int, c: int, plain: bool) -> int {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if c >= 65536 {
             return if (c >> 16) == sh { c & 65535 } else { -1 };
         }
@@ -691,7 +691,7 @@ impl Vm {
     /// The inline cache for slot `slot` of `o`.
     #[inline]
     pub fn ic_of(&self, o: int, slot: int) -> int {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned || slot >= 65536 {
             return slot;
         }
@@ -741,7 +741,7 @@ impl Vm {
     /// The slot of own property `atom` of `o`, -1 when absent.
     #[inline(always)]
     pub fn find(&self, o: int, atom: int) -> int {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         self.shapes[self.holder(sh)].find(atom, self.shapes[sh as usize].nkeys)
     }
 
@@ -752,17 +752,17 @@ impl Vm {
 
     #[inline]
     pub fn key_at(&self, o: int, slot: int) -> int {
-        self.shapes[self.holder(self.objs[o as usize].shape)].keys[slot as usize]
+        self.shapes[self.holder(self.objs[o as usize].shape as int)].keys[slot as usize]
     }
 
     #[inline]
     pub fn attr_at(&self, o: int, slot: int) -> int {
-        self.shapes[self.holder(self.objs[o as usize].shape)].attrs[slot as usize]
+        self.shapes[self.holder(self.objs[o as usize].shape as int)].attrs[slot as usize]
     }
 
     /// The own keys of `o` in order.
     pub fn keys_of(&self, o: int) -> Vec<int> {
-        self.shape_keys(self.objs[o as usize].shape)
+        self.shape_keys(self.objs[o as usize].shape as int)
     }
 
     /// Shape `sh`'s keys in order.
@@ -793,7 +793,7 @@ impl Vm {
 
     /// Adds own property `atom` (absent) to `o`; its slot.
     pub fn add_own(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
             self.shape_epoch += 1;
             self.push_val(o, v);
@@ -824,7 +824,7 @@ impl Vm {
                 // a dictionary
                 self.own_shape(o);
                 self.shape_epoch += 1;
-                let sh2 = self.objs[o as usize].shape;
+                let sh2 = self.objs[o as usize].shape as int;
                 self.push_val(o, v);
                 self.shapes[sh2 as usize].nkeys += 1;
                 return self.shapes[sh2 as usize].push(atom, attr);
@@ -854,14 +854,14 @@ impl Vm {
                 s.t_map.insert(atom * 16 + attr, next);
             }
         }
-        self.objs[o as usize].shape = next;
+        self.objs[o as usize].shape = next as i32;
         self.push_val(o, v);
         slot
     }
 
     /// Gives `o` an owned copy of its shape, to change in place.
     pub fn own_shape(&mut self, o: int) {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
             return;
         }
@@ -881,7 +881,7 @@ impl Vm {
             self.shape_epoch += 1;
             i
         };
-        self.objs[o as usize].shape = id;
+        self.objs[o as usize].shape = id as i32;
     }
 
     pub fn set_attr(&mut self, o: int, slot: int, attr: int) {
@@ -890,21 +890,21 @@ impl Vm {
         }
         self.own_shape(o);
         self.shape_epoch += 1;
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         self.shapes[sh as usize].attrs[slot as usize] = attr;
     }
 
     pub fn remove_own(&mut self, o: int, slot: int) {
         self.own_shape(o);
         self.shape_epoch += 1;
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         self.shapes[sh as usize].remove(slot);
         self.remove_val(o, slot);
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
     pub fn free_shape(&mut self, o: int) {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
             self.shapes[sh as usize] = Shape::new();
             self.free_shapes.push(sh);
@@ -1540,7 +1540,7 @@ impl Vm {
 
     // ---- allocation
 
-    pub fn alloc(&mut self, class: int, proto: int) -> int {
+    pub fn alloc(&mut self, class: i32, proto: int) -> int {
         self.alloc_count += 1;
         self.made += 1;
         self.live += 1;
@@ -1551,13 +1551,13 @@ impl Vm {
             let i = self.free_list.pop().unwrap();
             let o = &mut self.objs[i as usize];
             o.class = class;
-            o.proto = proto;
+            o.proto = proto as i32;
             o.free = false;
             o.marked = false;
             i
         } else {
             grow_objs(&mut self.objs);
-            self.objs.push(JsObj::new(class, proto));
+            self.objs.push(JsObj::new(class, proto as i32));
             (self.objs.len() as int) - 1
         };
         if self.rc_on {
@@ -1667,7 +1667,7 @@ impl Vm {
 
     // ---- conversions
 
-    pub fn class_of(&self, v: &Val) -> int {
+    pub fn class_of(&self, v: &Val) -> i32 {
         match v {
             Val::Obj(o) => self.objs[*o as usize].class,
             _ => -1,
@@ -2005,7 +2005,7 @@ impl Vm {
             }
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_SYMBOL {
-                    return (-1, self.objs[*o as usize].pos);
+                    return (-1, self.objs[*o as usize].pos as int);
                 }
                 let p = self.to_primitive(k, "string");
                 if self.throwing {
@@ -2038,7 +2038,7 @@ impl Vm {
     pub fn function_prototype(&mut self, f: int) -> Val {
         // made on first use; a generator's instances inherit from it and it
         // from %GeneratorPrototype%, with no `constructor`
-        let pi = self.objs[f as usize].func;
+        let pi = self.objs[f as usize].func as int;
         let generator = self.objs[f as usize].class == C_FUNCTION && self.protos[pi as usize].generator;
         let proto = if generator && self.protos[pi as usize].is_async {
             self.async_generator_proto
@@ -2069,7 +2069,7 @@ impl Vm {
     fn function_own(&mut self, f: int, atom: int) -> Val {
         let class = self.objs[f as usize].class;
         if class == C_FUNCTION {
-            let pi = self.objs[f as usize].func;
+            let pi = self.objs[f as usize].func as int;
             if atom == A_LENGTH {
                 return Val::Num(self.protos[pi as usize].length as double);
             }
@@ -2085,13 +2085,13 @@ impl Vm {
             }
         } else if class == C_BOUND {
             if atom == A_NAME {
-                let t = self.objs[f as usize].env;
+                let t = self.objs[f as usize].env as int;
                 let n = self.get_obj(t, A_NAME, &Val::Obj(t));
                 let s = self.to_string(&n);
                 return self.string_val(format!("bound {}", s));
             }
             if atom == A_LENGTH {
-                let t = self.objs[f as usize].env;
+                let t = self.objs[f as usize].env as int;
                 let l = self.get_obj(t, A_LENGTH, &Val::Obj(t));
                 let n = self.to_number(&l) - (self.objs[f as usize].elems.len() as double);
                 return Val::Num(if n < 0.0 { 0.0 } else { n });
@@ -2142,7 +2142,7 @@ impl Vm {
                     }
                 }
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
             hops += 1;
             if hops > 10000 {
                 break;
@@ -2248,19 +2248,19 @@ impl Vm {
 
     /// A proxy up o's prototype chain (a write that misses goes to its trap).
     fn proxy_on_chain(&self, o: int) -> bool {
-        let mut cur = self.objs[o as usize].proto;
+        let mut cur = self.objs[o as usize].proto as int;
         while cur >= 0 {
             if self.objs[cur as usize].class == C_PROXY {
                 return true;
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         false
     }
 
     fn setter_on_chain(&mut self, o: int, atom: int, v: &Val, receiver: &Val) -> bool {
         // true when an accessor or read-only property up the chain took it
-        let mut cur = self.objs[o as usize].proto;
+        let mut cur = self.objs[o as usize].proto as int;
         while cur >= 0 {
             if self.objs[cur as usize].class == C_PROXY {
                 let k = self.key_val(atom);
@@ -2290,7 +2290,7 @@ impl Vm {
                 }
                 return false;
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         false
     }
@@ -2587,7 +2587,7 @@ impl Vm {
                     return true;
                 }
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         false
     }
@@ -2709,7 +2709,7 @@ impl Vm {
             }
         }
         let keys = self.keys_of(o);
-        let attrs = self.shape_attrs(self.objs[o as usize].shape);
+        let attrs = self.shape_attrs(self.objs[o as usize].shape as int);
         let mut ints: Vec<int> = Vec::new();
         let mut others: Vec<int> = Vec::new();
         let mut syms: Vec<int> = Vec::new();
@@ -2798,7 +2798,7 @@ impl Vm {
             }
             let _ = first;
             first = false;
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         out
     }
@@ -2809,7 +2809,7 @@ impl Vm {
         if self.objs[o as usize].class == C_PROXY {
             return false;
         }
-        let mut cur = self.objs[o as usize].proto;
+        let mut cur = self.objs[o as usize].proto as int;
         while cur >= 0 {
             let c = self.objs[cur as usize].class;
             if c == C_PROXY || c == C_STRING || c == C_TYPED {
@@ -2833,7 +2833,7 @@ impl Vm {
                 }
                 k += 1;
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         true
     }
@@ -2855,7 +2855,7 @@ impl Vm {
         }
         let mut target = fo;
         while self.objs[target as usize].class == C_BOUND {
-            target = self.objs[target as usize].env;
+            target = self.objs[target as usize].env as int;
         }
         let o = match v {
             Val::Obj(o) => *o,
@@ -2885,7 +2885,7 @@ impl Vm {
             let p = self.proxy_call(o, PH_GETPROTO, Vec::new());
             return obj_of(&p);
         }
-        self.objs[o as usize].proto
+        self.objs[o as usize].proto as int
     }
 
     // ---- arithmetic helpers
@@ -3058,11 +3058,11 @@ impl Vm {
         }
         let class = self.objs[fo as usize].class;
         if class == C_NATIVE {
-            let id = self.objs[fo as usize].func;
+            let id = self.objs[fo as usize].func as int;
             return self.call_native(id, fo, this, &args, false, Val::Undef);
         }
         if class == C_BOUND {
-            let target = self.objs[fo as usize].env;
+            let target = self.objs[fo as usize].env as int;
             let bthis = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
             let mut all = self.objs[fo as usize].elems.clone();
             for a in args {
@@ -3124,12 +3124,12 @@ impl Vm {
         }
         let class = self.objs[fo as usize].class;
         if class == C_NATIVE {
-            let id = self.objs[fo as usize].func;
+            let id = self.objs[fo as usize].func as int;
             let this = Val::Undef;
             return self.call_native(id, fo, this, &args, true, new_target);
         }
         if class == C_BOUND {
-            let target = self.objs[fo as usize].env;
+            let target = self.objs[fo as usize].env as int;
             let mut all = self.objs[fo as usize].elems.clone();
             for a in args {
                 all.push(a);
@@ -3141,7 +3141,7 @@ impl Vm {
             let arr = self.new_array(args);
             return self.proxy_call(fo, PH_CONSTRUCT, vec![Val::Obj(arr), new_target]);
         }
-        let pi = self.objs[fo as usize].func;
+        let pi = self.objs[fo as usize].func as int;
         if !self.protos[pi as usize].constructible() {
             self.throw_type("value is not a constructor");
             return Val::Undef;
@@ -3183,7 +3183,7 @@ impl Vm {
     /// Sets up a frame for the JS function `fo`; the stack holds
     /// [f, this, args…]. For a constructor call `this` is the new object.
     pub fn enter_function(&mut self, fo: int, argc: int, construct: bool, new_target: Val) -> bool {
-        let pi = self.objs[fo as usize].func;
+        let pi = self.objs[fo as usize].func as int;
         if !construct && !self.protos[pi as usize].uses_args && self.protos[pi as usize].rest < 0 && !self.protos[pi as usize].class_ctor {
             return self.enter_plain(fo, pi, argc);
         }
@@ -3263,7 +3263,7 @@ impl Vm {
                 this_val = Val::Obj(bo);
             }
         }
-        let mut env = self.objs[fo as usize].env;
+        let mut env = self.objs[fo as usize].env as int;
         if env_size > 0 {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
@@ -3325,7 +3325,7 @@ impl Vm {
                 this_val = Val::Obj(bo);
             }
         }
-        let mut env = self.objs[fo as usize].env;
+        let mut env = self.objs[fo as usize].env as int;
         if env_size > 0 {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
@@ -3402,7 +3402,7 @@ impl Vm {
     pub fn ctor_of_frame(&self, fi: usize) -> int {
         let fo = self.frames[fi].fobj;
         if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION && self.colds[self.objs[fo as usize].cold as usize].elems2.len() == 2 {
-            let pi = self.objs[fo as usize].func;
+            let pi = self.objs[fo as usize].func as int;
             if self.protos[pi as usize].arrow {
                 return obj_of(&self.colds[self.objs[fo as usize].cold as usize].elems2[1]);
             }
@@ -3415,7 +3415,7 @@ impl Vm {
         let f = self.alloc(C_FUNCTION, fp);
         let fi = self.frames.len() - 1;
         let env = self.frames[fi].env;
-        self.objs[f as usize].func = pi;
+        self.objs[f as usize].func = pi as i32;
         self.put_env(f, env);
         if self.protos[pi as usize].arrow {
             let t = self.frames[fi].this_val.clone();
@@ -3486,9 +3486,9 @@ impl Vm {
     pub fn iter_next(&mut self, it: &Val) -> Option<Val> {
         let o = obj_of(it);
         if o >= 0 && self.objs[o as usize].class == C_ITER {
-            let src = self.objs[o as usize].env;
-            let i = self.objs[o as usize].func;
-            let kind = self.objs[o as usize].pos;
+            let src = self.objs[o as usize].env as int;
+            let i = self.objs[o as usize].func as int;
+            let kind = self.objs[o as usize].pos as int;
             if src < 0 {
                 return None;
             }
@@ -3497,7 +3497,7 @@ impl Vm {
                 self.put_env(o, -1);
                 return None;
             }
-            self.objs[o as usize].func = i + 1;
+            self.objs[o as usize].func = (i + 1) as i32;
             let v = self.objs[src as usize].elems[i as usize].clone();
             if kind == 1 {
                 return Some(Val::Num(i as double));
@@ -3597,7 +3597,7 @@ impl Vm {
         let mut e = self.frames[fi].env;
         let mut d = depth;
         while d > 0 {
-            e = self.objs[e as usize].proto;
+            e = self.objs[e as usize].proto as int;
             d -= 1;
         }
         e
@@ -4165,7 +4165,7 @@ impl Vm {
         if fo < 0 || self.objs[fo as usize].class != C_FUNCTION || self.find(fo, A_NAME) >= 0 {
             return;
         }
-        let pi = self.objs[fo as usize].func;
+        let pi = self.objs[fo as usize].func as int;
         if !self.protos[pi as usize].name.is_empty() || self.protos[pi as usize].class_ctor {
             return;
         }
@@ -4271,7 +4271,7 @@ impl Vm {
                 return self.enter_function(fo, argc, false, Val::Undef) || true;
             }
             if class == C_NATIVE {
-                let id = self.objs[fo as usize].func;
+                let id = self.objs[fo as usize].func as int;
                 // f.call(this, …) and f.apply(this, args) run in this loop
                 if id == crate::builtins::NF_CALL {
                     // [call, f, this, a…] → [f, this, a…]
@@ -4407,7 +4407,7 @@ impl Vm {
                 return false;
             }
             if class == C_BOUND {
-                let target = self.objs[fo as usize].env;
+                let target = self.objs[fo as usize].env as int;
                 let bthis = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
                 let bargs = self.objs[fo as usize].elems.clone();
                 self.stack[fpos as usize] = Val::Obj(target);
@@ -4462,7 +4462,7 @@ impl Vm {
         }
         let class = self.objs[fo as usize].class;
         if class == C_FUNCTION {
-            let pi = self.objs[fo as usize].func;
+            let pi = self.objs[fo as usize].func as int;
             if !self.protos[pi as usize].constructible() {
                 self.throw_type("value is not a constructor");
                 return false;
@@ -4607,14 +4607,14 @@ impl Vm {
                 let v = self.pop();
                 let o = obj_of(&self.stack[n - 2]);
                 // c caches the transition: shape before * 2^24 + after
-                let sh = self.objs[o as usize].shape;
+                let sh = self.objs[o as usize].shape as int;
                 let c = op.c;
                 if c >= 0 && (c >> 24) == sh {
-                    self.objs[o as usize].shape = c & 16777215;
+                    self.objs[o as usize].shape = (c & 16777215) as i32;
                     self.push_val(o, v);
                 } else {
                     self.define(o, op.a, v, 0);
-                    let sh2 = self.objs[o as usize].shape;
+                    let sh2 = self.objs[o as usize].shape as int;
                     if sh2 != sh && sh2 < 16777216 && !self.shapes[sh as usize].owned && !self.shapes[sh2 as usize].owned {
                         self.protos[pi].code[(pc - 1) as usize].c = sh * 16777216 + sh2;
                     }
@@ -5031,7 +5031,7 @@ impl Vm {
                 // the class whose constructor is running (arrows: the one
                 // they were made in)
                 let fobj = self.ctor_of_frame(fi);
-                let parent = self.objs[fobj as usize].proto;
+                let parent = self.objs[fobj as usize].proto as int;
                 let nt = self.frames[fi].new_target.clone();
                 let this = self.frames[fi].this_val.clone();
                 let pclass = if parent >= 0 { self.objs[parent as usize].class } else { -1 };
@@ -5349,11 +5349,11 @@ impl Vm {
             }
             OP_POP_ENV => {
                 let e = self.frames[fi].env;
-                self.frames[fi].env = self.objs[e as usize].proto;
+                self.frames[fi].env = self.objs[e as usize].proto as int;
             }
             OP_COPY_ENV => {
                 let e = self.frames[fi].env;
-                let parent = self.objs[e as usize].proto;
+                let parent = self.objs[e as usize].proto as int;
                 let n = self.alloc(C_ENV, parent);
                 let mut i = 0;
                 while i < self.objs[e as usize].elems.len() {
@@ -5436,7 +5436,7 @@ impl Vm {
                     self.throw_syntax("'super' keyword unexpected here");
                     return false;
                 }
-                let start = self.objs[home as usize].proto;
+                let start = self.objs[home as usize].proto as int;
                 if start < 0 {
                     self.stack.push(Val::Undef);
                 } else {
@@ -5515,7 +5515,7 @@ impl Vm {
                     let class = self.objs[f as usize].class;
                     let name = self.protos[pi].consts[op.a as usize].clone();
                     if class == C_FUNCTION {
-                        let fp = self.objs[f as usize].func;
+                        let fp = self.objs[f as usize].func as int;
                         if self.protos[fp as usize].name.is_empty() {
                             if let Val::Str(s) = &name {
                                 let s = self.sget(s.clone());
@@ -5778,15 +5778,15 @@ impl Vm {
 
     pub fn put_proto(&mut self, o: int, p: int) {
         self.inc_o(p);
-        let old = self.objs[o as usize].proto;
-        self.objs[o as usize].proto = p;
+        let old = self.objs[o as usize].proto as int;
+        self.objs[o as usize].proto = p as i32;
         self.dec_o(old);
     }
 
     pub fn put_env(&mut self, o: int, e: int) {
         self.inc_o(e);
-        let old = self.objs[o as usize].env;
-        self.objs[o as usize].env = e;
+        let old = self.objs[o as usize].env as int;
+        self.objs[o as usize].env = e as i32;
         self.dec_o(old);
     }
 
@@ -5803,7 +5803,7 @@ impl Vm {
 
     /// `o`'s Cold, made on first use.
     pub fn cold_id(&mut self, o: int) -> int {
-        let c = self.objs[o as usize].cold;
+        let c = self.objs[o as usize].cold as int;
         if c > 0 {
             return c;
         }
@@ -5813,12 +5813,12 @@ impl Vm {
         } else {
             self.free_colds.pop().unwrap()
         };
-        self.objs[o as usize].cold = id;
+        self.objs[o as usize].cold = id as i32;
         id
     }
 
     pub fn free_cold(&mut self, o: int) {
-        let c = self.objs[o as usize].cold;
+        let c = self.objs[o as usize].cold as int;
         if c > 0 {
             self.colds[c as usize] = Cold::new();
             self.free_colds.push(c);
@@ -5973,8 +5973,8 @@ impl Vm {
             };
             let prim = obj_of(&self.colds[self.objs[o as usize].cold as usize].prim);
             // no vector per object: four calls
-            self.trace_ref(proto, count, work);
-            self.trace_ref(env, count, work);
+            self.trace_ref(proto as int, count, work);
+            self.trace_ref(env as int, count, work);
             self.trace_ref(home, count, work);
             self.trace_ref(prim, count, work);
             let nv = self.objs[o as usize].vals.len();
@@ -6032,7 +6032,7 @@ impl Vm {
         let mut i2: usize = 0;
         while i2 < total {
             if self.rc_check {
-                old.push(self.objs[i2].rc);
+                old.push(self.objs[i2].rc as int);
             }
             self.objs[i2].rc = 0;
             i2 += 1;
@@ -6050,12 +6050,12 @@ impl Vm {
             if self.objs[i2].marked {
                 self.objs[i2].marked = false;
                 live += 1;
-                if self.rc_check && old[i2] < self.objs[i2].rc {
+                if self.rc_check && old[i2] < self.objs[i2].rc as int {
                     // a reference was not counted
                     self.rc_errors += 1;
                     if self.rc_errors <= 20 {
                         let c = self.objs[i2].class;
-                        let nr = self.objs[i2].rc;
+                        let nr = self.objs[i2].rc as int;
                         self.rc_log.push(format!("rc: low count {} < {} (class {}, #{})", old[i2], nr, c, i2));
                     }
                 }
@@ -6208,8 +6208,8 @@ impl Vm {
         let primv = self.colds[self.objs[x as usize].cold as usize].prim;
         let prim = obj_of(&primv);
         self.sdec(str_of(&primv));
-        self.drop_ref(proto, work);
-        self.drop_ref(env, work);
+        self.drop_ref(proto as int, work);
+        self.drop_ref(env as int, work);
         self.drop_ref(home, work);
         self.drop_ref(prim, work);
         let nv = self.objs[x as usize].vals.len();
@@ -6410,8 +6410,8 @@ impl Vm {
             (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
         };
         let prim = obj_of(&self.colds[self.objs[o as usize].cold as usize].prim);
-        self.inc_o(proto);
-        self.inc_o(env);
+        self.inc_o(proto as int);
+        self.inc_o(env as int);
         self.inc_o(home);
         self.inc_o(prim);
         let nv = self.objs[o as usize].vals.len();

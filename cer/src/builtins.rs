@@ -293,7 +293,7 @@ impl Vm {
     pub fn native_fn(&mut self, name: &str, id: int, length: int) -> int {
         let fp = self.function_proto;
         let f = self.alloc(C_NATIVE, fp);
-        self.objs[f as usize].func = id;
+        self.objs[f as usize].func = id as i32;
         let a = self.intern(name);
         let _ = a;
         let sv9 = self.str_val(name);
@@ -342,7 +342,7 @@ impl Vm {
     pub fn well_known_symbol(&mut self, atom: int, desc: &str) -> int {
         let sp = self.symbol_proto;
         let s = self.alloc(C_SYMBOL, sp);
-        self.objs[s as usize].pos = atom;
+        self.objs[s as usize].pos = atom as i32;
         let sv8 = self.str_val(desc);
         self.put_prim(s, sv8);
         self.symbol_atoms.insert(atom, s);
@@ -354,7 +354,7 @@ impl Vm {
         let op = self.alloc(C_OBJECT, -1);
         self.object_proto = op;
         let fp = self.alloc(C_NATIVE, op);
-        self.objs[fp as usize].func = NF_NOOP;
+        self.objs[fp as usize].func = NF_NOOP as i32;
         self.function_proto = fp;
         let g = self.alloc(C_OBJECT, op);
         self.global = g;
@@ -969,7 +969,7 @@ impl Vm {
         let shown = self.regex_shown[idx as usize].clone();
         let rp = self.regexp_proto;
         let o = self.alloc(C_REGEXP, rp);
-        self.objs[o as usize].func = idx;
+        self.objs[o as usize].func = idx as i32;
         self.put_prim(o, src);
         let re = &self.regexes[idx as usize];
         let (g, ic, m, sa, u, y) = (re.global, re.ignore_case, re.multiline, re.dot_all, re.unicode && !re.unicode_sets, re.sticky);
@@ -1017,7 +1017,7 @@ impl Vm {
 
     /// RegExp.prototype.exec: the match array or null; updates lastIndex.
     pub fn regexp_exec(&mut self, ro: int, s: &Rc<String>) -> Val {
-        let idx = self.objs[ro as usize].func;
+        let idx = self.objs[ro as usize].func as int;
         let (global, sticky, ngroups, has_indices) = {
             let re = &self.regexes[idx as usize];
             (re.global, re.sticky, re.ngroups, re.has_indices)
@@ -1193,7 +1193,7 @@ impl Vm {
         let mut last: int = 0;
         if self.class_of(pattern) == C_REGEXP {
             let ro = obj_of(pattern);
-            let idx = self.objs[ro as usize].func;
+            let idx = self.objs[ro as usize].func as int;
             let global = self.regexes[idx as usize].global;
             if all && !global {
                 self.throw_type("replaceAll must be called with a global RegExp");
@@ -1328,7 +1328,7 @@ impl Vm {
         let n = units.len() as int;
         if self.class_of(sep) == C_REGEXP {
             let ro = obj_of(sep);
-            let idx = self.objs[ro as usize].func;
+            let idx = self.objs[ro as usize].func as int;
             let ngroups = self.regexes[idx as usize].ngroups;
             if n == 0 {
                 let caps = self.regexes[idx as usize].exec(&units, 0);
@@ -1510,7 +1510,7 @@ impl Vm {
         true
     }
 
-    pub fn this_collection(&mut self, this: &Val, class: int, name: &str) -> int {
+    pub fn this_collection(&mut self, this: &Val, class: i32, name: &str) -> int {
         let o = obj_of(this);
         if o < 0 || self.objs[o as usize].class != class {
             self.throw_type(format!("Method {} called on incompatible receiver", name).as_str());
@@ -2511,7 +2511,7 @@ impl Vm {
                 }
             }
         }
-        self.objs[p as usize].pos = state;
+        self.objs[p as usize].pos = state as i32;
         self.put_prim(p, v.clone());
         let reactions = self.objs[p as usize].elems.clone();
         self.put_elems(p, Vec::new());
@@ -2605,7 +2605,7 @@ impl Vm {
 
     pub fn promise_then(&mut self, p: int, on_ok: Val, on_err: Val) -> Val {
         let d = self.new_promise();
-        let state = self.objs[p as usize].pos;
+        let state = self.objs[p as usize].pos as int;
         if state == 0 {
             self.push_elem(p, on_ok);
             self.push_elem(p, on_err);
@@ -3133,7 +3133,7 @@ impl Vm {
                 let atom = self.intern(name.as_str());
                 let sp = self.symbol_proto;
                 let s = self.alloc(C_SYMBOL, sp);
-                self.objs[s as usize].pos = atom;
+                self.objs[s as usize].pos = atom as i32;
                 let sv2 = self.string_val(desc);
                 self.put_prim(s, if matches!(a0, Val::Undef) { Val::Undef } else { sv2 });
                 self.symbol_atoms.insert(atom, s);
@@ -3149,7 +3149,7 @@ impl Vm {
                 let atom = self.intern(name.as_str());
                 let sp = self.symbol_proto;
                 let s = self.alloc(C_SYMBOL, sp);
-                self.objs[s as usize].pos = atom;
+                self.objs[s as usize].pos = atom as i32;
                 let sv1 = self.string_val(key.clone());
                 self.put_prim(s, sv1);
                 self.symbol_atoms.insert(atom, s);
@@ -3163,7 +3163,7 @@ impl Vm {
                     self.throw_type("not a symbol");
                     return Val::Undef;
                 }
-                let name = self.atom_str(self.objs[o as usize].pos);
+                let name = self.atom_str(self.objs[o as usize].pos as int);
                 if name.starts_with("@@for:") {
                     return self.colds[self.objs[o as usize].cold as usize].prim.clone();
                 }
@@ -3224,7 +3224,7 @@ impl Vm {
                     self.throw_type("Bind must be called on a function");
                     return Val::Undef;
                 }
-                let fp = self.objs[obj_of(&this) as usize].proto;
+                let fp = self.objs[obj_of(&this) as usize].proto as int;
                 let b = self.alloc(C_BOUND, fp);
                 self.put_env(b, obj_of(&this));
                 self.put_prim(b, a0);
@@ -3246,7 +3246,7 @@ impl Vm {
                 let n = self.get(&this, A_NAME);
                 let ns = self.to_string(&n);
                 if self.objs[o as usize].class == C_FUNCTION {
-                    let pi = self.objs[o as usize].func;
+                    let pi = self.objs[o as usize].func as int;
                     if let Val::Str(src) = &self.protos[pi as usize].src {
                         let src = self.sget(src.clone());
                         let (a, b) = (self.protos[pi as usize].src_start, self.protos[pi as usize].src_end);
@@ -3350,7 +3350,7 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
-                let p = self.objs[o as usize].proto;
+                let p = self.objs[o as usize].proto as int;
                 if p >= 0 {
                     Val::Obj(p)
                 } else {
@@ -3369,7 +3369,7 @@ impl Vm {
                                     self.throw_type("Cyclic __proto__ value");
                                     return Val::Undef;
                                 }
-                                c = self.objs[c as usize].proto;
+                                c = self.objs[c as usize].proto as int;
                             }
                             self.put_proto(*o, po);
                         }
@@ -3517,7 +3517,7 @@ impl Vm {
                     if id == NF_O_ISFROZEN && class == C_ARRAY && !self.objs[o as usize].elems.is_empty() && self.objs[o as usize].pos != 2 {
                         return Val::Bool(false);
                     }
-                    let sh = self.objs[o as usize].shape;
+                    let sh = self.objs[o as usize].shape as int;
                     for a in self.shape_attrs(sh).iter() {
                         if (*a & P_FIXED) == 0 {
                             return Val::Bool(false);
@@ -3592,12 +3592,12 @@ impl Vm {
             NF_OP_ISPROTO => {
                 let p = obj_of(&this);
                 if let Val::Obj(o) = &a0 {
-                    let mut c = self.objs[*o as usize].proto;
+                    let mut c = self.objs[*o as usize].proto as int;
                     while c >= 0 {
                         if c == p {
                             return Val::Bool(true);
                         }
-                        c = self.objs[c as usize].proto;
+                        c = self.objs[c as usize].proto as int;
                     }
                 }
                 Val::Bool(false)

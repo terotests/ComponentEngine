@@ -51,7 +51,7 @@ impl Vm {
 
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
     pub fn proxy_call(&mut self, p: int, which: int, args: Vec<Val>) -> Val {
-        let target = self.objs[p as usize].env;
+        let target = self.objs[p as usize].env as int;
         let handler = self.colds[self.objs[p as usize].cold as usize].home;
         if handler < 0 || target < 0 || self.proxy_hooks < 0 {
             self.throw_type("Cannot perform an operation on a proxy that has been revoked");
@@ -109,7 +109,7 @@ impl Vm {
             return false;
         }
         if self.objs[o as usize].class == C_PROXY {
-            let t = self.objs[o as usize].env;
+            let t = self.objs[o as usize].env as int;
             if t < 0 {
                 self.throw_type("Cannot perform 'IsArray' on a proxy that has been revoked");
                 return false;

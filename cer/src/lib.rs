@@ -181,7 +181,7 @@ impl Engine {
         let entry = unit::link(&mut self.vm, u);
         let fp = self.vm.function_proto;
         let f = self.vm.alloc(C_FUNCTION, fp);
-        self.vm.objs[f as usize].func = entry;
+        self.vm.objs[f as usize].func = entry as i32;
         let g = Val::Obj(self.vm.global);
         self.vm.run_program(Val::Obj(f), g)
     }
