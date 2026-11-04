@@ -5222,7 +5222,10 @@ impl Vm {
                 let n = self.stack.len() as int;
                 let p = self.array_proto;
                 let a = self.alloc(C_ARRAY, p);
-                reserve_vals(&mut self.evecs[self.objs[a as usize].elems as usize], op.a as usize);
+                if op.a > 0 {
+                    let e = self.elems_id(a);
+                    reserve_vals(&mut self.evecs[e], op.a as usize);
+                }
                 let mut i = n - op.a;
                 while i < n {
                     let v = self.stack[i as usize];
