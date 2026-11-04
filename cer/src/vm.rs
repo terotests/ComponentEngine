@@ -6203,9 +6203,9 @@ pub fn drop_bufs(o: &mut JsObj) {
     drop_caps(o);
 }
 
-/// Rust: a cleared Vec keeps its capacity; a big one goes too, a small
-/// one stays for the next object in the slot (no malloc and free per
-/// object).
+/// Rust: a cleared Vec keeps its capacity; past KEEP_CAP it goes too.
+/// Keeping 4 saved Chart.js 1 % of its instructions but cost earley-boyer
+/// 12 MB (59 -> 71 MB), so a collection frees them all.
 #[ranger::target(rust)]
 pub fn drop_caps(o: &mut JsObj) {
     if o.vals.capacity() > KEEP_CAP {
@@ -6225,8 +6225,8 @@ pub fn reserve_vals(v: &mut Vec<Val>, n: usize) {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn reserve_vals(_v: &mut Vec<Val>, _n: usize) {}
 
-/// The capacity a free slot's buffers keep through a collection.
-pub const KEEP_CAP: usize = 4;
+/// The capacity a free slot's buffers keep through a collection (0: none).
+pub const KEEP_CAP: usize = 0;
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn drop_caps(_o: &mut JsObj) {}
