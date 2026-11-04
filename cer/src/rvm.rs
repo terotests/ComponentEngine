@@ -435,15 +435,15 @@ impl Vm {
                         }
                         let mut done = false;
                         if o >= 0 && num {
-                            if let Val::Obj(x) = val {
-                                self.objs[x as usize].rc += 1;
-                            }
+                            self.inc(&val);
                             let ob = &mut self.objs[o as usize];
                             let mut old: int = -1;
+                            let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = n as int;
                                 if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == n && ob.pos != 2 {
                                     old = obj_of(&ob.elems[i as usize]);
+                                    old_s = str_of(&ob.elems[i as usize]);
                                     ob.elems[i as usize] = val.clone();
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
@@ -457,6 +457,7 @@ impl Vm {
                             }
                             if done {
                                 self.dec_o(old);
+                                self.sdec(old_s);
                             } else {
                                 self.dec(&val);
                             }

@@ -248,6 +248,20 @@ pub struct Vm {
     pub sfree: Vec<int>,
     /// freed by the last collection, reused after the next one
     pub sfreed: Vec<int>,
+    /// the heap's references to each string handle (object slots and the
+    /// prefixes whose text lies in it), as Vm.objs[].rc is for objects:
+    /// the stack, frames and other roots are not counted
+    pub srcs: Vec<int>,
+    /// whether a handle is in szct
+    pub sinz: Vec<bool>,
+    /// handles whose count went to 0 (or that are new): reclaim() frees
+    /// those no root holds
+    pub szct: Vec<int>,
+    pub szct_spare: Vec<int>,
+    /// szct's length that makes a reclaim due
+    pub szct_limit: int,
+    /// strings reclaim() freed (statistics)
+    pub sfree_count: int,
     /// strings made since the last collection, and how many make one due
     pub snew: int,
     pub slimit: int,
@@ -272,6 +286,11 @@ pub struct Vm {
     pub pic_way: int,
     pub alloc_count: int,
     pub gc_threshold: int,
+    /// objects made since the last collection, freed or not, and how many
+    /// make one due: reference counting frees no cycle, so they wait for a
+    /// collection that the allocation volume, not the net growth, brings
+    pub made: int,
+    pub made_limit: int,
     pub native_depth: int,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
@@ -334,6 +353,15 @@ pub fn obj_of(v: &Val) -> int {
     match v {
         Val::Obj(o) => *o,
         _ => -1,
+    }
+}
+
+/// The string handle of `v`, 0 (the empty string, never counted) when it
+/// is no string.
+pub fn str_of(v: &Val) -> int {
+    match v {
+        Val::Str(h) => *h,
+        _ => 0,
     }
 }
 
@@ -463,6 +491,12 @@ impl Vm {
             smark: Vec::new(),
             sfree: Vec::new(),
             sfreed: Vec::new(),
+            srcs: Vec::new(),
+            sinz: Vec::new(),
+            szct: Vec::new(),
+            szct_spare: Vec::new(),
+            sfree_count: 0,
+            szct_limit: ZCT_MIN,
             snew: 0,
             slimit: SLIMIT_MIN,
             slimit_min: SLIMIT_MIN,
@@ -477,6 +511,8 @@ impl Vm {
             pic_way: 0,
             alloc_count: 0,
             gc_threshold: 200000,
+            made: 0,
+            made_limit: MADE_MIN,
             native_depth: 0,
             prelude_protos: 0,
             temp_roots: Vec::new(),
@@ -871,6 +907,9 @@ impl Vm {
         self.smark = Vec::new();
         self.sfree = Vec::new();
         self.sfreed = Vec::new();
+        self.srcs = Vec::new();
+        self.sinz = Vec::new();
+        self.szct = Vec::new();
         self.snew = 0;
         self.slimit = self.slimit_min;
         self.sbytes = 0;
@@ -881,6 +920,8 @@ impl Vm {
         self.slen.push(0);
         self.sflag.push(1);
         self.smark.push(false);
+        self.srcs.push(0);
+        self.sinz.push(false);
     }
 
     fn new_handle(&mut self, s: Rc<String>, flag: int) -> int {
@@ -892,21 +933,86 @@ impl Vm {
         if self.snew >= self.slimit || self.sbytes >= self.sbytes_limit {
             self.gc_flag = true;
         }
-        if !self.sfree.is_empty() {
+        let h = if !self.sfree.is_empty() {
             let h = self.sfree.pop().unwrap();
             let i = h as usize;
             self.strs[i] = s;
             self.sup[i] = -1;
             self.slen[i] = 0;
             self.sflag[i] = flag;
-            return h;
+            self.srcs[i] = 0;
+            h
+        } else {
+            self.strs.push(s);
+            self.sup.push(-1);
+            self.slen.push(0);
+            self.sflag.push(flag);
+            self.smark.push(false);
+            self.srcs.push(0);
+            self.sinz.push(false);
+            (self.strs.len() - 1) as int
+        };
+        // a new string is held by nothing counted yet: reclaim() frees it
+        // unless a root or the heap has it by then
+        self.sinz[h as usize] = flag == 0;
+        if flag == 0 {
+            self.szct.push(h);
+            if (self.szct.len() as int) >= self.szct_limit {
+                self.gc_flag = true;
+            }
         }
-        self.strs.push(s);
-        self.sup.push(-1);
-        self.slen.push(0);
-        self.sflag.push(flag);
-        self.smark.push(false);
-        (self.strs.len() - 1) as int
+        h
+    }
+
+    /// One more counted reference to string handle `h`.
+    #[inline]
+    pub fn sinc(&mut self, h: int) {
+        if h > 0 {
+            self.srcs[h as usize] += 1;
+        }
+    }
+
+    /// One counted reference to `h` fewer; at 0 it joins szct.
+    #[inline]
+    pub fn sdec(&mut self, h: int) {
+        if h > 0 {
+            let i = h as usize;
+            self.srcs[i] -= 1;
+            if self.srcs[i] <= 0 && !self.sinz[i] && self.sflag[i] == 0 {
+                self.sinz[i] = true;
+                self.szct.push(h);
+                if (self.szct.len() as int) >= self.szct_limit {
+                    self.gc_flag = true;
+                }
+            }
+        }
+    }
+
+    /// Frees string handle `h` (no count, no root): its buffer goes, and
+    /// the handle its text lay in (a prefix's) loses a reference.
+    fn free_str(&mut self, h: int) {
+        let i = h as usize;
+        let up = self.sup[i];
+        if up < 0 {
+            self.sbytes -= self.strs[i].as_bytes().len() as int;
+            if self.sbytes < 0 {
+                self.sbytes = 0;
+            }
+        }
+        if self.snew > 0 {
+            self.snew -= 1;
+        }
+        let e = self.sempty.clone();
+        self.strs[i] = e;
+        self.sup[i] = -1;
+        self.slen[i] = 0;
+        self.sflag[i] = 2;
+        self.sinz[i] = false;
+        self.sfreed.push(h);
+        self.sfree_count += 1;
+        if up >= 0 {
+            self.sdec(up);
+        }
     }
 
     /// A string value for a shared string.
@@ -987,6 +1093,8 @@ impl Vm {
         self.sbytes -= n;
         self.sup[i] = h2;
         self.slen[i] = n;
+        // h's text now lies in h2's buffer: h holds h2
+        self.srcs[h2 as usize] += 1;
         h2
     }
 
@@ -1019,105 +1127,53 @@ impl Vm {
         p.cstrs = Vec::new();
     }
 
-    #[inline]
-    fn smark_val(&mut self, v: Val) {
-        if let Val::Str(h) = v {
-            self.smark[h as usize] = true;
-        }
-    }
-
     /// collect(): marks the strings the roots and the live objects (marked)
     /// hold, then frees the rest of the table.
     fn mark_strs(&mut self) {
-        let total = self.objs.len();
+        // the counts start again from the heap (as the objects' in trace)
+        let ns = self.strs.len();
+        let mut old: Vec<int> = Vec::new();
+        if self.rc_check {
+            old = self.srcs.clone();
+        }
         let mut i: usize = 0;
+        while i < ns {
+            self.srcs[i] = 0;
+            i += 1;
+        }
+        let total = self.objs.len();
+        i = 0;
         while i < total {
             if self.objs[i].marked {
                 let p = self.colds[self.objs[i].cold as usize].prim;
-                self.smark_val(p);
+                self.smark_count(p);
                 let nv = self.objs[i].vals.len();
                 let mut j: usize = 0;
                 while j < nv {
-                    if let Val::Str(h) = self.objs[i].vals[j] {
-                        self.smark[h as usize] = true;
-                    }
+                    let v = self.objs[i].vals[j];
+                    self.smark_count(v);
                     j += 1;
                 }
                 let ne = self.objs[i].elems.len();
                 j = 0;
                 while j < ne {
-                    if let Val::Str(h) = self.objs[i].elems[j] {
-                        self.smark[h as usize] = true;
-                    }
+                    let v = self.objs[i].elems[j];
+                    self.smark_count(v);
                     j += 1;
                 }
                 let ne2 = self.colds[self.objs[i].cold as usize].elems2.len();
                 j = 0;
                 while j < ne2 {
-                    if let Val::Str(h) = self.colds[self.objs[i].cold as usize].elems2[j] {
-                        self.smark[h as usize] = true;
-                    }
+                    let v = self.colds[self.objs[i].cold as usize].elems2[j];
+                    self.smark_count(v);
                     j += 1;
                 }
             }
             i += 1;
         }
-        let n = self.stack.len();
-        i = 0;
-        while i < n {
-            let v = self.stack[i];
-            self.smark_val(v);
-            i += 1;
-        }
-        let nf = self.frames.len();
-        i = 0;
-        while i < nf {
-            let t = self.frames[i].this_val;
-            let nt = self.frames[i].new_target;
-            self.smark_val(t);
-            self.smark_val(nt);
-            i += 1;
-        }
-        let x = self.exc;
-        self.smark_val(x);
-        i = 0;
-        while i < self.temp_roots.len() {
-            let v = self.temp_roots[i];
-            self.smark_val(v);
-            i += 1;
-        }
-        i = 0;
-        while i < self.jobs.len() {
-            let v = self.jobs[i];
-            self.smark_val(v);
-            i += 1;
-        }
-        i = 0;
-        while i < self.atom_vals.len() {
-            let v = self.atom_vals[i];
-            self.smark_val(v);
-            i += 1;
-        }
-        i = 0;
-        while i < self.type_vals.len() {
-            let v = self.type_vals[i];
-            self.smark_val(v);
-            i += 1;
-        }
-        i = 0;
-        while i < self.kvals.len() {
-            let v = self.kvals[i];
-            self.smark_val(v);
-            i += 1;
-        }
-        i = 0;
-        while i < self.regex_shown.len() {
-            let v = self.regex_shown[i];
-            self.smark_val(v);
-            i += 1;
-        }
+        let mut roots: Vec<int> = Vec::new();
+        self.smark_roots(&mut roots);
         // a prefix keeps the handles its text lies in
-        let ns = self.strs.len();
         i = 1;
         while i < ns {
             if self.smark[i] && self.sup[i] >= 0 {
@@ -1129,6 +1185,37 @@ impl Vm {
             }
             i += 1;
         }
+        // and holds a reference to the next one
+        i = 1;
+        while i < ns {
+            if self.smark[i] && self.sup[i] >= 0 {
+                let u = self.sup[i] as usize;
+                self.srcs[u] += 1;
+            }
+            i += 1;
+        }
+        if self.rc_check {
+            i = 1;
+            while i < ns {
+                if self.smark[i] && self.sflag[i] == 2 {
+                    // a freed string is still referenced
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        self.rc_log.push(format!("rc: freed string #{} referenced", i));
+                    }
+                }
+                if self.smark[i] && self.sflag[i] == 0 && i < old.len() && old[i] < self.srcs[i] {
+                    // a reference to a string was not counted
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        let nr = self.srcs[i];
+                        let t = String::from(self.sref(i as int));
+                        self.rc_log.push(format!("rc: low string count {} < {} (#{} {:?})", old[i], nr, i, t));
+                    }
+                }
+                i += 1;
+            }
+        }
         let nfr = self.sfreed.len();
         i = 0;
         while i < nfr {
@@ -1136,11 +1223,13 @@ impl Vm {
             self.sfree.push(h);
             i += 1;
         }
-        self.sfreed = Vec::new();
+        self.sfreed.clear();
+        self.szct.clear();
         let mut live: int = 0;
         let mut bytes: int = 0;
         i = 1;
         while i < ns {
+            self.sinz[i] = false;
             if self.sflag[i] == 0 && !self.smark[i] {
                 let e = self.sempty.clone();
                 self.strs[i] = e;
@@ -1150,6 +1239,14 @@ impl Vm {
             } else if self.sflag[i] != 2 {
                 live += 1;
                 bytes += self.strs[i].as_bytes().len() as int;
+                if self.sflag[i] == 0 {
+                    rc_trim(&mut self.strs[i]);
+                }
+                if self.sflag[i] == 0 && self.srcs[i] == 0 {
+                    // held by roots only
+                    self.sinz[i] = true;
+                    self.szct.push(i as int);
+                }
             }
             self.smark[i] = false;
             i += 1;
@@ -1158,6 +1255,151 @@ impl Vm {
         self.slimit = if live > self.slimit_min { live } else { self.slimit_min };
         self.sbytes = 0;
         self.sbytes_limit = if bytes > SBYTES_MIN { bytes } else { SBYTES_MIN };
+        self.szct_limit = self.next_szct_limit();
+    }
+
+    /// mark_strs: a heap reference to a string, marked and counted.
+    #[inline]
+    fn smark_count(&mut self, v: Val) {
+        if let Val::Str(h) = v {
+            self.smark[h as usize] = true;
+            if h > 0 {
+                self.srcs[h as usize] += 1;
+            }
+        }
+    }
+
+    /// A root's string marked; `list` gets each handle marked here.
+    #[inline]
+    fn smark_root(&mut self, v: Val, list: &mut Vec<int>) {
+        if let Val::Str(h) = v {
+            if !self.smark[h as usize] {
+                self.smark[h as usize] = true;
+                list.push(h);
+            }
+        }
+    }
+
+    /// Marks the strings the roots hold (not the heap): the stack, the
+    /// frames, the pending exception and jobs, and the machine's tables.
+    fn smark_roots(&mut self, list: &mut Vec<int>) {
+        let n = self.stack.len();
+        let mut i: usize = 0;
+        while i < n {
+            let v = self.stack[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        let nf = self.frames.len();
+        i = 0;
+        while i < nf {
+            let t = self.frames[i].this_val;
+            let nt = self.frames[i].new_target;
+            self.smark_root(t, list);
+            self.smark_root(nt, list);
+            i += 1;
+        }
+        let x = self.exc;
+        self.smark_root(x, list);
+        i = 0;
+        while i < self.temp_roots.len() {
+            let v = self.temp_roots[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.jobs.len() {
+            let v = self.jobs[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.atom_vals.len() {
+            let v = self.atom_vals[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.type_vals.len() {
+            let v = self.type_vals[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.kvals.len() {
+            let v = self.kvals[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.regex_shown.len() {
+            let v = self.regex_shown[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+    }
+
+    /// reclaim(): frees the strings of szct that neither the heap nor a
+    /// root holds, and what only they held (a prefix's next handle).
+    fn reclaim_strs(&mut self) {
+        // handles freed by the last reclaim may be reused now
+        let nfr = self.sfreed.len();
+        let mut i: usize = 0;
+        while i < nfr {
+            let h = self.sfreed[i];
+            self.sfree.push(h);
+            i += 1;
+        }
+        self.sfreed.clear();
+        if self.szct.is_empty() {
+            return;
+        }
+        let mut marked: Vec<int> = Vec::new();
+        self.smark_roots(&mut marked);
+        let mut keep: Vec<int> = Vec::new();
+        while !self.szct.is_empty() {
+            let list = take_ints(&mut self.szct, &mut self.szct_spare);
+            let n = list.len();
+            i = 0;
+            while i < n {
+                let h = list[i];
+                i += 1;
+                let k = h as usize;
+                if !self.sinz[k] {
+                    continue;
+                }
+                self.sinz[k] = false;
+                if self.sflag[k] != 0 || self.srcs[k] > 0 {
+                    continue;
+                }
+                if self.smark[k] {
+                    // a root holds it
+                    self.sinz[k] = true;
+                    keep.push(h);
+                    continue;
+                }
+                self.free_str(h);
+            }
+            give_ints(&mut self.szct_spare, list);
+        }
+        self.szct = keep;
+        let nm = marked.len();
+        i = 0;
+        while i < nm {
+            let h = marked[i] as usize;
+            self.smark[h] = false;
+            i += 1;
+        }
+        self.szct_limit = self.next_szct_limit();
+    }
+
+    fn next_szct_limit(&self) -> int {
+        let n = (self.szct.len() as int) * 2;
+        if n > self.zct_min {
+            n
+        } else {
+            self.zct_min
+        }
     }
 
     pub fn intern(&mut self, s: &str) -> int {
@@ -1247,6 +1489,7 @@ impl Vm {
 
     pub fn alloc(&mut self, class: int, proto: int) -> int {
         self.alloc_count += 1;
+        self.made += 1;
         self.live += 1;
         if proto >= 0 {
             self.objs[proto as usize].rc += 1;
@@ -1268,7 +1511,7 @@ impl Vm {
             self.objs[i as usize].zct = true;
             self.zct.push(i);
         }
-        if self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit {
+        if self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.made >= self.made_limit {
             self.gc_flag = true;
         }
         i
@@ -3725,15 +3968,15 @@ impl Vm {
                         let target = self.pop();
                         let mut done = false;
                         if let (Val::Obj(o), Val::Num(n)) = (&target, &k) {
-                            if let Val::Obj(x) = val {
-                                self.objs[x as usize].rc += 1;
-                            }
+                            self.inc(&val);
                             let ob = &mut self.objs[*o as usize];
                             let mut old: int = -1;
+                            let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
                                 if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n && ob.pos != 2 {
                                     old = obj_of(&ob.elems[i as usize]);
+                                    old_s = str_of(&ob.elems[i as usize]);
                                     ob.elems[i as usize] = val.clone();
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
@@ -3748,6 +3991,7 @@ impl Vm {
                             }
                             if done {
                                 self.dec_o(old);
+                                self.sdec(old_s);
                             } else {
                                 self.dec(&val);
                             }
@@ -3952,7 +4196,7 @@ impl Vm {
     /// gc_flag from the counts (Vm::gc_due): after a collection, and where
     /// a limit changes.
     pub fn gc_recheck(&mut self) {
-        self.gc_flag = self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.snew >= self.slimit || self.sbytes >= self.sbytes_limit;
+        self.gc_flag = self.alloc_count >= self.gc_threshold || self.made >= self.made_limit || (self.zct.len() as int) >= self.zct_limit || (self.szct.len() as int) >= self.szct_limit || self.snew >= self.slimit || self.sbytes >= self.sbytes_limit;
     }
 
     /// The calling part of OP_CALL; true when a frame was pushed or the
@@ -4233,6 +4477,10 @@ impl Vm {
                     if h >= 0 {
                         self.stack.pop();
                         self.objs[e as usize].elems[i] = Val::Str(h);
+                        // the slot holds the new handle, no longer the old
+                        // (now its prefix)
+                        self.sinc(h);
+                        self.sdec(x);
                         done = true;
                     }
                 }
@@ -4266,6 +4514,8 @@ impl Vm {
                                 self.stack.pop();
                                 self.stack.pop();
                                 self.objs[o as usize].vals[slot as usize] = Val::Str(h);
+                                self.sinc(h);
+                                self.sdec(x);
                                 done = true;
                             }
                         }
@@ -5262,8 +5512,14 @@ impl Vm {
 
     #[inline]
     pub fn inc(&mut self, v: &Val) {
-        if let Val::Obj(o) = v {
-            self.objs[*o as usize].rc += 1;
+        match v {
+            Val::Obj(o) => {
+                self.objs[*o as usize].rc += 1;
+            }
+            Val::Str(h) => {
+                self.sinc(*h);
+            }
+            _ => {}
         }
     }
 
@@ -5276,8 +5532,14 @@ impl Vm {
 
     #[inline]
     pub fn dec(&mut self, v: &Val) {
-        if let Val::Obj(o) = v {
-            self.dec_o(*o);
+        match v {
+            Val::Obj(o) => {
+                self.dec_o(*o);
+            }
+            Val::Str(h) => {
+                self.sdec(*h);
+            }
+            _ => {}
         }
     }
 
@@ -5301,9 +5563,8 @@ impl Vm {
         let n = vs.len();
         let mut i: usize = 0;
         while i < n {
-            if let Val::Obj(o) = vs[i] {
-                self.objs[o as usize].rc += 1;
-            }
+            let v = vs[i];
+            self.inc(&v);
             i += 1;
         }
     }
@@ -5312,9 +5573,8 @@ impl Vm {
         let n = vs.len();
         let mut i: usize = 0;
         while i < n {
-            if let Val::Obj(o) = vs[i] {
-                self.dec_o(o);
-            }
+            let v = vs[i];
+            self.dec(&v);
             i += 1;
         }
     }
@@ -5323,18 +5583,18 @@ impl Vm {
     #[inline]
     pub fn put_slot(&mut self, o: int, slot: int, v: Val) {
         self.inc(&v);
-        let old = obj_of(&self.objs[o as usize].vals[slot as usize]);
+        let old = self.objs[o as usize].vals[slot as usize];
         self.objs[o as usize].vals[slot as usize] = v;
-        self.dec_o(old);
+        self.dec(&old);
     }
 
     /// Element `i` of `o` becomes `v`.
     #[inline]
     pub fn put_elem(&mut self, o: int, i: int, v: Val) {
         self.inc(&v);
-        let old = obj_of(&self.objs[o as usize].elems[i as usize]);
+        let old = self.objs[o as usize].elems[i as usize];
         self.objs[o as usize].elems[i as usize] = v;
-        self.dec_o(old);
+        self.dec(&old);
     }
 
     #[inline]
@@ -5357,9 +5617,9 @@ impl Vm {
     pub fn put_elem2(&mut self, o: int, i: int, v: Val) {
         self.inc(&v);
         let c = self.cold_id(o) as usize;
-        let old = obj_of(&self.colds[c].elems2[i as usize]);
+        let old = self.colds[c].elems2[i as usize];
         self.colds[c].elems2[i as usize] = v;
-        self.dec_o(old);
+        self.dec(&old);
     }
 
     pub fn push_elem2(&mut self, o: int, v: Val) {
@@ -5374,9 +5634,8 @@ impl Vm {
         let n = self.objs[o as usize].elems.len();
         let mut i: usize = 0;
         while i < n {
-            if let Val::Obj(x) = self.objs[o as usize].elems[i] {
-                self.dec_o(x);
-            }
+            let x = self.objs[o as usize].elems[i];
+            self.dec(&x);
             i += 1;
         }
         self.objs[o as usize].elems = vs;
@@ -5390,9 +5649,8 @@ impl Vm {
         let n = self.colds[self.objs[o as usize].cold as usize].elems2.len();
         let mut i: usize = 0;
         while i < n {
-            if let Val::Obj(x) = self.colds[self.objs[o as usize].cold as usize].elems2[i] {
-                self.dec_o(x);
-            }
+            let x = self.colds[self.objs[o as usize].cold as usize].elems2[i];
+            self.dec(&x);
             i += 1;
         }
         let c = self.cold_id(o) as usize;
@@ -5407,9 +5665,8 @@ impl Vm {
         }
         let mut i = n;
         while i < len {
-            if let Val::Obj(x) = self.objs[o as usize].elems[i as usize] {
-                self.dec_o(x);
-            }
+            let x = self.objs[o as usize].elems[i as usize];
+            self.dec(&x);
             i += 1;
         }
         self.objs[o as usize].elems.truncate(n as usize);
@@ -5422,9 +5679,8 @@ impl Vm {
         }
         let mut i = n;
         while i < len {
-            if let Val::Obj(x) = self.colds[self.objs[o as usize].cold as usize].elems2[i as usize] {
-                self.dec_o(x);
-            }
+            let x = self.colds[self.objs[o as usize].cold as usize].elems2[i as usize];
+            self.dec(&x);
             i += 1;
         }
         let c = self.cold_id(o) as usize;
@@ -5460,9 +5716,9 @@ impl Vm {
         }
         self.inc(&v);
         let c = self.cold_id(o) as usize;
-        let old = obj_of(&self.colds[c].prim);
+        let old = self.colds[c].prim;
         self.colds[c].prim = v;
-        self.dec_o(old);
+        self.dec(&old);
     }
 
     pub fn put_proto(&mut self, o: int, p: int) {
@@ -5705,7 +5961,7 @@ impl Vm {
     /// A collection when one is due, else a reclaim (the safe points call
     /// this when gc_due).
     pub fn gc(&mut self) {
-        if self.rc_on && self.alloc_count < self.gc_threshold && self.snew < self.slimit && self.sbytes < self.sbytes_limit {
+        if self.rc_on && self.alloc_count < self.gc_threshold && self.made < self.made_limit && self.snew < self.slimit && self.sbytes < self.sbytes_limit {
             self.reclaim();
             return;
         }
@@ -5777,6 +6033,8 @@ impl Vm {
         self.live = live;
         self.alloc_count = 0;
         self.gc_threshold = if live * 2 > 200000 { live * 2 } else { 200000 };
+        self.made = 0;
+        self.made_limit = if live * MADE_PER_LIVE > MADE_MIN { live * MADE_PER_LIVE } else { MADE_MIN };
         self.zct_limit = self.next_zct_limit();
         self.gc_recheck();
     }
@@ -5880,6 +6138,7 @@ impl Vm {
             i += 1;
         }
         give_ints(&mut self.zct_spare, list);
+        self.reclaim_strs();
         self.zct_limit = self.next_zct_limit();
         self.gc_recheck();
     }
@@ -5891,7 +6150,9 @@ impl Vm {
             let ob = &self.objs[x as usize];
             (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
         };
-        let prim = obj_of(&self.colds[self.objs[x as usize].cold as usize].prim);
+        let primv = self.colds[self.objs[x as usize].cold as usize].prim;
+        let prim = obj_of(&primv);
+        self.sdec(str_of(&primv));
         self.drop_ref(proto, work);
         self.drop_ref(env, work);
         self.drop_ref(home, work);
@@ -5899,24 +6160,42 @@ impl Vm {
         let nv = self.objs[x as usize].vals.len();
         let mut j: usize = 0;
         while j < nv {
-            if let Val::Obj(c) = self.objs[x as usize].vals[j] {
-                self.drop_ref(c, work);
+            match self.objs[x as usize].vals[j] {
+                Val::Obj(c) => {
+                    self.drop_ref(c, work);
+                }
+                Val::Str(h) => {
+                    self.sdec(h);
+                }
+                _ => {}
             }
             j += 1;
         }
         let ne = self.objs[x as usize].elems.len();
         j = 0;
         while j < ne {
-            if let Val::Obj(c) = self.objs[x as usize].elems[j] {
-                self.drop_ref(c, work);
+            match self.objs[x as usize].elems[j] {
+                Val::Obj(c) => {
+                    self.drop_ref(c, work);
+                }
+                Val::Str(h) => {
+                    self.sdec(h);
+                }
+                _ => {}
             }
             j += 1;
         }
         let ne2 = self.colds[self.objs[x as usize].cold as usize].elems2.len();
         j = 0;
         while j < ne2 {
-            if let Val::Obj(c) = self.colds[self.objs[x as usize].cold as usize].elems2[j] {
-                self.drop_ref(c, work);
+            match self.colds[self.objs[x as usize].cold as usize].elems2[j] {
+                Val::Obj(c) => {
+                    self.drop_ref(c, work);
+                }
+                Val::Str(h) => {
+                    self.sdec(h);
+                }
+                _ => {}
             }
             j += 1;
         }
@@ -6006,7 +6285,68 @@ impl Vm {
         }
         self.live = live;
         self.zct_limit = self.next_zct_limit();
+        self.recount_strs();
         self.gc_recheck();
+    }
+
+    /// recount(): the strings' counts again from the live objects and
+    /// the prefixes; the unreferenced ones go to szct.
+    fn recount_strs(&mut self) {
+        let ns = self.strs.len();
+        let mut i: usize = 0;
+        while i < ns {
+            self.srcs[i] = 0;
+            self.sinz[i] = false;
+            i += 1;
+        }
+        let total = self.objs.len();
+        i = 0;
+        while i < total {
+            if !self.objs[i].free {
+                let p = self.colds[self.objs[i].cold as usize].prim;
+                self.sinc(str_of(&p));
+                let nv = self.objs[i].vals.len();
+                let mut j: usize = 0;
+                while j < nv {
+                    let h = str_of(&self.objs[i].vals[j]);
+                    self.sinc(h);
+                    j += 1;
+                }
+                let ne = self.objs[i].elems.len();
+                j = 0;
+                while j < ne {
+                    let h = str_of(&self.objs[i].elems[j]);
+                    self.sinc(h);
+                    j += 1;
+                }
+                let ne2 = self.colds[self.objs[i].cold as usize].elems2.len();
+                j = 0;
+                while j < ne2 {
+                    let h = str_of(&self.colds[self.objs[i].cold as usize].elems2[j]);
+                    self.sinc(h);
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        i = 1;
+        while i < ns {
+            if self.sflag[i] != 2 && self.sup[i] >= 0 {
+                let u = self.sup[i] as usize;
+                self.srcs[u] += 1;
+            }
+            i += 1;
+        }
+        self.szct.clear();
+        i = 1;
+        while i < ns {
+            if self.sflag[i] == 0 && self.srcs[i] == 0 {
+                self.sinz[i] = true;
+                self.szct.push(i as int);
+            }
+            i += 1;
+        }
+        self.szct_limit = self.next_szct_limit();
     }
 
     fn count_refs(&mut self, o: int) {
@@ -6045,6 +6385,12 @@ impl Vm {
         }
     }
 }
+
+/// Objects made that make a collection due, at least (Vm.made_limit), and
+/// per live object: a collection's cost is the live heap's, so it stays a
+/// small part of the work that made the objects.
+pub const MADE_MIN: int = 262144;
+pub const MADE_PER_LIVE: int = 8;
 
 /// The smallest zct that makes a reclaim.
 pub const ZCT_MIN: int = 8192;
@@ -6257,6 +6603,21 @@ pub fn rc_push(rc: &mut Rc<String>, b: &str) -> bool {
     }
     false
 }
+
+/// Rust: a string's buffer to its size when a quarter or more is spare
+/// and nothing else holds it (Vm::collect; appending in place doubles it).
+#[ranger::target(rust)]
+pub fn rc_trim(rc: &mut Rc<String>) {
+    if let Some(s) = Rc::get_mut(rc) {
+        let n = s.len();
+        if n >= 256 && s.capacity() > n + n / 4 {
+            s.shrink_to_fit();
+        }
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_trim(_rc: &mut Rc<String>) {}
 
 /// The other targets' strings are immutable values (and their engines
 /// concatenate without copying where they can): always the ordinary way,
