@@ -855,6 +855,10 @@ impl Vm {
             }
         }
         self.objs[o as usize].shape = next as i32;
+        // the chain's holder has as many keys as the most an object on the
+        // chain has got: the values get room for that many at once
+        let most = self.shapes[self.holder(next)].keys.len();
+        grow_vals(&mut self.objs[o as usize].vals, most);
         self.push_val(o, v);
         slot
     }
@@ -6616,6 +6620,23 @@ pub fn drop_caps(o: &mut JsObj) {
         o.elems = Vec::new();
     }
 }
+
+/// Rust: a full `v` grows to room for `most` values (up to what doubling
+/// gives) instead of doubling: an object on a chain of shapes most often
+/// gets as many properties as the most the chain has seen.
+#[ranger::target(rust)]
+pub fn grow_vals(v: &mut Vec<Val>, most: usize) {
+    let n = v.len();
+    if n == v.capacity() && most > n + 1 {
+        // at most what doubling would give: a branch off a long chain
+        // does not take the chain's room
+        let cap = if most < 2 * n + 4 { most } else { 2 * n + 4 };
+        v.reserve_exact(cap - n);
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_vals(_v: &mut Vec<Val>, _most: usize) {}
 
 /// Room for `n` more values (Rust; the other targets grow as they push).
 #[ranger::target(rust)]
