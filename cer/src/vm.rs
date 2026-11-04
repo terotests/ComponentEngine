@@ -4896,6 +4896,7 @@ impl Vm {
                 let n = self.stack.len() as int;
                 let p = self.array_proto;
                 let a = self.alloc(C_ARRAY, p);
+                reserve_vals(&mut self.objs[a as usize].elems, op.a as usize);
                 let mut i = n - op.a;
                 while i < n {
                     let v = self.stack[i as usize];
@@ -5642,6 +5643,15 @@ impl Vm {
 
     /// Marks everything reachable from `work` (marked already); with
     /// `count`, every reference followed is counted into JsObj.rc.
+    fn trace_ref(&mut self, x: int, count: bool, work: &mut Vec<int>) {
+        if x >= 0 {
+            if count {
+                self.objs[x as usize].rc += 1;
+            }
+            self.mark_obj(x, work);
+        }
+    }
+
     fn trace(&mut self, work: &mut Vec<int>, count: bool) {
         while !work.is_empty() {
             let o = work.pop().unwrap();
@@ -5651,15 +5661,11 @@ impl Vm {
                 (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
             };
             let prim = obj_of(&self.colds[self.objs[o as usize].cold as usize].prim);
-            let firsts = vec![proto, env, home, prim];
-            for x in firsts {
-                if x >= 0 {
-                    if count {
-                        self.objs[x as usize].rc += 1;
-                    }
-                    self.mark_obj(x, work);
-                }
-            }
+            // no vector per object: four calls
+            self.trace_ref(proto, count, work);
+            self.trace_ref(env, count, work);
+            self.trace_ref(home, count, work);
+            self.trace_ref(prim, count, work);
             let nv = self.objs[o as usize].vals.len();
             let mut j: usize = 0;
             while j < nv {
@@ -6209,6 +6215,15 @@ pub fn drop_caps(o: &mut JsObj) {
         o.elems = Vec::new();
     }
 }
+
+/// Room for `n` more values (Rust; the other targets grow as they push).
+#[ranger::target(rust)]
+pub fn reserve_vals(v: &mut Vec<Val>, n: usize) {
+    v.reserve_exact(n);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn reserve_vals(_v: &mut Vec<Val>, _n: usize) {}
 
 /// The capacity a free slot's buffers keep through a collection.
 pub const KEEP_CAP: usize = 4;
