@@ -32,6 +32,7 @@ pub mod normalize;
 pub mod num;
 pub mod ops;
 pub mod parser;
+pub mod pcomp;
 pub mod prelude;
 pub mod proxy;
 pub mod regex;
@@ -59,7 +60,14 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Engine {
+        Engine::new_with(false)
+    }
+
+    /// An engine whose scripts, its prelude too, compile with pcomp.rs
+    /// (`pcomp`) or the tree compiler.
+    pub fn new_with(pcomp: bool) -> Engine {
         let mut vm = Vm::new();
+        vm.pcomp = pcomp;
         vm.setup();
         let mut e = Engine { vm: vm, error: String::new(), through_text: false };
         // the built-ins written in JavaScript
@@ -131,6 +139,13 @@ impl Engine {
     /// or another. Sets `error` when the script is not one.
     pub fn compile(&mut self, src: &str) -> unit::Unit {
         self.error = String::new();
+        if self.vm.pcomp {
+            let u = pcomp::compile_unit(src);
+            if !u.error.is_empty() {
+                self.error = u.error.clone();
+            }
+            return u;
+        }
         let mut p = parser::Parser::new(src);
         let root = p.parse_program();
         if !p.error.is_empty() {

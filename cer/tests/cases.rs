@@ -87,3 +87,23 @@ fn cases_txt_regs() {
     }
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
 }
+
+/// The same cases compiled in one pass from the tokens (pcomp.rs), on
+/// both machines.
+#[test]
+fn cases_txt_pcomp() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases.txt")).unwrap();
+    let all = parse(&text);
+    let mut failed = Vec::new();
+    for regs in [false, true] {
+        for (title, src, want) in all.iter() {
+            let mut e = Engine::new_with(true);
+            e.vm.regs = regs;
+            let got = e.eval(src);
+            if &got != want {
+                failed.push(format!("[{}{}]\n  want: {}\n  got:  {}", title, if regs { ", regs" } else { "" }, want, got));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
+}

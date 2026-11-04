@@ -86,6 +86,9 @@ impl Vm {
     /// completion value, or a thrown SyntaxError.
     pub fn eval_source(&mut self, src: &str, strict: bool, is_eval: bool) -> Val {
         let code = if strict { format!("'use strict';\n{}", src) } else { String::from(src) };
+        if self.pcomp {
+            return self.eval_pcomp(code.as_str(), strict, is_eval);
+        }
         let mut p = parser::Parser::new(code.as_str());
         let root = p.parse_program();
         if !p.error.is_empty() {
@@ -102,6 +105,34 @@ impl Vm {
         let mut c = compiler::Compiler::new(p.ast, atoms, names, base);
         c.local_program = strict || (own_strict && is_eval);
         let entry = c.compile_program(root);
+        if !c.error.is_empty() || entry < 0 {
+            let msg = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
+            self.throw_syntax(msg.as_str());
+            return Val::Undef;
+        }
+        self.atoms = c.atoms;
+        self.atom_names = c.atom_names;
+        for pr in c.protos {
+            let mut p2 = pr;
+            self.link_strs(&mut p2);
+            self.protos.push(p2);
+        }
+        let fp = self.function_proto;
+        let f = self.alloc(C_FUNCTION, fp);
+        self.objs[f as usize].func = entry;
+        let g = Val::Obj(self.global);
+        self.call_value(Val::Obj(f), g, Vec::new())
+    }
+
+    /// eval_source with pcomp.rs.
+    fn eval_pcomp(&mut self, code: &str, strict: bool, is_eval: bool) -> Val {
+        let atoms = self.atoms.clone();
+        let names = self.atom_names.clone();
+        let base = self.protos.len() as int;
+        let mut c = crate::pcomp::PComp::new(code, atoms, names, base);
+        c.local_program = strict;
+        c.local_if_strict = is_eval;
+        let entry = c.compile_program();
         if !c.error.is_empty() || entry < 0 {
             let msg = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
             self.throw_syntax(msg.as_str());

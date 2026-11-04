@@ -4,7 +4,9 @@ use cer::Engine;
 fn main() {
     let path = std::env::args().nth(1).expect("usage: cer <file.js>");
     let src = std::fs::read_to_string(&path).expect("cannot read the script");
-    let mut e = Engine::new();
+    // CER_PCOMP=1: compile in one pass from the tokens (pcomp.rs)
+    let pcomp = std::env::var("CER_PCOMP").map(|v| v == "1").unwrap_or(false);
+    let mut e = Engine::new_with(pcomp);
     // CER_REGS=1 / 0: on the register machine (rvm.rs) or the stack one
     if let Ok(v) = std::env::var("CER_REGS") {
         e.vm.regs = v == "1";

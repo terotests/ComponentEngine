@@ -226,6 +226,8 @@ pub struct Vm {
     pub echo: bool,
     /// run frames on the register machine (rvm.rs)
     pub regs: bool,
+    /// compile with pcomp.rs (tokens to bytecode in one pass, no tree)
+    pub pcomp: bool,
     /// the register code of every translated function (Proto.rbase) and
     /// the constants it reads (a register x < 0 is kvals[-1 - x])
     pub rcode: Vec<Op>,
@@ -447,6 +449,7 @@ impl Vm {
             out: Vec::new(),
             echo: false,
             regs: false,
+            pcomp: false,
             rcode: Vec::new(),
             kvals: Vec::new(),
             rtab: Vec::new(),
