@@ -842,9 +842,9 @@ impl Vm {
         let e0 = self.rpic[si];
         let mut w: int = 0;
         while e0 >= 0 && w < PIC_WAYS {
-            let b = ((e0 + w) * PIC_W) as usize;
+            let b = ((e0 + w as i32) * PIC_W as i32) as usize;
             w += 1;
-            if self.pic[b + 1] != self.shape_epoch || self.objs[o as usize].shape != self.pic[b] as i32 {
+            if self.pic[b + 1] != self.shape_epoch as i32 || self.objs[o as usize].shape != self.pic[b] as i32 {
                 continue;
             }
             let depth = self.pic[b + 2] as usize;
@@ -857,7 +857,7 @@ impl Vm {
                     ok = false;
                     break;
                 }
-                cur = pk;
+                cur = pk as int;
                 k += 1;
             }
             if !ok {
@@ -911,24 +911,24 @@ impl Vm {
                 k += 1;
             }
             self.pic[(n * PIC_W + PIC_W - 1) as usize] = 0;
-            self.rpic[si] = n;
-            n
+            self.rpic[si] = n as i32;
+            n as i32
         };
         // the next way in turn (the first entry's last int counts)
-        let ti = (base * PIC_W + PIC_W - 1) as usize;
+        let ti = (base * PIC_W as i32 + PIC_W as i32 - 1) as usize;
         let turn = self.pic[ti];
-        self.pic[ti] = (turn + 1) % PIC_WAYS;
-        let b = ((base + turn) * PIC_W) as usize;
-        self.pic[b] = self.objs[o as usize].shape as int;
-        self.pic[b + 1] = self.shape_epoch;
-        self.pic[b + 2] = chain.len() as int;
-        self.pic[b + 3] = slot;
+        self.pic[ti] = (turn + 1) % PIC_WAYS as i32;
+        let b = ((base + turn) * PIC_W as i32) as usize;
+        self.pic[b] = self.objs[o as usize].shape as i32;
+        self.pic[b + 1] = self.shape_epoch as i32;
+        self.pic[b + 2] = chain.len() as i32;
+        self.pic[b + 3] = slot as i32;
         self.pic[b + 4] = if acc { 1 } else { 0 };
         let mut k: usize = 0;
         while k < chain.len() {
             let x = chain[k];
-            self.pic[b + 5 + 2 * k] = x;
-            self.pic[b + 6 + 2 * k] = self.objs[x as usize].shape as int;
+            self.pic[b + 5 + 2 * k] = x as i32;
+            self.pic[b + 6 + 2 * k] = self.objs[x as usize].shape as i32;
             k += 1;
         }
         self.pic_way = b as int;

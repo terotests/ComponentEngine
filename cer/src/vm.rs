@@ -241,9 +241,9 @@ pub struct Vm {
     /// (h is then its first slen[h] bytes); sflag 1 pinned (constants,
     /// atoms), 2 free. collect() sweeps it (mark_strs).
     pub strs: Vec<Rc<String>>,
-    pub sup: Vec<int>,
-    pub slen: Vec<int>,
-    pub sflag: Vec<int>,
+    pub sup: Vec<i32>,
+    pub slen: Vec<i32>,
+    pub sflag: Vec<i32>,
     pub smark: Vec<bool>,
     pub sfree: Vec<int>,
     /// freed by the last collection, reused after the next one
@@ -251,7 +251,7 @@ pub struct Vm {
     /// the heap's references to each string handle (object slots and the
     /// prefixes whose text lies in it), as Vm.objs[].rc is for objects:
     /// the stack, frames and other roots are not counted
-    pub srcs: Vec<int>,
+    pub srcs: Vec<i32>,
     /// whether a handle is in szct
     pub sinz: Vec<bool>,
     /// handles whose count went to 0 (or that are new): reclaim() frees
@@ -277,8 +277,8 @@ pub struct Vm {
     /// pic_get): rpic[i] is rcode[i]'s entry in pic (PIC_W ints), -1 none;
     /// an entry holds while shape_epoch, which every change of an owned
     /// shape moves, stays
-    pub rpic: Vec<int>,
-    pub pic: Vec<int>,
+    pub rpic: Vec<i32>,
+    pub pic: Vec<i32>,
     pub shape_epoch: int,
     /// a collection or reclaim is due at the next safe point (gc_due)
     pub gc_flag: bool,
@@ -996,14 +996,14 @@ impl Vm {
             self.strs[i] = s;
             self.sup[i] = -1;
             self.slen[i] = 0;
-            self.sflag[i] = flag;
+            self.sflag[i] = flag as i32;
             self.srcs[i] = 0;
             h
         } else {
             self.strs.push(s);
             self.sup.push(-1);
             self.slen.push(0);
-            self.sflag.push(flag);
+            self.sflag.push(flag as i32);
             self.smark.push(false);
             self.srcs.push(0);
             self.sinz.push(false);
@@ -1068,7 +1068,7 @@ impl Vm {
         self.sfreed.push(h);
         self.sfree_count += 1;
         if up >= 0 {
-            self.sdec(up);
+            self.sdec(up as int);
         }
     }
 
@@ -1117,7 +1117,7 @@ impl Vm {
         while self.sup[x as usize] >= 0 {
             x = self.sup[x as usize];
         }
-        jsstr::prefix(self.strs[x as usize].as_str(), self.slen[h as usize])
+        jsstr::prefix(self.strs[x as usize].as_str(), self.slen[h as usize] as int)
     }
 
     /// String handle `h` as a shared string.
@@ -1148,8 +1148,8 @@ impl Vm {
         let h2 = self.new_handle(rc, 0);
         // only the appended bytes are new
         self.sbytes -= n;
-        self.sup[i] = h2;
-        self.slen[i] = n;
+        self.sup[i] = h2 as i32;
+        self.slen[i] = n as i32;
         // h's text now lies in h2's buffer: h holds h2
         self.srcs[h2 as usize] += 1;
         h2
@@ -1189,7 +1189,7 @@ impl Vm {
     fn mark_strs(&mut self) {
         // the counts start again from the heap (as the objects' in trace)
         let ns = self.strs.len();
-        let mut old: Vec<int> = Vec::new();
+        let mut old: Vec<i32> = Vec::new();
         if self.rc_check {
             old = self.srcs.clone();
         }
