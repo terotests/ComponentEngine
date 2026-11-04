@@ -331,7 +331,6 @@ impl Vm {
     pub fn ctor(&mut self, name: &str, id: int, length: int, proto: int) -> int {
         let f = self.native_fn(name, id, length);
         self.add_prop(f, A_PROTOTYPE, Val::Obj(proto), P_HIDDEN | P_READONLY | P_FIXED);
-        self.objs[f as usize].has_proto_obj = true;
         self.add_own(proto, A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
         let g = self.global;
         let a = self.intern(name);

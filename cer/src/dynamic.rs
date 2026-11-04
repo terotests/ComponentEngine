@@ -58,7 +58,6 @@ impl Vm {
         let gfp = self.generator_function_proto;
         let gf = self.native_fn("GeneratorFunction", NF_GENERATOR_FUNCTION, 1);
         self.add_prop(gf, A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
-        self.objs[gf as usize].has_proto_obj = true;
         self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
         let fc = self.get_obj(self.global, self.atoms["Function"], &Val::Obj(self.global));
         if let Val::Obj(f) = fc {
@@ -67,7 +66,6 @@ impl Vm {
         let agfp = self.async_generator_function_proto;
         let agf = self.native_fn("AsyncGeneratorFunction", NF_ASYNC_GENERATOR_FUNCTION, 1);
         self.add_prop(agf, A_PROTOTYPE, Val::Obj(agfp), P_HIDDEN | P_READONLY | P_FIXED);
-        self.objs[agf as usize].has_proto_obj = true;
         self.add_prop(agfp, A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
         if let Val::Obj(f) = fc {
             self.put_proto(agf, f);
@@ -75,7 +73,6 @@ impl Vm {
         let afp = self.async_function_proto;
         let af = self.native_fn("AsyncFunction", NF_ASYNC_FUNCTION, 1);
         self.add_prop(af, A_PROTOTYPE, Val::Obj(afp), P_HIDDEN | P_READONLY | P_FIXED);
-        self.objs[af as usize].has_proto_obj = true;
         self.add_prop(afp, A_CONSTRUCTOR, Val::Obj(af), P_HIDDEN | P_READONLY);
         if let Val::Obj(f) = fc {
             self.put_proto(af, f);

@@ -128,8 +128,6 @@ pub struct JsObj {
     pub extensible: bool,
     pub marked: bool,
     pub free: bool,
-    /// a function's own `prototype` object was made
-    pub has_proto_obj: bool,
 }
 
 impl JsObj {
@@ -149,7 +147,6 @@ impl JsObj {
             extensible: true,
             marked: false,
             free: false,
-            has_proto_obj: false,
         }
     }
 
@@ -169,7 +166,6 @@ impl JsObj {
         self.pos = 0;
         self.rc = 0;
         self.extensible = true;
-        self.has_proto_obj = false;
     }
 }
 

@@ -224,7 +224,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_val(&mut b, &mut st, vm, &cold.prim);
         put_num(&mut b, cold.home);
         put_num(&mut b, o.pos as int);
-        put_num(&mut b, (if o.extensible { 1 } else { 0 }) + (if o.has_proto_obj { 2 } else { 0 }));
+        put_num(&mut b, if o.extensible { 1 } else { 0 });
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
         if o.class == C_MAP || o.class == C_SET {
@@ -471,7 +471,6 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         o.pos = r.num() as i32;
         let bits = r.num();
         o.extensible = bits % 2 == 1;
-        o.has_proto_obj = (bits / 2) % 2 == 1;
         if class == C_MAP as int || class == C_SET as int {
             let ni = r.num();
             let mut j: int = 0;

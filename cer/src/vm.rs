@@ -2064,13 +2064,13 @@ impl Vm {
             self.add_own(p, A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
         }
         self.add_own(f, A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_FIXED);
-        self.objs[f as usize].has_proto_obj = true;
         Val::Obj(p)
     }
 
     /// A function with a `prototype` of its own that is not made yet.
     pub fn lazy_prototype(&self, f: int) -> bool {
-        if self.objs[f as usize].has_proto_obj {
+        // made (or set): an own property
+        if self.find(f, A_PROTOTYPE) >= 0 {
             return false;
         }
         let p = &self.protos[self.objs[f as usize].func as usize];
@@ -2089,7 +2089,7 @@ impl Vm {
                 let nm = self.protos[pi as usize].name.clone();
                 return self.string_val(nm);
             }
-            if atom == A_PROTOTYPE && !self.objs[f as usize].has_proto_obj {
+            if atom == A_PROTOTYPE && self.find(f, A_PROTOTYPE) < 0 {
                 let p = &self.protos[pi as usize];
                 if p.generator || p.constructible() {
                     return self.function_prototype(f);
@@ -2365,9 +2365,6 @@ impl Vm {
             }
             return;
         }
-        if (class == C_FUNCTION || class == C_BOUND) && atom == A_PROTOTYPE {
-            self.objs[o as usize].has_proto_obj = true;
-        }
         self.add_own(o, atom, v, 0);
     }
 
@@ -2509,10 +2506,6 @@ impl Vm {
         if (attr & P_READONLY) != 0 {
             self.any_setter = true;
             self.mark_setter(atom);
-        }
-        let class = self.objs[o as usize].class;
-        if (class == C_FUNCTION || class == C_BOUND) && atom == A_PROTOTYPE {
-            self.objs[o as usize].has_proto_obj = true;
         }
     }
 
