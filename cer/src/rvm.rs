@@ -99,6 +99,7 @@ impl Vm {
             let mut bp = self.frames[fi].bp;
             let mut pc = self.frames[fi].pc;
             if self.protos[pi].rstate == 0 {
+                unpack_code(&mut self.protos[pi]);
                 let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
                 if !e.is_empty() {
                     self.throw_type(e.as_str());
@@ -1133,7 +1134,8 @@ impl Vm {
     pub fn renter(&mut self, fo: int, fpos: int, argc: int, ret: int) -> bool {
         let pi = self.objs[fo as usize].func as usize;
         if self.protos[pi].rstate == 0 {
-            let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
+            unpack_code(&mut self.protos[pi]);
+                let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
             if !e.is_empty() {
                 self.throw_type(e.as_str());
                 return false;
@@ -1183,6 +1185,7 @@ impl Vm {
             }
             env = e;
         }
+        unpack_code(&mut self.protos[pi]);
         self.frames.push(Frame {
             proto: pi as int,
             fobj: fo,

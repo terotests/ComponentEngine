@@ -268,6 +268,8 @@ impl Vm {
         }
         let rest = self.colds[self.objs[g as usize].cold as usize].elems2.clone();
         let args_obj = obj_of(&rest[G_ARGS]);
+        let gp = self.objs[g as usize].func;
+        unpack_code(&mut self.protos[gp as usize]);
         self.frames.push(Frame {
             proto: self.objs[g as usize].func,
             fobj: obj_of(&rest[G_FOBJ]),

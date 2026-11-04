@@ -333,6 +333,156 @@ impl Shape {
     }
 }
 
+/// Rust: packs a function's code into `p.packed` (code, a and b of each op
+/// as zigzag varints, seven bytes to an int, after the op count) and frees
+/// `code`: most functions a program defines never run. The other targets
+/// keep `code`.
+#[ranger::target(rust)]
+pub fn pack_code(p: &mut Proto) {
+    if p.code.is_empty() || !p.packed.is_empty() {
+        return;
+    }
+    let mut w = Packer { words: Vec::new(), cur: 0, nb: 0 };
+    w.put(p.code.len() as int);
+    let mut i: usize = 0;
+    while i < p.code.len() {
+        let op = p.code[i];
+        w.put(op.code);
+        w.put(op.a);
+        w.put(op.b);
+        i += 1;
+    }
+    if w.nb > 0 {
+        w.words.push(w.cur);
+    }
+    w.words.shrink_to_fit();
+    p.packed = w.words;
+    p.code = Vec::new();
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn pack_code(_p: &mut Proto) {}
+
+/// `p.code` again from `p.packed` (Rust; nothing to do elsewhere).
+#[ranger::target(rust)]
+pub fn unpack_code(p: &mut Proto) {
+    if p.packed.is_empty() {
+        return;
+    }
+    p.code = packed_ops(p);
+    p.packed = Vec::new();
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn unpack_code(_p: &mut Proto) {}
+
+/// The function's ops, packed or not (a snapshot of a function that has
+/// not run).
+#[ranger::target(rust)]
+pub fn proto_ops(p: &Proto) -> Vec<Op> {
+    if p.packed.is_empty() {
+        p.code.clone()
+    } else {
+        packed_ops(p)
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn proto_ops(p: &Proto) -> Vec<Op> {
+    p.code.clone()
+}
+
+#[ranger::target(rust)]
+fn packed_ops(p: &Proto) -> Vec<Op> {
+    let mut r = Unpacker { pos: 0, nb: 0, cur: 0 };
+    let n = r.get(&p.packed);
+    let mut out: Vec<Op> = Vec::new();
+    out.reserve_exact(n as usize);
+    let mut i: int = 0;
+    while i < n {
+        let code = r.get(&p.packed);
+        let a = r.get(&p.packed);
+        let b = r.get(&p.packed);
+        out.push(Op { code: code, a: a, b: b, c: -1 });
+        i += 1;
+    }
+    out
+}
+
+/// pack_code's writer: bytes of 7 bits and a continuation bit, seven to a
+/// word (Rust only, where an int has 64 bits).
+#[ranger::target(rust)]
+struct Packer {
+    words: Vec<int>,
+    cur: int,
+    nb: int,
+}
+
+#[ranger::target(rust)]
+impl Packer {
+    fn byte(&mut self, x: int) {
+        self.cur |= x << (8 * self.nb);
+        self.nb += 1;
+        if self.nb == 7 {
+            self.words.push(self.cur);
+            self.cur = 0;
+            self.nb = 0;
+        }
+    }
+
+    fn put(&mut self, v: int) {
+        let mut z: int = if v >= 0 { v * 2 } else { -v * 2 - 1 };
+        loop {
+            if z < 128 {
+                self.byte(z);
+                return;
+            }
+            self.byte((z & 127) | 128);
+            z = z >> 7;
+        }
+    }
+}
+
+#[ranger::target(rust)]
+struct Unpacker {
+    pos: usize,
+    nb: int,
+    cur: int,
+}
+
+#[ranger::target(rust)]
+impl Unpacker {
+    fn byte(&mut self, w: &Vec<int>) -> int {
+        if self.nb == 0 {
+            self.cur = w[self.pos];
+            self.pos += 1;
+            self.nb = 7;
+        }
+        let x = self.cur & 255;
+        self.cur = self.cur >> 8;
+        self.nb -= 1;
+        x
+    }
+
+    fn get(&mut self, w: &Vec<int>) -> int {
+        let mut z: int = 0;
+        let mut shift: int = 0;
+        loop {
+            let x = self.byte(w);
+            z |= (x & 127) << shift;
+            if x < 128 {
+                break;
+            }
+            shift += 7;
+        }
+        if z % 2 == 0 {
+            z / 2
+        } else {
+            -(z + 1) / 2
+        }
+    }
+}
+
 /// Room for `n` ints (Rust; the other targets grow as they push).
 #[ranger::target(rust)]
 pub fn reserve_ints(v: &mut Vec<int>, n: usize) {
@@ -352,7 +502,12 @@ pub struct Op {
 }
 
 pub struct Proto {
+    /// the stack bytecode; empty while `packed` holds it (pack_code)
     pub code: Vec<Op>,
+    /// Rust: the code of a function that has not run yet, as varints seven
+    /// to an int (a few bytes an op, not an Op's 32); unpack_code makes
+    /// `code` again when the function first runs
+    pub packed: Vec<int>,
     pub consts: Vec<Val>,
     /// the strings of consts and src until the proto is linked
     /// (Vm::link_strs)
@@ -404,6 +559,7 @@ impl Proto {
     pub fn new(name: &str) -> Proto {
         Proto {
             code: Vec::new(),
+            packed: Vec::new(),
             consts: Vec::new(),
             cstrs: Vec::new(),
             name: String::from(name),

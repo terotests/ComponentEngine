@@ -192,8 +192,9 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, p.src_start);
         put_num(&mut b, p.src_end);
         put_vals(&mut b, &mut st, vm, &p.consts);
-        put_num(&mut b, p.code.len() as int);
-        for op in p.code.iter() {
+        let ops = proto_ops(p);
+        put_num(&mut b, ops.len() as int);
+        for op in ops.iter() {
             put_num(&mut b, op.code);
             put_num(&mut b, op.a);
             put_num(&mut b, op.b);
@@ -409,6 +410,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             p.code.push(Op { code: code, a: a, b: b, c: -1 });
             k += 1;
         }
+        pack_code(&mut p);
         vm.protos.push(p);
         i += 1;
     }

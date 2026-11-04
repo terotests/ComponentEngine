@@ -123,6 +123,7 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
             }
             i += 1;
         }
+        pack_code(&mut p);
         vm.protos.push(p);
     }
     base + u.entry

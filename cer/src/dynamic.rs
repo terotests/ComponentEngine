@@ -115,6 +115,7 @@ impl Vm {
         for pr in c.protos {
             let mut p2 = pr;
             self.link_strs(&mut p2);
+            pack_code(&mut p2);
             self.protos.push(p2);
         }
         let fp = self.function_proto;
@@ -143,6 +144,7 @@ impl Vm {
         for pr in c.protos {
             let mut p2 = pr;
             self.link_strs(&mut p2);
+            pack_code(&mut p2);
             self.protos.push(p2);
         }
         let fp = self.function_proto;

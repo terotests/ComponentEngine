@@ -3273,6 +3273,7 @@ impl Vm {
             }
             env = e;
         }
+        unpack_code(&mut self.protos[pi as usize]);
         self.frames.push(Frame {
             proto: pi,
             fobj: fo,
@@ -3334,6 +3335,7 @@ impl Vm {
             }
             env = e;
         }
+        unpack_code(&mut self.protos[pi as usize]);
         self.frames.push(Frame {
             proto: pi,
             fobj: fo,
