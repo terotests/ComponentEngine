@@ -394,6 +394,16 @@ pub struct PComp {
     /// declarations local
     pub local_if_strict: bool,
     keep_completion: bool,
+    /// TypeScript: types are read and skipped (`type_end`)
+    pub ts: bool,
+    /// JSX: elements are the factory's calls (the lexer writes them)
+    jsx: bool,
+    jsx_factory: String,
+    jsx_fragment: String,
+    /// the type reader's token and how many `>` of a `>>` it has read
+    tp: int,
+    tg: int,
+    tbad: bool,
 
     scopes: Vec<PScope>,
     binds: Vec<PBind>,
@@ -443,7 +453,12 @@ pub struct PComp {
 
 impl PComp {
     pub fn new(src: &str, atoms: HashMap<String, int>, atom_names: Vec<String>, proto_base: int) -> PComp {
-        let mut lx = Lexer::new(src);
+        PComp::new_syntax(src, atoms, atom_names, proto_base, false, "", "")
+    }
+
+    /// `new`, its JSX read as the factory's calls (crate::lexer::lexer_for).
+    pub fn new_syntax(src: &str, atoms: HashMap<String, int>, atom_names: Vec<String>, proto_base: int, jsx: bool, factory: &str, fragment: &str) -> PComp {
+        let mut lx = lexer_for(src, jsx, factory, fragment);
         let toks = lx.tokenize();
         let mut c = PComp {
             toks: Vec::new(),
@@ -464,6 +479,13 @@ impl PComp {
             local_program: false,
             local_if_strict: false,
             keep_completion: true,
+            ts: false,
+            jsx: jsx,
+            jsx_factory: String::from(factory),
+            jsx_fragment: String::from(fragment),
+            tp: 0,
+            tg: 0,
+            tbad: false,
             scopes: Vec::new(),
             binds: Vec::new(),
             refs: Vec::new(),
@@ -1983,7 +2005,7 @@ impl PComp {
     /// Reads `src` as tokens after the script's own; `pop_tokens` drops
     /// them. Answers what pop_tokens needs back.
     fn push_tokens(&mut self, src: &str) -> Vec<int> {
-        let mut lx = Lexer::new(src);
+        let mut lx = lexer_for(src, self.jsx, self.jsx_factory.as_str(), self.jsx_fragment.as_str());
         let toks = lx.tokenize();
         if !lx.error.is_empty() {
             let e = lx.error.clone();
@@ -2231,6 +2253,9 @@ impl PComp {
                 return;
             }
         }
+        if word && self.ts && self.ts_statement(in_list) {
+            return;
+        }
         if word {
             let w = self.text();
             let ws = w.as_str();
@@ -2459,6 +2484,7 @@ impl PComp {
             let ts = self.pos;
             let single = self.kind() == T_IDENT;
             self.skip_binding_target();
+            self.skip_annotation();
             if self.is("=") {
                 let name = if single { self.tok_text(ts) } else { String::new() };
                 self.next();
@@ -2895,6 +2921,7 @@ impl PComp {
             self.enter_block(s);
             if self.eat("(") {
                 self.pattern_target(K_CATCH);
+                self.skip_annotation();
                 self.expect(")");
             } else {
                 self.op(OP_POP);
@@ -3117,6 +3144,9 @@ impl PComp {
         let ts = self.pos;
         self.skip_target(pk);
         let single = self.pos - ts == 1 && (self.toks[ts as usize].kind as int) == T_IDENT;
+        if pk == K_PARAM {
+            self.skip_annotation();
+        }
         if self.is("=") {
             self.next();
             self.op(OP_DUP);
@@ -3407,7 +3437,24 @@ impl PComp {
         }
     }
 
-    fn arrow_ahead(&self) -> bool {
+    /// TypeScript: the parameter here is a name with a type (`a: T`,
+    /// `a?: T`) and nothing more.
+    fn plain_typed_param(&mut self) -> bool {
+        let mut k = self.pos + 1;
+        if self.tok_is(k, "?") {
+            k += 1;
+        }
+        if !self.tok_is(k, ":") {
+            return self.tok_is(k, ",") || self.tok_is(k, ")");
+        }
+        let e = self.type_end(k + 1);
+        e >= 0 && (self.tok_is(e, ",") || self.tok_is(e, ")"))
+    }
+
+    fn arrow_ahead(&mut self) -> bool {
+        if self.ts {
+            return self.ts_arrow_ahead();
+        }
         let mut k: int = 0;
         if self.peek_is(0, "async") && !self.tok_nl(self.pos + 1) && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "(")) {
             if self.peek_kind(1) == T_IDENT {
@@ -3426,6 +3473,43 @@ impl PComp {
             return false;
         }
         self.tok_is(a, "=>") && !self.tok_nl(a)
+    }
+
+    /// arrow_ahead in TypeScript: type parameters before the list, a
+    /// return type after it (not in a conditional's first branch, where
+    /// `c ? (a) : b => d` is the conditional).
+    fn ts_arrow_ahead(&mut self) -> bool {
+        let mut k: int = self.pos;
+        if self.is("async") && !self.tok_nl(self.pos + 1) && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "(") || self.peek_is(1, "<")) {
+            if self.peek_kind(1) == T_IDENT && !self.peek_is(1, "(") {
+                return self.peek_is(2, "=>");
+            }
+            k += 1;
+        }
+        if self.tok_is(k, "<") {
+            let e = self.type_params_end(k);
+            if e < 0 || !self.tok_is(e, "(") {
+                return false;
+            }
+            k = e;
+        } else if (self.toks[k as usize].kind as int) == T_IDENT && !self.tok_is(k, "(") {
+            return k == self.pos && self.tok_is(k + 1, "=>") && !self.tok_nl(k + 1);
+        }
+        if !self.tok_is(k, "(") {
+            return false;
+        }
+        let a = self.after_mate(k);
+        if a < 0 {
+            return false;
+        }
+        if self.tok_is(a, "=>") {
+            return !self.tok_nl(a);
+        }
+        if self.tok_is(a, ":") && !(self.pos > 0 && self.tok_is(self.pos - 1, "?")) {
+            let e = self.return_type_end(a + 1);
+            return e >= 0 && self.tok_is(e, "=>") && !self.tok_nl(e);
+        }
+        false
     }
 
     fn yield_expr(&mut self) -> Ex {
@@ -3646,6 +3730,16 @@ impl PComp {
         loop {
             if !self.error.is_empty() {
                 break;
+            }
+            if self.ts && (self.is("as") || self.is("satisfies")) && !self.nl_before() && 8 >= min {
+                // `x as T`: the value of x
+                self.next();
+                if self.is("const") {
+                    self.next();
+                } else {
+                    self.skip_type_here();
+                }
+                continue;
             }
             if !(self.kind() == T_PUNCT || (self.kind() == T_IDENT && !self.escaped() && (self.is("instanceof") || self.is("in")))) {
                 break;
@@ -3934,6 +4028,14 @@ impl PComp {
                 e = ex(E_OTHER);
             } else {
                 self.member_only();
+                if self.ts && self.is("<") {
+                    let a = self.type_args_end(self.pos);
+                    if a < 0 {
+                        self.ts_fail();
+                    } else {
+                        self.goto(a);
+                    }
+                }
                 let mut n: int = 0;
                 if self.is("(") {
                     n = self.call_args();
@@ -4033,6 +4135,17 @@ impl PComp {
             } else if self.kind() == T_TEMPLATE {
                 self.tagged(e);
                 e = ex(E_OTHER);
+            } else if self.ts && self.is("!") && !self.nl_before() {
+                // `x!`: not null, for the types only
+                self.next();
+            } else if self.ts && self.is("<") {
+                // `f<T>(…)`; else a comparison
+                let a = self.type_args_end(self.pos);
+                if a >= 0 && (self.tok_is(a, "(") || (a < self.tok_count() && (self.toks[a as usize].kind as int) == T_TEMPLATE)) {
+                    self.goto(a);
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -4554,7 +4667,9 @@ impl PComp {
         let mut counting = true;
         let mut simple = true;
         let mut param_exprs = false;
-        if arrow && !self.is("(") {
+        // TypeScript's parameter properties
+        let mut props: Vec<String> = Vec::new();
+        if arrow && !self.is("(") && !(self.ts && self.is("<")) {
             let nm = self.binding_ident();
             if self.error.is_empty() {
                 let b = self.declare(fscope, nm.as_str(), K_PARAM);
@@ -4565,8 +4680,34 @@ impl PComp {
             i = 1;
             length = 1;
         } else {
+            self.skip_type_params();
             self.expect("(");
             while !self.is(")") && self.kind() != T_EOF && self.error.is_empty() {
+                if self.ts && self.is("this") && self.peek_is(1, ":") {
+                    // `this: T` only types `this`
+                    self.next();
+                    self.skip_annotation();
+                    if !self.eat(",") {
+                        break;
+                    }
+                    continue;
+                }
+                if self.ts && (self.is("public") || self.is("private") || self.is("protected") || self.is("readonly") || self.is("override")) && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "(") {
+                    // a parameter property: `this.x = x` as the body starts
+                    if (flags & F_CTOR) == 0 {
+                        self.ts_fail();
+                        break;
+                    }
+                    while (self.is("public") || self.is("private") || self.is("protected") || self.is("readonly") || self.is("override")) && self.peek_kind(1) == T_IDENT {
+                        self.next();
+                    }
+                    if self.kind() != T_IDENT {
+                        self.ts_fail();
+                        break;
+                    }
+                    let pn = self.text();
+                    props.push(pn);
+                }
                 if self.eat("...") {
                     self.f().proto.rest = i;
                     counting = false;
@@ -4576,17 +4717,19 @@ impl PComp {
                     }
                     self.emit(OP_GET_LOCAL, i, 0);
                     self.pattern_target(K_PARAM);
+                    self.skip_annotation();
                     self.mark_pending();
                     self.fns[fnid as usize].param_binds.push(-1);
                     i += 1;
                     break;
                 }
-                let plain = self.kind() == T_IDENT && (self.peek_is(1, ",") || self.peek_is(1, ")"));
+                let plain = self.kind() == T_IDENT && (self.peek_is(1, ",") || self.peek_is(1, ")") || (self.ts && self.plain_typed_param()));
                 if plain {
                     let nm = self.binding_ident();
                     if !self.error.is_empty() {
                         break;
                     }
+                    self.skip_annotation();
                     let b = self.declare(fscope, nm.as_str(), K_PARAM);
                     self.param_names.push(nm.clone());
                     self.fns[fnid as usize].param_binds.push(b);
@@ -4599,6 +4742,7 @@ impl PComp {
                     param_exprs = true;
                     let ts = self.pos;
                     self.skip_target(K_PARAM);
+                    self.skip_annotation();
                     let has_default = self.is("=");
                     self.goto(ts);
                     if has_default {
@@ -4617,6 +4761,7 @@ impl PComp {
                 }
             }
             self.expect(")");
+            self.skip_return_type();
         }
         self.f().proto.nparams = i;
         self.f().proto.length = length;
@@ -4657,9 +4802,22 @@ impl PComp {
             }
             let vs = self.f().var_scope;
             self.emit(PH_HOIST, vs, 0);
+            if !props.is_empty() && (flags & F_DERIVED) == 0 {
+                self.param_props(&props);
+                props = Vec::new();
+            }
             while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
                 self.list_stmt = true;
+                let st = self.pos;
                 self.statement();
+                if !props.is_empty() && self.tok_is(st, "super") && self.tok_is(st + 1, "(") {
+                    // in a derived class, after `super(…)`
+                    self.param_props(&props);
+                    props = Vec::new();
+                }
+            }
+            if !props.is_empty() {
+                self.ts_fail();
             }
             self.expect("}");
             self.op(OP_RETURN_UNDEF);
@@ -4767,15 +4925,32 @@ impl PComp {
         let first = self.pos;
         self.next();
         let mut name = String::new();
-        if self.kind() == T_IDENT && !self.is("extends") && !self.is("{") {
+        if self.kind() == T_IDENT && !self.is("extends") && !self.is("{") && !(self.ts && self.is("implements")) {
             name = self.binding_ident();
         } else if decl {
             self.fail("class name expected");
             return ex(E_OTHER);
         }
+        self.skip_type_params();
         let derived = self.eat("extends");
         if derived {
             self.lhs();
+            if self.ts && self.is("<") {
+                let a = self.type_args_end(self.pos);
+                if a < 0 {
+                    self.ts_fail();
+                } else {
+                    self.goto(a);
+                }
+            }
+        }
+        if self.ts && self.eat("implements") {
+            loop {
+                self.skip_type_here();
+                if !self.eat(",") {
+                    break;
+                }
+            }
         }
         let saved = self.cur_scope;
         let mut inner: int = -1;
@@ -4801,10 +4976,16 @@ impl PComp {
             if self.eat(";") {
                 continue;
             }
+            if self.ts && self.ts_member_skipped() {
+                continue;
+            }
             let mut flags = 0;
             if self.is("static") && !self.peek_is(1, "(") && !self.peek_is(1, "=") {
                 self.next();
                 flags |= F_STATIC;
+                if self.ts && self.ts_member_skipped() {
+                    continue;
+                }
                 if self.is("{") {
                     stat_id = self.resume_member_fn(stat_id, class_scope);
                     self.in_function = true;
@@ -4834,8 +5015,31 @@ impl PComp {
             }
             let kpos = self.pos;
             let computed = self.is("[");
-            let kend = if computed { self.after_mate(kpos) } else { kpos + 1 };
-            let is_method = self.tok_is(kend, "(");
+            let mut kend = if computed { self.after_mate(kpos) } else { kpos + 1 };
+            if self.ts && self.tok_is(kend, "?") && (self.tok_is(kend + 1, "(") || self.tok_is(kend + 1, "<")) {
+                // `m?(): T;` declares only; with a body the parser reads it
+                let e = self.sig_rest_end(kend + 1);
+                if e >= 0 && !self.tok_is(e, "{") {
+                    self.goto(e);
+                    self.semicolon();
+                    continue;
+                }
+                self.ts_fail();
+                return ex(E_OTHER);
+            }
+            if self.ts && kend >= 0 && (self.tok_is(kend, "<") || self.tok_is(kend, "(")) {
+                // an overload's signature (no body) is skipped
+                let e = self.sig_rest_end(kend);
+                if e >= 0 && !self.tok_is(e, "{") {
+                    self.goto(e);
+                    self.semicolon();
+                    continue;
+                }
+                if self.tok_is(kend, "<") {
+                    kend = self.type_params_end(kend);
+                }
+            }
+            let is_method = self.tok_is(kend, "(") || (self.ts && self.tok_is(kend, "<"));
             if is_method {
                 let kk = self.kind();
                 let is_ctor = !computed && (flags & F_STATIC) == 0 && (kk == T_IDENT || kk == T_STR) && self.text().as_str() == "constructor";
@@ -4888,6 +5092,7 @@ impl PComp {
             self.op(OP_THIS);
             let mut kf: int = 0;
             let kname = self.prop_key(&mut kf);
+            self.skip_annotation();
             if self.eat("=") {
                 let e = self.assign();
                 if !computed {
@@ -4958,8 +5163,1165 @@ impl PComp {
     }
 }
 
+impl PComp {
+    // =====================================================================
+    // TypeScript's types, read only to be skipped: on the tokens, without
+    // emitting anything. Each `*_end` answers the token after what it
+    // read, or -1 when it is not one pcomp reads (the script then goes to
+    // the parser, crate::parser::script_js).
+
+    fn t_kind(&self) -> int {
+        if self.tp >= self.tok_count() {
+            return T_EOF;
+        }
+        self.toks[self.tp as usize].kind as int
+    }
+
+    fn t_is(&self, s: &str) -> bool {
+        self.tg == 0 && self.tok_is(self.tp, s)
+    }
+
+    fn t_peek_is(&self, k: int, s: &str) -> bool {
+        self.tg == 0 && self.tok_is(self.tp + k, s)
+    }
+
+    fn t_peek_kind(&self, k: int) -> int {
+        let i = self.tp + k;
+        if i >= self.tok_count() {
+            return T_EOF;
+        }
+        self.toks[i as usize].kind as int
+    }
+
+    fn t_nl(&self) -> bool {
+        self.tok_nl(self.tp)
+    }
+
+    fn t_next(&mut self) {
+        if self.tg != 0 {
+            self.tbad = true;
+        }
+        if self.tp < self.tok_count() - 1 {
+            self.tp += 1;
+        }
+    }
+
+    fn t_eat(&mut self, s: &str) -> bool {
+        if self.t_is(s) {
+            self.t_next();
+            return true;
+        }
+        false
+    }
+
+    fn t_expect(&mut self, s: &str) {
+        if !self.t_eat(s) {
+            self.tbad = true;
+        }
+    }
+
+    /// Past the bracket at the reader's token and its mate.
+    fn t_skip_balanced(&mut self) {
+        let a = self.after_mate(self.tp);
+        if a < 0 || self.tg != 0 {
+            self.tbad = true;
+            return;
+        }
+        self.tp = a;
+    }
+
+    /// A closing `>`, one of a `>>` / `>>>` too.
+    fn t_eat_gt(&mut self) {
+        if self.tbad || self.tp >= self.tok_count() || (self.toks[self.tp as usize].kind as int) != T_PUNCT {
+            self.tbad = true;
+            return;
+        }
+        let t = self.tok_text(self.tp);
+        let n = t.as_bytes().len() as int;
+        if self.tg >= n || t.as_bytes()[self.tg as usize] != 62 {
+            self.tbad = true;
+            return;
+        }
+        self.tg += 1;
+        if self.tg == n {
+            self.tg = 0;
+            self.tp += 1;
+        }
+    }
+
+    fn t_ident_name(&mut self) {
+        if self.t_kind() != T_IDENT || self.tg != 0 {
+            self.tbad = true;
+            return;
+        }
+        self.t_next();
+    }
+
+    /// `<T, U extends X = Y>`
+    fn t_type_params(&mut self) {
+        self.t_expect("<");
+        while !self.tbad && !self.t_is(">") && self.t_kind() != T_EOF {
+            while (self.t_is("const") || self.t_is("in") || self.t_is("out")) && self.t_peek_kind(1) == T_IDENT {
+                self.t_next();
+            }
+            self.t_ident_name();
+            if self.t_eat("extends") {
+                self.t_type(true);
+            }
+            if self.t_eat("=") {
+                self.t_type(true);
+            }
+            if !self.t_eat(",") {
+                break;
+            }
+        }
+        self.t_eat_gt();
+    }
+
+    /// `<A, B>`
+    fn t_type_args(&mut self) {
+        self.t_expect("<");
+        while !self.tbad && !self.t_is(">") && self.t_kind() != T_EOF {
+            self.t_type(true);
+            if !self.t_eat(",") {
+                break;
+            }
+        }
+        self.t_eat_gt();
+    }
+
+    /// A return type: a type, or `x is T` / `asserts x is T`.
+    fn t_return_type(&mut self) {
+        if self.t_is("asserts") && self.t_peek_kind(1) == T_IDENT && !self.tok_nl(self.tp + 1) {
+            self.t_next();
+            self.t_next();
+            if self.t_eat("is") {
+                self.t_type(true);
+            }
+            return;
+        }
+        if self.t_kind() == T_IDENT && self.t_peek_is(1, "is") && !self.tok_nl(self.tp + 1) {
+            self.t_next();
+            self.t_next();
+            self.t_type(true);
+            return;
+        }
+        self.t_type(true);
+    }
+
+    fn t_type(&mut self, cond: bool) {
+        if self.tbad {
+            return;
+        }
+        if self.t_is("<") {
+            self.t_type_params();
+            self.t_fn_type_rest();
+            return;
+        }
+        if self.t_is("abstract") && self.t_peek_is(1, "new") {
+            self.t_next();
+        }
+        if self.t_is("new") {
+            self.t_next();
+            if self.t_is("<") {
+                self.t_type_params();
+            }
+            self.t_fn_type_rest();
+            return;
+        }
+        self.t_eat("|");
+        self.t_intersection();
+        while !self.tbad && self.t_is("|") {
+            self.t_next();
+            self.t_intersection();
+        }
+        if cond && self.t_is("extends") && !self.t_nl() {
+            self.t_next();
+            self.t_type(false);
+            self.t_expect("?");
+            self.t_type(true);
+            self.t_expect(":");
+            self.t_type(true);
+        }
+    }
+
+    fn t_fn_type_rest(&mut self) {
+        if !self.t_is("(") {
+            self.tbad = true;
+            return;
+        }
+        self.t_skip_balanced();
+        self.t_expect("=>");
+        self.t_return_type();
+    }
+
+    fn t_intersection(&mut self) {
+        self.t_eat("&");
+        self.t_operator();
+        while !self.tbad && self.t_is("&") {
+            self.t_next();
+            self.t_operator();
+        }
+    }
+
+    fn t_starts(&self, k: int) -> bool {
+        let kd = self.t_peek_kind(k);
+        if kd == T_IDENT || kd == T_STR || kd == T_NUM || kd == T_TEMPLATE {
+            return true;
+        }
+        self.t_peek_is(k, "(") || self.t_peek_is(k, "[") || self.t_peek_is(k, "{") || self.t_peek_is(k, "-") || self.t_peek_is(k, "<")
+    }
+
+    fn t_operator(&mut self) {
+        if (self.t_is("keyof") || self.t_is("unique") || self.t_is("readonly")) && self.t_starts(1) {
+            self.t_next();
+            self.t_operator();
+            return;
+        }
+        if self.t_is("infer") && self.t_peek_kind(1) == T_IDENT {
+            self.t_next();
+            self.t_next();
+            if self.t_is("extends") && !self.t_nl() {
+                // `infer U extends X` inside a conditional's check
+                self.t_next();
+                self.t_type(false);
+            }
+            return;
+        }
+        self.t_primary();
+        while !self.tbad && self.t_is("[") && !self.t_nl() {
+            self.t_next();
+            if !self.t_is("]") {
+                self.t_type(true);
+            }
+            self.t_expect("]");
+        }
+    }
+
+    fn t_primary(&mut self) {
+        if self.tbad {
+            return;
+        }
+        let k = self.t_kind();
+        if self.t_is("(") {
+            self.t_skip_balanced();
+            if self.t_is("=>") {
+                self.t_next();
+                self.t_return_type();
+            }
+            return;
+        }
+        if self.t_is("{") || self.t_is("[") {
+            self.t_skip_balanced();
+            return;
+        }
+        if self.t_is("-") {
+            self.t_next();
+            if self.t_kind() != T_NUM {
+                self.tbad = true;
+                return;
+            }
+            self.t_next();
+            return;
+        }
+        if (k == T_STR || k == T_NUM || k == T_TEMPLATE) && self.tg == 0 {
+            self.t_next();
+            return;
+        }
+        if self.t_is("typeof") {
+            self.t_next();
+            if self.t_is("import") {
+                self.t_import_type();
+            } else {
+                self.t_entity();
+            }
+            if self.t_is("<") && !self.t_nl() {
+                self.t_type_args();
+            }
+            return;
+        }
+        if self.t_is("import") {
+            self.t_import_type();
+            return;
+        }
+        if k == T_IDENT && self.tg == 0 {
+            self.t_entity();
+            if self.t_is("<") && !self.t_nl() {
+                self.t_type_args();
+            }
+            return;
+        }
+        self.tbad = true;
+    }
+
+    fn t_entity(&mut self) {
+        self.t_ident_name();
+        while !self.tbad && self.t_is(".") {
+            self.t_next();
+            self.t_ident_name();
+        }
+    }
+
+    fn t_import_type(&mut self) {
+        self.t_next();
+        if !self.t_is("(") {
+            self.tbad = true;
+            return;
+        }
+        self.t_skip_balanced();
+        while !self.tbad && self.t_eat(".") {
+            self.t_ident_name();
+        }
+        if self.t_is("<") && !self.t_nl() {
+            self.t_type_args();
+        }
+    }
+
+    fn t_start(&mut self, i: int) {
+        self.tp = i;
+        self.tg = 0;
+        self.tbad = false;
+    }
+
+    fn t_done(&self) -> int {
+        if self.tbad || self.tg != 0 {
+            return -1;
+        }
+        self.tp
+    }
+
+    /// After the type at token `i`.
+    fn type_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_type(true);
+        self.t_done()
+    }
+
+    /// After the return type at token `i`.
+    fn return_type_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_return_type();
+        self.t_done()
+    }
+
+    /// After the type parameters `<…>` at token `i`.
+    fn type_params_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_type_params();
+        self.t_done()
+    }
+
+    /// After the type arguments `<…>` at token `i`.
+    fn type_args_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_type_args();
+        self.t_done()
+    }
+
+    /// TypeScript's declarations at a statement: the erased ones skipped,
+    /// `abstract class` read as a class; true when it read the statement.
+    /// What has a runtime meaning (`enum`, `namespace`, `import`,
+    /// `export`) is the parser's.
+    fn ts_statement(&mut self, in_list: bool) -> bool {
+        let w = self.text();
+        let ws = w.as_str();
+        let next_ident = self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1);
+        if ws == "type" && next_ident && (self.peek_is(2, "=") || self.peek_is(2, "<")) {
+            self.next();
+            self.next();
+            self.skip_type_params();
+            self.expect("=");
+            self.skip_type_here();
+            self.semicolon();
+            return true;
+        }
+        if ws == "interface" && next_ident {
+            self.skip_to_body();
+            return true;
+        }
+        if ws == "declare" && next_ident {
+            self.next();
+            if self.is("var") || self.is("let") || self.is("const") {
+                self.next();
+                loop {
+                    self.skip_binding_target();
+                    self.skip_annotation();
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.semicolon();
+                return true;
+            }
+            if self.is("function") || (self.is("async") && self.peek_is(1, "function")) {
+                let e = self.fn_signature_end(self.pos);
+                if e < 0 {
+                    self.ts_fail();
+                    return true;
+                }
+                self.goto(e);
+                self.semicolon();
+                return true;
+            }
+            if self.is("type") {
+                return self.ts_statement(in_list);
+            }
+            if self.is("module") && self.peek_kind(1) == T_STR && !self.peek_is(2, "{") {
+                self.next();
+                self.next();
+                self.semicolon();
+                return true;
+            }
+            // class, abstract class, interface, enum, namespace, module, global
+            self.skip_to_body();
+            return true;
+        }
+        if ws == "abstract" && self.peek_is(1, "class") && !self.tok_nl(self.pos + 1) {
+            self.next();
+            self.class_decl();
+            return true;
+        }
+        if ws == "function" || (ws == "async" && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1)) {
+            // an overload's signature, without a body
+            let e = self.fn_signature_end(self.pos);
+            if e >= 0 && !self.tok_is(e, "{") {
+                self.goto(e);
+                self.semicolon();
+                return true;
+            }
+            return false;
+        }
+        if ws == "import" && self.type_only_import() {
+            self.skip_module_clause();
+            return true;
+        }
+        if ws == "export" && ((self.peek_is(1, "type") && (self.peek_is(2, "{") || self.peek_is(2, "*"))) || self.peek_is(1, "interface") || self.peek_is(1, "declare") || (self.peek_is(1, "type") && self.peek_kind(2) == T_IDENT && (self.peek_is(3, "=") || self.peek_is(3, "<")))) {
+            if self.peek_is(2, "{") || self.peek_is(2, "*") {
+                self.skip_module_clause();
+                return true;
+            }
+            self.next();
+            if self.ts_statement(in_list) {
+                return true;
+            }
+            self.ts_fail();
+            return true;
+        }
+        if (ws == "enum" && next_ident) || (ws == "const" && self.peek_is(1, "enum")) {
+            if ws == "const" {
+                self.next();
+            }
+            self.enum_decl();
+            return true;
+        }
+        if ws == "import" && !self.peek_is(1, "(") && !self.peek_is(1, ".") {
+            self.script_import();
+            return true;
+        }
+        if ws == "export" {
+            self.script_export(in_list);
+            return true;
+        }
+        if (ws == "namespace" || ws == "module") && next_ident && (self.peek_is(2, "{") || self.peek_is(2, ".")) {
+            self.namespace_decl();
+            return true;
+        }
+        if ((ws == "namespace" || ws == "module") && next_ident) || ws == "import" || ws == "export" {
+            self.ts_fail();
+            return true;
+        }
+        let _ = in_list;
+        false
+    }
+
+    /// `import type …`, or `import { type A, type B } from …`: only types.
+    fn type_only_import(&self) -> bool {
+        if self.peek_is(1, "type") && (self.peek_kind(2) == T_IDENT || self.peek_is(2, "{") || self.peek_is(2, "*")) && !self.peek_is(2, "from") {
+            return true;
+        }
+        if !self.peek_is(1, "{") {
+            return false;
+        }
+        let close = self.mate_of(self.pos + 1);
+        let mut k = self.pos + 2;
+        let mut any = false;
+        while k < close {
+            // each entry starts with `type`
+            let k1 = k + 1;
+            let named = (self.toks[k1 as usize].kind as int) == T_IDENT && !self.tok_is(k1, "as");
+            if !(self.tok_is(k, "type") && named) {
+                return false;
+            }
+            any = true;
+            while k < close && !self.tok_is(k, ",") {
+                k += 1;
+            }
+            k += 1;
+        }
+        any
+    }
+
+    /// Past an import's or an export's clause, to its `;`.
+    fn skip_module_clause(&mut self) {
+        self.next();
+        loop {
+            if self.kind() == T_EOF {
+                return;
+            }
+            if self.is(";") {
+                self.next();
+                return;
+            }
+            if self.is("{") {
+                let a = self.after_mate(self.pos);
+                if a < 0 {
+                    self.ts_fail();
+                    return;
+                }
+                self.goto(a);
+                if !self.is("from") {
+                    self.semicolon();
+                    return;
+                }
+                continue;
+            }
+            if self.is("from") || self.kind() == T_STR {
+                if self.is("from") {
+                    self.next();
+                }
+                if self.kind() == T_STR {
+                    self.next();
+                }
+                if (self.is("with") || self.is("assert")) && self.peek_is(1, "{") {
+                    self.next();
+                    let a = self.after_mate(self.pos);
+                    self.goto(a);
+                }
+                self.semicolon();
+                return;
+            }
+            self.next();
+        }
+    }
+
+    /// Past the `{ … }` that ends a declaration (`interface I extends A {`).
+    fn skip_to_body(&mut self) {
+        let mut k = self.pos;
+        while k < self.tok_count() && !self.tok_is(k, "{") && (self.toks[k as usize].kind as int) != T_EOF {
+            if self.tok_is(k, "(") || self.tok_is(k, "[") {
+                let a = self.after_mate(k);
+                if a < 0 {
+                    break;
+                }
+                k = a;
+                continue;
+            }
+            k += 1;
+        }
+        let a = self.after_mate(k);
+        if !self.tok_is(k, "{") || a < 0 {
+            self.ts_fail();
+            return;
+        }
+        self.goto(a);
+    }
+
+    /// After `function name<T>(…): R` at token `i` (`async` and `*` too),
+    /// or -1.
+    fn fn_signature_end(&mut self, i: int) -> int {
+        let mut k = i;
+        if self.tok_is(k, "async") {
+            k += 1;
+        }
+        if !self.tok_is(k, "function") {
+            return -1;
+        }
+        k += 1;
+        if self.tok_is(k, "*") {
+            k += 1;
+        }
+        if k < self.tok_count() && (self.toks[k as usize].kind as int) == T_IDENT && !self.tok_is(k, "(") {
+            k += 1;
+        }
+        self.sig_rest_end(k)
+    }
+
+    /// After `<T>(…): R` at token `k` (a method's or a function's), or -1.
+    fn sig_rest_end(&mut self, i: int) -> int {
+        let mut k = i;
+        if self.tok_is(k, "<") {
+            k = self.type_params_end(k);
+            if k < 0 {
+                return -1;
+            }
+        }
+        if !self.tok_is(k, "(") {
+            return -1;
+        }
+        k = self.after_mate(k);
+        if k < 0 {
+            return -1;
+        }
+        if self.tok_is(k, ":") {
+            k = self.return_type_end(k + 1);
+        }
+        k
+    }
+
+    /// TypeScript: a class member's modifiers (`public`, `readonly` …)
+    /// skipped; true when the whole member is one without code
+    /// (`declare x: T`, `abstract m(): T`, `[key: string]: T`).
+    fn ts_member_skipped(&mut self) -> bool {
+        loop {
+            let m = self.is("public") || self.is("private") || self.is("protected") || self.is("readonly") || self.is("override") || self.is("declare") || self.is("abstract") || self.is("accessor");
+            if !m {
+                break;
+            }
+            // the word is a member's name: `readonly() {}`, `public = 1`
+            if self.peek_is(1, "(") || self.peek_is(1, "=") || self.peek_is(1, ";") || self.peek_is(1, "}") || self.peek_is(1, ":") || self.peek_is(1, "?") || self.peek_is(1, "!") || self.peek_is(1, "<") || self.tok_nl(self.pos + 1) {
+                break;
+            }
+            if self.is("accessor") {
+                self.ts_fail();
+                return true;
+            }
+            if self.is("declare") || self.is("abstract") {
+                // no code: up to the member's end
+                self.next();
+                self.skip_member_sig();
+                return true;
+            }
+            self.next();
+        }
+        if self.is("[") && self.peek_kind(1) == T_IDENT && self.peek_is(2, ":") {
+            // an index signature
+            self.skip_member_sig();
+            return true;
+        }
+        if self.is("static") && self.peek_is(1, "[") && self.peek_kind(2) == T_IDENT && self.peek_is(3, ":") {
+            self.next();
+            self.skip_member_sig();
+            return true;
+        }
+        false
+    }
+
+    /// Past a member that has no code: its name, `?`, type or signature,
+    /// and the `;`.
+    fn skip_member_sig(&mut self) {
+        while self.is("static") || self.is("readonly") || self.is("public") || self.is("private") || self.is("protected") || self.is("override") || self.is("abstract") || self.is("declare") || self.is("get") || self.is("set") || self.is("async") || self.is("*") {
+            if self.peek_is(1, "(") || self.peek_is(1, ":") || self.peek_is(1, "?") || self.peek_is(1, ";") || self.peek_is(1, "<") {
+                break;
+            }
+            self.next();
+        }
+        if self.is("[") {
+            let a = self.after_mate(self.pos);
+            if a < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(a);
+        } else {
+            self.next();
+        }
+        if self.is("?") || self.is("!") {
+            self.next();
+        }
+        if self.is("<") || self.is("(") {
+            let e = self.sig_rest_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(e);
+        } else if self.is(":") {
+            self.next();
+            self.skip_type_here();
+        }
+        if self.is("=") {
+            // `declare x = 1` is an error; an abstract field has no value
+            self.ts_fail();
+            return;
+        }
+        self.semicolon();
+    }
+
+    /// `this.x = x` for each parameter property, as statements.
+    fn param_props(&mut self, names: &Vec<String>) {
+        let mut src = String::new();
+        for n in names.iter() {
+            src.push_str(format!("this.{} = {};\n", n, n).as_str());
+        }
+        let saved = self.push_tokens(src.as_str());
+        while self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.pop_tokens(&saved);
+    }
+
+    /// The source's text from token `a` to token `b` (both in).
+    fn src_text(&self, a: int, b: int) -> String {
+        let from = self.toks[a as usize].start as usize;
+        let to = self.toks[b as usize].end as usize;
+        self.src_rc.chars().skip(from).take(to - from).collect::<String>()
+    }
+
+    /// `enum E { A, B = 5, C = 'c' }` as TypeScript writes it:
+    ///   var E; (function (E) { E[E["A"] = 0] = "A"; var A = E["A"]; … })(E || (E = {}));
+    /// (each member's name stands for it in the later initializers).
+    fn enum_decl(&mut self) {
+        self.next();
+        let name = self.binding_ident();
+        if !self.is("{") {
+            self.ts_fail();
+            return;
+        }
+        let close = self.mate_of(self.pos);
+        self.next();
+        let mut body = format!("var {}; (function ({}) {{\n", name, name);
+        let mut prev = String::new();
+        let mut first = true;
+        while self.pos < close && self.error.is_empty() {
+            let member = if self.kind() == T_STR {
+                let t = self.text();
+                self.next();
+                t
+            } else {
+                self.ident_name()
+            };
+            if !self.error.is_empty() {
+                return;
+            }
+            let mq = pq(member.as_str());
+            let mut is_string = false;
+            let value: String;
+            if self.eat("=") {
+                let a = self.pos;
+                let e = self.scan_to(a, ",", false);
+                if e <= a {
+                    self.ts_fail();
+                    return;
+                }
+                is_string = e == a + 1 && self.kind() == T_STR;
+                if self.kind() == T_TEMPLATE {
+                    self.ts_fail();
+                    return;
+                }
+                let last = e - 1;
+                value = format!("({})", self.src_text(a, last));
+                self.goto(e);
+            } else if first {
+                value = String::from("0");
+            } else {
+                value = format!("{}[{}] + 1", name, pq(prev.as_str()));
+            }
+            if is_string {
+                body.push_str(format!("{}[{}] = {};\n", name, mq, value).as_str());
+            } else {
+                body.push_str(format!("{}[{}[{}] = {}] = {};\n", name, name, mq, value, mq).as_str());
+            }
+            if pcomp_ident(member.as_str()) && member != name {
+                body.push_str(format!("var {} = {}[{}];\n", member, name, mq).as_str());
+            }
+            prev = member;
+            first = false;
+            if !self.eat(",") {
+                break;
+            }
+        }
+        if self.pos != close {
+            self.ts_fail();
+            return;
+        }
+        self.next();
+        body.push_str(format!("}})({} || ({} = {{}}));\n", name, name).as_str());
+        self.ts_source(body.as_str());
+    }
+
+    /// `namespace N { … }` as TypeScript writes it, as the parser does:
+    ///   var N; (function (N) { …; N.a = a; })(N || (N = {}));
+    /// an exported declaration stays, its names set on N after it.
+    fn namespace_decl(&mut self) {
+        self.next();
+        let name = self.binding_ident();
+        if self.is(".") && self.error.is_empty() {
+            // `namespace A.B { … }`: each inner one exported from the outer
+            let mut chain: Vec<String> = Vec::new();
+            while self.eat(".") {
+                chain.push(self.ident_name());
+            }
+            if !self.is("{") || !self.error.is_empty() {
+                self.ts_fail();
+                return;
+            }
+            let open = self.pos;
+            let close = self.mate_of(open);
+            let mut src = format!("namespace {} {{", name);
+            for c in chain.iter() {
+                src.push_str(format!(" export namespace {} {{", c).as_str());
+            }
+            let inner = open + 1;
+            let t = self.src_text(inner, close);
+            src.push_str(t.as_str());
+            let mut depth: usize = 0;
+            while depth < chain.len() {
+                src.push_str(" }");
+                depth += 1;
+            }
+            src.push_str("\n");
+            self.goto(close);
+            self.next();
+            self.ts_source(src.as_str());
+            return;
+        }
+        if !self.is("{") || !self.error.is_empty() {
+            self.ts_fail();
+            return;
+        }
+        let open = self.pos;
+        let close = self.mate_of(open);
+        let mut body = format!("var {}; (function ({}) {{\n", name, name);
+        let mut pending: Vec<String> = Vec::new();
+        let mut from = open + 1;
+        let mut k = open + 1;
+        while k < close {
+            if self.tok_is(k, "{") || self.tok_is(k, "(") || self.tok_is(k, "[") {
+                k = self.mate_of(k) + 1;
+                continue;
+            }
+            let starts = k == open + 1 || self.tok_is(k - 1, ";") || self.tok_is(k - 1, "}") || self.tok_nl(k);
+            if starts && self.tok_is(k, "export") {
+                if k > from {
+                    let last = k - 1;
+                    let t = self.src_text(from, last);
+                    body.push_str(t.as_str());
+                    body.push_str("\n");
+                }
+                for n in pending.iter() {
+                    body.push_str(format!("{}.{} = {};\n", name, n, n).as_str());
+                }
+                pending = Vec::new();
+                // the names it declares
+                let mut j = k + 1;
+                if self.tok_is(j, "declare") {
+                    self.ts_fail();
+                    return;
+                }
+                if self.tok_is(j, "const") && self.tok_is(j + 1, "enum") {
+                    j += 1;
+                }
+                if self.tok_is(j, "abstract") || self.tok_is(j, "async") {
+                    j += 1;
+                }
+                if self.tok_is(j, "function") || self.tok_is(j, "class") || self.tok_is(j, "enum") || self.tok_is(j, "namespace") {
+                    let mut n = j + 1;
+                    if self.tok_is(n, "*") {
+                        n += 1;
+                    }
+                    pending.push(self.tok_text(n));
+                } else if self.tok_is(j, "const") || self.tok_is(j, "let") || self.tok_is(j, "var") {
+                    // plain names only: `export const a = 1, b = 2`
+                    let mut n = j + 1;
+                    loop {
+                        if (self.toks[n as usize].kind as int) != T_IDENT {
+                            self.ts_fail();
+                            return;
+                        }
+                        pending.push(self.tok_text(n));
+                        let e = self.scan_to(n + 1, ", ;", false);
+                        if !self.tok_is(e, ",") {
+                            break;
+                        }
+                        n = e + 1;
+                    }
+                } else if self.tok_is(j, "interface") || self.tok_is(j, "type") {
+                    // types only
+                } else {
+                    self.ts_fail();
+                    return;
+                }
+                from = k + 1;
+            }
+            k += 1;
+        }
+        if close > from {
+            let last = close - 1;
+            let t = self.src_text(from, last);
+            body.push_str(t.as_str());
+            body.push_str("\n");
+        }
+        for n in pending.iter() {
+            body.push_str(format!("{}.{} = {};\n", name, n, n).as_str());
+        }
+        body.push_str(format!("}})({} || ({} = {{}}));\n", name, name).as_str());
+        self.goto(close);
+        self.next();
+        self.ts_source(body.as_str());
+    }
+
+    /// A value `import` in a script, as the parser reads it: each name a
+    /// `const` read from `__cerxesImport("m")`; a type-only entry erased.
+    fn script_import(&mut self) {
+        self.next();
+        if self.kind() == T_STR {
+            let m = self.text();
+            self.next();
+            self.semicolon();
+            self.ts_source(format!("__cerxesImport({});\n", pq(m.as_str())).as_str());
+            return;
+        }
+        let mut names: Vec<String> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        if self.kind() == T_IDENT && !self.is("{") && !self.is("*") {
+            if self.peek_is(1, "=") {
+                // `import A = B.C`: an alias (`require` is the parser's)
+                if self.peek_is(2, "require") {
+                    self.ts_fail();
+                    return;
+                }
+                let n = self.text();
+                let a = self.pos + 2;
+                let mut e = a;
+                while e < self.tok_count() && (self.toks[e as usize].kind as int) != T_EOF && !self.tok_is(e, ";") && !(e > a && self.tok_nl(e)) {
+                    e += 1;
+                }
+                if e == a {
+                    self.ts_fail();
+                    return;
+                }
+                let last = e - 1;
+                let t = self.src_text(a, last);
+                self.goto(e);
+                self.semicolon();
+                self.ts_source(format!("var {} = {};\n", n, t).as_str());
+                return;
+            }
+            names.push(self.text());
+            keys.push(String::from("default"));
+            self.next();
+            self.eat(",");
+        }
+        if self.is("*") {
+            self.next();
+            if !self.eat("as") {
+                self.ts_fail();
+                return;
+            }
+            names.push(self.text());
+            keys.push(String::new());
+            self.next();
+        } else if self.is("{") {
+            self.next();
+            while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+                if self.is("type") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "as") && !self.peek_is(1, ",") && !self.peek_is(1, "}") {
+                    self.next();
+                    self.next();
+                    if self.eat("as") {
+                        self.next();
+                    }
+                } else {
+                    let k = self.text();
+                    self.next();
+                    let n = if self.eat("as") {
+                        let t = self.text();
+                        self.next();
+                        t
+                    } else {
+                        k.clone()
+                    };
+                    names.push(n);
+                    keys.push(k);
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("}");
+        }
+        if !self.eat("from") || self.kind() != T_STR {
+            self.ts_fail();
+            return;
+        }
+        let m = self.text();
+        self.next();
+        if (self.is("with") || self.is("assert")) && self.peek_is(1, "{") {
+            self.next();
+            let a = self.after_mate(self.pos);
+            self.goto(a);
+        }
+        self.semicolon();
+        let call = format!("__cerxesImport({})", pq(m.as_str()));
+        if names.is_empty() {
+            self.ts_source(format!("{};\n", call).as_str());
+            return;
+        }
+        let mut src = String::from("const ");
+        let mut i: usize = 0;
+        while i < names.len() {
+            if i > 0 {
+                src.push_str(", ");
+            }
+            if keys[i].is_empty() {
+                src.push_str(format!("{} = {}", names[i], call).as_str());
+            } else {
+                src.push_str(format!("{} = {}[{}]", names[i], call, pq(keys[i].as_str())).as_str());
+            }
+            i += 1;
+        }
+        src.push_str(";\n");
+        self.ts_source(src.as_str());
+    }
+
+    /// `export` in a script: the declaration stays, the keyword goes;
+    /// export lists and re-exports are dropped.
+    fn script_export(&mut self, in_list: bool) {
+        self.next();
+        if self.eat("default") {
+            if self.is("function") || self.is("class") || (self.is("async") && self.peek_is(1, "function")) || self.is("abstract") || self.is("interface") {
+                self.list_stmt = in_list;
+                self.statement();
+                return;
+            }
+            // an expression (`export default { a, b }` is an object)
+            let e = self.assign();
+            self.semicolon();
+            self.expr_statement_tail(e);
+            return;
+        }
+        if self.is("=") || self.is("{") || self.is("*") || (self.is("as") && self.peek_is(1, "namespace")) {
+            self.pos -= 1;
+            self.skip_module_clause();
+            return;
+        }
+        if self.is("import") {
+            self.ts_fail();
+            return;
+        }
+        self.list_stmt = in_list;
+        self.statement();
+    }
+
+    /// Statements written as source for the ones read (`import`).
+    fn ts_source(&mut self, src: &str) {
+        let saved_src = self.src_rc.clone();
+        self.src_rc = Rc::new(String::from(src));
+        let saved = self.push_tokens(src);
+        while self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.pop_tokens(&saved);
+        self.src_rc = saved_src;
+    }
+
+    /// TypeScript cannot be read here: the parser reads it.
+    fn ts_fail(&mut self) {
+        self.fail("TypeScript pcomp does not read");
+    }
+
+    /// Skips the type at the current token (pcomp reads on after it).
+    fn skip_type_here(&mut self) {
+        let e = self.type_end(self.pos);
+        if e < 0 {
+            self.ts_fail();
+            return;
+        }
+        self.goto(e);
+    }
+
+    /// `: T` (and a `?` / `!` before it) after a binding or a parameter.
+    fn skip_annotation(&mut self) {
+        if !self.ts {
+            return;
+        }
+        if self.is("?") || self.is("!") {
+            self.next();
+        }
+        if self.is(":") {
+            self.next();
+            self.skip_type_here();
+        }
+    }
+
+    /// `: R` after a parameter list.
+    fn skip_return_type(&mut self) {
+        if self.ts && self.is(":") {
+            self.next();
+            let e = self.return_type_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(e);
+        }
+    }
+
+    /// `<T>` before a parameter list.
+    fn skip_type_params(&mut self) {
+        if self.ts && self.is("<") {
+            let e = self.type_params_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(e);
+        }
+    }
+}
+
+/// `s` as a JavaScript string literal.
+fn pq(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        if c == '"' {
+            out.push_str("\\\"");
+        } else if c == '\\' {
+            out.push_str("\\\\");
+        } else if c == '\n' {
+            out.push_str("\\n");
+        } else if c == '\r' {
+            out.push_str("\\r");
+        } else if (c as u32) < 32 || c == '\u{2028}' || c == '\u{2029}' {
+            out.push_str(format!("\\u{:04x}", c as u32).as_str());
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A name a `var` may declare.
+fn pcomp_ident(s: &str) -> bool {
+    if s.is_empty() || is_reserved(s) {
+        return false;
+    }
+    let mut first = true;
+    for c in s.chars() {
+        let ok = c == '_' || c == '$' || c.is_alphabetic() || (!first && c.is_numeric());
+        if !ok {
+            return false;
+        }
+        first = false;
+    }
+    true
+}
+
 /// A script compiled as a unit, read and written in one pass.
 pub fn compile_unit(src: &str) -> crate::unit::Unit {
+    compile_unit_with(src, false)
+}
+
+/// compile_unit, TypeScript's types skipped with `ts`.
+pub fn compile_unit_with(src: &str, ts: bool) -> crate::unit::Unit {
+    compile_unit_syntax(src, ts, false, "", "")
+}
+
+/// compile_unit: TypeScript's types skipped with `ts`, JSX read with `jsx`
+/// (`factory`, `fragment` its names).
+pub fn compile_unit_syntax(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str) -> crate::unit::Unit {
     let names = crate::vm::first_atoms();
     let mut atoms: HashMap<String, int> = HashMap::new();
     let mut i: int = 0;
@@ -4967,7 +6329,8 @@ pub fn compile_unit(src: &str) -> crate::unit::Unit {
         atoms.insert(n.clone(), i);
         i += 1;
     }
-    let mut c = PComp::new(src, atoms, names, 0);
+    let mut c = PComp::new_syntax(src, atoms, names, 0, jsx, factory, fragment);
+    c.ts = ts;
     let entry = c.compile_program();
     let mut u = crate::unit::Unit::new();
     if !c.error.is_empty() || entry < 0 {

@@ -100,6 +100,25 @@ pub struct Lexer {
     /// the previous token was one of those keywords
     paren_keyword: bool,
     puncts: Vec<String>,
+    /// JSX: `tokenize` writes each element as the tokens of its factory's
+    /// call (`jsx_tokens`), for pcomp
+    pub jsx: bool,
+    pub jsx_factory: String,
+    pub jsx_fragment: String,
+    /// tokens read ahead (an element's), the next one last
+    pend: Vec<Tok>,
+    /// the previous token was `.` or `?.`
+    after_dot: bool,
+}
+
+/// A lexer for `src`; with `jsx` its elements are read as their factory's
+/// calls (`@jsx` pragmas as `factory` and `fragment`).
+pub fn lexer_for(src: &str, jsx: bool, factory: &str, fragment: &str) -> Lexer {
+    let mut lx = Lexer::new(src);
+    lx.jsx = jsx;
+    lx.jsx_factory = String::from(factory);
+    lx.jsx_fragment = String::from(fragment);
+    lx
 }
 
 pub fn is_id_start(c: char) -> bool {
@@ -165,7 +184,22 @@ pub fn push_code_point(out: &mut String, cp: int) {
 
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
-        Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), regex_ok: true, parens: Vec::new(), paren_keyword: false, puncts: puncts() }
+        Lexer {
+            xs: Vec::new(),
+            src: src.chars().collect::<Vec<char>>(),
+            pos: 0,
+            line: 1,
+            error: String::new(),
+            regex_ok: true,
+            parens: Vec::new(),
+            paren_keyword: false,
+            puncts: puncts(),
+            jsx: false,
+            jsx_factory: String::from("__jsx"),
+            jsx_fragment: String::from("__jsxFragment"),
+            pend: Vec::new(),
+            after_dot: false,
+        }
     }
 
     pub fn at(&self, i: int) -> char {
@@ -235,8 +269,27 @@ impl Lexer {
 
     /// The next token; after the end, `T_EOF` again and again.
     pub fn next_token(&mut self) -> Tok {
-        let n = self.src.len() as int;
+        if !self.pend.is_empty() {
+            return self.pend.pop().unwrap();
+        }
         let nl = self.skip_space();
+        if self.jsx && self.error.is_empty() && self.jsx_starts() {
+            let mut out: Vec<Tok> = Vec::new();
+            self.jsx_tokens(&mut out, nl);
+            if !self.error.is_empty() {
+                return self.error_token();
+            }
+            out.reverse();
+            self.pend = out;
+            return self.pend.pop().unwrap();
+        }
+        self.token_after_space(nl)
+    }
+
+    /// The token at `pos`, the space before it skipped (`nl`: a line break
+    /// was in it).
+    fn token_after_space(&mut self, nl: bool) -> Tok {
+        let n = self.src.len() as int;
         if !self.error.is_empty() {
             return self.error_token();
         }
@@ -303,7 +356,9 @@ impl Lexer {
         if is_id_start(c) || c == '\\' {
             let mut t = Tok::new(T_IDENT, line, nl);
             t.text = self.read_ident(&mut t.escaped);
-            self.regex_ok = regex_after_word(t.text.as_str()) && !t.escaped;
+            // a name after `.` is a property's, whatever its word
+            self.regex_ok = regex_after_word(t.text.as_str()) && !t.escaped && !self.after_dot;
+            self.after_dot = false;
             let w = t.text.as_str();
             self.paren_keyword = !t.escaped && (w == "if" || w == "while" || w == "for" || w == "with");
             return t;
@@ -313,6 +368,7 @@ impl Lexer {
             let mut t = Tok::new(T_PRIVATE, line, nl);
             t.text = self.read_ident(&mut t.escaped);
             self.regex_ok = false;
+            self.after_dot = false;
             return t;
         }
         if (c >= '0' && c <= '9') || (c == '.' && self.at(self.pos + 1) >= '0' && self.at(self.pos + 1) <= '9') {
@@ -371,6 +427,7 @@ impl Lexer {
                 let mut t = Tok::new(T_PUNCT, line, nl);
                 self.pos += plen;
                 let s = p.as_str();
+                self.after_dot = s == "." || s == "?.";
                 self.regex_ok = !(s == ")" || s == "]" || s == "}" || s == "++" || s == "--");
                 if s == "}" {
                     self.regex_ok = true;
@@ -954,6 +1011,346 @@ impl Lexer {
         x.flags = flags;
         t.x = self.xs.len() as int;
         self.xs.push(x);
+    }
+}
+
+// ---- JSX as tokens (lexer_for): an element is written as the tokens of
+// its factory's call, as crate::jsx reads it into the tree:
+//   <div id="a" {...p}>Hi {name}</div>  →  __jsx("div", {"id": "a", ...p}, "Hi ", name)
+
+impl Lexer {
+    /// A `<` here opens an element: where an expression starts, before a
+    /// name or `>`, and not TypeScript's `<T,>` / `<T extends …>`.
+    fn jsx_starts(&self) -> bool {
+        if !self.regex_ok || self.cur() != '<' {
+            return false;
+        }
+        let c = self.at(self.pos + 1);
+        if c == '>' {
+            return true;
+        }
+        if !is_id_start(c) {
+            return false;
+        }
+        let mut j = self.pos + 1;
+        while is_id_part(self.at(j)) || self.at(j) == '-' {
+            j += 1;
+        }
+        while self.at(j) == ' ' || self.at(j) == '\t' || self.at(j) == '\n' || self.at(j) == '\r' {
+            j += 1;
+        }
+        if self.at(j) == ',' {
+            return false;
+        }
+        if self.at(j) == 'e' && self.at(j + 1) == 'x' && self.at(j + 2) == 't' && self.at(j + 3) == 'e' && self.at(j + 4) == 'n' && self.at(j + 5) == 'd' && self.at(j + 6) == 's' && !is_id_part(self.at(j + 7)) {
+            return false;
+        }
+        true
+    }
+
+    fn jsx_tok(&self, kind: int, text: &str, line: int, at: int) -> Tok {
+        let mut t = Tok::new(kind, line, false);
+        t.text = String::from(text);
+        t.start = at;
+        t.end = at;
+        t
+    }
+
+    fn jsx_punct(&self, out: &mut Vec<Tok>, p: &str, line: int, at: int) {
+        let t = self.jsx_tok(T_PUNCT, p, line, at);
+        out.push(t);
+    }
+
+    fn jsx_str(&self, out: &mut Vec<Tok>, s: &str, line: int, at: int) {
+        let t = self.jsx_tok(T_STR, s, line, at);
+        out.push(t);
+    }
+
+    /// A dotted name's tokens: `React.createElement`, `this.Comp`.
+    fn jsx_dotted(&self, out: &mut Vec<Tok>, dotted: &str, line: int, at: int) {
+        let mut first = true;
+        for part in dotted.split('.') {
+            if !first {
+                self.jsx_punct(out, ".", line, at);
+            }
+            let t = self.jsx_tok(T_IDENT, part, line, at);
+            out.push(t);
+            first = false;
+        }
+    }
+
+    fn jsx_skip(&mut self) {
+        self.skip_space();
+    }
+
+    fn jsx_expect(&mut self, c: char) {
+        self.jsx_skip();
+        if self.cur() == c {
+            self.pos += 1;
+            return;
+        }
+        let f = self.cur();
+        self.fail(format!("expected '{}' in JSX but found '{}'", c, f).as_str());
+    }
+
+    /// The script inside `{…}` (the lexer is past the `{`) as tokens, up
+    /// to its `}`, which is read too.
+    fn jsx_script(&mut self, out: &mut Vec<Tok>) {
+        self.regex_ok = true;
+        let mut depth: int = 0;
+        loop {
+            if !self.error.is_empty() {
+                return;
+            }
+            let nl = self.skip_space();
+            if self.pos >= self.src.len() as int {
+                self.fail("unterminated JSX expression");
+                return;
+            }
+            if self.cur() == '}' && depth == 0 {
+                self.pos += 1;
+                return;
+            }
+            if self.jsx_starts() {
+                self.jsx_tokens(out, nl);
+                continue;
+            }
+            let start = self.pos;
+            let keyword = self.paren_keyword;
+            self.paren_keyword = false;
+            let mut t = self.read_token(nl, keyword);
+            t.start = start;
+            t.end = self.pos;
+            if !self.error.is_empty() {
+                return;
+            }
+            if t.kind == T_PUNCT {
+                if t.text.as_str() == "{" {
+                    depth += 1;
+                } else if t.text.as_str() == "}" {
+                    depth -= 1;
+                }
+            }
+            out.push(t);
+        }
+    }
+
+    /// A tag name: its text (to match the closing tag), and its tokens.
+    fn jsx_tag_tokens(&mut self, out: &mut Vec<Tok>, line: int, at: int) -> String {
+        let first = self.jsx_ident();
+        if first.is_empty() {
+            let c = self.cur();
+            self.fail(format!("expected a JSX tag name but found '{}'", c).as_str());
+            return first;
+        }
+        if self.cur() == ':' {
+            self.pos += 1;
+            let second = self.jsx_ident();
+            let text = format!("{}:{}", first, second);
+            self.jsx_str(out, text.as_str(), line, at);
+            return text;
+        }
+        if self.cur() == '.' {
+            let mut text = first.clone();
+            while self.cur() == '.' {
+                self.pos += 1;
+                let p = self.jsx_ident();
+                if p.is_empty() {
+                    self.fail("expected a name after '.' in a JSX tag");
+                    break;
+                }
+                text.push('.');
+                text.push_str(p.as_str());
+            }
+            self.jsx_dotted(out, text.as_str(), line, at);
+            return text;
+        }
+        let c0 = first.chars().next().unwrap_or(' ');
+        if (c0 >= 'a' && c0 <= 'z') || first.contains('-') {
+            self.jsx_str(out, first.as_str(), line, at);
+        } else {
+            self.jsx_dotted(out, first.as_str(), line, at);
+        }
+        first
+    }
+
+    /// An element or a fragment at `<`, as its factory's call.
+    pub fn jsx_tokens(&mut self, out: &mut Vec<Tok>, nl: bool) {
+        let line = self.line;
+        let at = self.pos;
+        self.pos += 1;
+        self.jsx_skip();
+        let f = self.jsx_factory.clone();
+        let fstart = out.len();
+        self.jsx_dotted(out, f.as_str(), line, at);
+        out[fstart].nl = nl;
+        self.jsx_punct(out, "(", line, at);
+        let fragment = self.cur() == '>';
+        let mut tag_text = String::new();
+        let mut closed = false;
+        if fragment {
+            self.pos += 1;
+            let fr = self.jsx_fragment.clone();
+            self.jsx_dotted(out, fr.as_str(), line, at);
+            self.jsx_punct(out, ",", line, at);
+            let t = self.jsx_tok(T_IDENT, "null", line, at);
+            out.push(t);
+        } else {
+            tag_text = self.jsx_tag_tokens(out, line, at);
+            self.jsx_punct(out, ",", line, at);
+            if self.cur() == '<' {
+                self.fail("type arguments on a JSX element are not supported");
+                return;
+            }
+            let mut props = 0;
+            loop {
+                self.jsx_skip();
+                if !self.error.is_empty() || self.pos >= self.src.len() as int {
+                    self.fail("unterminated JSX tag");
+                    return;
+                }
+                let c = self.cur();
+                if c == '/' {
+                    self.pos += 1;
+                    self.jsx_expect('>');
+                    closed = true;
+                    break;
+                }
+                if c == '>' {
+                    self.pos += 1;
+                    break;
+                }
+                let al = self.line;
+                let ap = self.pos;
+                self.jsx_punct(out, if props == 0 { "{" } else { "," }, al, ap);
+                props += 1;
+                if c == '{' {
+                    // `{...props}`
+                    self.pos += 1;
+                    self.jsx_script(out);
+                    continue;
+                }
+                let mut name = self.jsx_ident();
+                if name.is_empty() {
+                    self.fail(format!("unexpected '{}' in a JSX tag", c).as_str());
+                    return;
+                }
+                if self.cur() == ':' {
+                    self.pos += 1;
+                    let second = self.jsx_ident();
+                    name = format!("{}:{}", name, second);
+                }
+                self.jsx_str(out, name.as_str(), al, ap);
+                self.jsx_punct(out, ":", al, ap);
+                self.jsx_skip();
+                if self.cur() == '=' {
+                    self.pos += 1;
+                    self.jsx_skip();
+                    let v = self.cur();
+                    let vl = self.line;
+                    let vp = self.pos;
+                    if v == '"' || v == '\'' {
+                        let raw = self.jsx_string();
+                        if !self.error.is_empty() {
+                            return;
+                        }
+                        let s = decode_entities(raw.as_str());
+                        self.jsx_str(out, s.as_str(), vl, vp);
+                    } else if v == '{' {
+                        self.pos += 1;
+                        let before = out.len();
+                        self.jsx_script(out);
+                        if out.len() == before {
+                            self.fail("a JSX attribute value must not be empty");
+                            return;
+                        }
+                    } else if v == '<' {
+                        self.jsx_tokens(out, false);
+                    } else {
+                        self.fail("expected a JSX attribute value");
+                        return;
+                    }
+                } else {
+                    let t = self.jsx_tok(T_IDENT, "true", al, ap);
+                    out.push(t);
+                }
+            }
+            if props == 0 {
+                let t = self.jsx_tok(T_IDENT, "null", line, at);
+                out.push(t);
+            } else {
+                self.jsx_punct(out, "}", line, at);
+            }
+        }
+        if !closed && self.error.is_empty() {
+            self.jsx_children_tokens(out);
+            if !self.error.is_empty() {
+                return;
+            }
+            // `</name>`
+            self.pos += 1;
+            self.jsx_expect('/');
+            self.jsx_skip();
+            let mut end = String::new();
+            if !fragment {
+                let mut scratch: Vec<Tok> = Vec::new();
+                end = self.jsx_tag_tokens(&mut scratch, line, at);
+            }
+            if self.error.is_empty() && end != tag_text {
+                self.fail(format!("expected '</{}>' but found '</{}>'", tag_text, end).as_str());
+                return;
+            }
+            self.jsx_expect('>');
+        }
+        self.jsx_punct(out, ")", line, at);
+        // after an element a `/` divides
+        self.regex_ok = false;
+    }
+
+    /// Children up to the `<` of the closing tag, each after a `,`.
+    fn jsx_children_tokens(&mut self, out: &mut Vec<Tok>) {
+        loop {
+            if !self.error.is_empty() {
+                return;
+            }
+            if self.pos >= self.src.len() as int {
+                self.fail("unterminated JSX element");
+                return;
+            }
+            let c = self.cur();
+            let line = self.line;
+            let at = self.pos;
+            if c == '<' {
+                let mut j = self.pos + 1;
+                while self.at(j) == ' ' || self.at(j) == '\t' || self.at(j) == '\n' || self.at(j) == '\r' {
+                    j += 1;
+                }
+                if self.at(j) == '/' {
+                    return;
+                }
+                self.jsx_punct(out, ",", line, at);
+                self.jsx_tokens(out, false);
+                continue;
+            }
+            if c == '{' {
+                self.pos += 1;
+                let comma = out.len();
+                self.jsx_punct(out, ",", line, at);
+                self.jsx_script(out);
+                if out.len() == comma + 1 {
+                    // `{/* a comment */}`
+                    out.pop();
+                }
+                continue;
+            }
+            let raw = self.jsx_text();
+            let t = crate::jsx::clean_text(raw.as_str());
+            if !t.is_empty() {
+                let s = decode_entities(t.as_str());
+                self.jsx_punct(out, ",", line, at);
+                self.jsx_str(out, s.as_str(), line, at);
+            }
+        }
     }
 }
 

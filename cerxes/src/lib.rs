@@ -174,14 +174,25 @@ impl Engine {
     pub fn compile(&mut self, src: &str) -> unit::Unit {
         self.error = String::new();
         let mut pcomp_error = String::new();
-        if self.vm.pcomp && !self.syntax.typescript {
-            // JavaScript; what pcomp does not read (JSX, a module's import
-            // and export) goes to the parser
+        if self.vm.pcomp && !self.syntax.typescript && !self.syntax.jsx {
+            // JavaScript; what pcomp does not read (a module's import and
+            // export) goes to the parser
             let u = pcomp::compile_unit(src);
             if u.error.is_empty() {
                 return u;
             }
             pcomp_error = u.error.clone();
+        }
+        if self.vm.pcomp && (self.syntax.typescript || self.syntax.jsx) {
+            // TypeScript and JSX: pcomp skips the types and the lexer
+            // writes each element as its factory's call; what pcomp does
+            // not read (decorators …) goes to the parser
+            let mut sx = self.syntax.clone();
+            crate::jsx::read_pragmas(src, &mut sx);
+            let u = pcomp::compile_unit_syntax(src, sx.typescript, sx.jsx, sx.jsx_factory.as_str(), sx.jsx_fragment.as_str());
+            if u.error.is_empty() {
+                return u;
+            }
         }
         if self.vm.pcomp {
             // TypeScript, JSX or a module: the parser writes it as

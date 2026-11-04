@@ -68,6 +68,11 @@ impl TokX {
     }
 }
 
+/// A lexer for `src` (CEr reads no JSX: `jsx` and its names are not used).
+pub fn lexer_for(src: &str, _jsx: bool, _factory: &str, _fragment: &str) -> Lexer {
+    Lexer::new(src)
+}
+
 pub struct Lexer {
     /// the tokens' extras (Tok.x)
     pub xs: Vec<TokX>,
