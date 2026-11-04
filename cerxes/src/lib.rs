@@ -40,6 +40,7 @@ pub mod normalize;
 pub mod num;
 pub mod ops;
 pub mod parser;
+pub mod pcomp;
 pub mod prelude;
 pub mod proxy;
 pub mod regex;

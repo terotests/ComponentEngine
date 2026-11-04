@@ -149,6 +149,11 @@ fn is_assign_op(op: &str) -> bool {
         || op == "??="
 }
 
+/// Not a binding name in strict code.
+pub fn is_strict_reserved(w: &str) -> bool {
+    w == "implements" || w == "interface" || w == "let" || w == "package" || w == "private" || w == "protected" || w == "public" || w == "static" || w == "yield" || w == "eval" || w == "arguments"
+}
+
 pub fn is_reserved(w: &str) -> bool {
     w == "break"
         || w == "case"

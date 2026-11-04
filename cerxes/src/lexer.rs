@@ -35,6 +35,8 @@ pub struct Tok {
     pub escaped: bool,
     /// where the token starts in the source (a char index)
     pub start: int,
+    /// where the token ends (a char index)
+    pub end: int,
     /// what a `(` or `)` did to the lexer's parentheses (PAREN_*), so that
     /// a rewind can undo it
     pub paren: int,
@@ -57,6 +59,7 @@ impl Tok {
             x: -1,
             escaped: false,
             start: 0,
+            end: -1,
             paren: PAREN_NONE,
         }
     }
@@ -245,10 +248,31 @@ impl Lexer {
         self.paren_keyword = false;
         let mut t = self.read_token(nl, keyword);
         t.start = start;
+        t.end = self.pos;
         if !self.error.is_empty() {
             return self.error_token();
         }
         t
+    }
+
+    /// All of plain JavaScript's tokens, ending in T_EOF (the single-pass
+    /// compiler's input); on an error, `error` holds it and the tokens stop.
+    pub fn tokenize(&mut self) -> Vec<Tok> {
+        let mut toks: Vec<Tok> = Vec::new();
+        loop {
+            let t = self.next_token();
+            let k = t.kind;
+            if k == T_ERROR {
+                self.error = t.text.clone();
+                break;
+            }
+            grow_toks(&mut toks);
+            toks.push(t);
+            if k == T_EOF {
+                break;
+            }
+        }
+        toks
     }
 
     /// The pending error as a token; the lexer stops at the end.

@@ -43,6 +43,10 @@ fn main() {
     if let Ok(v) = std::env::var("CER_REGS") {
         e.vm.regs = v == "1";
     }
+    // CER_PCOMP=1: eval and Function code through the single-pass compiler
+    if let Ok(v) = std::env::var("CER_PCOMP") {
+        e.vm.pcomp = v == "1";
+    }
     e.set_syntax_for_path(path.as_str());
     e.set_echo(true);
     let r = e.eval(src.as_str());

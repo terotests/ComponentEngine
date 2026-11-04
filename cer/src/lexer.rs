@@ -295,12 +295,18 @@ impl Lexer {
                 continue;
             }
             let mut found = false;
+            let c0 = c as int;
             for p in ps.iter() {
-                let pc = p.chars().collect::<Vec<char>>();
+                // punctuators are ASCII: compare bytes, first byte first
+                let pb = p.as_bytes();
+                if (pb[0] as int) != c0 {
+                    continue;
+                }
+                let plen = pb.len() as int;
                 let mut ok = true;
-                let mut k: int = 0;
-                while k < pc.len() as int {
-                    if self.at(self.pos + k) != pc[k as usize] {
+                let mut k: int = 1;
+                while k < plen {
+                    if (self.at(self.pos + k) as int) != (pb[k as usize] as int) {
                         ok = false;
                         break;
                     }
@@ -316,7 +322,7 @@ impl Lexer {
                 if ok {
                     let mut t = Tok::new(T_PUNCT, line, nl);
                     t.text = p.clone();
-                    self.pos += pc.len() as int;
+                    self.pos += plen;
                     let s = p.as_str();
                     regex_ok = !(s == ")" || s == "]" || s == "}" || s == "++" || s == "--");
                     if s == "}" {
