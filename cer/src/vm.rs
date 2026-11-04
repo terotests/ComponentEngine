@@ -127,6 +127,8 @@ pub struct Vm {
     /// the objects whose count is 0 (JsObj.rc): garbage unless a root
     /// holds one (Vm::reclaim)
     pub zct: Vec<int>,
+    /// the buffer the next reclaim's zct takes (Rust: no new vector)
+    pub zct_spare: Vec<int>,
     /// reclaim runs when zct grows past this, at least zct_min (ZCT_MIN;
     /// tests make it 1: a reclaim at every safe point)
     pub zct_limit: int,
@@ -381,6 +383,7 @@ impl Vm {
             colds: Vec::new(),
             free_colds: Vec::new(),
             zct: Vec::new(),
+            zct_spare: Vec::new(),
             zct_limit: ZCT_MIN,
             zct_min: ZCT_MIN,
             freed: Vec::new(),
@@ -4074,10 +4077,7 @@ impl Vm {
                     }
                 }
                 // the arguments in a vector from the pool: no allocation per call
-                let mut args: Vec<Val> = match self.arg_pool.pop() {
-                    Some(v) => v,
-                    None => Vec::new(),
-                };
+                let mut args: Vec<Val> = take_args(&mut self.arg_pool);
                 let mut i = 0;
                 while i < argc {
                     args.push(self.stack[(bp + i) as usize]);
@@ -4088,8 +4088,7 @@ impl Vm {
                 self.native_depth += 1;
                 let r = self.call_native(id, fo, this, &args, false, Val::Undef);
                 self.native_depth -= 1;
-                args.clear();
-                self.arg_pool.push(args);
+                give_args(&mut self.arg_pool, args);
                 self.stack.push(r);
                 return false;
             }
@@ -4892,15 +4891,18 @@ impl Vm {
                 self.define_elem(o, &k, f, if hidden { P_HIDDEN } else { 0 });
             }
             OP_NEW_ARRAY => {
+                // the items go straight into the slot's elements (a free
+                // slot keeps its small buffer), no vector in between
                 let n = self.stack.len() as int;
-                let mut items: Vec<Val> = Vec::with_capacity(op.a as usize);
+                let p = self.array_proto;
+                let a = self.alloc(C_ARRAY, p);
                 let mut i = n - op.a;
                 while i < n {
-                    items.push(self.stack[i as usize].clone());
+                    let v = self.stack[i as usize];
+                    self.push_elem(a, v);
                     i += 1;
                 }
                 self.stack.truncate((n - op.a) as usize);
-                let a = self.new_array(items);
                 self.stack.push(Val::Obj(a));
             }
             OP_ARRAY_PUSH => {
@@ -5725,7 +5727,7 @@ impl Vm {
             self.mark_strs();
         }
         let mut live: int = 0;
-        self.zct = Vec::new();
+        self.zct.clear();
         i2 = 0;
         while i2 < total {
             if self.objs[i2].marked {
@@ -5765,7 +5767,7 @@ impl Vm {
             self.free_list.push(x);
             k += 1;
         }
-        self.freed = Vec::new();
+        self.freed.clear();
         self.live = live;
         self.alloc_count = 0;
         self.gc_threshold = if live * 2 > 200000 { live * 2 } else { 200000 };
@@ -5818,15 +5820,14 @@ impl Vm {
             self.free_list.push(x);
             k += 1;
         }
-        self.freed = Vec::new();
+        self.freed.clear();
         let mut rooted: Vec<int> = Vec::new();
         self.mark_roots(&mut rooted);
         let mut reach: Vec<bool> = Vec::new();
         if self.rc_check {
             reach = self.reachable();
         }
-        let list = self.zct.clone();
-        self.zct = Vec::new();
+        let list = take_ints(&mut self.zct, &mut self.zct_spare);
         let n = list.len();
         let mut i: usize = 0;
         let mut work: Vec<int> = Vec::new();
@@ -5872,6 +5873,7 @@ impl Vm {
             self.objs[x].marked = false;
             i += 1;
         }
+        give_ints(&mut self.zct_spare, list);
         self.zct_limit = self.next_zct_limit();
         self.gc_recheck();
     }
@@ -6113,6 +6115,56 @@ pub fn arith_num(code: int, x: double, y: double) -> double {
 
 /// Rust: the slot table grows by an eighth (at least 1024 slots), not by
 /// doubling: a JsObj is big and most of a doubled table would stay empty.
+/// `v`'s items, `v` left empty. Rust: `v` takes `spare`'s buffer and the
+/// items keep theirs (no copy); the other targets copy them.
+#[ranger::target(rust)]
+pub fn take_ints(v: &mut Vec<int>, spare: &mut Vec<int>) -> Vec<int> {
+    let mut out = std::mem::take(spare);
+    std::mem::swap(v, &mut out);
+    out
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn take_ints(v: &mut Vec<int>, _spare: &mut Vec<int>) -> Vec<int> {
+    let out = v.clone();
+    v.clear();
+    out
+}
+
+/// `list`'s buffer becomes the next take_ints' spare (Rust only).
+#[ranger::target(rust)]
+pub fn give_ints(spare: &mut Vec<int>, mut list: Vec<int>) {
+    list.clear();
+    *spare = list;
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn give_ints(_spare: &mut Vec<int>, _list: Vec<int>) {}
+
+/// A vector for a native call's arguments, from the pool (Rust only; the
+/// other targets allocate one).
+#[ranger::target(rust)]
+pub fn take_args(pool: &mut Vec<Vec<Val>>) -> Vec<Val> {
+    match pool.pop() {
+        Some(v) => v,
+        None => Vec::new(),
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn take_args(_pool: &mut Vec<Vec<Val>>) -> Vec<Val> {
+    Vec::new()
+}
+
+#[ranger::target(rust)]
+pub fn give_args(pool: &mut Vec<Vec<Val>>, mut args: Vec<Val>) {
+    args.clear();
+    pool.push(args);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn give_args(_pool: &mut Vec<Vec<Val>>, _args: Vec<Val>) {}
+
 #[ranger::target(rust)]
 pub fn grow_objs(v: &mut Vec<JsObj>) {
     if v.len() == v.capacity() {
@@ -6145,16 +6197,21 @@ pub fn drop_bufs(o: &mut JsObj) {
     drop_caps(o);
 }
 
-/// Rust: a cleared Vec keeps its capacity; it goes too.
+/// Rust: a cleared Vec keeps its capacity; a big one goes too, a small
+/// one stays for the next object in the slot (no malloc and free per
+/// object).
 #[ranger::target(rust)]
 pub fn drop_caps(o: &mut JsObj) {
-    if o.vals.capacity() > 0 {
+    if o.vals.capacity() > KEEP_CAP {
         o.vals = Vec::new();
     }
-    if o.elems.capacity() > 0 {
+    if o.elems.capacity() > KEEP_CAP {
         o.elems = Vec::new();
     }
 }
+
+/// The capacity a free slot's buffers keep through a collection.
+pub const KEEP_CAP: usize = 4;
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn drop_caps(_o: &mut JsObj) {}
