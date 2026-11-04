@@ -298,15 +298,14 @@ impl Lexer {
             let c0 = c as int;
             for p in ps.iter() {
                 // punctuators are ASCII: compare bytes, first byte first
-                let pb = p.as_bytes();
-                if (pb[0] as int) != c0 {
+                if (p.as_bytes()[0] as int) != c0 {
                     continue;
                 }
-                let plen = pb.len() as int;
+                let plen = p.as_bytes().len() as int;
                 let mut ok = true;
                 let mut k: int = 1;
                 while k < plen {
-                    if (self.at(self.pos + k) as int) != (pb[k as usize] as int) {
+                    if (self.at(self.pos + k) as int) != (p.as_bytes()[k as usize] as int) {
                         ok = false;
                         break;
                     }
