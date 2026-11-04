@@ -87,6 +87,20 @@ impl Vm {
         // wraps it
         let module = code.starts_with("/*@cerxesModule ");
         let mut pcomp_error = String::new();
+        if self.pcomp && module {
+            let ms = parser::module_source(code.as_str());
+            if !ms.path.is_empty() {
+                let entry = self.pcomp_module(&ms);
+                if entry >= 0 {
+                    let fp = self.function_proto;
+                    let f = self.alloc(C_FUNCTION, fp);
+                    self.objs[f as usize].func = entry as i32;
+                    let g = Val::Obj(self.global);
+                    return self.call_value(Val::Obj(f), g, Vec::new());
+                }
+                // the parser reads it, and names its file in an error
+            }
+        }
         if self.pcomp && !module {
             let (entry, error) = self.pcomp_program(code.as_str(), strict, is_eval);
             if entry >= 0 {
@@ -182,6 +196,30 @@ impl Vm {
             self.protos.push(p2);
         }
         (entry, String::new())
+    }
+
+    /// A module's function (`parser::module_source`) compiled with pcomp
+    /// and linked: its proto, or -1 (nothing changed).
+    fn pcomp_module(&mut self, ms: &parser::ModuleSource) -> int {
+        let atoms = self.atoms.clone();
+        let names = self.atom_names.clone();
+        let base = self.protos.len() as int;
+        let mut c = crate::pcomp::PComp::new_syntax(ms.body.as_str(), atoms, names, base, ms.jsx, ms.jsx_factory.as_str(), ms.jsx_fragment.as_str());
+        c.ts = ms.typescript;
+        c.module_path = ms.path.clone();
+        let entry = c.compile_program();
+        if !c.error.is_empty() || entry < 0 {
+            return -1;
+        }
+        self.atoms = c.atoms;
+        self.atom_names = c.atom_names;
+        for pr in c.protos {
+            let mut p2 = pr;
+            self.link_strs(&mut p2);
+            pack_code(&mut p2);
+            self.protos.push(p2);
+        }
+        entry
     }
 
     fn caller_strict(&self) -> bool {

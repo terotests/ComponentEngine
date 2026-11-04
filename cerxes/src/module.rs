@@ -98,6 +98,18 @@ pub const HEADER: &str = "/*@cerxesModule ";
 /// The parser of a text that starts with `HEADER`: the module's function
 /// (`module_text`), or a parser whose error is the module's syntax error.
 pub fn module_parser_of(src: &str) -> Parser {
+    let (path, body) = module_parts(src);
+    let m = module_text(body.as_str(), path.as_str());
+    if !m.error.is_empty() {
+        let mut p = module_parser("", path.as_str());
+        p.error = m.error;
+        return p;
+    }
+    module_parser(m.text.as_str(), path.as_str())
+}
+
+/// A text that starts with `HEADER`: the module's path and its source.
+fn module_parts(src: &str) -> (String, String) {
     // the path runs to the first "*/" (the registry lets no path hold one)
     let mut path = String::new();
     let mut body = String::new();
@@ -125,13 +137,18 @@ pub fn module_parser_of(src: &str) -> Parser {
         }
         at += 1;
     }
-    let m = module_text(body.as_str(), path.as_str());
-    if !m.error.is_empty() {
-        let mut p = module_parser("", path.as_str());
-        p.error = m.error;
-        return p;
-    }
-    module_parser(m.text.as_str(), path.as_str())
+    (path, body)
+}
+
+/// A text that starts with `HEADER` as pcomp reads it: the function that
+/// runs the module (its exports returned by `__cerxesModuleExports`), the
+/// path, and the syntax its path and pragmas say.
+pub fn module_source(src: &str) -> crate::parser::ModuleSource {
+    let (path, body) = module_parts(src);
+    let mut sx = Syntax::for_path(path.as_str());
+    crate::jsx::read_pragmas(body.as_str(), &mut sx);
+    let text = format!("(function () {{'use strict';{}\n;return __cerxesModuleExports;\n}})", body);
+    crate::parser::ModuleSource { path: path, body: text, typescript: sx.typescript, jsx: sx.jsx, jsx_factory: sx.jsx_factory, jsx_fragment: sx.jsx_fragment }
 }
 
 /// The syntax the module's text is read with, and the path its imports

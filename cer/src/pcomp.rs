@@ -400,6 +400,13 @@ pub struct PComp {
     jsx: bool,
     jsx_factory: String,
     jsx_fragment: String,
+    /// a module's file (`compile_module`): its imports name it, and its
+    /// exports (names, the expressions that read them, `export *` modules)
+    /// are what it returns
+    pub module_path: String,
+    mex_names: Vec<String>,
+    mex_values: Vec<String>,
+    mex_stars: Vec<String>,
     /// the type reader's token and how many `>` of a `>>` it has read
     tp: int,
     tg: int,
@@ -483,6 +490,10 @@ impl PComp {
             jsx: jsx,
             jsx_factory: String::from(factory),
             jsx_fragment: String::from(fragment),
+            module_path: String::new(),
+            mex_names: Vec::new(),
+            mex_values: Vec::new(),
+            mex_stars: Vec::new(),
             tp: 0,
             tg: 0,
             tbad: false,
@@ -2361,10 +2372,18 @@ impl PComp {
                 return;
             }
             if ws == "import" && !self.peek_is(1, "(") && !self.peek_is(1, ".") {
+                if !self.module_path.is_empty() {
+                    self.script_import();
+                    return;
+                }
                 self.fail("modules are not supported");
                 return;
             }
             if ws == "export" {
+                if !self.module_path.is_empty() {
+                    self.module_export(in_list);
+                    return;
+                }
                 self.fail("modules are not supported");
                 return;
             }
@@ -3385,7 +3404,9 @@ impl PComp {
 
     fn name_anonymous(&mut self, e: Ex, name: &str) {
         if e.k == E_ANON {
-            let c = self.str_const(name);
+            // a module's `export default function () {}` (its binding is
+            // `__cerxesDefault`) is named default
+            let c = if name == "__cerxesDefault" { self.str_const("default") } else { self.str_const(name) };
             self.emit(OP_SET_NAME, c, 0);
         }
     }
@@ -4286,6 +4307,12 @@ impl PComp {
 
     fn primary(&mut self) -> Ex {
         let k = self.kind();
+        if k == T_IDENT && !self.module_path.is_empty() && self.is("__cerxesModuleExports") {
+            // what a module returns (`compile_module`)
+            self.next();
+            let src = self.module_exports_src();
+            return self.source_expr(src.as_str());
+        }
         if k == T_NUM {
             let raw = self.text();
             if self.strict && raw.as_str() == "octal" {
@@ -5619,6 +5646,10 @@ impl PComp {
             return true;
         }
         if ws == "export" {
+            if !self.module_path.is_empty() {
+                self.module_export(in_list);
+                return true;
+            }
             self.script_export(in_list);
             return true;
         }
@@ -6069,7 +6100,8 @@ impl PComp {
             let m = self.text();
             self.next();
             self.semicolon();
-            self.ts_source(format!("__cerxesImport({});\n", pq(m.as_str())).as_str());
+            let call = self.import_text(m.as_str());
+            self.ts_source(format!("{};\n", call).as_str());
             return;
         }
         let mut names: Vec<String> = Vec::new();
@@ -6152,7 +6184,7 @@ impl PComp {
             self.goto(a);
         }
         self.semicolon();
-        let call = format!("__cerxesImport({})", pq(m.as_str()));
+        let call = self.import_text(m.as_str());
         if names.is_empty() {
             self.ts_source(format!("{};\n", call).as_str());
             return;
@@ -6201,6 +6233,229 @@ impl PComp {
         }
         self.list_stmt = in_list;
         self.statement();
+    }
+
+    /// `__cerxesImport("m")`; in a module, `__cerxesImport("m", "its/file")`,
+    /// so "./x" and "../x" are read from the module's folder.
+    fn import_text(&self, m: &str) -> String {
+        if self.module_path.is_empty() {
+            return format!("__cerxesImport({})", pq(m));
+        }
+        format!("__cerxesImport({}, {})", pq(m), pq(self.module_path.as_str()))
+    }
+
+    /// An export the module returns: its name, the expression that reads it.
+    fn module_export_name(&mut self, name: &str, value: &str) {
+        let mut i: usize = 0;
+        while i < self.mex_names.len() {
+            if self.mex_names[i].as_str() == name {
+                // the parser names the module in the error
+                self.ts_fail();
+                return;
+            }
+            i += 1;
+        }
+        self.mex_names.push(String::from(name));
+        self.mex_values.push(String::from(value));
+    }
+
+    /// The names the declaration statement at the current token declares in
+    /// the module's own scope, each exported under its own name, or all
+    /// under `default` when `as_default`.
+    fn module_export_decl(&mut self, in_list: bool, as_default: bool) {
+        let start = self.binds.len();
+        let scope = self.cur_scope;
+        let vs = self.f().var_scope;
+        self.list_stmt = in_list;
+        self.statement();
+        if !self.error.is_empty() {
+            return;
+        }
+        let mut found: Vec<String> = Vec::new();
+        let mut i = start;
+        while i < self.binds.len() {
+            let bs = self.binds[i].scope;
+            if bs == scope || bs == vs {
+                found.push(self.binds[i].name.clone());
+            }
+            i += 1;
+        }
+        for n in found.iter() {
+            if as_default {
+                self.module_export_name("default", n.as_str());
+            } else {
+                self.module_export_name(n.as_str(), n.as_str());
+            }
+        }
+    }
+
+    /// A name in an export list: a name or a string.
+    fn export_name(&mut self) -> String {
+        let t = self.text();
+        self.next();
+        t
+    }
+
+    /// `with { … }` / `assert { … }` after a module name, and the semicolon.
+    fn module_clause_end(&mut self) {
+        if (self.is("with") || self.is("assert")) && self.peek_is(1, "{") {
+            self.next();
+            let a = self.after_mate(self.pos);
+            if a < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(a);
+        }
+        self.semicolon();
+    }
+
+    /// `export` in a module (`compile_module`): the declaration stays, and
+    /// what it exports is noted for the module to return (as the parser's
+    /// `module_export` does).
+    fn module_export(&mut self, in_list: bool) {
+        self.next();
+        if self.eat("default") {
+            if self.ts && self.is("interface") {
+                self.skip_to_body();
+                return;
+            }
+            let named = (self.is("function") && (self.peek_kind(1) == T_IDENT || (self.peek_is(1, "*") && self.peek_kind(2) == T_IDENT)))
+                || (self.is("async") && self.peek_is(1, "function") && (self.peek_kind(2) == T_IDENT || (self.peek_is(2, "*") && self.peek_kind(3) == T_IDENT)))
+                || (self.is("class") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "extends") && !self.peek_is(1, "implements") && !self.peek_is(1, "{"))
+                || (self.is("abstract") && self.peek_is(1, "class") && self.peek_kind(2) == T_IDENT && !self.peek_is(2, "extends") && !self.peek_is(2, "implements") && !self.peek_is(2, "{"));
+            if named {
+                self.module_export_decl(in_list, true);
+                return;
+            }
+            let e = self.assign();
+            if !self.error.is_empty() {
+                return;
+            }
+            self.name_anonymous(e, "default");
+            self.semicolon();
+            let scope = self.cur_scope;
+            let b = self.declare(scope, "__cerxesDefault", K_CONST);
+            self.emit_bind_init(b);
+            self.op(OP_POP);
+            self.mark_inited(b);
+            self.module_export_name("default", "__cerxesDefault");
+            return;
+        }
+        if self.is("=") || (self.is("as") && self.peek_is(1, "namespace")) || (self.ts && self.is("type") && (self.peek_is(1, "{") || self.peek_is(1, "*"))) {
+            self.pos -= 1;
+            self.skip_module_clause();
+            return;
+        }
+        if self.is("*") {
+            self.next();
+            let mut alias = String::new();
+            let mut aliased = false;
+            if self.eat("as") {
+                alias = self.export_name();
+                aliased = true;
+            }
+            if !self.eat("from") || self.kind() != T_STR {
+                self.ts_fail();
+                return;
+            }
+            let m = self.text();
+            self.next();
+            self.module_clause_end();
+            if aliased {
+                let read = self.import_text(m.as_str());
+                self.module_export_name(alias.as_str(), read.as_str());
+            } else {
+                self.mex_stars.push(m);
+            }
+            return;
+        }
+        if self.is("{") {
+            self.next();
+            let mut names: Vec<String> = Vec::new();
+            let mut keys: Vec<String> = Vec::new();
+            while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+                if self.ts && self.is("type") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "as") && !self.peek_is(1, ",") && !self.peek_is(1, "}") {
+                    // `type T`: erased
+                    self.next();
+                    self.next();
+                    if self.eat("as") {
+                        self.next();
+                    }
+                } else {
+                    let k = self.export_name();
+                    let n = if self.eat("as") { self.export_name() } else { k.clone() };
+                    names.push(n);
+                    keys.push(k);
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("}");
+            let mut from = String::new();
+            let mut has_from = false;
+            if self.eat("from") {
+                if self.kind() != T_STR {
+                    self.ts_fail();
+                    return;
+                }
+                from = self.text();
+                has_from = true;
+                self.next();
+            }
+            self.module_clause_end();
+            let mut i: usize = 0;
+            while i < names.len() {
+                let v = if has_from {
+                    let read = self.import_text(from.as_str());
+                    format!("{}[{}]", read, pq(keys[i].as_str()))
+                } else {
+                    keys[i].clone()
+                };
+                let n = names[i].clone();
+                self.module_export_name(n.as_str(), v.as_str());
+                i += 1;
+            }
+            return;
+        }
+        if self.is("import") {
+            self.ts_fail();
+            return;
+        }
+        self.module_export_decl(in_list, false);
+    }
+
+    /// What the module returns: its exports as an object (the modules of
+    /// `export *` under them, but their defaults).
+    fn module_exports_src(&self) -> String {
+        let mut fields: Vec<String> = Vec::new();
+        let mut i: usize = 0;
+        while i < self.mex_names.len() {
+            fields.push(format!("{}: {}", pq(self.mex_names[i].as_str()), self.mex_values[i]));
+            i += 1;
+        }
+        let own = format!("{{{}}}", fields.join(", "));
+        if self.mex_stars.is_empty() {
+            return format!("({})", own);
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for m in self.mex_stars.iter() {
+            let read = self.import_text(m.as_str());
+            parts.push(format!("__cerxesStar({})", read));
+        }
+        format!("Object.assign({{}}, {}, {})", parts.join(", "), own)
+    }
+
+    /// An expression written as source, compiled where the current token is.
+    fn source_expr(&mut self, src: &str) -> Ex {
+        let saved_src = self.src_rc.clone();
+        self.src_rc = Rc::new(String::from(src));
+        let saved = self.push_tokens(src);
+        let e = self.assign();
+        self.pop_tokens(&saved);
+        self.src_rc = saved_src;
+        e
     }
 
     /// Statements written as source for the ones read (`import`).

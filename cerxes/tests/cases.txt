@@ -476,6 +476,14 @@ import d, { a, bee, cue, fromB, M } from 'a.js';
 ----
 3,1,2,7,b,7
 
+==== js [a TypeScript module's enum, namespace and abstract class; its anonymous default is named default]
+defineSourceModule('lib/t.ts', 'enum E { P, Q }\nnamespace N { export const z = 4; }\nexport abstract class D<T> { abstract m(): T; k(p: number): number { return p * 2; } }\ninterface I { a: number }\nexport type U = number;\nexport { E, N };\nexport default function (): string { return "d"; }');
+import f, { E, N, D } from 'lib/t.ts';
+import * as T from 'lib/t.ts';
+[E.Q, N.z, typeof D, f(), f.name, Object.keys(T).sort().join(' ')].join()
+----
+1,4,function,d,default,D E N default
+
 ==== js [a module is strict and its this is undefined]
 defineSourceModule('s.js', 'export const t = typeof this; export function f() { try { undeclared = 1; return "sloppy"; } catch (e) { return e.name; } }');
 import { t, f } from 's.js';

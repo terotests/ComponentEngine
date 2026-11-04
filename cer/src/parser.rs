@@ -147,6 +147,23 @@ pub fn eval_js(_code: &str, js_error: &str) -> (String, String) {
     (String::new(), String::from(js_error))
 }
 
+/// A module's text as `eval` gets it (`module::HEADER`, the path, the comment's end, the source):
+/// its path, its source and how that is read. CEr has no modules: the path
+/// is empty.
+pub struct ModuleSource {
+    pub path: String,
+    pub body: String,
+    pub typescript: bool,
+    pub jsx: bool,
+    pub jsx_factory: String,
+    pub jsx_fragment: String,
+}
+
+/// Not used in CEr (`ModuleSource`).
+pub fn module_source(_code: &str) -> ModuleSource {
+    ModuleSource { path: String::new(), body: String::new(), typescript: false, jsx: false, jsx_factory: String::new(), jsx_fragment: String::new() }
+}
+
 impl Parser {
     pub fn new(src: &str) -> Parser {
         let mut lx = Lexer::new(src);

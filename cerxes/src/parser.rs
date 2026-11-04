@@ -229,6 +229,22 @@ pub fn eval_js(code: &str, js_error: &str) -> (String, String) {
     parsed_js(Parser::new(code), js_error)
 }
 
+/// A module's text as `eval` gets it (`module::HEADER`, the path, the comment's end, the source),
+/// as pcomp reads it (`module::module_source`): the path, the function's
+/// source, and how that is read.
+pub struct ModuleSource {
+    pub path: String,
+    pub body: String,
+    pub typescript: bool,
+    pub jsx: bool,
+    pub jsx_factory: String,
+    pub jsx_fragment: String,
+}
+
+pub fn module_source(code: &str) -> ModuleSource {
+    crate::module::module_source(code)
+}
+
 impl Parser {
     /// A script read as TSX; a text that starts with `module::HEADER` (what
     /// the module registry hands `eval`) is read as that module.

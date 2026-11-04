@@ -2322,7 +2322,9 @@ impl Compiler {
     fn name_anonymous(&mut self, e: int, name: &str) {
         let k = self.ast.nodes[e as usize].kind;
         if (k == N_FUNC || k == N_CLASS) && self.ast.nodes[e as usize].s.is_empty() {
-            let c = self.str_const(name);
+            // a module's `export default function () {}` (its binding is
+            // `__cerxesDefault`) is named default
+            let c = if name == "__cerxesDefault" { self.str_const("default") } else { self.str_const(name) };
             self.emit(OP_SET_NAME, c, 0);
         }
     }
