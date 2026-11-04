@@ -370,6 +370,8 @@ pub struct PComp {
     /// the tokens' texts, each once (`name_ids` finds one)
     names: Vec<String>,
     name_ids: HashMap<String, int>,
+    /// name_id's cache: a text's cheap hash to its index, -1 for none
+    name_cache: Vec<int>,
     /// the number tokens' values
     nums: Vec<double>,
     /// the token closing each bracket (and the one opening each closing
@@ -447,6 +449,7 @@ impl PComp {
             toks: Vec::new(),
             names: Vec::new(),
             name_ids: HashMap::new(),
+            name_cache: Vec::new(),
             nums: Vec::new(),
             mate: Vec::new(),
             xs: Vec::new(),
@@ -561,6 +564,36 @@ impl PComp {
     }
 
     fn name_id(&mut self, s: &str) -> int {
+        // most texts repeat: a direct-mapped cache by a cheap hash first
+        let b = s.as_bytes();
+        let n = b.len();
+        let mut h: int = n as int;
+        let mut i: usize = 0;
+        while i < n && i < 8 {
+            h = (h * 131 + (b[i] as int)) & 16777215;
+            i += 1;
+        }
+        if n > 8 {
+            h = (h * 131 + (b[n - 1] as int)) & 16777215;
+        }
+        let slot = ((h ^ (h >> 14)) & 16383) as usize;
+        if self.name_cache.is_empty() {
+            let mut k = 0;
+            while k < 16384 {
+                self.name_cache.push(-1);
+                k += 1;
+            }
+        }
+        let c = self.name_cache[slot];
+        if c >= 0 && self.names[c as usize].as_str() == s {
+            return c;
+        }
+        let id = self.name_id_slow(s);
+        self.name_cache[slot] = id;
+        id
+    }
+
+    fn name_id_slow(&mut self, s: &str) -> int {
         match self.name_ids.get(s) {
             Some(i) => *i,
             None => {
