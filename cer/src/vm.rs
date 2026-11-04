@@ -670,7 +670,7 @@ impl Vm {
     /// which never changes, and the slot alone for an owned one, checked
     /// against its key. `plain`: a writable data property; else any data
     /// property.
-    #[inline]
+    #[inline(always)]
     pub fn ic_slot(&self, o: int, atom: int, c: int, plain: bool) -> int {
         let sh = self.objs[o as usize].shape;
         if c >= 65536 {
@@ -733,18 +733,13 @@ impl Vm {
 
 
     /// The shape that holds shape `sh`'s keys (Shape.kref).
-    #[inline]
+    #[inline(always)]
     pub fn holder(&self, sh: int) -> usize {
-        let k = self.shapes[sh as usize].kref;
-        if k < 0 {
-            sh as usize
-        } else {
-            k as usize
-        }
+        self.shapes[sh as usize].kref as usize
     }
 
     /// The slot of own property `atom` of `o`, -1 when absent.
-    #[inline]
+    #[inline(always)]
     pub fn find(&self, o: int, atom: int) -> int {
         let sh = self.objs[o as usize].shape;
         self.shapes[self.holder(sh)].find(atom, self.shapes[sh as usize].nkeys)
@@ -835,6 +830,7 @@ impl Vm {
                 return self.shapes[sh2 as usize].push(atom, attr);
             }
             let h = self.holder(sh);
+            next = self.shapes.len() as int;
             let mut ns = Shape::new();
             if (self.shapes[h].keys.len() as int) == slot {
                 // the chain's newest shape: its holder gets the key
@@ -845,9 +841,9 @@ impl Vm {
                 ns = self.shapes[h].copy(slot);
                 ns.owned = false;
                 ns.push(atom, attr);
+                ns.kref = next;
             }
             ns.nkeys = slot + 1;
-            next = self.shapes.len() as int;
             self.shapes.push(ns);
             let s = &mut self.shapes[sh as usize];
             if (s.t_atom.len() as int) < T_LINEAR {
@@ -872,10 +868,15 @@ impl Vm {
         let n = self.shapes[sh as usize].nkeys;
         let ns = self.shapes[self.holder(sh)].copy(n);
         let id = if self.free_shapes.is_empty() {
+            let i = self.shapes.len() as int;
+            let mut ns = ns;
+            ns.kref = i;
             self.shapes.push(ns);
-            (self.shapes.len() as int) - 1
+            i
         } else {
             let i = self.free_shapes.pop().unwrap();
+            let mut ns = ns;
+            ns.kref = i;
             self.shapes[i as usize] = ns;
             self.shape_epoch += 1;
             i
@@ -936,8 +937,8 @@ impl Vm {
         let mut si: usize = 0;
         while si < self.shapes.len() {
             let mut k: usize = 0;
-            // a holder's keys, the chain's (kref -1)
-            while self.shapes[si].kref < 0 && k < self.shapes[si].keys.len() {
+            // a holder's keys, the whole chain's
+            while self.shapes[si].kref == si as int && k < self.shapes[si].keys.len() {
                 if (self.shapes[si].attrs[k] & (P_READONLY | P_ACCESSOR)) != 0 {
                     let a = self.shapes[si].keys[k];
                     self.mark_setter(a);

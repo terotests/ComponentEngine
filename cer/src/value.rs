@@ -193,7 +193,8 @@ pub struct Shape {
     /// the shape's property count: its keys are the first nkeys of its
     /// holder's (kref)
     pub nkeys: int,
-    /// the shape that holds the keys, -1 for this one. A transition from
+    /// the shape that holds the keys, itself for a holder (the shape at
+    /// index 0 for a new one: Vm sets it as it places the shape). A transition from
     /// the newest shape of a chain appends to the chain's holder instead of
     /// copying its keys, so a chain of shapes made one property at a time
     /// shares one key list (a shape tree, without a copy per transition).
@@ -217,7 +218,7 @@ impl Shape {
     pub fn new() -> Shape {
         Shape {
             nkeys: 0,
-            kref: -1,
+            kref: 0,
             keys: Vec::new(),
             attrs: Vec::new(),
             itab: Vec::new(),
@@ -233,7 +234,9 @@ impl Shape {
     /// absent (a chain has each key once, so a slot past n is absent).
     #[inline]
     pub fn find(&self, atom: int, n: int) -> int {
-        if self.itab.len() > 0 {
+        // a short prefix of a long chain: the scan is shorter than the
+        // table's probes
+        if n > SHAPE_HASH_AT && self.itab.len() > 0 {
             let mask = (self.itab.len() as int) - 1;
             let mut h = atom & mask;
             loop {
