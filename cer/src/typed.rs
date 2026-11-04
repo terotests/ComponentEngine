@@ -527,8 +527,8 @@ impl Vm {
         self.method(g, "__taInfo", NF_TA_INFO, 1);
     }
 
-    pub fn call_native_typed(&mut self, id: int, args: Vec<Val>) -> Val {
-        let mut a: Vec<Val> = args;
+    pub fn call_native_typed(&mut self, id: int, args: &Vec<Val>) -> Val {
+        let mut a: Vec<Val> = args.clone();
         while a.len() < 5 {
             a.push(Val::Undef);
         }

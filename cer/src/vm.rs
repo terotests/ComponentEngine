@@ -251,6 +251,8 @@ pub struct Vm {
     /// bytes of strings made since the last collection, and the count
     /// that makes one due: big strings die only when the table is swept
     pub sbytes: int,
+    /// argument vectors for native calls, reused (Vm::call_op)
+    pub arg_pool: Vec<Vec<Val>>,
     pub sbytes_limit: int,
     pub sempty: Rc<String>,
     /// prototype-chain caches of the register code's reads (rvm.rs
@@ -459,6 +461,7 @@ impl Vm {
             slimit: SLIMIT_MIN,
             slimit_min: SLIMIT_MIN,
             sbytes: 0,
+            arg_pool: Vec::new(),
             sbytes_limit: SBYTES_MIN,
             sempty: Rc::new(String::new()),
             rpic: Vec::new(),
@@ -2754,7 +2757,7 @@ impl Vm {
         let class = self.objs[fo as usize].class;
         if class == C_NATIVE {
             let id = self.objs[fo as usize].func;
-            return self.call_native(id, fo, this, args, false, Val::Undef);
+            return self.call_native(id, fo, this, &args, false, Val::Undef);
         }
         if class == C_BOUND {
             let target = self.objs[fo as usize].env;
@@ -2821,7 +2824,7 @@ impl Vm {
         if class == C_NATIVE {
             let id = self.objs[fo as usize].func;
             let this = Val::Undef;
-            return self.call_native(id, fo, this, args, true, new_target);
+            return self.call_native(id, fo, this, &args, true, new_target);
         }
         if class == C_BOUND {
             let target = self.objs[fo as usize].env;
@@ -3933,7 +3936,7 @@ impl Vm {
     }
 
     pub fn freeze_obj(&mut self, o: int) {
-        self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, vec![Val::Obj(o)], false, Val::Undef);
+        self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, &vec![Val::Obj(o)], false, Val::Undef);
     }
 
     pub fn gc_due(&self) -> bool {
@@ -4067,17 +4070,23 @@ impl Vm {
                         }
                     }
                 }
-                let mut args: Vec<Val> = Vec::with_capacity(argc as usize);
+                // the arguments in a vector from the pool: no allocation per call
+                let mut args: Vec<Val> = match self.arg_pool.pop() {
+                    Some(v) => v,
+                    None => Vec::new(),
+                };
                 let mut i = 0;
                 while i < argc {
-                    args.push(self.stack[(bp + i) as usize].clone());
+                    args.push(self.stack[(bp + i) as usize]);
                     i += 1;
                 }
                 let this = self.stack[(fpos + 1) as usize].clone();
                 self.stack.truncate(fpos as usize);
                 self.native_depth += 1;
-                let r = self.call_native(id, fo, this, args, false, Val::Undef);
+                let r = self.call_native(id, fo, this, &args, false, Val::Undef);
                 self.native_depth -= 1;
+                args.clear();
+                self.arg_pool.push(args);
                 self.stack.push(r);
                 return false;
             }

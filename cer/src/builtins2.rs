@@ -99,14 +99,14 @@ impl Vm {
         out
     }
 
-    pub fn call_native2(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>, construct: bool, new_target: Val) -> Val {
+    pub fn call_native2(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         let a0 = arg(&args, 0);
         let a1 = arg(&args, 1);
         match id {
             // ---- Array
             NF_A_ISARRAY => Val::Bool(self.class_of(&a0) == C_ARRAY),
             NF_A_OF => {
-                let a = self.new_array(args);
+                let a = self.new_array(args.clone());
                 Val::Obj(a)
             }
             NF_A_FROM => {
@@ -147,14 +147,14 @@ impl Vm {
                         self.throw_type(format!("Cannot add property {}, object is not extensible", n).as_str());
                         return Val::Undef;
                     }
-                    for a in args {
-                        self.push_elem(o, a);
+                    for a in args.iter() {
+                        self.push_elem(o, *a);
                     }
                     return Val::Num(self.objs[o as usize].elems.len() as double);
                 }
                 let mut n = self.len_of(&Val::Obj(o));
-                for a in args {
-                    self.set_index(o, n, a);
+                for a in args.iter() {
+                    self.set_index(o, n, *a);
                     n += 1;
                 }
                 self.set_obj(o, A_LENGTH, Val::Num(n as double));
@@ -190,8 +190,8 @@ impl Vm {
             NF_AP_UNSHIFT => {
                 let o = self.this_array(&this);
                 let mut i: usize = 0;
-                for a in args {
-                    self.insert_elem(o, i as int, a);
+                for a in args.iter() {
+                    self.insert_elem(o, i as int, *a);
                     i += 1;
                 }
                 Val::Num(self.objs[o as usize].elems.len() as double)
@@ -250,7 +250,7 @@ impl Vm {
             NF_AP_CONCAT => {
                 let o = self.this_array(&this);
                 let mut out = self.elems_of(o);
-                for a in args {
+                for a in args.iter() {
                     if let Val::Obj(x) = &a {
                         if self.objs[*x as usize].class == C_ARRAY {
                             let items = self.objs[*x as usize].elems.clone();
@@ -260,7 +260,7 @@ impl Vm {
                             continue;
                         }
                     }
-                    out.push(a);
+                    out.push(*a);
                 }
                 let r = self.new_array(out);
                 Val::Obj(r)

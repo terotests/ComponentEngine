@@ -530,7 +530,7 @@ impl Vm {
         self.method(g, "__cerIntlSource", NF_INTL_SOURCE, 0);
     }
 
-    pub fn call_native_intl(&mut self, id: int, args: Vec<Val>) -> Val {
+    pub fn call_native_intl(&mut self, id: int, args: &Vec<Val>) -> Val {
         if id == NF_INTL_SOURCE {
             return self.eval_source(INTL, false, false);
         }

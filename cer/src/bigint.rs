@@ -708,7 +708,7 @@ impl Vm {
         }
     }
 
-    pub fn call_native_bigint(&mut self, id: int, this: Val, args: Vec<Val>, construct: bool) -> Val {
+    pub fn call_native_bigint(&mut self, id: int, this: Val, args: &Vec<Val>, construct: bool) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
         if id == NF_BIGINT {

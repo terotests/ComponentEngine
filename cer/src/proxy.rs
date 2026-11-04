@@ -59,8 +59,8 @@ impl Vm {
         }
         let hook = self.objs[self.proxy_hooks as usize].elems[which as usize].clone();
         let mut all: Vec<Val> = vec![Val::Obj(target), Val::Obj(handler)];
-        for a in args {
-            all.push(a);
+        for a in args.iter() {
+            all.push(*a);
         }
         self.call_value(hook, Val::Undef, all)
     }
@@ -119,7 +119,7 @@ impl Vm {
         self.objs[o as usize].class == C_ARRAY
     }
 
-    pub fn call_native_proxy(&mut self, id: int, args: Vec<Val>, construct: bool) -> Val {
+    pub fn call_native_proxy(&mut self, id: int, args: &Vec<Val>, construct: bool) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
         if id == NF_PROXY {

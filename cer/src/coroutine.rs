@@ -521,7 +521,7 @@ impl Vm {
         }
     }
 
-    pub fn call_native_co(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>) -> Val {
+    pub fn call_native_co(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         if id == NF_AGEN_AWAIT_OK || id == NF_AGEN_AWAIT_ERR {
             let g = self.objs[fobj as usize].env;

@@ -122,6 +122,10 @@ pub fn number_to_string(x: double) -> String {
     if x == 0.0 {
         return String::from("0");
     }
+    let quick = quick_num_string(x);
+    if !quick.is_empty() {
+        return quick;
+    }
     if x < 0.0 {
         return format!("-{}", number_to_string(-x));
     }
@@ -591,4 +595,22 @@ pub fn to_fixed(x: double, d: int) -> String {
         return format!("-{}", s);
     }
     s
+}
+
+/// Rust: the shortest digits that read back as `x`, without an exponent,
+/// are what JavaScript writes for 1e-6 <= |x| < 1e21 (Number::toString);
+/// one formatting, no char vectors. Empty outside that range (and on the
+/// other targets): number_to_string's own way.
+#[ranger::target(rust)]
+pub fn quick_num_string(x: double) -> String {
+    let a = if x < 0.0 { -x } else { x };
+    if a >= 0.000001 && a < 1e21 {
+        return format!("{}", x);
+    }
+    String::new()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn quick_num_string(_x: double) -> String {
+    String::new()
 }

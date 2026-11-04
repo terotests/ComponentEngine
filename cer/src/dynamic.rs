@@ -142,7 +142,7 @@ impl Vm {
         Val::Undef
     }
 
-    pub fn call_native_dynamic_this(&mut self, id: int, this: Val, args: Vec<Val>) -> Val {
+    pub fn call_native_dynamic_this(&mut self, id: int, this: Val, args: &Vec<Val>) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         if id == NF_SYMP_VALUEOF {
             return self.this_symbol(&this);
@@ -247,7 +247,7 @@ impl Vm {
         Val::Undef
     }
 
-    pub fn call_native_dynamic(&mut self, id: int, args: Vec<Val>, new_target: Val) -> Val {
+    pub fn call_native_dynamic(&mut self, id: int, args: &Vec<Val>, new_target: Val) -> Val {
         if id == NF_EVAL {
             if args.is_empty() {
                 return Val::Undef;

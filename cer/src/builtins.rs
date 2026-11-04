@@ -2715,7 +2715,7 @@ impl Vm {
 
     // ---- the dispatch
 
-    pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>, construct: bool, new_target: Val) -> Val {
+    pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && (matches!(this, Val::Undef) || matches!(this, Val::Null)) {
             self.throw_type("Array.prototype method called on null or undefined");
             return Val::Undef;
@@ -3119,7 +3119,7 @@ impl Vm {
                         return Val::Obj(a);
                     }
                 }
-                self.put_elems(a, args);
+                self.put_elems(a, args.clone());
                 Val::Obj(a)
             }
             NF_SYMBOL => {
