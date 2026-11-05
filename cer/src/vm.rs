@@ -6204,7 +6204,7 @@ impl Vm {
     pub fn free_cold(&mut self, o: int) {
         let c = self.objs[o as usize].cold as int;
         if c > 0 {
-            self.colds[c as usize] = Cold::new();
+            reset_cold(&mut self.colds, c as usize);
             self.free_colds.push(c);
             self.objs[o as usize].cold = 0;
         }
@@ -7056,6 +7056,38 @@ pub fn grow_vals(v: &mut Vec<Val>, most: usize) {
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn grow_vals(_v: &mut Vec<Val>, _most: usize) {}
+
+/// A freed Cold as new (Rust: emptied in place, small buffers kept and no
+/// new hash state; a map's table goes).
+#[ranger::target(rust)]
+pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
+    let c = &mut colds[i];
+    if c.index.capacity() > 0 {
+        c.index = HashMap::new();
+    }
+    if c.marks.capacity() > 16 {
+        c.marks = Vec::new();
+    } else {
+        c.marks.clear();
+    }
+    if c.nums.capacity() > 16 {
+        c.nums = Vec::new();
+    } else {
+        c.nums.clear();
+    }
+    if c.elems2.capacity() > 16 {
+        c.elems2 = Vec::new();
+    } else {
+        c.elems2.clear();
+    }
+    c.prim = Val::Undef;
+    c.home = -1;
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
+    colds[i] = Cold::new();
+}
 
 /// The stack grows to `n` values, undefined.
 #[ranger::target(rust)]

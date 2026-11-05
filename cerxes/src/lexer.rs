@@ -100,6 +100,10 @@ pub struct Lexer {
     /// the previous token was one of those keywords
     paren_keyword: bool,
     puncts: Vec<String>,
+    /// by a punctuator's first byte (below 128) the first in `puncts` that
+    /// starts with it, and for each the next one that does: -1 for none
+    pfirst: Vec<int>,
+    pnext: Vec<int>,
     /// JSX: `tokenize` writes each element as the tokens of its factory's
     /// call (`jsx_tokens`), for pcomp
     pub jsx: bool,
@@ -162,6 +166,45 @@ fn hex_val(c: char) -> int {
 }
 
 /// Punctuators, longest first so the scan takes the longest match.
+/// punct_firsts and punct_nexts: the punctuators by their first byte.
+fn punct_firsts() -> Vec<int> {
+    let ps = puncts();
+    let mut first: Vec<int> = Vec::new();
+    let mut i: usize = 0;
+    while i < 128 {
+        first.push(-1);
+        i += 1;
+    }
+    let mut k = ps.len();
+    while k > 0 {
+        k -= 1;
+        let b = ps[k].as_bytes()[0] as usize;
+        first[b] = k as int;
+    }
+    first
+}
+
+fn punct_nexts() -> Vec<int> {
+    let ps = puncts();
+    let mut next: Vec<int> = Vec::new();
+    let mut k: usize = 0;
+    while k < ps.len() {
+        let b = ps[k].as_bytes()[0];
+        let mut j = k + 1;
+        let mut nx: int = -1;
+        while j < ps.len() {
+            if ps[j].as_bytes()[0] == b {
+                nx = j as int;
+                break;
+            }
+            j += 1;
+        }
+        next.push(nx);
+        k += 1;
+    }
+    next
+}
+
 fn puncts() -> Vec<String> {
     let list = vec![
         ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=", "<=", ">=",
@@ -213,6 +256,8 @@ impl Lexer {
             parens: Vec::new(),
             paren_keyword: false,
             puncts: puncts(),
+            pfirst: punct_firsts(),
+            pnext: punct_nexts(),
             jsx: false,
             jsx_factory: String::from("__jsx"),
             jsx_fragment: String::from("__jsxFragment"),
@@ -456,16 +501,12 @@ impl Lexer {
             self.regex_ok = false;
             return t;
         }
-        let mut k: int = 0;
         let c0 = c as int;
-        while k < self.puncts.len() as int {
+        // the punctuators that start with c, longest first
+        let mut k: int = if c0 < 128 { self.pfirst[c0 as usize] } else { -1 };
+        while k >= 0 {
             let ki = k as usize;
-            k += 1;
-            // the punctuators are ASCII: compare bytes, and the first one
-            // before anything is copied
-            if (self.puncts[ki].as_bytes()[0] as int) != c0 {
-                continue;
-            }
+            k = self.pnext[ki];
             let plen = self.puncts[ki].as_bytes().len() as int;
             let mut ok = true;
             let mut j: int = 1;
@@ -476,15 +517,15 @@ impl Lexer {
                 }
                 j += 1;
             }
-            let p = self.puncts[ki].clone();
             // `?.` followed by a digit is `?` and a number
-            if ok && p.as_str() == "?." {
+            if ok && plen == 2 && c0 == 63 && (self.at(self.pos + 1) as int) == 46 {
                 let d = self.at(self.pos + 2);
                 if d >= '0' && d <= '9' {
                     ok = false;
                 }
             }
             if ok {
+                let p = self.puncts[ki].clone();
                 let mut t = Tok::new(T_PUNCT, line, nl);
                 self.pos += plen;
                 let s = p.as_str();
