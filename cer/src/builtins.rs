@@ -1281,7 +1281,7 @@ impl Vm {
             if fn_repl {
                 let sv7 = self.string_val(pat.clone());
                 let sv8 = self.rc_val(s.clone());
-                let r = self.call_value(repl.clone(), Val::Undef, vec![sv7, Val::Num(p as double), sv8]);
+                let r = self.call_fixed(repl.clone(), Val::Undef, 3, sv7, Val::Num(p as double), sv8);
                 if self.throwing {
                     return Val::Undef;
                 }
@@ -1901,14 +1901,14 @@ impl Vm {
         if is_obj(&v) || matches!(v, Val::Num(_)) {
             let tj = if is_obj(&v) { self.get(&v, A_TOJSON) } else { Val::Undef };
             if self.is_callable(&tj) {
-                v = self.call_value(tj, v.clone(), vec![key.clone()]);
+                v = self.call_fixed(tj, v.clone(), 1, key.clone(), Val::Undef, Val::Undef);
                 if self.throwing {
                     return false;
                 }
             }
         }
         if self.is_callable(replacer) {
-            v = self.call_value(replacer.clone(), holder.clone(), vec![key.clone(), v.clone()]);
+            v = self.call_fixed(replacer.clone(), holder.clone(), 2, key.clone(), v.clone(), Val::Undef);
             if self.throwing {
                 return false;
             }
@@ -2316,7 +2316,7 @@ impl Vm {
                 }
             }
         }
-        self.call_value(reviver.clone(), holder.clone(), vec![key.clone(), v])
+        self.call_fixed(reviver.clone(), holder.clone(), 2, key.clone(), v, Val::Undef)
     }
 
     // ---- Date
@@ -2576,7 +2576,7 @@ impl Vm {
                 let state = (-neg) as int;
                 let derived = obj_of(&d);
                 if self.is_callable(&b) {
-                    let r = self.call_value(b, Val::Undef, vec![c]);
+                    let r = self.call_fixed(b, Val::Undef, 1, c, Val::Undef, Val::Undef);
                     if self.throwing {
                         self.throwing = false;
                         let e = self.exc.clone();
@@ -2592,19 +2592,19 @@ impl Vm {
                 }
             } else if matches!(b, Val::Undef) && matches!(c, Val::Undef) && matches!(d, Val::Undef) {
                 // queueMicrotask
-                self.call_value(a, Val::Undef, Vec::new());
+                self.call_fixed(a, Val::Undef, 0, Val::Undef, Val::Undef, Val::Undef);
                 if self.throwing {
                     self.throwing = false;
                     self.exc = Val::Undef;
                 }
             } else {
                 // thenable job: then.call(thenable, resolve, reject)
-                self.call_value(a, b, vec![c, d.clone()]);
+                self.call_fixed(a, b, 2, c, d.clone(), Val::Undef);
                 if self.throwing {
                     self.throwing = false;
                     let e = self.exc.clone();
                     self.exc = Val::Undef;
-                    self.call_value(d, Val::Undef, vec![e]);
+                    self.call_fixed(d, Val::Undef, 1, e, Val::Undef, Val::Undef);
                     self.throwing = false;
                 }
             }
@@ -3585,7 +3585,7 @@ impl Vm {
                 let o = self.alloc(C_OBJECT, -1);
                 let mut i: int = 0;
                 for it in items {
-                    let k = self.call_value(f.clone(), Val::Undef, vec![it.clone(), Val::Num(i as double)]);
+                    let k = self.call_fixed(f.clone(), Val::Undef, 2, it.clone(), Val::Num(i as double), Val::Undef);
                     if self.throwing {
                         return Val::Undef;
                     }
@@ -3690,7 +3690,7 @@ impl Vm {
             }
             NF_OP_TOLOCALE => {
                 let f = self.get(&this, A_TOSTRING);
-                self.call_value(f, this, Vec::new())
+                self.call_fixed(f, this, 0, Val::Undef, Val::Undef, Val::Undef)
             }
             NF_OP_VALUEOF => {
                 let o = self.to_object(&this);

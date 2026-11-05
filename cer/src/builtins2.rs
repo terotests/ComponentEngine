@@ -126,7 +126,7 @@ impl Vm {
                     let mut out: Vec<Val> = Vec::new();
                     let mut i: int = 0;
                     for it in items {
-                        let r = self.call_value(a1.clone(), arg(&args, 2), vec![it, Val::Num(i as double)]);
+                        let r = self.call_fixed(a1.clone(), arg(&args, 2), 2, it, Val::Num(i as double), Val::Undef);
                         if self.throwing {
                             return Val::Undef;
                         }
@@ -277,7 +277,7 @@ impl Vm {
                 if self.objs[o as usize].class != C_ARRAY {
                     let jf = self.get(&this, self.atoms["join"]);
                     if self.is_callable(&jf) {
-                        return self.call_value(jf, this.clone(), Vec::new());
+                        return self.call_fixed(jf, this.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                     }
                     return self.string_val(String::from("[object Object]"));
                 }
@@ -365,7 +365,7 @@ impl Vm {
                         continue;
                     }
                     let v = self.get_index(&ob, i);
-                    let r = self.call_value(a0.clone(), a1.clone(), vec![v.clone(), Val::Num(i as double), ob.clone()]);
+                    let r = self.call_fixed(a0.clone(), a1.clone(), 3, v.clone(), Val::Num(i as double), ob.clone());
                     if self.throwing {
                         return Val::Undef;
                     }
@@ -1399,7 +1399,7 @@ impl Vm {
                             if self.colds[self.objs[o as usize].cold as usize].marks[i] == 0 {
                                 let k = self.evecs[self.objs[o as usize].elems as usize].v[i].clone();
                                 let v = if is_set { k.clone() } else { self.colds[self.objs[o as usize].cold as usize].elems2[i].clone() };
-                                self.call_value(a0.clone(), a1.clone(), vec![v, k, this.clone()]);
+                                self.call_fixed(a0.clone(), a1.clone(), 3, v, k, this.clone());
                                 if self.throwing {
                                     return Val::Undef;
                                 }
@@ -1427,7 +1427,7 @@ impl Vm {
                 self.put_proto(p, proto);
                 let (res, rej) = self.resolving_functions(p);
                 self.temp_roots.push(Val::Obj(p));
-                self.call_value(a0, Val::Undef, vec![Val::Obj(res), Val::Obj(rej)]);
+                self.call_fixed(a0, Val::Undef, 2, Val::Obj(res), Val::Obj(rej), Val::Undef);
                 self.temp_roots.pop();
                 if self.throwing {
                     self.throwing = false;

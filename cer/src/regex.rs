@@ -1335,15 +1335,18 @@ impl Regex {
 
     /// Runs the program from `pc` at `start`; answers the end position or
     /// -1. `back` runs it right to left (lookbehind).
-    fn run(&self, input: &Vec<int>, start: int, pc0: int, caps: &mut Vec<int>, regs: &mut Vec<int>, back: bool) -> int {
+    fn run(&self, input: &Vec<int>, start: int, pc0: int, caps: &mut Vec<int>, regs: &mut Vec<int>, back: bool, stack: &mut Vec<(int, int, int)>) -> int {
         let n = input.len() as int;
-        let mut stack: Vec<(int, int, int)> = Vec::new();
+        // the backtrack entries of this run sit above base: a lookaround's
+        // run shares the list and leaves it as it found it
+        let base = stack.len();
         let mut pc = pc0;
         let mut pos = start;
         let mut steps: int = 0;
         loop {
             steps += 1;
             if steps > 50000000 {
+                stack.truncate(base);
                 return -1;
             }
             let ins = self.code[pc as usize];
@@ -1504,7 +1507,7 @@ impl Regex {
                     let neg = (kind & 1) == 1;
                     let behind = kind >= 2;
                     let saved = caps.clone();
-                    let r = self.run(input, pos, ins.b, caps, regs, behind);
+                    let r = self.run(input, pos, ins.b, caps, regs, behind, stack);
                     let hit = r >= 0;
                     if hit == neg {
                         // failed: undo what the lookaround captured
@@ -1535,6 +1538,7 @@ impl Regex {
                     }
                 }
                 I_MATCH => {
+                    stack.truncate(base);
                     return pos;
                 }
                 _ => {
@@ -1544,7 +1548,7 @@ impl Regex {
             if !ok {
                 // backtrack
                 loop {
-                    if stack.is_empty() {
+                    if stack.len() == base {
                         return -1;
                     }
                     let (kind, a, b) = stack.pop().unwrap();
@@ -1574,6 +1578,10 @@ impl Regex {
             regs.push(-1);
             r += 1;
         }
+        // one capture list for every start: a failed try leaves it to be
+        // cleared, not dropped
+        let mut caps: Vec<int> = Vec::with_capacity(ncap);
+        let mut stack: Vec<(int, int, int)> = Vec::new();
         while s <= n {
             if self.first >= 0 && !self.sticky {
                 while s < n && input[s as usize] != self.first {
@@ -1583,13 +1591,13 @@ impl Regex {
                     return Vec::new();
                 }
             }
-            let mut caps: Vec<int> = Vec::with_capacity(ncap);
+            caps.clear();
             let mut i: usize = 0;
             while i < ncap {
                 caps.push(-1);
                 i += 1;
             }
-            let e = self.run(input, s, 0, &mut caps, &mut regs, false);
+            let e = self.run(input, s, 0, &mut caps, &mut regs, false, &mut stack);
             if e >= 0 {
                 return caps;
             }

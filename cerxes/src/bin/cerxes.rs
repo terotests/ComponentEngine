@@ -6,6 +6,12 @@
 // `cerxes --prelude-snapshot > src/prelude_snap.rs` the prelude Engine::new restores.
 use cerxes::Engine;
 
+#[path = "../../salloc/salloc.rs"]
+mod salloc;
+
+#[global_allocator]
+static GLOBAL: salloc::SmallAlloc = salloc::SmallAlloc;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = "usage: cerxes [--emit] <file.ts|.tsx|.jsx|.js> | cerxes --runtime";

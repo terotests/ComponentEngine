@@ -138,6 +138,11 @@ pub const R_GET_METHOD_ELEM: int = 52;
 pub const R_CHECK: int = 53;
 /// w1 x, w2 where to go when x is not undefined (a default's test)
 pub const R_JNU: int = 54;
+/// a stack op with sub (0..2) operands, w2 and w3, and one result in w1:
+/// the operands go above the frame, the op runs as the stack machine
+/// does it, its result comes back (instanceof, in, delete o[k], a
+/// function's name, for-in keys, a short array literal)
+pub const R_STEP_K: int = 55;
 
 const BAD: int = 1000000;
 
@@ -797,6 +802,11 @@ impl Tr {
                     // it throws; nothing after it on this path
                     self.mat_all();
                 }
+            } else if (c as int) == OP_INSTANCEOF || (c as int) == OP_IN || (c as int) == OP_DEL_ELEM || (c as int) == OP_SET_NAME || (c as int) == OP_ITER_KEYS || ((c as int) == OP_NEW_ARRAY && op.a <= 2) {
+                let k: int = if (c as int) == OP_NEW_ARRAY { op.a as int } else if (c as int) == OP_SET_NAME || (c as int) == OP_ITER_KEYS { 1 } else { 2 };
+                let x = if k >= 1 { self.opnd(d - k) } else { 0 };
+                let y = if k >= 2 { self.opnd(d - 1) } else { 0 };
+                self.result(i, R_STEP_K, k, k, x, y);
             } else if (c as int) == OP_TDZ || (c as int) == OP_NEW_TARGET || (c as int) == OP_ARGUMENTS || (c as int) == OP_CALLEE || (c as int) == OP_REGEX || (c as int) == OP_TYPEOF_GLOBAL || (c as int) == OP_GET_SUPER {
                 self.result(i, R_STEP_PUSH, 0, 0, 0, 0);
             } else {

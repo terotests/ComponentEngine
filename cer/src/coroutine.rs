@@ -385,7 +385,7 @@ impl Vm {
                 return 0;
             }
         }
-        let r = self.call_value(m, it, vec![received]);
+        let r = self.call_fixed(m, it, 1, received, Val::Undef, Val::Undef);
         if self.throwing {
             return 0;
         }
@@ -421,7 +421,7 @@ impl Vm {
         if self.throwing || !self.is_callable(&m) {
             return;
         }
-        let r = self.call_value(m, it.clone(), Vec::new());
+        let r = self.call_fixed(m, it.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
         if !self.throwing && !is_obj(&r) {
             self.throw_type("Iterator result is not an object");
         }
@@ -634,10 +634,10 @@ impl Vm {
                 let k = self.get_index(&v, 0);
                 let val = if self.throwing { Val::Undef } else { self.get_index(&v, 1) };
                 if !self.throwing {
-                    self.call_value(adder.clone(), Val::Obj(m), vec![k, val]);
+                    self.call_fixed(adder.clone(), Val::Obj(m), 2, k, val, Val::Undef);
                 }
             } else {
-                self.call_value(adder.clone(), Val::Obj(m), vec![v]);
+                self.call_fixed(adder.clone(), Val::Obj(m), 1, v, Val::Undef, Val::Undef);
             }
             if self.throwing {
                 self.iter_close_on_throw(&it);

@@ -1879,7 +1879,7 @@ impl Vm {
         }
         if self.is_callable(&tp) {
             let sv18 = self.str_val(hint);
-            let r = self.call_value(tp, v.clone(), vec![sv18]);
+            let r = self.call_fixed(tp, v.clone(), 1, sv18, Val::Undef, Val::Undef);
             if self.throwing {
                 return Val::Undef;
             }
@@ -1896,7 +1896,7 @@ impl Vm {
                 return Val::Undef;
             }
             if self.is_callable(&f) {
-                let r = self.call_value(f, v.clone(), Vec::new());
+                let r = self.call_fixed(f, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                 if self.throwing {
                     return Val::Undef;
                 }
@@ -2170,6 +2170,10 @@ impl Vm {
     }
 
     pub fn key_val(&mut self, a: int) -> Val {
+        if self.atom_kind(a) != 3 {
+            // not a symbol's atom (kept per atom): no table lookup
+            return self.atom_val(a);
+        }
         match self.symbol_atoms.get(&a) {
             Some(sym) => Val::Obj(*sym),
             None => self.atom_val(a),
@@ -2255,7 +2259,7 @@ impl Vm {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
                     let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
                     if self.is_callable(&g) {
-                        return self.call_value(g, receiver.clone(), Vec::new());
+                        return self.call_fixed(g, receiver.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                     }
                     return Val::Undef;
                 }
@@ -2389,7 +2393,7 @@ impl Vm {
     }
 
     /// A proxy up o's prototype chain (a write that misses goes to its trap).
-    fn proxy_on_chain(&self, o: int) -> bool {
+    pub fn proxy_on_chain(&self, o: int) -> bool {
         let mut cur = self.objs[o as usize].proto as int;
         while cur >= 0 {
             if self.objs[cur as usize].class == C_PROXY {
@@ -2416,7 +2420,7 @@ impl Vm {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
                     let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                     if self.is_callable(&s) {
-                        self.call_value(s, receiver.clone(), vec![v.clone()]);
+                        self.call_fixed(s, receiver.clone(), 1, v.clone(), Val::Undef, Val::Undef);
                     } else if self.strict_now() {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("Cannot set property {} of #<Object> which has only a getter", n).as_str());
@@ -2457,7 +2461,7 @@ impl Vm {
                 let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
                 let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                 if self.is_callable(&s) {
-                    self.call_value(s, Val::Obj(o), vec![v]);
+                    self.call_fixed(s, Val::Obj(o), 1, v, Val::Undef, Val::Undef);
                 } else if self.strict_now() {
                     let n = self.atom_str(atom);
                     self.throw_type(format!("Cannot set property {} of #<Object> which has only a getter", n).as_str());
@@ -2842,15 +2846,18 @@ impl Vm {
                 i += 1;
             }
         }
-        let keys = self.keys_of(o);
-        let attrs = self.shape_attrs(self.objs[o as usize].shape as int);
+        // the keys are read from the shape in place: atom_kind only reads
+        let sh = self.objs[o as usize].shape as int;
+        let nk = self.shapes[sh as usize].nkeys as usize;
+        let hk = self.holder(sh);
         let mut ints: Vec<int> = Vec::new();
-        let mut others: Vec<int> = Vec::new();
+        let mut others: Vec<int> = Vec::with_capacity(nk);
+        reserve_vals(&mut out, nk);
         let mut syms: Vec<int> = Vec::new();
         let mut k: usize = 0;
-        while k < keys.len() {
-            let a = keys[k];
-            if (attrs[k] & P_HIDDEN) != 0 && !include_hidden {
+        while k < nk {
+            let a = self.shapes[hk].keys[k];
+            if (self.shapes[hk].attrs[k] & P_HIDDEN) != 0 && !include_hidden {
                 k += 1;
                 continue;
             }
@@ -2981,7 +2988,7 @@ impl Vm {
         let fo = obj_of(f);
         let hi = self.get_obj(fo, A_HASINSTANCE, f);
         if self.is_callable(&hi) && self.objs[obj_of(&hi) as usize].class != C_NATIVE {
-            let r = self.call_value(hi, f.clone(), vec![v.clone()]);
+            let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef, Val::Undef);
             return truthy(&r);
         }
         if !self.is_callable(f) {
@@ -3037,7 +3044,7 @@ impl Vm {
                 }
                 let n = self.sref(*x).as_bytes().len() + self.sref(*y).as_bytes().len();
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize]);
+                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
                 s.push_str(self.sref(*x));
                 s.push_str(self.sref(*y));
                 rc_refill(&mut self.strs[h as usize], s);
@@ -3047,7 +3054,7 @@ impl Vm {
                 let t = number_to_string(*y);
                 let n = self.sref(*x).as_bytes().len() + t.as_bytes().len();
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize]);
+                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
                 s.push_str(self.sref(*x));
                 s.push_str(t.as_str());
                 rc_refill(&mut self.strs[h as usize], s);
@@ -3057,7 +3064,7 @@ impl Vm {
                 let t = number_to_string(*x);
                 let n = t.as_bytes().len() + self.sref(*y).as_bytes().len();
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize]);
+                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
                 s.push_str(t.as_str());
                 s.push_str(self.sref(*y));
                 rc_refill(&mut self.strs[h as usize], s);
@@ -3211,7 +3218,7 @@ impl Vm {
             }
             return self.stack.pop().unwrap();
         }
-        self.call_value(f.clone(), Val::Undef, vec![a.clone(), b.clone()])
+        self.call_fixed(f.clone(), Val::Undef, 2, a.clone(), b.clone(), Val::Undef)
     }
 
     pub fn call_value(&mut self, f: Val, this: Val, args: Vec<Val>) -> Val {
@@ -3257,11 +3264,52 @@ impl Vm {
         self.stack.pop().unwrap()
     }
 
+    /// call_value with up to three arguments (n of a, b, c) and no list
+    /// made for them when f is a compiled function.
+    pub fn call_fixed(&mut self, f: Val, this: Val, n: int, a: Val, b: Val, c: Val) -> Val {
+        let fo = obj_of(&f);
+        if fo < 0 || self.objs[fo as usize].class != C_FUNCTION {
+            let mut args: Vec<Val> = Vec::new();
+            if n > 0 {
+                args.push(a);
+            }
+            if n > 1 {
+                args.push(b);
+            }
+            if n > 2 {
+                args.push(c);
+            }
+            return self.call_value(f, this, args);
+        }
+        let base = self.frames.len() as int;
+        self.stack.push(f);
+        self.stack.push(this);
+        if n > 0 {
+            self.stack.push(a);
+        }
+        if n > 1 {
+            self.stack.push(b);
+        }
+        if n > 2 {
+            self.stack.push(c);
+        }
+        if !self.enter_function(fo, n, false, Val::Undef) {
+            return Val::Undef;
+        }
+        self.native_depth += 1;
+        self.run(base);
+        self.native_depth -= 1;
+        if self.throwing || self.suspended {
+            return Val::Undef;
+        }
+        self.stack.pop().unwrap()
+    }
+
     /// Runs a script's entry function. Unlike `call_value` from a native,
     /// the script's own frames are safe points for the collector.
     pub fn run_program(&mut self, f: Val, this: Val) -> Val {
         self.native_depth -= 1;
-        let r = self.call_value(f, this, Vec::new());
+        let r = self.call_fixed(f, this, 0, Val::Undef, Val::Undef, Val::Undef);
         self.native_depth += 1;
         r
     }
@@ -3364,6 +3412,7 @@ impl Vm {
         let mut args_obj: int = -1;
         if uses_args {
             let mut items: Vec<Val> = Vec::new();
+            reserve_vals(&mut items, argc as usize);
             let mut i = 0;
             while i < argc {
                 items.push(self.stack[(bp + i) as usize].clone());
@@ -3394,6 +3443,9 @@ impl Vm {
         }
         if rest >= 0 {
             let mut items: Vec<Val> = Vec::new();
+            if argc > rest {
+                reserve_vals(&mut items, (argc - rest) as usize);
+            }
             let mut i = rest;
             while i < argc {
                 items.push(self.stack[(bp + i) as usize].clone());
@@ -3524,7 +3576,7 @@ impl Vm {
             return;
         }
         let f = self.colds[self.objs[ctor as usize].cold as usize].elems2[0].clone();
-        self.call_value(f, this.clone(), Vec::new());
+        self.call_fixed(f, this.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
     }
 
     /// Unwinds to the innermost handler of this run; false when there is
@@ -3634,7 +3686,7 @@ impl Vm {
             self.throw_type("object is not iterable");
             return Val::Undef;
         }
-        let it = self.call_value(f, v.clone(), Vec::new());
+        let it = self.call_fixed(f, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
         if self.throwing {
             return Val::Undef;
         }
@@ -3676,7 +3728,7 @@ impl Vm {
         if self.throwing {
             return None;
         }
-        let r = self.call_value(next, it.clone(), Vec::new());
+        let r = self.call_fixed(next, it.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
         if self.throwing {
             return None;
         }
@@ -5007,7 +5059,7 @@ impl Vm {
                     return false;
                 }
                 if !matches!(m, Val::Undef) && !matches!(m, Val::Null) {
-                    let it = self.call_value(m, v, Vec::new());
+                    let it = self.call_fixed(m, v, 0, Val::Undef, Val::Undef, Val::Undef);
                     if !self.throwing && !is_obj(&it) {
                         self.throw_type("Result of the Symbol.asyncIterator method is not an object");
                     }
@@ -5019,7 +5071,7 @@ impl Vm {
                     return false;
                 }
                 let wrap = self.async_from_sync;
-                let it = self.call_value(Val::Obj(wrap), Val::Undef, vec![sync]);
+                let it = self.call_fixed(Val::Obj(wrap), Val::Undef, 1, sync, Val::Undef, Val::Undef);
                 self.stack.push(it);
             }
             OP_GEN_RESUME => {
@@ -6994,15 +7046,29 @@ pub fn drop_caps(o: &mut JsObj, elems: &mut Vec<Val>) {
 pub fn grow_vals(v: &mut Vec<Val>, most: usize) {
     let n = v.len();
     if n == v.capacity() && most > n + 1 {
-        // at most what doubling would give: a branch off a long chain
-        // does not take the chain's room
-        let cap = if most < 2 * n + 4 { most } else { 2 * n + 4 };
+        // at most what doubling would give (16 for a new object): a
+        // branch off a long chain does not take the chain's room
+        let lim = if n == 0 { 16 } else { 2 * n + 4 };
+        let cap = if most < lim { most } else { lim };
         v.reserve_exact(cap - n);
     }
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn grow_vals(_v: &mut Vec<Val>, _most: usize) {}
+
+/// The stack grows to `n` values, undefined.
+#[ranger::target(rust)]
+pub fn grow_stack(v: &mut Vec<Val>, n: usize) {
+    v.resize(n, Val::Undef);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_stack(v: &mut Vec<Val>, n: usize) {
+    while v.len() < n {
+        v.push(Val::Undef);
+    }
+}
 
 /// Room for `n` more values (Rust; the other targets grow as they push).
 #[ranger::target(rust)]
@@ -7066,17 +7132,18 @@ pub fn rc_vacate(rc: &mut Rc<String>, empty: &Rc<String>) {
 /// The buffer a reused slot kept, empty, for its new text (Rust; the
 /// other targets start a new one).
 #[ranger::target(rust)]
-pub fn rc_take_buf(rc: &mut Rc<String>) -> String {
+pub fn rc_take_buf(rc: &mut Rc<String>, n: usize) -> String {
     if let Some(s) = Rc::get_mut(rc) {
         let mut b = std::mem::take(s);
         b.clear();
+        b.reserve(n);
         return b;
     }
-    String::new()
+    String::with_capacity(n)
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn rc_take_buf(_rc: &mut Rc<String>) -> String {
+pub fn rc_take_buf(_rc: &mut Rc<String>, _n: usize) -> String {
     String::new()
 }
 

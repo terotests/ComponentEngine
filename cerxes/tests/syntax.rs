@@ -386,3 +386,26 @@ out.join('|')
     "#);
     assert_eq!(r, "1|3|Infinity|-Infinity|NaN|0|-Infinity|Infinity|2|10|x|1.5|0||null|Symbol(q)|1,2|1e+21|true|false|true|true|true|[object Array]|[object Object]|[object Null]|[object Undefined]|[object Number]|[object String]|[object Function]|[object Map]|[object Z]|[object Array]|[object RegExp]|[object Date]|boom");
 }
+
+#[test]
+fn cached_property_adds_respect_setters_proxies_and_extensibility() {
+    // a set op caches the shape transition of an add; later objects on the
+    // same op still meet setters, frozen prototypes and proxies (as Node)
+    let mut e = Engine::new();
+    let r = e.eval(r#"
+        "use strict";
+        var out = [];
+        function mk(o) { o.x = 1; o.y = 2; return o; }
+        for (var i = 0; i < 5; i++) mk({});
+        var P = {}; var o1 = Object.create(P);
+        Object.defineProperty(P, 'y', { set: function (v) { out.push('setter ' + v); }, configurable: true });
+        mk(o1); out.push(JSON.stringify(Object.keys(o1)));
+        var ne = Object.preventExtensions({}); try { mk(ne); } catch (e) { out.push(e.constructor.name); }
+        var Q = Object.freeze({ x: 0 }); var o2 = Object.create(Q); try { mk(o2); } catch (e) { out.push(e.constructor.name); }
+        var pr = new Proxy({}, { set: function (t, k, v, r) { out.push('trap ' + k); return true; } });
+        var o3 = Object.create(pr); mk(o3); out.push(JSON.stringify(Object.keys(o3)));
+        var o4 = mk({}); out.push(o4.x + o4.y, JSON.stringify(o4));
+        out.join('|')
+    "#);
+    assert_eq!(r, "setter 2|[\"x\"]|TypeError|TypeError|trap x|trap y|[]|3|{\"x\":1,\"y\":2}");
+}

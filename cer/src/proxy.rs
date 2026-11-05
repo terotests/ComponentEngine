@@ -87,7 +87,7 @@ impl Vm {
             return Val::Undef;
         }
         let k = self.key_val(atom);
-        let v = self.call_value(trap, Val::Obj(handler), vec![Val::Obj(target), k, r]);
+        let v = self.call_fixed(trap, Val::Obj(handler), 3, Val::Obj(target), k, r);
         if self.throwing {
             return Val::Undef;
         }
