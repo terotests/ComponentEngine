@@ -19,3 +19,7 @@ overflow-checks = false
 debug = false
 
 [workspace]
+
+[features]
+# the baseline JIT's host calls (src/wjit.rs), wasm32 only
+wjit = []

@@ -45,6 +45,11 @@ pub mod uniprops;
 pub mod unit;
 pub mod value;
 pub mod vm;
+/// the baseline JIT (wjit.rs): Rust only
+#[ranger::target(rust)]
+pub mod wjit {
+    include!("wjit.rs");
+}
 
 use value::*;
 use vm::*;

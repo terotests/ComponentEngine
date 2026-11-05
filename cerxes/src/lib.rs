@@ -55,6 +55,11 @@ pub mod unit;
 pub mod types;
 pub mod value;
 pub mod vm;
+/// the baseline JIT (wjit.rs): Rust only
+#[ranger::target(rust)]
+pub mod wjit {
+    include!("wjit.rs");
+}
 
 use parser::Syntax;
 use value::*;

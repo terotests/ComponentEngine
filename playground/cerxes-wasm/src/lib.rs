@@ -182,3 +182,31 @@ pub extern "C" fn cx_runtime() {
     OUTPUT.with(|b| b.borrow_mut().clear());
     RESULT.with(|b| *b.borrow_mut() = cerxes::emit::runtime().into_bytes());
 }
+
+/// The baseline JIT (cerxes::wjit): `on` 1 turns it on for this engine,
+/// a function is compiled after `min` back edges. The host must give the
+/// import cerxes_jit.install (a build with the `wjit` feature); 1 when this
+/// build can run compiled code.
+#[no_mangle]
+pub unsafe extern "C" fn cx_jit(e: *mut Engine, on: i32, min: i32) -> i32 {
+    let engine = &mut *e;
+    let ok = cerxes::wjit::available();
+    engine.vm.jit_on = on != 0 && ok;
+    engine.vm.jit_min = min as i64;
+    if ok {
+        1
+    } else {
+        0
+    }
+}
+
+/// The JIT's counters as the result text (cx_result_ptr / _len).
+#[no_mangle]
+pub extern "C" fn cx_jit_stats() {
+    let s = cerxes::wjit::stats();
+    let t = format!(
+        "{{\"compiled\":{},\"refused\":{},\"dropped\":{},\"bytes\":{},\"entries\":{},\"opsDone\":{},\"opsAll\":{},\"exits\":{:?}}}",
+        s.compiled, s.refused, s.dropped, s.bytes, s.entries, s.ops_done, s.ops_all, s.exits
+    );
+    RESULT.with(|b| *b.borrow_mut() = t.into_bytes());
+}

@@ -67,6 +67,40 @@ impl Vm {
         val_put(&mut self.stack, i, v);
     }
 
+    /// A back edge to pc with the JIT on: once the function is hot its
+    /// compiled code (wjit.rs) runs from pc; the pc the interpreter goes on
+    /// at, or -1 when the time slice ended there (the frame is stopped).
+    pub fn jit_run(&mut self, pi: usize, rb: int, bp: int, fi: usize, pc: int) -> int {
+        let ri = (rb + pc) as usize;
+        while self.jit_miss.len() <= ri {
+            self.jit_miss.push(0);
+        }
+        if self.jit_miss[ri] > JIT_MISS_MAX {
+            return pc;
+        }
+        while self.jit_hot.len() <= pi {
+            self.jit_hot.push(0);
+        }
+        if self.jit_hot[pi] < self.jit_min {
+            self.jit_hot[pi] += 1;
+            return pc;
+        }
+        let budget = if self.slicing { SLICE_TICKS } else { 1073741824 };
+        let r = jit_enter(self, pi, bp, pc, budget);
+        if r >= 0 {
+            return r;
+        }
+        // the budget ran out: read the clock at this back edge
+        let at = -1 - r;
+        if self.slicing {
+            self.ticks = 1;
+            if self.brk(fi, at) {
+                return -1;
+            }
+        }
+        at
+    }
+
     /// The atom of the property op at pc (its stack op's operand).
     pub fn ratom(&self, pi: usize, pc: int) -> int {
         let op = self.protos[pi].code[pc as usize];
@@ -400,20 +434,34 @@ impl Vm {
                             self.frames[fi].pc = (t as int);
                             self.rgc(want);
                         }
+                        let back = (t as int) <= pc;
                         pc = (t as int);
                         if self.slicing && self.brk(fi, pc) {
                             return;
                         }
+                        if back && self.jit_on {
+                            pc = self.jit_run(pi, rb, bp, fi, pc);
+                            if pc < 0 {
+                                return;
+                            }
+                        }
                         continue;
                     }
                     R_JUMP => {
-                        if (w1 as int) <= pc && self.gc_due() {
+                        let back = (w1 as int) <= pc;
+                        if back && self.gc_due() {
                             self.frames[fi].pc = (w1 as int);
                             self.rgc(want);
                         }
                         pc = (w1 as int);
                         if self.slicing && self.brk(fi, pc) {
                             return;
+                        }
+                        if back && self.jit_on {
+                            pc = self.jit_run(pi, rb, bp, fi, pc);
+                            if pc < 0 {
+                                return;
+                            }
                         }
                         continue;
                     }
@@ -1904,3 +1952,21 @@ pub fn unknown_op() {
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn unknown_op() {}
+
+/// Runs the function's compiled code from pc (wjit.rs); the pc to go on at,
+/// or -1 - pc when its budget ran out. Only Rust compiles; elsewhere the
+/// interpreter goes on at pc.
+#[ranger::target(rust)]
+pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int) -> int {
+    crate::wjit::enter(vm, pi, bp, pc, budget as i32)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int) -> int {
+    pc
+}
+
+/// A loop head whose compiled code went back to the interpreter before a
+/// back edge this often (4 per such entry, 1 back per good one) is no
+/// longer entered.
+pub const JIT_MISS_MAX: int = 1024;

@@ -318,6 +318,17 @@ pub struct Vm {
     /// slices are on for this run: set by Engine::run / resume only, so a
     /// host call (call_top, jobs) never stops half way
     pub slicing: bool,
+    /// the baseline JIT (wjit.rs) runs hot loops: a host that can run its
+    /// code sets it
+    pub jit_on: bool,
+    /// back edges a function takes before it is compiled
+    pub jit_min: int,
+    /// by proto: the compiled function (a table index), -1 not yet, -2 none
+    pub jit_fn: Vec<int>,
+    /// by proto: back edges taken while not compiled
+    pub jit_hot: Vec<int>,
+    /// by rcode index of a loop head: entries that left at once (wjit.rs)
+    pub jit_miss: Vec<int>,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
     pub temp_roots: Vec<Val>,
@@ -551,6 +562,11 @@ impl Vm {
             ticks: SLICE_TICKS,
             suspended: false,
             slicing: false,
+            jit_on: false,
+            jit_min: 64,
+            jit_fn: Vec::new(),
+            jit_hot: Vec::new(),
+            jit_miss: Vec::new(),
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
