@@ -1052,20 +1052,22 @@ impl Vm {
     #[inline(never)]
     fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
         let atom = self.ratom(pi, pc);
+        let mut h0: int = -1;
         if o >= 0 && self.rcode[(rb + pc) as usize].c == -3 {
             // the site last read through the chain: its cache first (a hit
             // means o's shape has no such own property)
-            let h = self.pic_probe(rb + pc, o);
-            if h != -1 {
+            h0 = self.pic_probe(rb + pc, o);
+            if h0 != -1 {
                 let way = self.pic_way as usize;
-                if h < 0 || self.pic[way + 4] == 0 {
-                    let r = if h >= 0 { self.objs[h as usize].vals[self.pic[way + 3] as usize] } else { Val::Undef };
+                if h0 < 0 || self.pic[way + 4] == 0 {
+                    let r = if h0 >= 0 { self.objs[h0 as usize].vals[self.pic[way + 3] as usize] } else { Val::Undef };
                     self.stack[(bp + w1) as usize] = r;
                     return false;
                 }
+                // a getter on the chain: on to its call
             }
         }
-        if o >= 0 {
+        if o >= 0 && h0 == -1 {
             let c = self.rcode[(rb + pc) as usize].c;
             let slot = self.ic_get(o, atom, (c as int), pi, pc + 1);
             self.rcode[(rb + pc) as usize].c = self.protos[pi].code[pc as usize].c;
@@ -1081,7 +1083,7 @@ impl Vm {
             }
         }
         if o >= 0 {
-            let h = self.pic_get(rb + pc, o, atom);
+            let h = if h0 != -1 { h0 } else { self.pic_get(rb + pc, o, atom) };
             if h != -1 {
                 let way = self.pic_way as usize;
                 let r = if h >= 0 { self.objs[h as usize].vals[self.pic[way + 3] as usize] } else { Val::Undef };
@@ -1091,6 +1093,7 @@ impl Vm {
                     return false;
                 }
                 // a getter: a plain function runs as a call in this loop
+                self.rcode[(rb + pc) as usize].c = -3;
                 let g = self.evecs[self.objs[obj_of(&r) as usize].elems as usize].v[0];
                 let go = obj_of(&g);
                 if go >= 0 && self.objs[go as usize].class == C_FUNCTION {
