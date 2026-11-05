@@ -67,7 +67,7 @@ function engine() {
         throw new Error("wjit: invalid module (/tmp/wjit-bad.wasm): " + e.message);
       }
       const env = { memory: x.memory };
-      for (const h of ["get_elem", "set_elem", "get_prop", "set_prop"]) env[h] = x["cerxes_jit_" + h];
+      for (const h of ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow"]) env[h] = x["cerxes_jit_" + h];
       const inst = new WebAssembly.Instance(m, { env });
       const t = x.__indirect_function_table;
       const idx = t.grow(1);
@@ -87,6 +87,10 @@ function engine() {
     jit,
     out,
     setJit(on, m) {
+      const mask = opt("mask", "").split(",").filter(Boolean).map(Number);
+      let lo = 0, hi = 0;
+      for (const k of mask) if (k < 32) lo |= 1 << k; else hi |= 1 << (k - 32);
+      x.cerxes_jit_mask(lo, hi);
       return x.cx_jit(e, on ? 1 : 0, m);
     },
     eval(src) {
@@ -130,6 +134,20 @@ function readCases(file) {
 
 let failures = 0;
 
+if (opt("eval", "")) {
+  // --eval=file: its answer with the JIT off and on (min 0)
+  const src = fs.readFileSync(opt("eval", ""), "utf8");
+  for (const on of [false, true]) {
+    const e = engine();
+    e.setJit(on, on ? Number(opt("min", "0")) : 0);
+    const r = e.eval(src);
+    console.log((on ? "on:  " : "off: ") + r.value + (r.output ? "\n" + r.output : ""));
+    if (on) console.log(JSON.stringify(e.stats()));
+    if (on && e.out.length) console.log(e.out.join("\n"));
+  }
+  process.exit(0);
+}
+
 if (doCases) {
   const files = [path.join(REPO, "cer/tests/cases.txt"), path.join(REPO, "cerxes/tests/cases.txt")];
   let n = 0;
@@ -137,6 +155,7 @@ if (doCases) {
   let compiled = 0;
   for (const f of files) {
     for (const c of readCases(f)) {
+      if (opt("case", "") && !c.title.includes(opt("case", ""))) continue;
       n++;
       const a = engine();
       a.setJit(false, 0);

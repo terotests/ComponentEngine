@@ -208,6 +208,7 @@ const IF: u8 = 0x04;
 const ELSE: u8 = 0x05;
 const END: u8 = 0x0b;
 const BR: u8 = 0x0c;
+const BR_IF: u8 = 0x0d;
 const BR_TABLE: u8 = 0x0e;
 const RETURN: u8 = 0x0f;
 const SELECT: u8 = 0x1b;
@@ -264,6 +265,8 @@ const L_BP: u32 = 5;
 const L_OUT: u32 = 6;
 const L_TAG: u32 = 7;
 const L_LOOPED: u32 = 8;
+const L_ENTRY: u32 = 15;
+const L_C: u32 = 16;
 const L_A: u32 = 9; // f64
 const L_B: u32 = 10; // f64
 const L_Q0: u32 = 11; // i64 x4 (R_LOAD2)
@@ -275,8 +278,15 @@ const H_GET_ELEM: u32 = 0;
 const H_SET_ELEM: u32 = 1;
 const H_GET_PROP: u32 = 2;
 const H_SET_PROP: u32 = 3;
-const NHELPERS: u32 = 4;
-const HELPERS: [&str; 4] = ["get_elem", "set_elem", "get_prop", "set_prop"];
+const H_OP: u32 = 4;
+const H_CALL: u32 = 5;
+const H_SLOW: u32 = 6;
+const NHELPERS: u32 = 7;
+const HELPERS: [&str; 7] = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow"];
+/// what a compiled function returns for "the op threw" (the frame's pc is
+/// set) and "go on with the top frame" (frames changed)
+pub const OUT_THROW: i32 = i32::MIN + 4;
+pub const OUT_FRAMES: i32 = i32::MIN + 5;
 const CALL: u8 = 0x10;
 const I32_REM_S: u8 = 0x6f;
 
@@ -310,6 +320,9 @@ struct Cg<'a> {
     /// the function's proto and where its code is in rcode
     pi: u32,
     rb: u32,
+    /// inside an op's fast path: `extra` at its slow block, which a failed
+    /// check branches to (the interpreter's slow path through H_SLOW)
+    slow_at: Option<u32>,
 }
 
 impl<'a> Cg<'a> {
@@ -407,22 +420,75 @@ impl<'a> Cg<'a> {
             }
         }
     }
-    /// return pc unless the operand is a number
+    /// the condition on the wasm stack holds: the fast path fails (its slow
+    /// block, or return pc)
+    fn fail_if(&mut self, pc: i64) {
+        match self.slow_at {
+            Some(at) => {
+                self.op(BR_IF);
+                let d = self.extra - at;
+                self.w.u(d as u64);
+            }
+            None => self.exit_if(pc),
+        }
+    }
+    fn fail(&mut self, pc: i64) {
+        match self.slow_at {
+            Some(at) => {
+                self.op(BR);
+                let d = self.extra - at;
+                self.w.u(d as u64);
+            }
+            None => self.exit_at(pc),
+        }
+    }
+    /// fail unless the operand is a number
     fn need_num(&mut self, o: Opnd, pc: i64) {
         match o {
             Opnd::Num(_) => {}
             Opnd::K(_) => {
                 // a constant that is not a number never is
-                self.exit_at(pc);
+                self.fail(pc);
             }
             Opnd::Reg(_) => {
                 self.tag(o);
                 let t = self.lay.t_num as i64;
                 self.i32c(t);
                 self.op(I32_NE);
-                self.exit_if(pc);
+                self.fail_if(pc);
             }
         }
+    }
+    /// The op's fast path (`fast`), and the interpreter's whole op through
+    /// H_SLOW when one of its checks fails; for a comparison both leave
+    /// the answer in L_C.
+    fn with_slow(&mut self, pc: i64, next: i64, cmp_result: bool, fast: &dyn Fn(&mut Cg<'a>) -> bool) -> bool {
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        let saved = self.slow_at;
+        self.slow_at = Some(self.extra);
+        let ok = fast(self);
+        self.slow_at = saved;
+        if ok {
+            self.op(BR);
+            self.w.u(1);
+        }
+        self.op(END);
+        self.extra -= 1;
+        self.helper(H_SLOW, pc, next);
+        if cmp_result {
+            let cell = cell_addr() as i64;
+            self.i32c(cell);
+            self.mem(I32_LOAD, 2, 12);
+            self.set(L_C);
+        }
+        self.op(END);
+        self.extra -= 1;
+        true
     }
     /// the operand's number on the wasm stack (after need_num)
     fn num(&mut self, o: Opnd) {
@@ -526,11 +592,6 @@ impl<'a> Cg<'a> {
         self.tag(o);
         self.set(L_TAG);
         let l = self.lay;
-        // a string: return pc (its truth needs its length)
-        self.get(L_TAG);
-        self.i32c(l.t_str as i64);
-        self.op(I32_EQ);
-        self.exit_if(pc);
         // number: n != 0 && n == n
         self.get(b);
         self.mem(F64_LOAD, 3, off + l.off_num);
@@ -543,12 +604,21 @@ impl<'a> Cg<'a> {
         self.get(L_A);
         self.op(F64_EQ);
         self.op(I32_AND);
-        // bool: its byte; otherwise object
+        // bool: its byte; a string: its handle is not 0 (the empty
+        // string); otherwise object
         self.get(b);
         self.mem(I32_LOAD8_U, 0, off + l.off_bool);
+        self.get(b);
+        self.mem(I32_LOAD, 2, off + l.off_int);
+        self.i32c(0);
+        self.op(I32_NE);
         self.get(L_TAG);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
+        self.get(L_TAG);
+        self.i32c(l.t_str as i64);
+        self.op(I32_EQ);
+        self.op(SELECT);
         self.get(L_TAG);
         self.i32c(l.t_bool as i64);
         self.op(I32_EQ);
@@ -620,7 +690,7 @@ impl<'a> Cg<'a> {
             self.op(F64_LE);
             self.op(I32_AND);
             self.op(I32_EQZ);
-            self.exit_if(pc);
+            self.fail_if(pc);
         }
         self.get(L_A);
         self.op(I32_TRUNC_F64_S);
@@ -650,8 +720,24 @@ impl<'a> Cg<'a> {
         self.i32c(rb + pc);
         self.op(CALL);
         self.w.u(h as u64);
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_TAG as u64);
+        self.set(L_TAG);
+        // the stack and the constants may have moved (a native that ran
+        // JavaScript, a function compiled): their addresses again
+        let cell = cell_addr() as i64;
+        self.i32c(cell);
+        self.mem(I32_LOAD, 2, 0);
+        self.set(L_SP);
+        self.i32c(cell);
+        self.mem(I32_LOAD, 2, 4);
+        self.set(L_KV);
+        self.get(L_TAG);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        // 1: the interpreter runs it; 2: it ran, the interpreter goes on
+        // after it; 3: it ran, the interpreter goes on at cell[2]; 4 it
+        // threw; 5 frames changed
+        self.get(L_TAG);
         self.i32c(1);
         self.op(I32_EQ);
         self.exit_if(pc);
@@ -659,6 +745,27 @@ impl<'a> Cg<'a> {
         self.i32c(2);
         self.op(I32_EQ);
         self.exit_if(next);
+        self.get(L_TAG);
+        self.i32c(3);
+        self.op(I32_EQ);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.i32c(cell);
+        self.mem(I32_LOAD, 2, 8);
+        self.set(L_OUT);
+        let d = self.exit_depth();
+        self.op(BR);
+        self.w.u(d as u64);
+        self.extra -= 1;
+        self.op(END);
+        self.get(L_TAG);
+        self.i32c(4);
+        self.op(I32_EQ);
+        self.exit_if(OUT_THROW as i64);
+        self.exit_at(OUT_FRAMES as i64);
+        self.extra -= 1;
+        self.op(END);
     }
     /// x % y for whole non-negative int32s (the interpreter's fast path)
     fn modulo(&mut self, dst: i32, x: i32, y: i32, pc: i64) -> bool {
@@ -696,7 +803,7 @@ impl<'a> Cg<'a> {
             self.op(I32_AND);
         }
         self.op(I32_EQZ);
-        self.exit_if(pc);
+        self.fail_if(pc);
         self.get(L_A);
         self.op(I32_TRUNC_F64_S);
         self.get(L_B);
@@ -710,6 +817,90 @@ impl<'a> Cg<'a> {
 
     /// One op; false when it is written as an exit.
     fn one(&mut self, pc: usize, ins: Op) -> bool {
+        let k = (ins.code & 63) as u32;
+        if MASK.with(|m| m.get()) & (1u64 << k) != 0 && (ins.code & 255) < 64 {
+            return false;
+        }
+        let w0 = ins.code;
+        let (w1, w2, w3) = (ins.a, ins.b, ins.c);
+        let kind = (w0 & 255) as int;
+        let sub = ((w0 >> 8) & 255) as int;
+        let p = pc as i64;
+        let next = p + 1 + ((w0 >> 16) as i64);
+        let cmp_ok = |c: int| c >= OP_EQ && c <= OP_GE;
+        match kind {
+            R_ADD | R_SUB | R_MUL | R_ARITH | R_CMP | R_INC_LOCAL | R_POSTINC | R_INC | R_TONUM | R_ADD_LOCAL_POP => {
+                let can = match kind {
+                    R_ARITH => w1 >= 0 && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_MOD | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR),
+                    R_CMP => w1 >= 0 && cmp_ok(sub),
+                    R_POSTINC => w1 >= 0 && w2 >= 0,
+                    _ => w1 >= 0,
+                };
+                if can {
+                    self.with_slow(p, next, false, &|cg: &mut Cg<'a>| cg.fast_op(pc, ins))
+                } else {
+                    self.helper(H_SLOW, p, next);
+                    true
+                }
+            }
+            R_CMP_JF | R_CMP_JT | R_LOOP | R_CMP_JFK | R_CMP_JTK => {
+                let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w2, w3) } else { (w1, w2) };
+                if cmp_ok(sub) {
+                    let jfk = kind == R_CMP_JFK || kind == R_CMP_JTK;
+                    self.with_slow(p, next, true, &|cg: &mut Cg<'a>| {
+                        cg.cmp(sub as i32, x, y, p);
+                        cg.set(L_C);
+                        if jfk {
+                            cg.get(L_C);
+                            cg.store_bool((w1 & 65535) as u32);
+                        }
+                        true
+                    });
+                } else {
+                    self.helper(H_SLOW, p, next);
+                    let cell = cell_addr() as i64;
+                    self.i32c(cell);
+                    self.mem(I32_LOAD, 2, 12);
+                    self.set(L_C);
+                }
+                // the answer is in L_C
+                match kind {
+                    R_LOOP => {
+                        let body = (w0 >> 16) as i64;
+                        self.get(L_C);
+                        self.op(IF);
+                        self.op(T_VOID);
+                        self.extra += 1;
+                        self.jump(body, body <= p);
+                        self.op(ELSE);
+                        self.jump(w3 as i64, (w3 as i64) <= p);
+                        self.extra -= 1;
+                        self.op(END);
+                        self.op(UNREACHABLE);
+                    }
+                    _ => {
+                        let to = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w1 >> 16) as i64 } else { w3 as i64 };
+                        self.get(L_C);
+                        if kind == R_CMP_JF || kind == R_CMP_JFK {
+                            self.op(I32_EQZ);
+                        }
+                        self.op(IF);
+                        self.op(T_VOID);
+                        self.extra += 1;
+                        self.jump(to, to <= p);
+                        self.extra -= 1;
+                        self.op(END);
+                    }
+                }
+                true
+            }
+            _ => self.fast_op(pc, ins),
+        }
+    }
+
+    /// One op's code (fast paths fail to the slow block when inside
+    /// with_slow); false when it is not written.
+    fn fast_op(&mut self, pc: usize, ins: Op) -> bool {
         let w0 = ins.code;
         let (w1, w2, w3) = (ins.a, ins.b, ins.c);
         let kind = (w0 & 255) as int;
@@ -747,6 +938,123 @@ impl<'a> Cg<'a> {
                 } else {
                     self.arith(sub, w1, w2, w3, p)
                 }
+            }
+            R_GET_GLOBAL | R_GET_ENV | R_SET_ENV | R_THIS | R_TYPEOF | R_CHECK | R_STEP_PUSH | R_STEP_K | R_STEP0 | R_GET_METHOD
+            | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_CLOSURE | R_INIT_PROP | R_GET_THIS_PROP | R_WIN => {
+                let next = p + 1 + ((w0 >> 16) as i64);
+                self.helper(H_OP, p, next);
+                true
+            }
+            R_CALL => {
+                let next = p + 1 + ((w0 >> 16) as i64);
+                self.helper(H_CALL, p, next);
+                true
+            }
+            R_CMP_JFK | R_CMP_JTK => {
+                let dst = w1 & 65535;
+                let to = (w1 >> 16) as i64;
+                if !self.cmp(sub as i32, w2, w3, p) {
+                    return false;
+                }
+                self.set(L_TAG);
+                self.get(L_TAG);
+                self.store_bool(dst as u32);
+                self.get(L_TAG);
+                if kind == R_CMP_JFK {
+                    self.op(I32_EQZ);
+                }
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.jump(to, to <= p);
+                self.extra -= 1;
+                self.op(END);
+                true
+            }
+            R_JNN_KEEP => {
+                // not null or undefined: jump
+                let o = self.raw(w1);
+                if let Opnd::K(k) = o {
+                    let nullish = matches!(self.kvals.get(k as usize), Some(Val::Undef) | Some(Val::Null));
+                    if !nullish {
+                        self.jump(w2 as i64, (w2 as i64) <= p);
+                    }
+                    return true;
+                }
+                self.tag(o);
+                self.set(L_TAG);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_undef as i64);
+                self.op(I32_NE);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_null as i64);
+                self.op(I32_NE);
+                self.op(I32_AND);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.jump(w2 as i64, (w2 as i64) <= p);
+                self.extra -= 1;
+                self.op(END);
+                true
+            }
+            R_LOCAL_NULL_JF => {
+                if w1 < 0 {
+                    return false;
+                }
+                let cmp = w2 as int;
+                let o = Opnd::Reg(w1 as u32);
+                self.tag(o);
+                self.set(L_TAG);
+                // r for null, undefined, other; jump when !r
+                let rn = cmp == OP_SEQ || cmp == OP_EQ;
+                let ru = cmp == OP_SNE || cmp == OP_EQ;
+                let ro = cmp == OP_SNE || cmp == OP_NE;
+                self.i32c(if rn { 1 } else { 0 });
+                self.i32c(if ru { 1 } else { 0 });
+                self.i32c(if ro { 1 } else { 0 });
+                self.get(L_TAG);
+                self.i32c(self.lay.t_undef as i64);
+                self.op(I32_EQ);
+                self.op(SELECT);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_null as i64);
+                self.op(I32_EQ);
+                self.op(SELECT);
+                self.op(I32_EQZ);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.jump(w3 as i64, (w3 as i64) <= p);
+                self.extra -= 1;
+                self.op(END);
+                true
+            }
+            R_CASE_INT_JT => {
+                let o = self.opnd(w1);
+                if let Opnd::K(_) = o {
+                    return false;
+                }
+                // a number equal to w2: jump
+                self.tag(o);
+                self.i32c(self.lay.t_num as i64);
+                self.op(I32_EQ);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.num(o);
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&(w2 as f64).to_le_bytes());
+                self.op(F64_EQ);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.jump(w3 as i64, (w3 as i64) <= p);
+                self.extra -= 1;
+                self.op(END);
+                self.extra -= 1;
+                self.op(END);
+                true
             }
             R_GET_ELEM | R_SET_ELEM | R_GET_PROP | R_SET_PROP => {
                 let next = p + 1 + ((w0 >> 16) as i64);
@@ -805,9 +1113,9 @@ impl<'a> Cg<'a> {
                 self.jump(w1 as i64, (w1 as i64) <= p);
                 true
             }
-            R_JF | R_JT => {
+            R_JF | R_JT | R_JF_KEEP | R_JT_KEEP => {
                 self.truthy(w1, p);
-                if kind == R_JF {
+                if kind == R_JF || kind == R_JF_KEEP {
                     self.op(I32_EQZ);
                 }
                 self.op(IF);
@@ -917,7 +1225,9 @@ fn targets(ins: Op, pc: usize, out: &mut Vec<usize>) {
             out.push(ins.c as usize);
         }
         R_JUMP => out.push(ins.a as usize),
-        R_JF | R_JT => out.push(ins.b as usize),
+        R_JF | R_JT | R_JF_KEEP | R_JT_KEEP | R_JNN_KEEP => out.push(ins.b as usize),
+        R_CMP_JFK | R_CMP_JTK => out.push((ins.a >> 16) as usize),
+        R_LOCAL_NULL_JF | R_CASE_INT_JT => out.push(ins.c as usize),
         _ => {}
     }
     let _ = pc;
@@ -950,6 +1260,30 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
             starts[t] = true;
         }
     }
+    // an op's skip field steps over the ops after it; where one of them
+    // does something (a fused compare's own jump, left for the jumps that
+    // still go to it) the fall-through is a jump to the op past them
+    let mut skip_to = vec![0usize; n];
+    for (i, op) in code.iter().enumerate() {
+        let skip = (op.code >> 16) as usize;
+        if skip > 0 && (op.code & 255) as int != R_LOOP && i + 1 + skip < n {
+            let live = (i + 1..i + 1 + skip).any(|j| (code[j].code & 255) as int != R_NOP || starts[j]);
+            if live {
+                skip_to[i] = i + 1 + skip;
+            }
+        }
+    }
+    for (i, op) in code.iter().enumerate() {
+        if skip_to[i] > 0 {
+            starts[skip_to[i]] = true;
+        }
+        if (op.code & 255) as int == R_CALL {
+            let at = i + 1 + ((op.code >> 16) as usize);
+            if at < n {
+                starts[at] = true;
+            }
+        }
+    }
     let blocks: Vec<usize> = (0..n).filter(|i| starts[*i]).collect();
     let nb = blocks.len() as u32;
     let mut cg = Cg {
@@ -963,15 +1297,20 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
         exits: [0; 64],
         pi,
         rb,
+        slow_at: None,
     };
-    // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64)
-    cg.w.u(3);
+    // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c (i32)
+    cg.w.u(4);
     cg.w.u(3);
     cg.w.byte(T_I32);
     cg.w.u(2);
     cg.w.byte(T_F64);
     cg.w.u(4);
     cg.w.byte(T_I64);
+    cg.w.u(2);
+    cg.w.byte(T_I32);
+    cg.get(L_KEY);
+    cg.set(L_ENTRY);
     // loop $L / block $exit / block b_{nb-1} .. b_0
     cg.op(LOOP);
     cg.op(T_VOID);
@@ -1012,6 +1351,9 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
                     open = false;
                     break;
                 }
+                if skip_to[pc] > 0 {
+                    cg.jump(skip_to[pc] as i64, false);
+                }
                 pc += 1;
             } else {
                 let kind = (ins.code & 255) as usize;
@@ -1030,11 +1372,17 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
         }
     }
     cg.op(END); // $exit
-    // a pc that went on past a back edge carries 2^29 (enter() counts the
-    // entries that did not); a budget exit is negative already
+    // a pc the code got to (past a back edge, or anywhere but where it
+    // started) carries 2^29: enter() counts the entries that did not; a
+    // negative out (budget, throw, frames) is returned as it is
     cg.get(L_OUT);
     cg.i32c(0);
     cg.get(L_LOOPED);
+    cg.i32c(1 << 29);
+    cg.get(L_OUT);
+    cg.get(L_ENTRY);
+    cg.op(I32_NE);
+    cg.op(SELECT);
     cg.get(L_OUT);
     cg.i32c(0);
     cg.op(I32_LT_S);
@@ -1190,6 +1538,10 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
         let n = p.code.len();
         let lay = LAYOUT.with(|l| *l);
         f = -2;
+        // debug: mask bit 63 prints each function's register code
+        if MASK.with(|m| m.get()) & (1u64 << 63) != 0 {
+            eprintln!("{}", crate::regs::dump(p, &vm.rcode));
+        }
         if rb + n <= vm.rcode.len() {
             if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, lay, pi as u32, rb as u32) {
                 let idx = host::put(&c.bytes);
@@ -1210,6 +1562,18 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
                 });
                 if idx >= 0 {
                     f = idx as i64;
+                    // the pc after a call: the interpreter enters there again
+                    // when the callee returns
+                    for i in 0..n {
+                        let ins = vm.rcode[rb + i];
+                        if (ins.code & 255) as int == R_CALL {
+                            let at = rb + i + 1 + ((ins.code >> 16) as usize);
+                            while vm.jit_res.len() <= at {
+                                vm.jit_res.push(false);
+                            }
+                            vm.jit_res[at] = true;
+                        }
+                    }
                 }
             } else {
                 STATS.with(|s| {
@@ -1224,6 +1588,13 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
     if f < 0 {
         return pc;
     }
+    let ri = (vm.protos[pi].rbase + pc) as usize;
+    while vm.jit_miss.len() <= ri {
+        vm.jit_miss.push(0);
+    }
+    if vm.jit_miss[ri] > crate::rvm::JIT_MISS_MAX {
+        return pc;
+    }
     STATS.with(|s| {
         let mut t = s.get();
         t.entries += 1;
@@ -1233,14 +1604,20 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
     let kv = vm.kvals.as_ptr() as usize;
     let vp = vm as *mut crate::vm::Vm as usize;
     let r = host::call(f as i32, sp, kv, pc as i32, budget, vp, bp as i32);
+    if r == OUT_THROW {
+        return -2;
+    }
+    if r == OUT_FRAMES {
+        return -3;
+    }
     if r < 0 {
-        return r as i64;
+        // the budget ran out at -1 - r
+        return -4 - (-1 - r) as i64;
     }
     // jit_miss counts, by loop head, the entries that went back to the
     // interpreter before a back edge: code that leaves at once on every
     // pass only costs, and after enough of those that head is not entered
     // again (another loop of the function still is)
-    let ri = (vm.protos[pi].rbase + pc) as usize;
     if r & (1 << 29) != 0 {
         if vm.jit_miss[ri] > 0 {
             vm.jit_miss[ri] -= 1;
@@ -1284,8 +1661,7 @@ fn after(vm: &crate::vm::Vm) -> i32 {
 }
 
 /// R_GET_ELEM: an array element by a whole number in range.
-#[no_mangle]
-pub extern "C" fn cerxes_jit_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
+fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
     let vm = unsafe { vm_of(vm) };
     let ins = vm.rcode[ri as usize];
     let bp = bp as int;
@@ -1303,31 +1679,61 @@ pub extern "C" fn cerxes_jit_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: 
         }
     }
     if !done {
-        return 1;
+        let v = *vm.rget(bp, ins.b as int);
+        let k = *vm.rget(bp, ins.c as int);
+        let fi = vm.frames.len() - 1;
+        vm.frames[fi].pc = _pc as int + 1;
+        let r = vm.get_elem(&v, &k);
+        if !vm.throwing {
+            vm.rset((bp + ins.a as int) as usize, r);
+        }
+        return settle(vm, fi, _pc as int);
     }
     vm.rset((bp + ins.a as int) as usize, r);
     0
 }
 
+/// After a slow path: 4 it threw, 5 frames changed, else as after().
+fn settle(vm: &mut crate::vm::Vm, fi: usize, pc: int) -> i32 {
+    if vm.throwing {
+        if vm.frames.len() == fi + 1 {
+            vm.frames[fi].pc = pc + 1;
+        }
+        return 4;
+    }
+    if vm.frames.len() != fi + 1 {
+        return 5;
+    }
+    after(vm)
+}
+
 /// R_SET_ELEM: an array element by a whole number in range, or one past
 /// the end of an extensible array.
-#[no_mangle]
-pub extern "C" fn cerxes_jit_set_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
+fn h_set_elem(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
     let vm = unsafe { vm_of(vm) };
     let ins = vm.rcode[ri as usize];
     let bp = bp as int;
     let val = *vm.rget(bp, ins.c as int);
+    if set_elem_fast(vm, bp, ins, val) {
+        return after(vm);
+    }
+    let fi = vm.frames.len() - 1;
+    vm.r_set_elem_slow(bp, fi, pc as int, ins.a as int, ins.b as int, val);
+    settle(vm, fi, pc as int)
+}
+
+fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
     let o = crate::vm::obj_of(vm.rget(bp, ins.a as int));
     let n = match vm.rget(bp, ins.b as int) {
         Val::Num(x) => *x,
-        _ => return 1,
+        _ => return false,
     };
     if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos == 2 {
-        return 1;
+        return false;
     }
     let i = n as int;
     if i < 0 || (i as double) != n {
-        return 1;
+        return false;
     }
     let e = vm.objs[o as usize].elems as usize;
     let len = vm.evecs[e].v.len();
@@ -1342,26 +1748,25 @@ pub extern "C" fn cerxes_jit_set_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: 
         }
         vm.dec_o(old);
         vm.sdec(old_s);
-        return after(vm);
+        return true;
     }
     if (i as usize) == len && e != 0 && vm.objs[o as usize].extensible {
         vm.inc(&val);
         vm.evecs[e].v.push(val);
-        return after(vm);
+        return true;
     }
-    1
+    false
 }
 
 /// R_GET_PROP: an own data property its inline cache knows, or an array's
 /// length.
-#[no_mangle]
-pub extern "C" fn cerxes_jit_get_prop(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
+fn h_get_prop(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
     let vm = unsafe { vm_of(vm) };
     let ins = vm.rcode[ri as usize];
     let bp = bp as int;
     let o = crate::vm::obj_of(vm.rget(bp, ins.b as int));
     if o < 0 {
-        return 1;
+        return get_prop_slow(vm, bp, pi, pc, ri, o);
     }
     let c = ins.c;
     let ob = &vm.objs[o as usize];
@@ -1375,12 +1780,21 @@ pub extern "C" fn cerxes_jit_get_prop(vm: i32, bp: i32, pi: i32, pc: i32, ri: i3
         vm.rset((bp + ins.a as int) as usize, Val::Num(n));
         return 0;
     }
-    1
+    get_prop_slow(vm, bp, pi, pc, ri, o)
+}
+
+fn get_prop_slow(vm: &mut crate::vm::Vm, bp: int, pi: i32, pc: i32, ri: i32, o: int) -> i32 {
+    let ins = vm.rcode[ri as usize];
+    let fi = vm.frames.len() - 1;
+    let rb = vm.protos[pi as usize].rbase;
+    if vm.r_get_prop_slow(o, pi as usize, rb, bp, fi, pc as int, ins.code as int, ins.a as int, ins.b as int) {
+        return 5;
+    }
+    settle(vm, fi, pc as int)
 }
 
 /// R_SET_PROP: an own data property its inline cache knows.
-#[no_mangle]
-pub extern "C" fn cerxes_jit_set_prop(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
+fn h_set_prop(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
     let vm = unsafe { vm_of(vm) };
     let ins = vm.rcode[ri as usize];
     let bp = bp as int;
@@ -1391,5 +1805,410 @@ pub extern "C" fn cerxes_jit_set_prop(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: 
         vm.put_slot(o, (w3 & 65535) as int, val);
         return after(vm);
     }
-    1
+    let fi = vm.frames.len() - 1;
+    let pi = vm.frames[fi].proto as usize;
+    let rb = vm.protos[pi].rbase;
+    vm.r_set_prop_slow(o, pi, rb, bp, fi, _pc as int, ins.code as int, ins.a as int, ins.b as int, w3 as int);
+    settle(vm, fi, _pc as int)
+}
+
+// ------------------------------------------------------------ the cell
+//
+// After a helper the compiled code reads the stack's and the constants'
+// addresses again from a cell the helper filled in (cell[0] the frame's
+// registers, cell[1] kvals, cell[2] a pc for code 3).
+
+static mut CELL: [i32; 4] = [0; 4];
+
+fn cell_addr() -> usize {
+    // SAFETY: only the address is taken
+    unsafe { std::ptr::addr_of!(CELL) as usize }
+}
+
+fn fill_cell(vm: i32, bp: i32) {
+    // SAFETY: as vm_of; CELL is only touched on this (the VM's) thread
+    unsafe {
+        let v = vm_of(vm);
+        let c = &mut *std::ptr::addr_of_mut!(CELL);
+        c[0] = (v.stack.as_ptr() as usize + (bp as usize) * 16) as i32;
+        c[1] = v.kvals.as_ptr() as usize as i32;
+    }
+}
+
+fn set_cell_pc(pc: int) {
+    // SAFETY: as fill_cell
+    unsafe {
+        let c = &mut *std::ptr::addr_of_mut!(CELL);
+        c[2] = pc as i32;
+    }
+}
+
+macro_rules! export_helper {
+    ($name:ident, $inner:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $name(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
+            let r = $inner(vm, bp, pi, pc, ri);
+            fill_cell(vm, bp);
+            r
+        }
+    };
+}
+
+export_helper!(cerxes_jit_get_elem, h_get_elem);
+export_helper!(cerxes_jit_set_elem, h_set_elem);
+export_helper!(cerxes_jit_get_prop, h_get_prop);
+export_helper!(cerxes_jit_set_prop, h_set_prop);
+export_helper!(cerxes_jit_op, h_op);
+export_helper!(cerxes_jit_call, h_call);
+export_helper!(cerxes_jit_slow, h_slow);
+
+fn set_cell_c(r: bool) {
+    // SAFETY: as fill_cell
+    unsafe {
+        let c = &mut *std::ptr::addr_of_mut!(CELL);
+        c[3] = if r { 1 } else { 0 };
+    }
+}
+
+/// An op whose fast path in the compiled code did not take its operands
+/// (not numbers, not int32s, a constant): what the interpreter does on
+/// its slow path. A comparison leaves its answer in cell[3].
+fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
+    let vm = unsafe { vm_of(vm) };
+    let ins = vm.rcode[ri as usize];
+    let (w0, w1, w2, w3) = (ins.code as int, ins.a as int, ins.b as int, ins.c as int);
+    let bp = bp as int;
+    let pi = pi as usize;
+    let pc = pc as int;
+    let nf = vm.frames.len();
+    let fi = nf - 1;
+    let sub = (w0 >> 8) & 255;
+    let kind = w0 & 255;
+    let mut gc_ok = true;
+    match kind {
+        R_ADD => vm.r_add_slow(bp, fi, pc, w1, w2, w3),
+        R_SUB | R_MUL | R_ARITH => {
+            let code = if kind == R_SUB {
+                OP_SUB
+            } else if kind == R_MUL {
+                OP_MUL
+            } else {
+                sub
+            };
+            // the interpreter's whole arm: its own fast paths first
+            let mut done = false;
+            if let (Val::Num(a), Val::Num(b)) = (*vm.rget(bp, w2), *vm.rget(bp, w3)) {
+                let r = if code == OP_SUB {
+                    a - b
+                } else if code == OP_MUL {
+                    a * b
+                } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
+                    ((a as int) % (b as int)) as double
+                } else if code >= OP_BAND && code <= OP_SHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
+                    let (p, q) = (a as int, b as int);
+                    match code {
+                        OP_BAND => (p & q) as double,
+                        OP_BOR => (p | q) as double,
+                        OP_BXOR => (p ^ q) as double,
+                        OP_SHL => crate::vm::wrap32(p << (q & 31)) as double,
+                        _ => (p >> (q & 31)) as double,
+                    }
+                } else {
+                    crate::vm::arith_num(code, a, b)
+                };
+                vm.rset((bp + w1) as usize, Val::Num(r));
+                done = true;
+            }
+            if !done {
+                vm.r_arith_slow(code, bp, fi, pc, w1, w2, w3);
+            }
+        }
+        R_CMP => {
+            let r = vm.rcmp(sub, pi, bp, w2, w3, fi, pc);
+            if !vm.throwing {
+                vm.rset((bp + w1) as usize, Val::Bool(r));
+            }
+        }
+        R_CMP_JF | R_CMP_JT | R_LOOP => {
+            gc_ok = false;
+            let r = vm.rcmp(sub, pi, bp, w1, w2, fi, pc);
+            set_cell_c(r);
+        }
+        R_CMP_JFK | R_CMP_JTK => {
+            gc_ok = false;
+            let r = vm.rcmp(sub, pi, bp, w2, w3, fi, pc);
+            if !vm.throwing {
+                vm.stack[(bp + (w1 & 65535)) as usize] = Val::Bool(r);
+            }
+            set_cell_c(r);
+        }
+        R_INC_LOCAL => {
+            let i = (bp + w1) as usize;
+            let v = vm.stack[i];
+            vm.frames[fi].pc = pc + 1;
+            let (_, nv) = vm.numeric_step(&v, w2);
+            if !vm.throwing {
+                vm.stack[i] = nv;
+            }
+        }
+        R_POSTINC => {
+            let i = (bp + w2) as usize;
+            let pre = sub == 1;
+            let v = vm.stack[i];
+            vm.frames[fi].pc = pc + 1;
+            let (old, nv) = vm.numeric_step(&v, w3);
+            if !vm.throwing {
+                vm.stack[i] = nv;
+                vm.rset((bp + w1) as usize, if pre { nv } else { old });
+            }
+        }
+        R_INC => {
+            let dec = sub == 1;
+            if let Val::Num(x) = *vm.rget(bp, w2) {
+                vm.rset((bp + w1) as usize, Val::Num(if dec { x - 1.0 } else { x + 1.0 }));
+            } else {
+                vm.r_unary_slow(bp, fi, pc, if dec { 3 } else { 2 }, w1, w2);
+            }
+        }
+        R_TONUM => {
+            let neg = sub == 1;
+            if let Val::Num(x) = *vm.rget(bp, w2) {
+                vm.rset((bp + w1) as usize, Val::Num(if neg { -x } else { x }));
+            } else {
+                vm.r_unary_slow(bp, fi, pc, if neg { 1 } else { 0 }, w1, w2);
+            }
+        }
+        R_ADD_LOCAL_POP => {
+            let b = *vm.rget(bp, w2);
+            let i = (bp + w1) as usize;
+            let h = vm.append_val(vm.stack[i], b);
+            if h >= 0 {
+                vm.stack[i] = Val::Str(h);
+            } else {
+                let a = vm.stack[i];
+                let r = if let (Val::Num(x), Val::Num(y)) = (a, b) {
+                    Val::Num(x + y)
+                } else {
+                    vm.frames[fi].pc = pc + 1;
+                    vm.add_vals(&a, &b)
+                };
+                if !vm.throwing {
+                    vm.stack[i] = r;
+                }
+            }
+        }
+        _ => return 1,
+    }
+    if vm.throwing {
+        if vm.frames.len() == nf {
+            vm.frames[fi].pc = pc + 1;
+        }
+        return 4;
+    }
+    if vm.frames.len() != nf {
+        return 5;
+    }
+    if gc_ok {
+        after(vm)
+    } else {
+        0
+    }
+}
+
+/// The ops the interpreter does with a method or a few lines that cannot
+/// push a frame of the compiled function's own (rvm.rs, the same arms).
+fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
+    let vm = unsafe { vm_of(vm) };
+    let ins = vm.rcode[ri as usize];
+    let (w0, w1, w2, w3) = (ins.code as int, ins.a as int, ins.b as int, ins.c as int);
+    let bp = bp as int;
+    let pi = pi as usize;
+    let pc = pc as int;
+    let nf = vm.frames.len();
+    let fi = nf - 1;
+    let rb = vm.protos[pi].rbase;
+    let next = pc + 1 + (w0 >> 16);
+    let sub = (w0 >> 8) & 255;
+    let mut out = 0;
+    match w0 & 255 {
+        R_GET_GLOBAL => {
+            let g = vm.global;
+            let c = vm.protos[pi].code[pc as usize].c;
+            let slot = vm.ic_slot(g, w3, c as int, false);
+            if slot >= 0 {
+                let v = vm.objs[g as usize].vals[slot as usize];
+                vm.rset((bp + w1) as usize, v);
+            } else {
+                vm.r_step_push(pi, bp, fi, pc, w1);
+            }
+        }
+        R_GET_ENV => {
+            let e = vm.get_env(w2);
+            let v = vm.env_slot(e, w3);
+            vm.rset((bp + w1) as usize, v);
+            if sub == 1 {
+                vm.rset((bp + w1 + 1) as usize, Val::Undef);
+            }
+        }
+        R_SET_ENV => {
+            let e = vm.get_env(w2);
+            let v = *vm.rget(bp, w1);
+            vm.put_elem(e, w3, v);
+        }
+        R_THIS => {
+            let t = vm.frames[fi].this_val;
+            vm.rset((bp + w1) as usize, t);
+        }
+        R_TYPEOF => {
+            let v = *vm.rget(bp, w2);
+            let t = vm.type_val(&v);
+            vm.rset((bp + w1) as usize, t);
+        }
+        R_CHECK => {
+            let v = *vm.rget(bp, w1);
+            let bad = if sub == 0 {
+                if let Val::Obj(o) = v {
+                    o == vm.tdz_obj
+                } else {
+                    false
+                }
+            } else {
+                matches!(v, Val::Undef) || matches!(v, Val::Null)
+            };
+            if bad {
+                vm.frames[fi].pc = pc + 1;
+                vm.r_check_fail(pi, sub, w2);
+            }
+        }
+        R_STEP_PUSH => vm.r_step_push(pi, bp, fi, pc, w1),
+        R_STEP_K => vm.r_step_k(pi, bp, fi, pc, w0, w1, w2, w3),
+        R_STEP0 => {
+            let op = vm.protos[pi].code[pc as usize];
+            let mut p2 = pc + 1;
+            vm.frames[fi].pc = p2;
+            vm.step(op, pi, bp, fi, &mut p2);
+        }
+        R_GET_METHOD => vm.r_get_method(bp, rb, fi, pc, w0, w1, w2, w3),
+        R_GET_METHOD_ELEM => vm.r_get_method_elem(bp, fi, pc, w1, w2, w3),
+        R_ADD_ENV => vm.r_add_env(bp, fi, pc, w0, w1, w2, w3),
+        R_NEW_OBJECT => {
+            let o = vm.new_object();
+            vm.rset((bp + w1) as usize, Val::Obj(o));
+        }
+        R_CLOSURE => {
+            let f = vm.closure(w2);
+            vm.rset((bp + w1) as usize, Val::Obj(f));
+        }
+        R_INIT_PROP => {
+            let v = *vm.rget(bp, w2);
+            let o = crate::vm::obj_of(vm.rget(bp, w1));
+            let sh = vm.objs[o as usize].shape as int;
+            let c = vm.protos[pi].code[pc as usize].c;
+            if c >= 0 && ((c >> 16) as int) == sh {
+                vm.objs[o as usize].shape = c & 65535;
+                if crate::rvm::vals_full(&vm.objs[o as usize].vals) {
+                    let most = vm.shapes[vm.holder((c & 65535) as int)].keys.len();
+                    crate::vm::grow_vals(&mut vm.objs[o as usize].vals, most);
+                }
+                vm.push_val(o, v);
+            } else {
+                vm.frames[fi].pc = pc + 1;
+                vm.define(o, w3, v, 0);
+                let sh2 = vm.objs[o as usize].shape as int;
+                if sh2 != sh && sh < 32768 && sh2 < 65536 && !vm.shapes[sh as usize].owned && !vm.shapes[sh2 as usize].owned {
+                    vm.protos[pi].code[pc as usize].c = (sh * 65536 + sh2) as i32;
+                }
+            }
+        }
+        R_GET_THIS_PROP => {
+            let c = w3;
+            let o = match vm.frames[fi].this_val {
+                Val::Obj(x) => x,
+                _ => return 1,
+            };
+            if c >= 65536 && ((c >> 16) as int) == vm.objs[o as usize].shape as int {
+                let r = vm.objs[o as usize].vals[(c & 65535) as usize];
+                vm.rset((bp + w1) as usize, r);
+            } else {
+                return 1;
+            }
+        }
+        R_WIN => {
+            let want = (bp + vm.protos[pi].fsize) as usize;
+            let p2 = vm.r_win(pi, bp, fi, pc, w1, want);
+            if vm.throwing {
+                return 4;
+            }
+            if p2 < 0 {
+                return 5;
+            }
+            if p2 != next {
+                set_cell_pc(p2);
+                out = 3;
+            }
+        }
+        _ => return 1,
+    }
+    if vm.throwing {
+        if vm.frames.len() == nf {
+            vm.frames[fi].pc = pc + 1;
+        }
+        return 4;
+    }
+    if vm.frames.len() != nf {
+        return 5;
+    }
+    if out != 0 {
+        return out;
+    }
+    after(vm)
+}
+
+/// R_CALL of anything but a JavaScript function (a native, a bound
+/// function, a proxy): what r_call_slow does. A JavaScript function goes
+/// back to the interpreter, which pushes its frame; the compiled code is
+/// entered again when it returns (rvm.rs, R_RET).
+fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
+    let vm = unsafe { vm_of(vm) };
+    let ins = vm.rcode[ri as usize];
+    let (w0, w1, w2, w3) = (ins.code as int, ins.a as int, ins.b as int, ins.c as int);
+    let bp = bp as int;
+    let pc = pc as int;
+    if vm.gc_due() {
+        return 1;
+    }
+    let fpos = bp + w1;
+    let fo = crate::vm::obj_of(&vm.stack[fpos as usize]);
+    if fo >= 0 && vm.objs[fo as usize].class == C_FUNCTION {
+        return 1;
+    }
+    let nf = vm.frames.len();
+    let fi = nf - 1;
+    let pi = vm.frames[fi].proto as usize;
+    vm.frames[fi].pc = pc + 1 + (w0 >> 16);
+    if ((w0 >> 8) & 255) == 1 {
+        vm.stack[(fpos + 1) as usize] = Val::Undef;
+    }
+    let want = (bp + vm.protos[pi].fsize) as usize;
+    if vm.r_call_slow(fo, fpos, w2, bp, w3, want) {
+        return 5;
+    }
+    if vm.throwing {
+        return 4;
+    }
+    if vm.frames.len() != nf {
+        return 5;
+    }
+    after(vm)
+}
+
+thread_local! {
+    /// op kinds written as exits whatever they are (cerxes_jit_mask), to
+    /// find which op's code goes wrong
+    static MASK: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+#[no_mangle]
+pub extern "C" fn cerxes_jit_mask(lo: i32, hi: i32) {
+    MASK.with(|m| m.set((lo as u32 as u64) | ((hi as u32 as u64) << 32)));
 }

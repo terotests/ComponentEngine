@@ -329,6 +329,8 @@ pub struct Vm {
     pub jit_hot: Vec<int>,
     /// by rcode index of a loop head: entries that left at once (wjit.rs)
     pub jit_miss: Vec<int>,
+    /// by rcode index: the pc after a call in compiled code (wjit.rs)
+    pub jit_res: Vec<bool>,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
     pub temp_roots: Vec<Val>,
@@ -567,6 +569,7 @@ impl Vm {
             jit_fn: Vec::new(),
             jit_hot: Vec::new(),
             jit_miss: Vec::new(),
+            jit_res: Vec::new(),
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
