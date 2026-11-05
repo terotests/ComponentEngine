@@ -3643,7 +3643,17 @@ impl Vm {
                     Val::Undef => String::from("Undefined"),
                     Val::Null => String::from("Null"),
                     _ => {
-                        let o = self.to_object(&this);
+                        // a primitive reads through its prototype, as its
+                        // wrapper would, without making one
+                        let (o, wc) = match &this {
+                            Val::Num(_) => (self.number_proto, C_NUMBER),
+                            Val::Str(_) => (self.string_proto, C_STRING),
+                            Val::Bool(_) => (self.boolean_proto, C_BOOLEAN),
+                            _ => {
+                                let w = self.to_object(&this);
+                                (w, self.objs[w as usize].class)
+                            }
+                        };
                         if self.a_tostringtag < 0 {
                             self.a_tostringtag = self.intern("@@toStringTag");
                         }
@@ -3653,7 +3663,7 @@ impl Vm {
                             let s = self.sget(s.clone());
                             s.as_ref().clone()
                         } else {
-                            let c = self.objs[o as usize].class;
+                            let c = wc;
                             class = c as int;
                             if (c as usize) < self.tostr_vals.len() && !matches!(self.tostr_vals[c as usize], Val::Undef) {
                                 return self.tostr_vals[c as usize].clone();
