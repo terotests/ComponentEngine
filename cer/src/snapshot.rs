@@ -204,9 +204,9 @@ pub fn snapshot(vm: &Vm) -> String {
         let ops = proto_ops(p);
         put_num(&mut b, ops.len() as int);
         for op in ops.iter() {
-            put_num(&mut b, op.code);
-            put_num(&mut b, op.a);
-            put_num(&mut b, op.b);
+            put_num(&mut b, (op.code as int));
+            put_num(&mut b, (op.a as int));
+            put_num(&mut b, (op.b as int));
         }
     }
     // the objects
@@ -416,7 +416,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             let code = r.num();
             let a = r.num();
             let b = r.num();
-            p.code.push(Op { code: code, a: a, b: b, c: -1 });
+            p.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
             k += 1;
         }
         pack_code(&mut p);

@@ -345,9 +345,9 @@ pub fn pack_code(p: &mut Proto) {
     let mut i: usize = 0;
     while i < p.code.len() {
         let op = p.code[i];
-        w.put(op.code);
-        w.put(op.a);
-        w.put(op.b);
+        w.put((op.code as int));
+        w.put((op.a as int));
+        w.put((op.b as int));
         i += 1;
     }
     if w.nb > 0 {
@@ -401,7 +401,7 @@ fn packed_ops(p: &Proto) -> Vec<Op> {
         let code = r.get(&p.packed);
         let a = r.get(&p.packed);
         let b = r.get(&p.packed);
-        out.push(Op { code: code, a: a, b: b, c: -1 });
+        out.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
         i += 1;
     }
     out
@@ -492,11 +492,11 @@ pub fn reserve_ints(_v: &mut Vec<int>, _n: usize) {}
 
 #[derive(Clone, Copy)]
 pub struct Op {
-    pub code: int,
-    pub a: int,
-    pub b: int,
+    pub code: i32,
+    pub a: i32,
+    pub b: i32,
     /// an inline cache: the slot the property was found at last time
-    pub c: int,
+    pub c: i32,
 }
 
 pub struct Proto {

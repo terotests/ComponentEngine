@@ -324,23 +324,23 @@ fn is_compare(code: int) -> bool {
 /// Whether the op jumps to `a` (and, for YIELD_STAR, to `b`).
 fn is_jump(op: &Op) -> bool {
     let c = op.code;
-    c == OP_JUMP
-        || c == OP_JF
-        || c == OP_JT
-        || c == OP_JNOT_UNDEF
-        || c == OP_JF_KEEP
-        || c == OP_JT_KEEP
-        || c == OP_JNN_KEEP
-        || c == OP_JNULLISH
-        || c == OP_CMP_JF
-        || c == OP_LOCAL_NULL_JF
-        || c == OP_CASE_INT_JT
-        || c == OP_CASE_JT
-        || c == OP_ITER_NEXT
-        || (c == OP_TEMPLATE_OBJ && op.b >= 0)
-        || c == OP_GEN_RESUME
-        || c == OP_YIELD_STAR
-        || c == OP_TRY
+    (c as int) == OP_JUMP
+        || (c as int) == OP_JF
+        || (c as int) == OP_JT
+        || (c as int) == OP_JNOT_UNDEF
+        || (c as int) == OP_JF_KEEP
+        || (c as int) == OP_JT_KEEP
+        || (c as int) == OP_JNN_KEEP
+        || (c as int) == OP_JNULLISH
+        || (c as int) == OP_CMP_JF
+        || (c as int) == OP_LOCAL_NULL_JF
+        || (c as int) == OP_CASE_INT_JT
+        || (c as int) == OP_CASE_JT
+        || (c as int) == OP_ITER_NEXT
+        || ((c as int) == OP_TEMPLATE_OBJ && op.b >= 0)
+        || (c as int) == OP_GEN_RESUME
+        || (c as int) == OP_YIELD_STAR
+        || (c as int) == OP_TRY
 }
 
 /// A token as pcomp keeps it: its text (or number) by index into
@@ -1109,7 +1109,7 @@ impl PComp {
 
     fn emit3(&mut self, code: int, a: int, b: int, c: int) -> int {
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code.push(Op { code: code, a: a, b: b, c: c });
+        self.fs[i].proto.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: (c as i32) });
         (self.fs[i].proto.code.len() as int) - 1
     }
 
@@ -1137,18 +1137,18 @@ impl PComp {
 
     fn set_op(&mut self, at: int, code: int, a: int, b: int) {
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[at as usize] = Op { code: code, a: a, b: b, c: -1 };
+        self.fs[i].proto.code[at as usize] = Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 };
     }
 
     fn patch(&mut self, at: int) {
         let here = self.pc();
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[at as usize].a = here;
+        self.fs[i].proto.code[at as usize].a = (here as i32);
     }
 
     fn patch_to(&mut self, at: int, target: int) {
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[at as usize].a = target;
+        self.fs[i].proto.code[at as usize].a = (target as i32);
     }
 
     fn fn_str_const(&mut self, f: int, s: &str) -> int {
@@ -1326,41 +1326,41 @@ impl PComp {
             let mut fused = -1;
             let mut fa = 0;
             let mut fb = 0;
-            if code == OP_GET_LOCAL && last.code == OP_GET_LOCAL {
+            if code == OP_GET_LOCAL && (last.code as int) == OP_GET_LOCAL {
                 fused = OP_GET_LOCAL2;
                 fa = last.a;
                 fb = a;
-            } else if code == OP_UNDEF && last.code == OP_GET_ENV {
+            } else if code == OP_UNDEF && (last.code as int) == OP_GET_ENV {
                 fused = OP_GET_ENV_UNDEF;
                 fa = last.a;
-                fb = last.b;
-            } else if code == OP_CASE_JT && last.code == OP_INT {
+                fb = (last.b as int);
+            } else if code == OP_CASE_JT && (last.code as int) == OP_INT {
                 fused = OP_CASE_INT_JT;
-                fa = a;
-                fb = last.a;
+                fa = (a as i32);
+                fb = (last.a as int);
             } else if code == OP_CMP_JF && (b == OP_SEQ || b == OP_SNE || b == OP_EQ || b == OP_NE) && n > 1 && self.xlabel < (n as int) - 1 {
                 let prev = self.xo[n - 2];
                 let mut slot = -1;
-                if prev.code == OP_NULL && last.code == OP_GET_LOCAL {
+                if (prev.code as int) == OP_NULL && (last.code as int) == OP_GET_LOCAL {
                     slot = last.a;
-                } else if prev.code == OP_GET_LOCAL && last.code == OP_NULL {
+                } else if (prev.code as int) == OP_GET_LOCAL && (last.code as int) == OP_NULL {
                     slot = prev.a;
                 }
                 if slot >= 0 {
                     self.xo.pop();
                     self.xfixed.pop();
-                    self.xo[n - 2] = Op { code: OP_LOCAL_NULL_JF, a: a, b: slot * 256 + b, c: -1 };
+                    self.xo[n - 2] = Op { code: (OP_LOCAL_NULL_JF as i32), a: (a as i32), b: slot * 256 + (b as i32), c: -1 };
                     self.xfixed[n - 2] = false;
                     return (n as int) - 2;
                 }
             }
             if fused >= 0 {
-                self.xo[n - 1] = Op { code: fused, a: fa, b: fb, c: -1 };
+                self.xo[n - 1] = Op { code: (fused as i32), a: fa, b: (fb as i32), c: -1 };
                 self.xfixed[n - 1] = false;
                 return (n as int) - 1;
             }
         }
-        self.xo.push(Op { code: code, a: a, b: b, c: -1 });
+        self.xo.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
         self.xfixed.push(false);
         (self.xo.len() as int) - 1
     }
@@ -1370,12 +1370,12 @@ impl PComp {
             let n = self.xo.len();
             if n > 0 {
                 let last = self.xo[n - 1].code;
-                if last == OP_SET_LOCAL {
-                    self.xo[n - 1].code = OP_SET_LOCAL_POP;
-                } else if last == OP_SET_PROP {
-                    self.xo[n - 1].code = OP_SET_PROP_POP;
-                } else if last == OP_SET_ELEM {
-                    self.xo[n - 1].code = OP_SET_ELEM_POP;
+                if (last as int) == OP_SET_LOCAL {
+                    self.xo[n - 1].code = (OP_SET_LOCAL_POP as i32);
+                } else if (last as int) == OP_SET_PROP {
+                    self.xo[n - 1].code = (OP_SET_PROP_POP as i32);
+                } else if (last as int) == OP_SET_ELEM {
+                    self.xo[n - 1].code = (OP_SET_ELEM_POP as i32);
                 }
             }
         }
@@ -1386,7 +1386,7 @@ impl PComp {
     fn xpatch(&mut self, at: int) {
         let here = self.xo.len() as int;
         self.xlabel = here;
-        self.xo[at as usize].a = here;
+        self.xo[at as usize].a = (here as i32);
         self.xfixed[at as usize] = true;
     }
 
@@ -1559,19 +1559,19 @@ impl PComp {
     fn expand_ref(&mut self, op: Op, top_completion: bool) {
         let r = op.a as usize;
         let mode = op.b;
-        if mode == M_LOAD {
+        if (mode as int) == M_LOAD {
             self.xload_name(r);
             return;
         }
-        if mode == M_STORE {
+        if (mode as int) == M_STORE {
             self.xstore_name(r, false);
             return;
         }
-        if mode == M_INIT {
+        if (mode as int) == M_INIT {
             self.xstore_name(r, true);
             return;
         }
-        if mode == M_TYPEOF {
+        if (mode as int) == M_TYPEOF {
             let b = self.refs[r].bind;
             let name = self.refs[r].name.clone();
             if self.refs[r].with_list >= 0 {
@@ -1605,7 +1605,7 @@ impl PComp {
             self.xop(OP_TYPEOF);
             return;
         }
-        if mode == M_DELETE {
+        if (mode as int) == M_DELETE {
             if self.refs[r].bind >= 0 {
                 self.xop(OP_FALSE);
             } else {
@@ -1617,11 +1617,11 @@ impl PComp {
             }
             return;
         }
-        if mode == M_UPD {
+        if (mode as int) == M_UPD {
             let flags = op.c;
-            let prefix = (flags & U_PREFIX) != 0;
-            let inc = (flags & U_INC) != 0;
-            let discard = (flags & U_DISCARD) != 0;
+            let prefix = (flags & (U_PREFIX as i32)) != 0;
+            let inc = (flags & (U_INC as i32)) != 0;
+            let discard = (flags & (U_DISCARD as i32)) != 0;
             let b = self.refs[r].bind;
             if self.ref_local(r) && self.binds[b as usize].kind != K_CONST {
                 let slot = self.binds[b as usize].slot;
@@ -1646,15 +1646,15 @@ impl PComp {
                 self.xop(OP_POP);
             }
             if discard {
-                if (flags & U_TOP) != 0 {
+                if (flags & (U_TOP as i32)) != 0 {
                     self.xemit(OP_SET_LOCAL, 0, 0);
                 }
                 self.xop(OP_POP);
             }
             return;
         }
-        if mode == M_ADDT_LOAD || mode == M_ADDT_STORE {
-            let sr = if mode == M_ADDT_LOAD { (op.c / 2) as usize } else { r };
+        if (mode as int) == M_ADDT_LOAD || (mode as int) == M_ADDT_STORE {
+            let sr = if (mode as int) == M_ADDT_LOAD { (op.c / 2) as usize } else { r };
             let b = self.refs[sr].bind;
             let ok = b >= 0
                 && !self.binds[b as usize].global
@@ -1663,8 +1663,8 @@ impl PComp {
                 && !self.refs[sr].tdz
                 && self.refs[sr].with_list < 0;
             let in_env = ok && self.binds[b as usize].in_env;
-            let pure = if mode == M_ADDT_LOAD { (op.c % 2) == 1 } else { op.c == 1 };
-            if mode == M_ADDT_LOAD {
+            let pure = if (mode as int) == M_ADDT_LOAD { (op.c % 2) == 1 } else { op.c == 1 };
+            if (mode as int) == M_ADDT_LOAD {
                 if ok && in_env {
                     let slot = self.binds[b as usize].slot;
                     let depth = self.env_depth(self.refs[sr].scope, self.binds[b as usize].scope);
@@ -1711,7 +1711,7 @@ impl PComp {
                 if o.a >= 0 && (o.a as usize) <= n {
                     target[o.a as usize] = true;
                 }
-                if o.code == OP_YIELD_STAR && o.b >= 0 && (o.b as usize) <= n {
+                if (o.code as int) == OP_YIELD_STAR && o.b >= 0 && (o.b as usize) <= n {
                     target[o.b as usize] = true;
                 }
             }
@@ -1733,40 +1733,40 @@ impl PComp {
             map[i] = self.xo.len() as int;
             let o = code[i];
             let c = o.code;
-            if c == PH_REF {
+            if (c as int) == PH_REF {
                 // a local's property: fused
-                if o.b == M_LOAD && i + 1 < n && code[i + 1].code == OP_GET_PROP && !target[i + 1] && self.ref_local(o.a as usize) {
+                if (o.b as int) == M_LOAD && i + 1 < n && (code[i + 1].code as int) == OP_GET_PROP && !target[i + 1] && self.ref_local(o.a as usize) {
                     let b = self.refs[o.a as usize].bind;
                     let slot = self.binds[b as usize].slot;
-                    self.xemit(OP_GET_LOCAL_PROP, slot, code[i + 1].a);
+                    self.xemit(OP_GET_LOCAL_PROP, slot, (code[i + 1].a as int));
                     map[i + 1] = map[i];
                     i += 2;
                     continue;
                 }
-                let top = o.b == M_ADDT_STORE && (o.c & 2) != 0;
+                let top = (o.b as int) == M_ADDT_STORE && (o.c & 2) != 0;
                 let mut o2 = o;
-                if o.b == M_ADDT_STORE {
+                if (o.b as int) == M_ADDT_STORE {
                     o2.c = o.c & 1;
                 }
                 self.expand_ref(o2, top);
-            } else if c == OP_THIS && i + 1 < n && code[i + 1].code == OP_GET_PROP && !target[i + 1] {
-                self.xemit(OP_GET_THIS_PROP, code[i + 1].a, 0);
+            } else if (c as int) == OP_THIS && i + 1 < n && (code[i + 1].code as int) == OP_GET_PROP && !target[i + 1] {
+                self.xemit(OP_GET_THIS_PROP, (code[i + 1].a as int), 0);
                 map[i + 1] = map[i];
                 i += 2;
                 continue;
-            } else if c == PH_ENTER {
-                self.x_enter(o.a, o.b == 1);
-            } else if c == PH_LEAVE {
+            } else if (c as int) == PH_ENTER {
+                self.x_enter((o.a as int), o.b == 1);
+            } else if (c as int) == PH_LEAVE {
                 if self.scopes[o.a as usize].has_env {
                     self.xop(OP_POP_ENV);
                 }
-            } else if c == PH_COPY_ENV {
+            } else if (c as int) == PH_COPY_ENV {
                 if self.scopes[o.a as usize].has_env {
                     self.xop(OP_COPY_ENV);
                 }
-            } else if c == PH_HOIST {
-                self.x_hoist(o.a);
-            } else if c == PH_DECL_GLOBALS {
+            } else if (c as int) == PH_HOIST {
+                self.x_hoist((o.a as int));
+            } else if (c as int) == PH_DECL_GLOBALS {
                 if !self.local_program {
                     let binds = self.scopes[o.a as usize].binds.clone();
                     for b in binds.iter() {
@@ -1778,19 +1778,19 @@ impl PComp {
                         }
                     }
                 }
-            } else if c == PH_PROLOGUE {
-                self.x_prologue(o.a, f);
-            } else if c == PH_BODY_VARS {
-                self.x_body_vars(o.a, o.b);
-            } else if c == PH_ANNEX {
-                self.x_annex(o.a);
-            } else if c == PH_NOP {
+            } else if (c as int) == PH_PROLOGUE {
+                self.x_prologue((o.a as int), f);
+            } else if (c as int) == PH_BODY_VARS {
+                self.x_body_vars((o.a as int), (o.b as int));
+            } else if (c as int) == PH_ANNEX {
+                self.x_annex((o.a as int));
+            } else if (c as int) == PH_NOP {
                 // nothing
-            } else if c == OP_POP {
+            } else if (c as int) == OP_POP {
                 self.xop(OP_POP);
             } else {
-                let at = self.xemit(c, o.a, o.b);
-                if c == OP_TEMPLATE_OBJ || c == OP_YIELD_STAR {
+                let at = self.xemit((c as int), (o.a as int), (o.b as int));
+                if (c as int) == OP_TEMPLATE_OBJ || (c as int) == OP_YIELD_STAR {
                     // not fused: keep both operands
                     self.xo[at as usize] = Op { code: c, a: o.a, b: o.b, c: -1 };
                 }
@@ -1804,12 +1804,12 @@ impl PComp {
             if !self.xfixed[k] && is_jump(&self.xo[k]) {
                 let a = self.xo[k].a;
                 if a >= 0 && (a as usize) <= n {
-                    self.xo[k].a = map[a as usize];
+                    self.xo[k].a = (map[a as usize] as i32);
                 }
-                if self.xo[k].code == OP_YIELD_STAR {
+                if (self.xo[k].code as int) == OP_YIELD_STAR {
                     let b = self.xo[k].b;
                     if b >= 0 && (b as usize) <= n {
-                        self.xo[k].b = map[b as usize];
+                        self.xo[k].b = (map[b as usize] as i32);
                     }
                 }
             }
@@ -2442,9 +2442,9 @@ impl PComp {
         if e.k == E_UPDATE_IDENT && e.a == self.pc() - 1 {
             let i = self.fs.len() - 1;
             let mut c = self.fs[i].proto.code[e.a as usize].c;
-            c |= U_DISCARD;
+            c |= (U_DISCARD as i32);
             if top {
-                c |= U_TOP;
+                c |= (U_TOP as i32);
             }
             self.fs[i].proto.code[e.a as usize].c = c;
             return;
@@ -2452,24 +2452,24 @@ impl PComp {
         if !top && e.k == E_ADDASSIGN && e.b == self.pc() - 1 && e.b > 0 {
             let i = self.fs.len() - 1;
             let add = self.fs[i].proto.code[(e.b - 1) as usize];
-            if add.code == OP_ADD {
+            if (add.code as int) == OP_ADD {
                 let sr = self.fs[i].proto.code[e.b as usize].a;
                 let lr = self.fs[i].proto.code[e.a as usize].a;
                 let pure = if self.assigns == e.c { 1 } else { 0 };
-                self.fs[i].proto.code[e.a as usize] = Op { code: PH_REF, a: lr, b: M_ADDT_LOAD, c: sr * 2 + pure };
-                self.fs[i].proto.code[(e.b - 1) as usize] = Op { code: PH_REF, a: sr, b: M_ADDT_STORE, c: pure };
-                self.fs[i].proto.code[e.b as usize] = Op { code: PH_NOP, a: 0, b: 0, c: -1 };
+                self.fs[i].proto.code[e.a as usize] = Op { code: (PH_REF as i32), a: lr, b: (M_ADDT_LOAD as i32), c: sr * 2 + pure };
+                self.fs[i].proto.code[(e.b - 1) as usize] = Op { code: (PH_REF as i32), a: sr, b: (M_ADDT_STORE as i32), c: pure };
+                self.fs[i].proto.code[e.b as usize] = Op { code: (PH_NOP as i32), a: 0, b: 0, c: -1 };
                 return;
             }
         }
         if !top && e.k == E_MEMBER_ADDASSIGN {
             let last = self.last_op();
             let n = self.pc();
-            if last.code == OP_SET_PROP && n >= 2 {
+            if (last.code as int) == OP_SET_PROP && n >= 2 {
                 let i = self.fs.len() - 1;
-                if self.fs[i].proto.code[(n - 2) as usize].code == OP_ADD {
+                if (self.fs[i].proto.code[(n - 2) as usize].code as int) == OP_ADD {
                     self.pop_op();
-                    self.set_op(n - 2, OP_ADD_PROP_POP, last.a, 0);
+                    self.set_op(n - 2, OP_ADD_PROP_POP, (last.a as int), 0);
                     return;
                 }
             }
@@ -3260,7 +3260,7 @@ impl PComp {
             return;
         }
         let last = self.last_op();
-        if e.k == E_IDENT && last.code == PH_REF {
+        if e.k == E_IDENT && (last.code as int) == PH_REF {
             let name = self.refs[e.a as usize].name.clone();
             if self.strict && (name.as_str() == "eval" || name.as_str() == "arguments") {
                 self.fail("Unexpected eval or arguments in strict mode");
@@ -3271,14 +3271,14 @@ impl PComp {
             self.op(OP_POP);
             return;
         }
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && (last.code == OP_GET_PROP || last.code == OP_GET_PRIVATE) {
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
             self.op(OP_SWAP);
-            self.emit(OP_SET_PROP, last.a, 0);
+            self.emit(OP_SET_PROP, (last.a as int), 0);
             self.op(OP_POP);
             return;
         }
-        if e.k == E_INDEX && last.code == OP_GET_ELEM {
+        if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
             self.pop_op();
             self.op(OP_ROT3);
             self.op(OP_ROT3);
@@ -3421,12 +3421,12 @@ impl PComp {
     /// the last op.
     fn cond_jump_false(&mut self, e: Ex) {
         let last = self.last_op();
-        if e.k == E_CMP && is_compare(last.code) {
+        if e.k == E_CMP && is_compare((last.code as int)) {
             self.pop_op();
-            self.emit(OP_CMP_JF, 0, last.code);
+            self.emit(OP_CMP_JF, 0, (last.code as int));
             return;
         }
-        if e.k == E_NOT && last.code == OP_NOT {
+        if e.k == E_NOT && (last.code as int) == OP_NOT {
             self.pop_op();
             self.emit(OP_JT, 0, 0);
             return;
@@ -3575,8 +3575,8 @@ impl PComp {
         self.op(OP_RETURN);
         let done = self.pc();
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[step as usize].a = done;
-        self.fs[i].proto.code[step as usize].b = ret;
+        self.fs[i].proto.code[step as usize].a = (done as i32);
+        self.fs[i].proto.code[step as usize].b = (ret as i32);
         ex(E_OTHER)
     }
 
@@ -3632,7 +3632,7 @@ impl PComp {
         } else {
             OP_JNN_KEEP
         };
-        if left.k == E_IDENT && last.code == PH_REF && left.b == n - 1 {
+        if left.k == E_IDENT && (last.code as int) == PH_REF && left.b == n - 1 {
             self.check_strict_target(left);
             let r = left.a;
             let name = self.refs[r as usize].name.clone();
@@ -3665,20 +3665,20 @@ impl PComp {
             }
             return ex(E_OTHER);
         }
-        if (left.k == E_MEMBER || left.k == E_PRIVATE) && (last.code == OP_GET_PROP || last.code == OP_GET_PRIVATE) {
+        if (left.k == E_MEMBER || left.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             let at = last.a;
             self.pop_op();
             if o == "=" {
                 self.assign();
-                self.emit(OP_SET_PROP, at, 0);
+                self.emit(OP_SET_PROP, (at as int), 0);
                 return ex(E_OTHER);
             }
             self.op(OP_DUP);
-            self.emit(OP_GET_PROP, at, 0);
+            self.emit(OP_GET_PROP, (at as int), 0);
             if logical {
                 let j = self.emit(jcode, 0, 0);
                 self.assign();
-                self.emit(OP_SET_PROP, at, 0);
+                self.emit(OP_SET_PROP, (at as int), 0);
                 let jend = self.emit(OP_JUMP, 0, 0);
                 self.patch(j);
                 self.op(OP_SWAP);
@@ -3690,13 +3690,13 @@ impl PComp {
             let bop = &o[0..(o.as_bytes().len() - 1)];
             let code = binary_code(bop);
             self.op(code);
-            self.emit(OP_SET_PROP, at, 0);
+            self.emit(OP_SET_PROP, (at as int), 0);
             if o == "+=" {
-                return Ex { k: E_MEMBER_ADDASSIGN, a: at, b: -1, c: -1 };
+                return Ex { k: E_MEMBER_ADDASSIGN, a: (at as int), b: -1, c: -1 };
             }
             return ex(E_OTHER);
         }
-        if left.k == E_INDEX && last.code == OP_GET_ELEM {
+        if left.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
             self.pop_op();
             if o == "=" {
                 self.assign();
@@ -3819,7 +3819,7 @@ impl PComp {
         self.assigns += 1;
         let last = self.last_op();
         let code = if inc { OP_INC } else { OP_DEC };
-        if e.k == E_IDENT && last.code == PH_REF && e.b == self.pc() - 1 {
+        if e.k == E_IDENT && (last.code as int) == PH_REF && e.b == self.pc() - 1 {
             self.check_strict_target(e);
             let mut flags = 0;
             if prefix {
@@ -3829,28 +3829,28 @@ impl PComp {
                 flags |= U_INC;
             }
             let i = self.fs.len() - 1;
-            self.fs[i].proto.code[e.b as usize] = Op { code: PH_REF, a: e.a, b: M_UPD, c: flags };
+            self.fs[i].proto.code[e.b as usize] = Op { code: (PH_REF as i32), a: (e.a as i32), b: (M_UPD as i32), c: (flags as i32) };
             return Ex { k: E_UPDATE_IDENT, a: e.b, b: -1, c: -1 };
         }
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && (last.code == OP_GET_PROP || last.code == OP_GET_PRIVATE) {
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             let at = last.a;
             self.pop_op();
             self.op(OP_DUP);
-            self.emit(OP_GET_PROP, at, 0);
+            self.emit(OP_GET_PROP, (at as int), 0);
             self.op(OP_TONUM);
             if prefix {
                 self.op(code);
-                self.emit(OP_SET_PROP, at, 0);
+                self.emit(OP_SET_PROP, (at as int), 0);
             } else {
                 self.op(OP_DUP);
                 self.op(OP_ROT3);
                 self.op(code);
-                self.emit(OP_SET_PROP, at, 0);
+                self.emit(OP_SET_PROP, (at as int), 0);
                 self.op(OP_POP);
             }
             return ex(E_OTHER);
         }
-        if e.k == E_INDEX && last.code == OP_GET_ELEM {
+        if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
             self.pop_op();
             self.op(OP_DUP2);
             self.op(OP_GET_ELEM);
@@ -3927,10 +3927,10 @@ impl PComp {
                 }
                 let last = self.last_op();
                 if s == "typeof" {
-                    if a.k == E_IDENT && last.code == PH_REF {
+                    if a.k == E_IDENT && (last.code as int) == PH_REF {
                         let i = self.fs.len() - 1;
                         let n = self.fs[i].proto.code.len() - 1;
-                        self.fs[i].proto.code[n].b = M_TYPEOF;
+                        self.fs[i].proto.code[n].b = (M_TYPEOF as i32);
                     } else {
                         self.op(OP_TYPEOF);
                     }
@@ -3939,16 +3939,16 @@ impl PComp {
                         self.fail("Delete of an unqualified identifier in strict mode.");
                         return ex(E_OTHER);
                     }
-                    if (a.k == E_MEMBER || a.k == E_PRIVATE) && (last.code == OP_GET_PROP || last.code == OP_GET_PRIVATE) {
+                    if (a.k == E_MEMBER || a.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
                         self.pop_op();
-                        self.emit(OP_DEL_PROP, last.a, 0);
-                    } else if a.k == E_INDEX && last.code == OP_GET_ELEM {
+                        self.emit(OP_DEL_PROP, (last.a as int), 0);
+                    } else if a.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
                         self.pop_op();
                         self.op(OP_DEL_ELEM);
-                    } else if a.k == E_IDENT && last.code == PH_REF {
+                    } else if a.k == E_IDENT && (last.code as int) == PH_REF {
                         let i = self.fs.len() - 1;
                         let n = self.fs[i].proto.code.len() - 1;
-                        self.fs[i].proto.code[n].b = M_DELETE;
+                        self.fs[i].proto.code[n].b = (M_DELETE as i32);
                     } else {
                         self.op(OP_POP);
                         self.op(OP_TRUE);
@@ -4012,10 +4012,10 @@ impl PComp {
     /// The callee just read becomes a function and its `this`.
     fn callee(&mut self, e: Ex, optional: bool) {
         let last = self.last_op();
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && (last.code == OP_GET_PROP || last.code == OP_GET_PRIVATE) {
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
-            self.emit(OP_GET_METHOD, last.a, if optional { 1 } else { 0 });
-        } else if e.k == E_INDEX && last.code == OP_GET_ELEM {
+            self.emit(OP_GET_METHOD, (last.a as int), if optional { 1 } else { 0 });
+        } else if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
             self.pop_op();
             self.op(OP_GET_METHOD_ELEM);
         } else if e.k == E_SUPER_MEMBER {
@@ -4280,9 +4280,9 @@ impl PComp {
 
     fn tagged(&mut self, e: Ex) {
         let last = self.last_op();
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && (last.code == OP_GET_PROP || last.code == OP_GET_PRIVATE) {
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
-            self.emit(OP_GET_METHOD, last.a, 0);
+            self.emit(OP_GET_METHOD, (last.a as int), 0);
         } else {
             self.op(OP_UNDEF);
         }
@@ -4428,7 +4428,7 @@ impl PComp {
             self.next();
             let at = self.emit_ref(ws, M_LOAD, false);
             let r = self.fs[self.fs.len() - 1].proto.code[at as usize].a;
-            return Ex { k: E_IDENT, a: r, b: at, c: -1 };
+            return Ex { k: E_IDENT, a: (r as int), b: at, c: -1 };
         }
         if self.is("(") {
             self.next();

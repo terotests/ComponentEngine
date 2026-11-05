@@ -872,38 +872,38 @@ impl Compiler {
             let mut fused = -1;
             let mut fa = 0;
             let mut fb = 0;
-            if code == OP_GET_LOCAL && last.code == OP_GET_LOCAL {
+            if code == OP_GET_LOCAL && (last.code as int) == OP_GET_LOCAL {
                 fused = OP_GET_LOCAL2;
                 fa = last.a;
                 fb = a;
-            } else if code == OP_UNDEF && last.code == OP_GET_ENV {
+            } else if code == OP_UNDEF && (last.code as int) == OP_GET_ENV {
                 fused = OP_GET_ENV_UNDEF;
                 fa = last.a;
-                fb = last.b;
-            } else if code == OP_CASE_JT && last.code == OP_INT {
+                fb = (last.b as int);
+            } else if code == OP_CASE_JT && (last.code as int) == OP_INT {
                 fused = OP_CASE_INT_JT;
-                fa = a;
-                fb = last.a;
+                fa = (a as i32);
+                fb = (last.a as int);
             } else if code == OP_CMP_JF && (b == OP_SEQ || b == OP_SNE || b == OP_EQ || b == OP_NE) && n > 1 && (self.fs[i].label_at as usize) < n - 1 {
                 let prev = self.fs[i].proto.code[n - 2];
                 let mut slot = -1;
-                if prev.code == OP_NULL && last.code == OP_GET_LOCAL {
+                if (prev.code as int) == OP_NULL && (last.code as int) == OP_GET_LOCAL {
                     slot = last.a;
-                } else if prev.code == OP_GET_LOCAL && last.code == OP_NULL {
+                } else if (prev.code as int) == OP_GET_LOCAL && (last.code as int) == OP_NULL {
                     slot = prev.a;
                 }
                 if slot >= 0 {
                     self.fs[i].proto.code.pop();
-                    self.fs[i].proto.code[n - 2] = Op { code: OP_LOCAL_NULL_JF, a: a, b: slot * 256 + b, c: -1 };
+                    self.fs[i].proto.code[n - 2] = Op { code: (OP_LOCAL_NULL_JF as i32), a: (a as i32), b: slot * 256 + (b as i32), c: -1 };
                     return (n as int) - 2;
                 }
             }
             if fused >= 0 {
-                self.fs[i].proto.code[n - 1] = Op { code: fused, a: fa, b: fb, c: -1 };
+                self.fs[i].proto.code[n - 1] = Op { code: (fused as i32), a: fa, b: (fb as i32), c: -1 };
                 return (n as int) - 1;
             }
         }
-        self.fs[i].proto.code.push(Op { code: code, a: a, b: b, c: -1 });
+        self.fs[i].proto.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
         (self.fs[i].proto.code.len() as int) - 1
     }
 
@@ -915,12 +915,12 @@ impl Compiler {
             let n = self.fs[i].proto.code.len();
             if n > 0 {
                 let last = self.fs[i].proto.code[n - 1].code;
-                if last == OP_SET_LOCAL {
-                    self.fs[i].proto.code[n - 1].code = OP_SET_LOCAL_POP;
-                } else if last == OP_SET_PROP {
-                    self.fs[i].proto.code[n - 1].code = OP_SET_PROP_POP;
-                } else if last == OP_SET_ELEM {
-                    self.fs[i].proto.code[n - 1].code = OP_SET_ELEM_POP;
+                if (last as int) == OP_SET_LOCAL {
+                    self.fs[i].proto.code[n - 1].code = (OP_SET_LOCAL_POP as i32);
+                } else if (last as int) == OP_SET_PROP {
+                    self.fs[i].proto.code[n - 1].code = (OP_SET_PROP_POP as i32);
+                } else if (last as int) == OP_SET_ELEM {
+                    self.fs[i].proto.code[n - 1].code = (OP_SET_ELEM_POP as i32);
                 }
             }
         }
@@ -931,12 +931,12 @@ impl Compiler {
     fn patch(&mut self, at: int) {
         let here = self.pc();
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[at as usize].a = here;
+        self.fs[i].proto.code[at as usize].a = (here as i32);
     }
 
     fn patch_to(&mut self, at: int, target: int) {
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[at as usize].a = target;
+        self.fs[i].proto.code[at as usize].a = (target as i32);
     }
 
     fn str_const(&mut self, s: &str) -> int {
@@ -2373,8 +2373,8 @@ impl Compiler {
         let done = self.pc();
         let i = step as usize;
         let fi = self.fs.len() - 1;
-        self.fs[fi].proto.code[i].a = done;
-        self.fs[fi].proto.code[i].b = ret;
+        self.fs[fi].proto.code[i].a = (done as i32);
+        self.fs[fi].proto.code[i].b = (ret as i32);
     }
 
     fn expr(&mut self, n: int) {

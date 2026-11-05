@@ -128,10 +128,10 @@ const BAD: int = 1000000;
 /// for ops handled by `Tr::flow` or unknown.
 pub fn net_effect(op: &Op) -> int {
     let c = op.code;
-    if c >= OP_ADD && c <= OP_GE {
+    if (c as int) >= OP_ADD && (c as int) <= OP_GE {
         return -1;
     }
-    match c {
+    match (c as int) {
         OP_UNDEF | OP_NULL | OP_TRUE | OP_FALSE | OP_INT | OP_CONST | OP_GET_LOCAL | OP_GET_ENV | OP_GET_GLOBAL | OP_TYPEOF_GLOBAL | OP_CLOSURE | OP_THIS | OP_NEW_TARGET | OP_ARGUMENTS | OP_NEW_OBJECT | OP_CALLEE | OP_GET_THIS_PROP | OP_TDZ | OP_REGEX | OP_GET_SUPER | OP_POSTINC_LOCAL | OP_PREINC_LOCAL | OP_GET_LOCAL_PROP | OP_DUP | OP_OVER | OP_ARRAY_REST | OP_GET_METHOD => 1,
         OP_GET_LOCAL2 | OP_GET_ENV_UNDEF | OP_DUP2 => 2,
         OP_SET_LOCAL | OP_SET_ENV | OP_SET_GLOBAL | OP_DECL_GLOBAL | OP_INC_LOCAL | OP_CHECK_TDZ | OP_REQUIRE_OBJ | OP_SET_NAME | OP_CONST_ERROR | OP_NOP | OP_END_TRY | OP_PUSH_ENV | OP_POP_ENV | OP_COPY_ENV | OP_GEN_START | OP_ITER_CLOSE_AT | OP_ARRAY_HOLE | OP_SWAP | OP_ROT3 | OP_ROT4 | OP_GET_METHOD_ELEM => 0,
@@ -140,9 +140,9 @@ pub fn net_effect(op: &Op) -> int {
         OP_SET_ELEM | OP_INIT_ELEM | OP_DEFINE_FIELD_ELEM | OP_INIT_GETTER_ELEM | OP_INIT_SETTER_ELEM | OP_DEFINE_METHOD_ELEM | OP_CALL_SPREAD | OP_ADD_ENV_POP => -2,
         OP_ADD_PROP_POP => -3,
         OP_YIELD => 1,
-        OP_CALL => -op.a - 1,
-        OP_NEW => -op.a,
-        OP_SUPER_CALL | OP_NEW_ARRAY | OP_OBJ_REST => 1 - op.a,
+        OP_CALL => ((-op.a - 1) as int),
+        OP_NEW => (-op.a as int),
+        OP_SUPER_CALL | OP_NEW_ARRAY | OP_OBJ_REST => (1 - op.a as int),
         OP_CLASS => {
             if op.a == 1 {
                 0
@@ -213,7 +213,7 @@ impl Tr {
         while i < n {
             t.depth.push(-1);
             t.label.push(false);
-            t.rc.push(Op { code: R_NOP, a: 0, b: 0, c: 0 });
+            t.rc.push(Op { code: (R_NOP as i32), a: 0, b: 0, c: 0 });
             i += 1;
         }
         let mut k: usize = 0;
@@ -263,59 +263,59 @@ impl Tr {
             let d = self.depth[i as usize];
             let op = self.code[i as usize];
             let c = op.code;
-            if c == OP_JUMP {
-                self.edge(op.a, d, true, &mut work, i);
-            } else if c == OP_JF || c == OP_JT || c == OP_JNOT_UNDEF {
-                self.edge(op.a, d - 1, true, &mut work, i);
+            if (c as int) == OP_JUMP {
+                self.edge((op.a as int), d, true, &mut work, i);
+            } else if (c as int) == OP_JF || (c as int) == OP_JT || (c as int) == OP_JNOT_UNDEF {
+                self.edge((op.a as int), d - 1, true, &mut work, i);
                 self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if c == OP_JF_KEEP || c == OP_JT_KEEP || c == OP_JNN_KEEP {
-                self.edge(op.a, d, true, &mut work, i);
+            } else if (c as int) == OP_JF_KEEP || (c as int) == OP_JT_KEEP || (c as int) == OP_JNN_KEEP {
+                self.edge((op.a as int), d, true, &mut work, i);
                 self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if c == OP_JNULLISH {
+            } else if (c as int) == OP_JNULLISH {
                 if op.b == 1 {
-                    self.edge(op.a, d, true, &mut work, i);
+                    self.edge((op.a as int), d, true, &mut work, i);
                     self.edge(i + 1, d, false, &mut work, i);
                 } else {
                     let m = if op.b > 1 { op.b } else { 1 };
-                    self.edge(op.a, d - m + 1, true, &mut work, i);
+                    self.edge((op.a as int), d - (m as int) + 1, true, &mut work, i);
                     self.edge(i + 1, d - 1, false, &mut work, i);
                 }
-            } else if c == OP_CMP_JF {
-                self.edge(op.a, d - 2, true, &mut work, i);
+            } else if (c as int) == OP_CMP_JF {
+                self.edge((op.a as int), d - 2, true, &mut work, i);
                 self.edge(i + 1, d - 2, false, &mut work, i);
-            } else if c == OP_LOCAL_NULL_JF || c == OP_CASE_INT_JT {
-                self.edge(op.a, d, true, &mut work, i);
+            } else if (c as int) == OP_LOCAL_NULL_JF || (c as int) == OP_CASE_INT_JT {
+                self.edge((op.a as int), d, true, &mut work, i);
                 self.edge(i + 1, d, false, &mut work, i);
-            } else if c == OP_CASE_JT {
-                self.edge(op.a, d - 1, true, &mut work, i);
+            } else if (c as int) == OP_CASE_JT {
+                self.edge((op.a as int), d - 1, true, &mut work, i);
                 self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if c == OP_ITER_NEXT {
-                self.edge(op.a, d, true, &mut work, i);
+            } else if (c as int) == OP_ITER_NEXT {
+                self.edge((op.a as int), d, true, &mut work, i);
                 self.edge(i + 1, d + 1, false, &mut work, i);
-            } else if c == OP_TEMPLATE_OBJ {
+            } else if (c as int) == OP_TEMPLATE_OBJ {
                 if op.b >= 0 {
-                    self.edge(op.a, d + 1, true, &mut work, i);
+                    self.edge((op.a as int), d + 1, true, &mut work, i);
                     self.edge(i + 1, d, false, &mut work, i);
                 } else {
-                    self.edge(i + 1, d + 1 - 2 * op.a, false, &mut work, i);
+                    self.edge(i + 1, d + 1 - (2 * op.a as int), false, &mut work, i);
                 }
-            } else if c == OP_GEN_RESUME {
-                self.edge(op.a, d - 1, true, &mut work, i);
+            } else if (c as int) == OP_GEN_RESUME {
+                self.edge((op.a as int), d - 1, true, &mut work, i);
                 self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if c == OP_YIELD_STAR {
-                self.edge(op.a, d - 2, true, &mut work, i);
-                self.edge(op.b, d - 1, true, &mut work, i);
+            } else if (c as int) == OP_YIELD_STAR {
+                self.edge((op.a as int), d - 2, true, &mut work, i);
+                self.edge((op.b as int), d - 1, true, &mut work, i);
                 self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if c == OP_TRY {
-                self.edge(op.a, d + 1, true, &mut work, i);
+            } else if (c as int) == OP_TRY {
+                self.edge((op.a as int), d + 1, true, &mut work, i);
                 self.edge(i + 1, d, false, &mut work, i);
-            } else if c == OP_RETURN || c == OP_RETURN_UNDEF || c == OP_THROW {
+            } else if (c as int) == OP_RETURN || (c as int) == OP_RETURN_UNDEF || (c as int) == OP_THROW {
                 // no successor
-            } else if c == OP_SET_LOCAL_POP {
+            } else if (c as int) == OP_SET_LOCAL_POP {
                 self.edge(i + 2, d - 1, false, &mut work, i);
-            } else if c == OP_SET_PROP_POP {
+            } else if (c as int) == OP_SET_PROP_POP {
                 self.edge(i + 2, d - 2, false, &mut work, i);
-            } else if c == OP_SET_ELEM_POP {
+            } else if (c as int) == OP_SET_ELEM_POP {
                 self.edge(i + 2, d - 3, false, &mut work, i);
             } else {
                 let e = net_effect(&op);
@@ -333,7 +333,7 @@ impl Tr {
         let mut i: int = 0;
         while i + 2 < self.n {
             let c = self.code[i as usize].code;
-            if (c == OP_SET_LOCAL_POP || c == OP_SET_PROP_POP || c == OP_SET_ELEM_POP) && self.depth[i as usize] >= 0 && self.depth[(i + 1) as usize] >= 0 {
+            if ((c as int) == OP_SET_LOCAL_POP || (c as int) == OP_SET_PROP_POP || (c as int) == OP_SET_ELEM_POP) && self.depth[i as usize] >= 0 && self.depth[(i + 1) as usize] >= 0 {
                 self.label[(i + 2) as usize] = true;
             }
             i += 1;
@@ -341,11 +341,11 @@ impl Tr {
     }
 
     fn set(&mut self, i: int, rop: int, sub: int, a: int, b: int, c: int) {
-        self.rc[i as usize] = Op { code: rop + 256 * sub, a: a, b: b, c: c };
+        self.rc[i as usize] = Op { code: (rop + 256 * sub) as i32, a: (a as i32), b: (b as i32), c: (c as i32) };
     }
 
     fn rop_at(&self, i: int) -> int {
-        self.rc[i as usize].code % 256
+        ((self.rc[i as usize].code % 256) as int)
     }
 
     fn kval(&mut self, v: Val) -> int {
@@ -438,10 +438,10 @@ impl Tr {
             // the other half of a GET_LOCAL2
             let d0 = self.rc[l as usize].a;
             let s0 = self.rc[l as usize].b;
-            if d0 + 1 == dst {
-                self.set(l, R_LOAD2, 0, d0, s0, src);
-            } else if dst + 1 == d0 {
-                self.set(l, R_LOAD2, 0, dst, src, s0);
+            if ((d0 + 1) as int) == dst {
+                self.set(l, R_LOAD2, 0, (d0 as int), (s0 as int), src);
+            } else if dst + 1 == (d0 as int) {
+                self.set(l, R_LOAD2, 0, dst, src, (s0 as int));
             } else {
                 self.fail("load shared", l);
             }
@@ -537,8 +537,8 @@ impl Tr {
             let op = self.code[i as usize];
             let c = op.code;
             let mut next = i + 1;
-            if c == OP_UNDEF || c == OP_NULL || c == OP_TRUE || c == OP_FALSE || c == OP_INT {
-                let v = match c {
+            if (c as int) == OP_UNDEF || (c as int) == OP_NULL || (c as int) == OP_TRUE || (c as int) == OP_FALSE || (c as int) == OP_INT {
+                let v = match (c as int) {
                     OP_UNDEF => Val::Undef,
                     OP_NULL => Val::Null,
                     OP_TRUE => Val::Bool(true),
@@ -547,23 +547,23 @@ impl Tr {
                 };
                 let k = self.kval(v);
                 self.push_pend(k, i);
-            } else if c == OP_CONST {
-                let k = self.kconst(op.a);
+            } else if (c as int) == OP_CONST {
+                let k = self.kconst((op.a as int));
                 self.push_pend(k, i);
-            } else if c == OP_GET_LOCAL {
-                self.push_pend(op.a, i);
-            } else if c == OP_GET_LOCAL2 {
-                self.push_pend(op.a, i);
-                self.push_pend(op.b, i);
-            } else if c == OP_DUP || c == OP_OVER {
-                let from = if c == OP_DUP { d - 1 } else { d - 2 };
+            } else if (c as int) == OP_GET_LOCAL {
+                self.push_pend((op.a as int), i);
+            } else if (c as int) == OP_GET_LOCAL2 {
+                self.push_pend((op.a as int), i);
+                self.push_pend((op.b as int), i);
+            } else if (c as int) == OP_DUP || (c as int) == OP_OVER {
+                let from = if (c as int) == OP_DUP { d - 1 } else { d - 2 };
                 let s = self.opnd(from);
                 self.push_pend(s, i);
-            } else if c == OP_POP {
+            } else if (c as int) == OP_POP {
                 self.popn(1);
-            } else if c == OP_SET_LOCAL || c == OP_SET_LOCAL_POP {
+            } else if (c as int) == OP_SET_LOCAL || (c as int) == OP_SET_LOCAL_POP {
                 let x = op.a;
-                self.mat_local(x);
+                self.mat_local((x as int));
                 let p = self.fusable_top(i);
                 if p >= 0 {
                     if self.rop_at(p) == R_CALL {
@@ -573,121 +573,121 @@ impl Tr {
                         self.rc[p as usize].a = x;
                     }
                     self.popn(1);
-                    if c == OP_SET_LOCAL {
-                        self.push_pend(x, i);
+                    if (c as int) == OP_SET_LOCAL {
+                        self.push_pend((x as int), i);
                     }
                 } else {
                     let s = self.opnd(d - 1);
-                    self.set(i, R_MOVE, 0, x, s, 0);
-                    if c == OP_SET_LOCAL_POP {
+                    self.set(i, R_MOVE, 0, (x as int), s, 0);
+                    if (c as int) == OP_SET_LOCAL_POP {
                         self.popn(1);
                     }
                 }
-                if c == OP_SET_LOCAL_POP {
+                if (c as int) == OP_SET_LOCAL_POP {
                     next = i + 2;
                 }
-            } else if c == OP_GET_PROP {
+            } else if (c as int) == OP_GET_PROP {
                 let o = self.opnd(d - 1);
                 self.result(i, R_GET_PROP, 0, 1, o, -1);
-            } else if c == OP_GET_LOCAL_PROP {
-                self.result(i, R_GET_PROP, 0, 0, op.a, -1);
-            } else if c == OP_GET_THIS_PROP {
+            } else if (c as int) == OP_GET_LOCAL_PROP {
+                self.result(i, R_GET_PROP, 0, 0, (op.a as int), -1);
+            } else if (c as int) == OP_GET_THIS_PROP {
                 self.result(i, R_GET_THIS_PROP, 0, 0, 0, -1);
-            } else if c == OP_SET_PROP_POP {
+            } else if (c as int) == OP_SET_PROP_POP {
                 let o = self.opnd(d - 2);
                 let v = self.opnd(d - 1);
                 self.popn(2);
                 self.set(i, R_SET_PROP, 0, o, v, -1);
                 next = i + 2;
-            } else if c == OP_GET_ELEM {
+            } else if (c as int) == OP_GET_ELEM {
                 let o = self.opnd(d - 2);
                 let k = self.opnd(d - 1);
                 self.result(i, R_GET_ELEM, 0, 2, o, k);
-            } else if c == OP_SET_ELEM_POP {
+            } else if (c as int) == OP_SET_ELEM_POP {
                 let o = self.opnd(d - 3);
                 let k = self.opnd(d - 2);
                 let v = self.opnd(d - 1);
                 self.popn(3);
                 self.set(i, R_SET_ELEM, 0, o, k, v);
                 next = i + 2;
-            } else if c >= OP_ADD && c <= OP_GE {
+            } else if (c as int) >= OP_ADD && (c as int) <= OP_GE {
                 let x = self.opnd(d - 2);
                 let y = self.opnd(d - 1);
-                let (rop, sub) = if c == OP_ADD {
+                let (rop, sub) = if (c as int) == OP_ADD {
                     (R_ADD, 0)
-                } else if c == OP_SUB {
+                } else if (c as int) == OP_SUB {
                     (R_SUB, 0)
-                } else if c == OP_MUL {
+                } else if (c as int) == OP_MUL {
                     (R_MUL, 0)
-                } else if c >= OP_EQ {
+                } else if (c as int) >= OP_EQ {
                     (R_CMP, c)
                 } else {
                     (R_ARITH, c)
                 };
-                self.result(i, rop, sub, 2, x, y);
-            } else if c == OP_ITER_NEXT {
+                self.result(i, rop, (sub as int), 2, x, y);
+            } else if (c as int) == OP_ITER_NEXT {
                 self.mat_all();
-                self.set(i, R_ITER_NEXT, 0, ns + d - 1, op.a, ns + d);
+                self.set(i, R_ITER_NEXT, 0, ns + d - 1, (op.a as int), ns + d);
                 self.push_own(-1);
-            } else if c == OP_SET_PROP {
+            } else if (c as int) == OP_SET_PROP {
                 // the value stays where the object was
                 self.mat(d - 2);
                 let v = self.opnd(d - 1);
                 self.popn(2);
                 self.set(i, R_SET_PROP, 1, ns + d - 2, v, -1);
                 self.push_own(-1);
-            } else if c == OP_TYPEOF {
+            } else if (c as int) == OP_TYPEOF {
                 let x = self.opnd(d - 1);
                 self.result(i, R_TYPEOF, 0, 1, x, 0);
-            } else if c == OP_NOT {
+            } else if (c as int) == OP_NOT {
                 let x = self.opnd(d - 1);
                 self.result(i, R_NOT, 0, 1, x, 0);
-            } else if c == OP_CMP_JF {
+            } else if (c as int) == OP_CMP_JF {
                 let x = self.opnd(d - 2);
                 let y = self.opnd(d - 1);
                 self.popn(2);
                 self.mat_all();
-                self.set(i, R_CMP_JF, op.b, x, y, op.a);
-            } else if c == OP_JUMP {
+                self.set(i, R_CMP_JF, (op.b as int), x, y, (op.a as int));
+            } else if (c as int) == OP_JUMP {
                 self.mat_all();
-                self.set(i, R_JUMP, 0, op.a, 0, 0);
+                self.set(i, R_JUMP, 0, (op.a as int), 0, 0);
                 next = -1;
-            } else if c == OP_JF || c == OP_JT {
+            } else if (c as int) == OP_JF || (c as int) == OP_JT {
                 let x = self.opnd(d - 1);
                 self.popn(1);
                 self.mat_all();
-                self.set(i, if c == OP_JF { R_JF } else { R_JT }, 0, x, op.a, 0);
-            } else if c == OP_JF_KEEP || c == OP_JT_KEEP || c == OP_JNN_KEEP {
+                self.set(i, if (c as int) == OP_JF { R_JF } else { R_JT }, 0, x, (op.a as int), 0);
+            } else if (c as int) == OP_JF_KEEP || (c as int) == OP_JT_KEEP || (c as int) == OP_JNN_KEEP {
                 self.mat_all();
-                let rop = if c == OP_JF_KEEP {
+                let rop = if (c as int) == OP_JF_KEEP {
                     R_JF_KEEP
-                } else if c == OP_JT_KEEP {
+                } else if (c as int) == OP_JT_KEEP {
                     R_JT_KEEP
                 } else {
                     R_JNN_KEEP
                 };
-                self.set(i, rop, 0, ns + d - 1, op.a, 0);
+                self.set(i, rop, 0, ns + d - 1, (op.a as int), 0);
                 self.popn(1);
-            } else if c == OP_LOCAL_NULL_JF {
+            } else if (c as int) == OP_LOCAL_NULL_JF {
                 self.mat_all();
-                self.set(i, R_LOCAL_NULL_JF, 0, op.b / 256, op.b % 256, op.a);
-            } else if c == OP_CASE_INT_JT {
+                self.set(i, R_LOCAL_NULL_JF, 0, ((op.b / 256) as int), ((op.b % 256) as int), (op.a as int));
+            } else if (c as int) == OP_CASE_INT_JT {
                 self.mat_all();
-                self.set(i, R_CASE_INT_JT, 0, ns + d - 1, op.b, op.a);
-            } else if c == OP_CASE_JT {
+                self.set(i, R_CASE_INT_JT, 0, ns + d - 1, (op.b as int), (op.a as int));
+            } else if (c as int) == OP_CASE_JT {
                 let y = self.opnd(d - 1);
                 self.popn(1);
                 self.mat_all();
-                self.set(i, R_CASE_JT, 0, ns + d - 2, y, op.a);
-            } else if c == OP_RETURN {
+                self.set(i, R_CASE_JT, 0, ns + d - 2, y, (op.a as int));
+            } else if (c as int) == OP_RETURN {
                 let x = self.opnd(d - 1);
                 self.set(i, R_RET, 0, x, 0, 0);
                 next = -1;
-            } else if c == OP_RETURN_UNDEF {
+            } else if (c as int) == OP_RETURN_UNDEF {
                 self.set(i, R_RET_UNDEF, 0, 0, 0, 0);
                 next = -1;
-            } else if c == OP_CALL {
-                let w = d - op.a - 2;
+            } else if (c as int) == OP_CALL {
+                let w = d - (op.a as int) - 2;
                 // an undefined `this` is written by the call itself
                 let mut sub = 0;
                 let tk = (w + 1) as usize;
@@ -699,75 +699,75 @@ impl Tr {
                     }
                 }
                 self.mat_from(w);
-                self.popn(op.a + 2);
-                self.set(i, R_CALL, sub, ns + w, op.a, 0);
+                self.popn(((op.a + 2) as int));
+                self.set(i, R_CALL, sub, ns + w, (op.a as int), 0);
                 self.push_own(i);
-            } else if c == OP_GET_METHOD {
+            } else if (c as int) == OP_GET_METHOD {
                 let o = self.opnd(d - 1);
                 self.popn(1);
-                self.set(i, R_GET_METHOD, op.b, ns + d - 1, o, op.a);
+                self.set(i, R_GET_METHOD, (op.b as int), ns + d - 1, o, (op.a as int));
                 self.push_own(-1);
                 self.push_own(-1);
-            } else if c == OP_THIS {
+            } else if (c as int) == OP_THIS {
                 self.result(i, R_THIS, 0, 0, 0, 0);
-            } else if c == OP_GET_ENV {
-                self.result(i, R_GET_ENV, 0, 0, op.a, op.b);
-            } else if c == OP_GET_ENV_UNDEF {
-                self.set(i, R_GET_ENV, 1, ns + d, op.a, op.b);
+            } else if (c as int) == OP_GET_ENV {
+                self.result(i, R_GET_ENV, 0, 0, (op.a as int), (op.b as int));
+            } else if (c as int) == OP_GET_ENV_UNDEF {
+                self.set(i, R_GET_ENV, 1, ns + d, (op.a as int), (op.b as int));
                 self.push_own(-1);
                 self.push_own(-1);
-            } else if c == OP_SET_ENV {
+            } else if (c as int) == OP_SET_ENV {
                 let v = self.opnd(d - 1);
-                self.set(i, R_SET_ENV, 0, v, op.a, op.b);
-            } else if c == OP_GET_GLOBAL {
-                self.result(i, R_GET_GLOBAL, 0, 0, 0, op.a);
-            } else if c == OP_NEW_OBJECT {
+                self.set(i, R_SET_ENV, 0, v, (op.a as int), (op.b as int));
+            } else if (c as int) == OP_GET_GLOBAL {
+                self.result(i, R_GET_GLOBAL, 0, 0, 0, (op.a as int));
+            } else if (c as int) == OP_NEW_OBJECT {
                 self.result(i, R_NEW_OBJECT, 0, 0, 0, 0);
-            } else if c == OP_INIT_PROP && op.b != 1 {
+            } else if (c as int) == OP_INIT_PROP && op.b != 1 {
                 let o = self.opnd(d - 2);
                 let v = self.opnd(d - 1);
                 self.popn(1);
-                self.set(i, R_INIT_PROP, 0, o, v, op.a);
+                self.set(i, R_INIT_PROP, 0, o, v, (op.a as int));
                 // the object stays where it was; nothing writes it elsewhere
                 let t = self.top();
                 self.ep[(t - 1) as usize] = -1;
-            } else if c == OP_CLOSURE {
-                self.result(i, R_CLOSURE, 0, 0, op.a, 0);
-            } else if c == OP_INC_LOCAL {
-                self.mat_local(op.a);
-                self.set(i, R_INC_LOCAL, 0, op.a, op.b, 0);
-            } else if c == OP_POSTINC_LOCAL || c == OP_PREINC_LOCAL {
-                self.mat_local(op.a);
-                let sub = if c == OP_PREINC_LOCAL { 1 } else { 0 };
-                self.result(i, R_POSTINC, sub, 0, op.a, op.b);
-            } else if c == OP_ADD_LOCAL_POP {
+            } else if (c as int) == OP_CLOSURE {
+                self.result(i, R_CLOSURE, 0, 0, (op.a as int), 0);
+            } else if (c as int) == OP_INC_LOCAL {
+                self.mat_local((op.a as int));
+                self.set(i, R_INC_LOCAL, 0, (op.a as int), (op.b as int), 0);
+            } else if (c as int) == OP_POSTINC_LOCAL || (c as int) == OP_PREINC_LOCAL {
+                self.mat_local((op.a as int));
+                let sub = if (c as int) == OP_PREINC_LOCAL { 1 } else { 0 };
+                self.result(i, R_POSTINC, sub, 0, (op.a as int), (op.b as int));
+            } else if (c as int) == OP_ADD_LOCAL_POP {
                 let v = self.opnd(d - 1);
                 self.popn(1);
-                self.mat_local(op.a);
-                self.set(i, R_ADD_LOCAL_POP, 0, op.a, v, 0);
-            } else if c == OP_NOP || c == OP_END_TRY || c == OP_PUSH_ENV || c == OP_POP_ENV || c == OP_COPY_ENV || c == OP_DECL_GLOBAL || c == OP_CONST_ERROR {
+                self.mat_local((op.a as int));
+                self.set(i, R_ADD_LOCAL_POP, 0, (op.a as int), v, 0);
+            } else if (c as int) == OP_NOP || (c as int) == OP_END_TRY || (c as int) == OP_PUSH_ENV || (c as int) == OP_POP_ENV || (c as int) == OP_COPY_ENV || (c as int) == OP_DECL_GLOBAL || (c as int) == OP_CONST_ERROR {
                 self.set(i, R_STEP0, 0, 0, 0, 0);
-                if c == OP_CONST_ERROR {
+                if (c as int) == OP_CONST_ERROR {
                     // it throws; nothing after it on this path
                     self.mat_all();
                 }
-            } else if c == OP_TDZ || c == OP_NEW_TARGET || c == OP_ARGUMENTS || c == OP_CALLEE || c == OP_REGEX || c == OP_TYPEOF_GLOBAL || c == OP_GET_SUPER {
+            } else if (c as int) == OP_TDZ || (c as int) == OP_NEW_TARGET || (c as int) == OP_ARGUMENTS || (c as int) == OP_CALLEE || (c as int) == OP_REGEX || (c as int) == OP_TYPEOF_GLOBAL || (c as int) == OP_GET_SUPER {
                 self.result(i, R_STEP_PUSH, 0, 0, 0, 0);
             } else {
                 // the stack op on the frame's window
                 self.mat_all();
                 self.set(i, R_WIN, 0, ns + d, 0, 0);
-                if c == OP_RETURN || c == OP_THROW {
+                if (c as int) == OP_RETURN || (c as int) == OP_THROW {
                     next = -1;
-                } else if c == OP_SET_PROP || c == OP_SET_ELEM || c == OP_INIT_PROP || c == OP_GET_METHOD_ELEM || c == OP_ADD_ENV_POP || c == OP_ADD_PROP_POP {
+                } else if (c as int) == OP_SET_PROP || (c as int) == OP_SET_ELEM || (c as int) == OP_INIT_PROP || (c as int) == OP_GET_METHOD_ELEM || (c as int) == OP_ADD_ENV_POP || (c as int) == OP_ADD_PROP_POP {
                     let e = net_effect(&op);
                     self.reset(d + e);
-                } else if c == OP_THROW {
+                } else if (c as int) == OP_THROW {
                     next = -1;
                 } else {
                     // the fall-through depth
                     let nd = if i + 1 < self.n { self.depth[(i + 1) as usize] } else { -1 };
-                    if c == OP_JNULLISH || c == OP_JNOT_UNDEF || c == OP_ITER_NEXT || c == OP_TEMPLATE_OBJ || c == OP_GEN_RESUME || c == OP_YIELD_STAR || c == OP_TRY || net_effect(&op) != BAD {
+                    if (c as int) == OP_JNULLISH || (c as int) == OP_JNOT_UNDEF || (c as int) == OP_ITER_NEXT || (c as int) == OP_TEMPLATE_OBJ || (c as int) == OP_GEN_RESUME || (c as int) == OP_YIELD_STAR || (c as int) == OP_TRY || net_effect(&op) != BAD {
                         if nd < 0 {
                             next = -1;
                         } else {
@@ -790,7 +790,7 @@ impl Tr {
 
     /// The instruction after the one at i.
     fn after(&self, i: int) -> int {
-        i + 1 + self.rc[i as usize].code / 65536
+        i + 1 + ((self.rc[i as usize].code / 65536) as int)
     }
 
     /// Where a keeping jump from register x ends up when it lands on t with
@@ -801,11 +801,11 @@ impl Tr {
         while k < 8 && t < self.n {
             let o = self.rc[t as usize];
             let rop = o.code % 256;
-            if !(rop == R_JF || rop == R_JT || rop == R_JF_KEEP || rop == R_JT_KEEP) || o.a != x {
+            if !((rop as int) == R_JF || (rop as int) == R_JT || (rop as int) == R_JF_KEEP || (rop as int) == R_JT_KEEP) || (o.a as int) != x {
                 break;
             }
-            let jumps = if rop == R_JF || rop == R_JF_KEEP { !v } else { v };
-            t = if jumps { o.b } else { self.after(t) };
+            let jumps = if (rop as int) == R_JF || (rop as int) == R_JF_KEEP { !v } else { v };
+            t = if jumps { (o.b as int) } else { self.after(t) };
             k += 1;
         }
         t
@@ -820,7 +820,7 @@ impl Tr {
         while i < n {
             let k = i as usize;
             let rop = self.rc[k].code % 256;
-            if rop == R_CMP {
+            if (rop as int) == R_CMP {
                 let j = self.after(i);
                 if j < n {
                     let o = self.rc[j as usize];
@@ -830,46 +830,46 @@ impl Tr {
                     let skip = self.after(j) - i - 1;
                     // a temp dies at its jump; a local (var b = x === y)
                     // keeps the value, so it fuses only as a keeping jump
-                    let temp = dst >= self.nslots;
+                    let temp = (dst as int) >= self.nslots;
                     if o.a == dst && skip < 32000 {
-                        if (jr == R_JF || jr == R_JT) && !temp {
-                            let jt = jr == R_JT;
-                            let t = self.thread(o.b, dst, jt);
+                        if ((jr as int) == R_JF || (jr as int) == R_JT) && !temp {
+                            let jt = (jr as int) == R_JT;
+                            let t = self.thread((o.b as int), (dst as int), jt);
                             if t < 32000 && dst < 65536 {
                                 let r2 = if jt { R_CMP_JTK } else { R_CMP_JFK };
-                                self.rc[k] = Op { code: r2 + 256 * sub + 65536 * skip, a: dst + 65536 * t, b: x, c: y };
+                                self.rc[k] = Op { code: (r2 + 256 * (sub as int) + 65536 * skip) as i32, a: dst + (65536 * t) as i32, b: x, c: y };
                             }
-                        } else if jr == R_JF || jr == R_JT {
-                            let r2 = if jr == R_JF { R_CMP_JF } else { R_CMP_JT };
-                            self.rc[k] = Op { code: r2 + 256 * sub + 65536 * skip, a: x, b: y, c: o.b };
-                        } else if (jr == R_JF_KEEP || jr == R_JT_KEEP) && dst < 65536 {
-                            let jt = jr == R_JT_KEEP;
-                            let t = self.thread(o.b, dst, jt);
+                        } else if (jr as int) == R_JF || (jr as int) == R_JT {
+                            let r2 = if (jr as int) == R_JF { R_CMP_JF } else { R_CMP_JT };
+                            self.rc[k] = Op { code: (r2 + 256 * (sub as int) + 65536 * skip) as i32, a: x, b: y, c: o.b };
+                        } else if ((jr as int) == R_JF_KEEP || (jr as int) == R_JT_KEEP) && dst < 65536 {
+                            let jt = (jr as int) == R_JT_KEEP;
+                            let t = self.thread((o.b as int), (dst as int), jt);
                             if t < 32000 {
                                 let r2 = if jt { R_CMP_JTK } else { R_CMP_JFK };
-                                self.rc[k] = Op { code: r2 + 256 * sub + 65536 * skip, a: dst + 65536 * t, b: x, c: y };
+                                self.rc[k] = Op { code: (r2 + 256 * (sub as int) + 65536 * skip) as i32, a: dst + (65536 * t) as i32, b: x, c: y };
                             }
                         }
                     }
                 }
-            } else if rop == R_JUMP {
+            } else if (rop as int) == R_JUMP {
                 // through jumps to jumps; a jump to a return returns
                 let mut t = self.rc[k].a;
                 let mut m = 0;
-                while m < 8 && t < n && self.rc[t as usize].code % 256 == R_JUMP && t != i {
+                while m < 8 && (t as int) < n && ((self.rc[t as usize].code % 256) as int) == R_JUMP && (t as int) != i {
                     t = self.rc[t as usize].a;
                     m += 1;
                 }
-                let tr = if t < n { self.rc[t as usize].code % 256 } else { -1 };
-                if tr == R_RET || tr == R_RET_UNDEF {
+                let tr = if (t as int) < n { self.rc[t as usize].code % 256 } else { -1 };
+                if (tr as int) == R_RET || (tr as int) == R_RET_UNDEF {
                     self.rc[k] = self.rc[t as usize];
                 } else {
                     self.rc[k].a = t;
                 }
-            } else if rop == R_JF_KEEP || rop == R_JT_KEEP {
+            } else if (rop as int) == R_JF_KEEP || (rop as int) == R_JT_KEEP {
                 let x = self.rc[k].a;
-                let t = self.thread(self.rc[k].b, x, rop == R_JT_KEEP);
-                self.rc[k].b = t;
+                let t = self.thread((self.rc[k].b as int), (x as int), (rop as int) == R_JT_KEEP);
+                self.rc[k].b = (t as i32);
             }
             i += 1;
         }
@@ -882,14 +882,14 @@ impl Tr {
         let mut i: int = 0;
         while i < n {
             let o = self.rc[i as usize];
-            if o.code % 256 == R_CASE_INT_JT {
+            if ((o.code % 256) as int) == R_CASE_INT_JT {
                 let x = o.a;
                 let mut keys: Vec<int> = Vec::new();
                 let mut tgts: Vec<int> = Vec::new();
                 let mut j = i;
-                while j < n && self.rc[j as usize].code % 256 == R_CASE_INT_JT && self.rc[j as usize].a == x && keys.len() < 1024 {
-                    keys.push(self.rc[j as usize].b);
-                    tgts.push(self.rc[j as usize].c);
+                while j < n && ((self.rc[j as usize].code % 256) as int) == R_CASE_INT_JT && self.rc[j as usize].a == x && keys.len() < 1024 {
+                    keys.push((self.rc[j as usize].b as int));
+                    tgts.push((self.rc[j as usize].c as int));
                     j = self.after(j);
                 }
                 let mut lo = keys[0];
@@ -922,7 +922,7 @@ impl Tr {
                         self.tab[base + (keys[k] - lo) as usize] = tgts[k];
                     }
                     let skip = self.rc[i as usize].code / 65536;
-                    self.rc[i as usize] = Op { code: R_SWITCH + 65536 * skip, a: x, b: at, c: lo };
+                    self.rc[i as usize] = Op { code: R_SWITCH as i32 + 65536 * skip, a: x, b: (at as i32), c: (lo as i32) };
                 }
                 i = j;
                 continue;
@@ -953,25 +953,25 @@ impl Tr {
         while i < n {
             let k = i as usize;
             let rop = self.rc[k].code % 256;
-            self.rc[k].code += 65536 * run[(i + 1) as usize];
-            let w = if rop == R_JUMP {
+            self.rc[k].code += (65536 * run[(i + 1) as usize] as i32);
+            let w = if (rop as int) == R_JUMP {
                 1
-            } else if rop == R_JF || rop == R_JT || rop == R_JF_KEEP || rop == R_JT_KEEP || rop == R_JNN_KEEP || rop == R_ITER_NEXT {
+            } else if (rop as int) == R_JF || (rop as int) == R_JT || (rop as int) == R_JF_KEEP || (rop as int) == R_JT_KEEP || (rop as int) == R_JNN_KEEP || (rop as int) == R_ITER_NEXT {
                 2
-            } else if rop == R_CMP_JF || rop == R_LOCAL_NULL_JF || rop == R_CASE_INT_JT || rop == R_CASE_JT {
+            } else if (rop as int) == R_CMP_JF || (rop as int) == R_LOCAL_NULL_JF || (rop as int) == R_CASE_INT_JT || (rop as int) == R_CASE_JT {
                 3
             } else {
                 0
             };
             if w == 1 {
                 let t = self.rc[k].a;
-                self.rc[k].a = t + run[t as usize];
+                self.rc[k].a = t + (run[t as usize] as i32);
             } else if w == 2 {
                 let t = self.rc[k].b;
-                self.rc[k].b = t + run[t as usize];
+                self.rc[k].b = t + (run[t as usize] as i32);
             } else if w == 3 {
                 let t = self.rc[k].c;
-                self.rc[k].c = t + run[t as usize];
+                self.rc[k].c = t + (run[t as usize] as i32);
             }
             i += 1;
         }
@@ -981,15 +981,15 @@ impl Tr {
         i = 0;
         while i < n {
             let k = i as usize;
-            if self.rc[k].code % 256 == R_JUMP {
+            if ((self.rc[k].code % 256) as int) == R_JUMP {
                 let t = self.rc[k].a;
                 let tk = t as usize;
-                if self.rc[tk].code % 256 == R_CMP_JF {
+                if ((self.rc[tk].code % 256) as int) == R_CMP_JF {
                     let body = t + 1 + self.rc[tk].code / 65536;
                     if body < 32000 {
                         let sub = (self.rc[tk].code / 256) % 256;
                         let (x, y, exit) = (self.rc[tk].a, self.rc[tk].b, self.rc[tk].c);
-                        self.rc[k] = Op { code: R_LOOP + 256 * sub + 65536 * body, a: x, b: y, c: exit };
+                        self.rc[k] = Op { code: R_LOOP as i32 + 256 * sub + 65536 * body, a: x, b: y, c: exit };
                     }
                 }
             }
