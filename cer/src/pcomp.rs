@@ -469,7 +469,6 @@ impl PComp {
     /// `new`, its JSX read as the factory's calls (crate::lexer::lexer_for).
     pub fn new_syntax(src: &str, atoms: HashMap<String, int>, atom_names: Vec<String>, proto_base: int, jsx: bool, factory: &str, fragment: &str) -> PComp {
         let mut lx = lexer_for(src, jsx, factory, fragment);
-        let toks = lx.tokenize();
         let mut c = PComp {
             toks: Vec::new(),
             names: Vec::new(),
@@ -534,29 +533,29 @@ impl PComp {
             xpi: 0,
             xf: 0,
         };
+        c.lex_tokens(&mut lx, 0);
+        trim_toks(&mut c.toks);
         if !lx.error.is_empty() {
             c.error = lx.error.clone();
         }
         c.xs = lx.xs;
-        c.set_tokens(toks);
+        c.pos = 0;
         c
     }
 
-    fn set_tokens(&mut self, toks: Vec<Tok>) {
-        self.toks = Vec::new();
-        self.mate = Vec::new();
-        self.add_tokens(toks, 0);
-        self.pos = 0;
-    }
-
-    /// `toks` after the tokens there are, kept small (PTok), with their
-    /// brackets matched; `xbase` is where their extras start in `xs`.
-    fn add_tokens(&mut self, toks: Vec<Tok>, xbase: int) {
+    /// The lexer's tokens after the ones there are, each kept small (PTok)
+    /// as it is read, with their brackets matched; `xbase` is where their
+    /// extras start in `xs`.
+    fn lex_tokens(&mut self, lx: &mut Lexer, xbase: int) {
         let base = self.toks.len();
-        reserve_toks(&mut self.toks, toks.len());
-        for t in toks.iter() {
-            let pt = self.small_tok(t, xbase);
+        loop {
+            let t = next_tok(lx);
+            let k = t.kind;
+            let pt = self.small_tok(&t, xbase);
             self.toks.push(pt);
+            if k == T_EOF {
+                break;
+            }
         }
         let n = self.toks.len();
         let mut stack: Vec<int> = Vec::new();
@@ -2021,18 +2020,17 @@ impl PComp {
     /// them. Answers what pop_tokens needs back.
     fn push_tokens(&mut self, src: &str) -> Vec<int> {
         let mut lx = lexer_for(src, self.jsx, self.jsx_factory.as_str(), self.jsx_fragment.as_str());
-        let toks = lx.tokenize();
-        if !lx.error.is_empty() {
-            let e = lx.error.clone();
-            self.fail(e.as_str());
-        }
         let base = self.toks.len() as int;
         let xbase = self.xs.len() as int;
         let mut saved: Vec<int> = Vec::new();
         saved.push(base);
         saved.push(xbase);
         saved.push(self.pos);
-        self.add_tokens(toks, xbase);
+        self.lex_tokens(&mut lx, xbase);
+        if !lx.error.is_empty() {
+            let e = lx.error.clone();
+            self.fail(e.as_str());
+        }
         for x in lx.xs {
             self.xs.push(x);
         }
@@ -6656,11 +6654,11 @@ fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &s
     u
 }
 
-/// Rust: room for `n` more tokens at once, not by doubling.
+/// Rust: the script's tokens without the room their doubling left.
 #[ranger::target(rust)]
-fn reserve_toks(v: &mut Vec<PTok>, n: usize) {
-    v.reserve_exact(n);
+fn trim_toks(v: &mut Vec<PTok>) {
+    v.shrink_to_fit();
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn reserve_toks(_v: &mut Vec<PTok>, _n: usize) {}
+fn trim_toks(_v: &mut Vec<PTok>) {}

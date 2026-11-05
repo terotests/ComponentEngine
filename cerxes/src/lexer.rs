@@ -119,6 +119,17 @@ pub struct Lexer {
     of_end: int,
 }
 
+/// The next token (pcomp reads them one at a time, never all of them as
+/// `Tok`s); after an error (`error`), T_EOF.
+pub fn next_tok(lx: &mut Lexer) -> Tok {
+    let t = lx.next_token();
+    if t.kind == T_ERROR {
+        lx.error = t.text.clone();
+        return Tok::new(T_EOF, lx.line, true);
+    }
+    t
+}
+
 /// A lexer for `src`; with `jsx` its elements are read as their factory's
 /// calls (`@jsx` pragmas as `factory` and `fragment`).
 pub fn lexer_for(src: &str, jsx: bool, factory: &str, fragment: &str) -> Lexer {

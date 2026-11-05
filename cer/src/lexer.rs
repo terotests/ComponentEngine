@@ -80,6 +80,33 @@ pub struct Lexer {
     pos: int,
     line: int,
     pub error: String,
+    /// next_tok's tokens (CEr reads them all at once) and the next one
+    buf: Vec<Tok>,
+    bi: int,
+    filled: bool,
+}
+
+/// The next token (pcomp reads them one at a time); after the last, or
+/// after an error (`error`), T_EOF.
+pub fn next_tok(lx: &mut Lexer) -> Tok {
+    if !lx.filled {
+        lx.buf = lx.tokenize();
+        lx.filled = true;
+        lx.bi = 0;
+    }
+    if lx.bi < lx.buf.len() as int {
+        let t = &lx.buf[lx.bi as usize];
+        let mut c = Tok::new(t.kind, t.line, t.nl);
+        c.text = t.text.clone();
+        c.num = t.num;
+        c.x = t.x;
+        c.escaped = t.escaped;
+        c.start = t.start;
+        c.end = t.end;
+        lx.bi += 1;
+        return c;
+    }
+    Tok::new(T_EOF, lx.line, true)
 }
 
 fn is_id_start(c: char) -> bool {
@@ -146,7 +173,7 @@ pub fn push_code_point(out: &mut String, cp: int) {
 
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
-        let mut lx = Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new() };
+        let mut lx = Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), buf: Vec::new(), bi: 0, filled: false };
         // a hashbang line at the very start is a comment
         if lx.src.len() >= 2 && lx.src[0] == '#' && lx.src[1] == '!' {
             while (lx.pos as usize) < lx.src.len() && lx.src[lx.pos as usize] != '\n' && lx.src[lx.pos as usize] != '\r' {
