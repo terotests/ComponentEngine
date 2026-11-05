@@ -1443,6 +1443,21 @@ impl Vm {
             }
             let site = rb + pc;
             if (site as usize) < self.rpic.len() && self.rpic[site as usize] >= 0 {
+                // the site's first way, a data property one prototype up
+                // (a method on its class's prototype): checked here first
+                let b = (self.rpic[site as usize] * (PIC_W as i32)) as usize;
+                if b + 6 < self.pic.len() && self.pic[b] == self.ob(o).shape && self.pic[b + 1] == (self.shape_epoch as i32) && self.pic[b + 2] == 1 && self.pic[b + 3] >= 0 && self.pic[b + 4] == 0 {
+                    let p = self.pic[b + 5];
+                    if self.ob(o).proto == p && self.ob(p as int).shape == self.pic[b + 6] {
+                        let f = *val_at(&self.ob(p as int).vals, self.pic[b + 3] as usize);
+                        let fun = if let Val::Obj(fo) = f { self.ob(fo).class == C_FUNCTION } else { false };
+                        if fun || ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
+                            self.rset((bp + w1) as usize, f);
+                            self.rset((bp + w1 + 1) as usize, v);
+                            return;
+                        }
+                    }
+                }
                 // a way that fits o's shape was learnt on that shape
                 // without the property of its own
                 let h = self.pic_probe(site, o);
