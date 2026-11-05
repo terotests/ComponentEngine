@@ -210,12 +210,12 @@ fn host_calls_reclaim_checked() {
 
 #[test]
 fn prelude_snapshot_is_current() {
-    // Engine::new restores src/prelude.snap instead of compiling the
+    // Engine::new restores src/prelude_snap.rs instead of compiling the
     // prelude; after a change to the prelude or the built-ins, write it
-    // again: cargo run --release --bin cerxes -- --prelude-snapshot > src/prelude.snap
-    let fresh = Engine::compiled(true).snapshot();
-    let kept = include_str!("../src/prelude.snap");
-    assert!(fresh == kept, "src/prelude.snap is stale: cargo run --release --bin cerxes -- --prelude-snapshot > src/prelude.snap");
+    // again: cargo run --release --bin cerxes -- --prelude-snapshot > src/prelude_snap.rs
+    let fresh = cerxes::prelude_snapshot_rs(&Engine::compiled(true).snapshot());
+    let kept = include_str!("../src/prelude_snap.rs");
+    assert!(fresh == kept, "src/prelude_snap.rs is stale: cargo run --release --bin cerxes -- --prelude-snapshot > src/prelude_snap.rs");
     let mut e = Engine::new();
     assert!(e.error.is_empty());
     e.eval("print([3,1,2].sort().join(), typeof Symbol.iterator, JSON.stringify(new Map([[1,2]]).size))");

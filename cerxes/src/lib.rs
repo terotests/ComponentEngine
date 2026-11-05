@@ -353,15 +353,33 @@ impl Engine {
     }
 }
 
-/// Rust: the engine's state after the prelude, from `src/prelude.snap`
-/// (`cerxes --prelude-snapshot`, checked by tests/syntax.rs); false when
-/// it does not restore, and the prelude is then compiled.
+/// Rust: the engine's state after the prelude, from `src/prelude_snap.rs`
+/// (a raw string written by `cerxes --prelude-snapshot`, checked by
+/// tests/syntax.rs; a .rs file so builds that copy src/*.rs get it, and
+/// not a module, so other targets do not carry it); false when it does
+/// not restore, and the prelude is then compiled.
 #[ranger::target(rust)]
 pub fn prelude_snapshot(vm: &mut Vm) -> bool {
-    snapshot::restore(vm, include_str!("prelude.snap"))
+    snapshot::restore(vm, include!("prelude_snap.rs"))
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn prelude_snapshot(_vm: &mut Vm) -> bool {
     false
+}
+
+/// Rust: a snapshot's text as the raw string literal `src/prelude_snap.rs`
+/// holds (enough `#` that the text cannot end it).
+#[ranger::target(rust)]
+pub fn prelude_snapshot_rs(text: &str) -> String {
+    let mut hashes = String::from("#");
+    while text.contains(format!("\"{}", hashes).as_str()) {
+        hashes.push('#');
+    }
+    format!("// written by `cerxes --prelude-snapshot`; see lib.rs prelude_snapshot\nr{}\"{}\"{}\n", hashes, text, hashes)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn prelude_snapshot_rs(_text: &str) -> String {
+    String::new()
 }

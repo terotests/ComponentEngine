@@ -3,7 +3,7 @@
 //
 // `cerxes --emit app.tsx` writes the script as JavaScript instead (src/emit.rs),
 // `cerxes --runtime` what such a script expects defined before it runs,
-// `cerxes --prelude-snapshot > src/prelude.snap` the prelude Engine::new restores.
+// `cerxes --prelude-snapshot > src/prelude_snap.rs` the prelude Engine::new restores.
 use cerxes::Engine;
 
 fn main() {
@@ -14,8 +14,9 @@ fn main() {
         return;
     }
     if args.len() > 1 && args[1] == "--prelude-snapshot" {
-        // src/prelude.snap: what Engine::new restores instead of compiling
-        print!("{}", Engine::compiled(true).snapshot());
+        // src/prelude_snap.rs: what Engine::new restores instead of
+        // compiling, as a raw string for include!
+        print!("{}", cerxes::prelude_snapshot_rs(&Engine::compiled(true).snapshot()));
         return;
     }
     if args.len() > 1 && args[1] == "--emit" {
