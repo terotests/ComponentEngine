@@ -1021,7 +1021,7 @@ impl Vm {
                     }
                     continue 'frames;
                 }
-                pc = if npc >= 0 { npc } else { pc + 1 + ((self.rcode[(rb + pc) as usize].code >> 16) as int) };
+                pc = if npc >= 0 { npc } else { pc + 1 + ((op_at(&self.rcode, (rb + pc) as usize).code >> 16) as int) };
             }
         }
     }
