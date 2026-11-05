@@ -754,6 +754,63 @@ impl Vm {
                         pc = (pc + 1 + ((w0 >> 16) as int));
                         continue;
                     }
+                    R_NEW_ARRAY => {
+                        self.r_new_array(bp, (w1 as int), (w2 as int));
+                    }
+                    R_NEW => {
+                        let argc = w2 as int;
+                        let fpos = bp + (w1 as int);
+                        let fo = obj_of(&self.stack[fpos as usize]);
+                        let mut plain = false;
+                        if fo >= 0 && self.ob(fo).class == C_FUNCTION {
+                            let p = &self.protos[self.ob(fo).func as usize];
+                            plain = !p.uses_args && p.rest < 0 && !p.class_ctor && p.constructible();
+                        }
+                        if plain {
+                            self.frames[fi].pc = (pc + 1 + ((w0 >> 16) as int));
+                            if self.gc_due() {
+                                self.rgc(want);
+                            }
+                            let top = (fpos + argc + 2) as usize;
+                            if self.stack.len() < top {
+                                grow_stack(&mut self.stack, top);
+                            }
+                            let mut k = argc;
+                            while k > 0 {
+                                self.stack[(fpos + 1 + k) as usize] = self.stack[(fpos + k) as usize];
+                                k -= 1;
+                            }
+                            let f = self.stack[fpos as usize];
+                            let this = self.make_this(&f);
+                            self.stack[(fpos + 1) as usize] = this;
+                            if !self.renter(fo, fpos, argc, fpos) {
+                                continue 'frames;
+                            }
+                            fi = self.frames.len() - 1;
+                            self.frames[fi].construct = true;
+                            self.frames[fi].new_target = f;
+                            pi = self.frames[fi].proto as usize;
+                            bp = fpos + 2;
+                            pc = self.frames[fi].pc;
+                            want = (bp + self.protos[pi].fsize) as usize;
+                            rb = self.protos[pi].rbase;
+                            if self.slicing && self.frame_brk() {
+                                return;
+                            }
+                            continue;
+                        }
+                        let p2 = self.r_win(pi, bp, fi, pc, (w3 as int), want);
+                        if self.throwing {
+                            if !self.unwind(base) {
+                                return;
+                            }
+                            continue 'frames;
+                        }
+                        if p2 < 0 {
+                            continue 'frames;
+                        }
+                        npc = p2;
+                    }
                     R_RET | R_RET_UNDEF => {
                         let mut v = if ((w0 & 255) as int) == R_RET { self.rget(bp, (w1 as int)).clone() } else { Val::Undef };
                         if self.frames[fi].construct && !is_obj(&v) {
@@ -1504,6 +1561,24 @@ impl Vm {
         }
         *v = self.frames[fi].this_val.clone();
         false
+    }
+
+    /// R_NEW_ARRAY: the n items from slot w1 on into a new array, which
+    /// goes to slot w1.
+    #[inline(never)]
+    fn r_new_array(&mut self, bp: int, w1: int, n: int) {
+        let p = self.array_proto;
+        let a = self.alloc(C_ARRAY, p);
+        let e = self.elems_id(a);
+        reserve_vals(&mut self.evecs[e].v, n as usize);
+        let from = bp + w1;
+        let mut i = from;
+        while i < from + n {
+            let v = self.stack[i as usize];
+            self.push_elem(a, v);
+            i += 1;
+        }
+        self.rset(from as usize, Val::Obj(a));
     }
 
     #[inline(never)]

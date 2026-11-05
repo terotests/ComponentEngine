@@ -144,6 +144,13 @@ pub const R_JNU: int = 54;
 /// does it, its result comes back (instanceof, in, delete o[k], a
 /// function's name, for-in keys, a short array literal)
 pub const R_STEP_K: int = 55;
+/// `new f(args)`: w1 f (the args after it), w2 argc, w3 the window's top.
+/// A plain JS constructor runs in rrun with `this` put after f (the
+/// args move up one slot); anything else runs the stack op on the window.
+pub const R_NEW: int = 56;
+/// `[a, b, c, …]`: w1 the first item's slot (the array goes there), w2
+/// the count
+pub const R_NEW_ARRAY: int = 57;
 
 const BAD: int = 1000000;
 
@@ -750,6 +757,19 @@ impl Tr {
                 self.popn(((op.a + 2) as int));
                 self.set(i, R_CALL, sub, ns + w, (op.a as int), 0);
                 self.push_own(i);
+            } else if (c as int) == OP_NEW_ARRAY && op.a > 2 {
+                let w = d - (op.a as int);
+                self.mat_from(w);
+                self.popn((op.a as int));
+                self.set(i, R_NEW_ARRAY, 0, ns + w, (op.a as int), 0);
+                self.push_own(-1);
+            } else if (c as int) == OP_NEW {
+                let w = d - (op.a as int) - 1;
+                // the stack op may run on the window: every operand in place
+                self.mat_all();
+                self.popn(((op.a + 1) as int));
+                self.set(i, R_NEW, 0, ns + w, (op.a as int), ns + d);
+                self.push_own(-1);
             } else if (c as int) == OP_GET_METHOD {
                 let o = self.opnd(d - 1);
                 self.popn(1);
