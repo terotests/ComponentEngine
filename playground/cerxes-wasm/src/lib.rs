@@ -71,7 +71,10 @@ pub unsafe extern "C" fn cx_free(p: *mut u8, n: usize) {
 
 #[no_mangle]
 pub extern "C" fn cx_new() -> *mut Engine {
-    Box::into_raw(Box::new(Engine::new()))
+    // on the register machine (rvm.rs), as the cerxes CLI with CER_REGS=1
+    let mut e = Engine::new();
+    e.vm.regs = true;
+    Box::into_raw(Box::new(e))
 }
 
 #[no_mangle]
