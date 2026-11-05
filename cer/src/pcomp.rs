@@ -404,6 +404,9 @@ pub struct PComp {
     /// exports (names, the expressions that read them, `export *` modules)
     /// are what it returns
     pub module_path: String,
+    /// a host's script (CErXes `Engine::compile`) may `import` the host's
+    /// modules and keep its `export`ed declarations, as the parser reads it
+    pub script_imports: bool,
     mex_names: Vec<String>,
     mex_values: Vec<String>,
     mex_stars: Vec<String>,
@@ -491,6 +494,7 @@ impl PComp {
             jsx_factory: String::from(factory),
             jsx_fragment: String::from(fragment),
             module_path: String::new(),
+            script_imports: false,
             mex_names: Vec::new(),
             mex_values: Vec::new(),
             mex_stars: Vec::new(),
@@ -2372,7 +2376,7 @@ impl PComp {
                 return;
             }
             if ws == "import" && !self.peek_is(1, "(") && !self.peek_is(1, ".") {
-                if !self.module_path.is_empty() {
+                if !self.module_path.is_empty() || self.script_imports {
                     self.script_import();
                     return;
                 }
@@ -2382,6 +2386,10 @@ impl PComp {
             if ws == "export" {
                 if !self.module_path.is_empty() {
                     self.module_export(in_list);
+                    return;
+                }
+                if self.script_imports {
+                    self.script_export(in_list);
                     return;
                 }
                 self.fail("modules are not supported");
@@ -3866,6 +3874,16 @@ impl PComp {
     }
 
     fn unary(&mut self) -> Ex {
+        if self.ts && !self.jsx && self.is("<") {
+            // TypeScript's `<T>x` (not in TSX, where it opens an element)
+            let e = self.type_args_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return ex(E_OTHER);
+            }
+            self.goto(e);
+            return self.unary();
+        }
         if self.kind() == T_PUNCT {
             let op = self.text();
             let s = op.as_str();
@@ -6479,11 +6497,39 @@ impl PComp {
     /// Skips the type at the current token (pcomp reads on after it).
     fn skip_type_here(&mut self) {
         let e = self.type_end(self.pos);
+        if e < 0 && self.type_ends_in_eq() {
+            return;
+        }
         if e < 0 {
             self.ts_fail();
             return;
         }
         self.goto(e);
+    }
+
+    /// A type that ends inside a `>>=` / `>=` token (`a: A<B<C>>= v`): the
+    /// token becomes its `=`, where pcomp reads on; false when it did not.
+    fn type_ends_in_eq(&mut self) -> bool {
+        if self.tbad || self.tg <= 0 {
+            return false;
+        }
+        let t = self.tok_text(self.tp);
+        let g = self.tg as usize;
+        if g >= t.as_bytes().len() {
+            return false;
+        }
+        let rest = String::from(&t[g..]);
+        if rest.as_str() != "=" {
+            return false;
+        }
+        let eq = self.name_id("=");
+        let i = self.tp as usize;
+        self.toks[i].v = eq as i32;
+        self.toks[i].start += self.tg as i32;
+        self.tg = 0;
+        let at = self.tp;
+        self.goto(at);
+        true
     }
 
     /// `: T` (and a `?` / `!` before it) after a binding or a parameter.
@@ -6577,6 +6623,16 @@ pub fn compile_unit_with(src: &str, ts: bool) -> crate::unit::Unit {
 /// compile_unit: TypeScript's types skipped with `ts`, JSX read with `jsx`
 /// (`factory`, `fragment` its names).
 pub fn compile_unit_syntax(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str) -> crate::unit::Unit {
+    compile_unit_full(src, ts, jsx, factory, fragment, false)
+}
+
+/// A host's script (CErXes `Engine::compile`): compile_unit_syntax, and
+/// its `import`s read the host's modules (`script_imports`).
+pub fn compile_script(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str) -> crate::unit::Unit {
+    compile_unit_full(src, ts, jsx, factory, fragment, true)
+}
+
+fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str, imports: bool) -> crate::unit::Unit {
     let names = crate::vm::first_atoms();
     let mut atoms: HashMap<String, int> = HashMap::new();
     let mut i: int = 0;
@@ -6586,6 +6642,7 @@ pub fn compile_unit_syntax(src: &str, ts: bool, jsx: bool, factory: &str, fragme
     }
     let mut c = PComp::new_syntax(src, atoms, names, 0, jsx, factory, fragment);
     c.ts = ts;
+    c.script_imports = imports;
     let entry = c.compile_program();
     let mut u = crate::unit::Unit::new();
     if !c.error.is_empty() || entry < 0 {

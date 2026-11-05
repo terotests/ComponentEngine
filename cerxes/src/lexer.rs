@@ -109,6 +109,14 @@ pub struct Lexer {
     pend: Vec<Tok>,
     /// the previous token was `.` or `?.`
     after_dot: bool,
+    /// where a `type A<…> =` alias is read (0 none, 1 after `type`, 2 after
+    /// its name, 3 after its `=`, 4 in its type parameters, `type_depth`
+    /// their `<` open): after the `=` a `<` is a type's, not an element
+    type_stage: int,
+    type_depth: int,
+    /// where a word `of` just ended (-1 none): `of<T>(` right after it is
+    /// a method's type parameters (`static of<T>()`), not an element
+    of_end: int,
 }
 
 /// A lexer for `src`; with `jsx` its elements are read as their factory's
@@ -199,6 +207,9 @@ impl Lexer {
             jsx_fragment: String::from("__jsxFragment"),
             pend: Vec::new(),
             after_dot: false,
+            type_stage: 0,
+            type_depth: 0,
+            of_end: -1,
         }
     }
 
@@ -273,7 +284,8 @@ impl Lexer {
             return self.pend.pop().unwrap();
         }
         let nl = self.skip_space();
-        if self.jsx && self.error.is_empty() && self.jsx_starts() {
+        if self.jsx && self.error.is_empty() && self.type_stage != 3 && self.jsx_starts() {
+            self.type_stage = 0;
             let mut out: Vec<Tok> = Vec::new();
             self.jsx_tokens(&mut out, nl);
             if !self.error.is_empty() {
@@ -305,7 +317,45 @@ impl Lexer {
         if !self.error.is_empty() {
             return self.error_token();
         }
+        if self.jsx {
+            self.type_alias_step(&t);
+            self.of_end = if t.kind == T_IDENT && !t.escaped && t.text.as_str() == "of" { self.pos } else { -1 };
+        }
         t
+    }
+
+    /// Follows a `type A<…> =` alias (`type_stage`) past the token `t`.
+    fn type_alias_step(&mut self, t: &Tok) {
+        let st = self.type_stage;
+        let ident = t.kind == T_IDENT && !t.escaped;
+        let punct = t.kind == T_PUNCT;
+        let w = t.text.as_str();
+        if st == 4 {
+            if punct && w == "<" {
+                self.type_depth += 1;
+            } else if punct && (w == ">" || w == ">>" || w == ">>>") {
+                self.type_depth -= w.as_bytes().len() as int;
+                if self.type_depth <= 0 {
+                    self.type_stage = 2;
+                    self.type_depth = 0;
+                }
+            } else if t.kind == T_EOF {
+                self.type_stage = 0;
+            }
+            return;
+        }
+        if st == 1 && ident {
+            self.type_stage = 2;
+        } else if st == 2 && punct && w == "=" {
+            self.type_stage = 3;
+        } else if st == 2 && punct && w == "<" {
+            self.type_stage = 4;
+            self.type_depth = 1;
+        } else if ident && w == "type" {
+            self.type_stage = 1;
+        } else {
+            self.type_stage = 0;
+        }
     }
 
     /// All of plain JavaScript's tokens, ending in T_EOF (the single-pass
@@ -1022,7 +1072,7 @@ impl Lexer {
     /// A `<` here opens an element: where an expression starts, before a
     /// name or `>`, and not TypeScript's `<T,>` / `<T extends …>`.
     fn jsx_starts(&self) -> bool {
-        if !self.regex_ok || self.cur() != '<' {
+        if !self.regex_ok || self.cur() != '<' || self.pos == self.of_end {
             return false;
         }
         let c = self.at(self.pos + 1);

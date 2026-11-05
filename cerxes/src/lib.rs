@@ -175,9 +175,9 @@ impl Engine {
         self.error = String::new();
         let mut pcomp_error = String::new();
         if self.vm.pcomp && !self.syntax.typescript && !self.syntax.jsx {
-            // JavaScript; what pcomp does not read (a module's import and
-            // export) goes to the parser
-            let u = pcomp::compile_unit(src);
+            // JavaScript, its `import`s the host's modules; what pcomp does
+            // not read goes to the parser
+            let u = pcomp::compile_script(src, false, false, "", "");
             if u.error.is_empty() {
                 return u;
             }
@@ -189,7 +189,7 @@ impl Engine {
             // not read (decorators …) goes to the parser
             let mut sx = self.syntax.clone();
             crate::jsx::read_pragmas(src, &mut sx);
-            let u = pcomp::compile_unit_syntax(src, sx.typescript, sx.jsx, sx.jsx_factory.as_str(), sx.jsx_fragment.as_str());
+            let u = pcomp::compile_script(src, sx.typescript, sx.jsx, sx.jsx_factory.as_str(), sx.jsx_fragment.as_str());
             if u.error.is_empty() {
                 return u;
             }

@@ -407,6 +407,23 @@ const f = <T>(a: T) => a; f(3)
 ----
 3
 
+# a type alias of a generic function in TSX, `of<T>()` a method's type
+# parameters, a type that ends in `>>=`, `<T>x` before `<U>y`
+==== tsx
+type F = <T>(x: T) => T;
+const g: F = (x) => x;
+class L { static of<T>(v: T): T[] { return [v]; } }
+const n: Array<Array<number>>= [[1]];
+let m: Map<string, number>= new Map();
+[g(2), L.of(5)[0], n[0][0], m.size].join()
+----
+2,5,1,0
+
+==== ts
+const y = <string><unknown>'s'; y + typeof y
+----
+sstring
+
 # a value import reads a module the host defined (defineModule)
 ==== tsx
 import x from 'y'; x
