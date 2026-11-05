@@ -164,10 +164,19 @@ pub fn snapshot(vm: &Vm) -> String {
     for a in vm.atom_names.iter() {
         put_num(&mut b, st.id(a.as_str()));
     }
+    // by atom, so that the same state gives the same text
     put_num(&mut b, vm.symbol_atoms.len() as int);
-    for (k, v) in vm.symbol_atoms.iter() {
-        put_num(&mut b, *k);
-        put_num(&mut b, *v);
+    let mut a: int = 0;
+    let na = vm.atom_names.len() as int;
+    while a < na {
+        match vm.symbol_atoms.get(&a) {
+            Some(v) => {
+                put_num(&mut b, a);
+                put_num(&mut b, *v);
+            }
+            None => {}
+        }
+        a += 1;
     }
     // the compiled code
     put_num(&mut b, vm.protos.len() as int);
