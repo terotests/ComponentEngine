@@ -249,7 +249,20 @@ impl Engine {
             self.error = String::from("SyntaxError");
             return self.error.clone();
         }
+        self.vm.slice_t0 = builtins::now_ms();
+        self.vm.ticks = vm::SLICE_TICKS;
+        self.vm.slicing = self.vm.slice_ms > 0.0;
         let r = self.run_val(u);
+        self.vm.slicing = false;
+        if self.vm.suspended {
+            return String::new();
+        }
+        self.finish_run(r)
+    }
+
+    /// What `run` does once the script has returned: its jobs, then its
+    /// completion value or the uncaught exception.
+    fn finish_run(&mut self, r: Val) -> String {
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -258,6 +271,46 @@ impl Engine {
             return self.uncaught();
         }
         self.vm.display(&r)
+    }
+
+    /// Scripts run in slices of `ms` milliseconds: when one runs out at a
+    /// branch, call or return, `run` / `eval` return "" with `is_suspended`
+    /// true, and `resume` goes on from there (a snapshot taken meanwhile
+    /// goes on in another engine too). 0: no slices (the default).
+    pub fn set_slice(&mut self, ms: double) {
+        self.vm.slice_ms = ms;
+    }
+
+    /// The script stopped when its slice ran out (`set_slice`).
+    pub fn is_suspended(&self) -> bool {
+        self.vm.suspended
+    }
+
+    /// Goes on with a suspended script for another slice; answers as `run`
+    /// does, "" with `is_suspended` true when this slice runs out too.
+    pub fn resume(&mut self) -> String {
+        if !self.vm.suspended {
+            return String::new();
+        }
+        self.vm.suspended = false;
+        self.vm.slice_t0 = builtins::now_ms();
+        self.vm.ticks = vm::SLICE_TICKS;
+        self.vm.slicing = self.vm.slice_ms > 0.0;
+        if !self.vm.regs || self.vm.translate_frames() {
+            self.vm.run(0);
+        }
+        self.vm.slicing = false;
+        if self.vm.suspended {
+            return String::new();
+        }
+        if self.vm.throwing {
+            return self.uncaught();
+        }
+        let r = match self.vm.stack.pop() {
+            Some(v) => v,
+            None => Val::Undef,
+        };
+        self.finish_run(r)
     }
 
     fn run_val(&mut self, u: unit::Unit) -> Val {

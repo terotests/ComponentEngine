@@ -297,6 +297,17 @@ pub struct Vm {
     pub made: int,
     pub made_limit: int,
     pub native_depth: int,
+    /// time slices (Engine::set_slice): the slice's length in ms, 0 for
+    /// none; when it began; back jumps left before the clock is read again
+    pub slice_ms: double,
+    pub slice_t0: double,
+    pub ticks: int,
+    /// the script stopped at a branch when its slice ran out, its frames
+    /// kept (Engine::resume goes on)
+    pub suspended: bool,
+    /// slices are on for this run: set by Engine::run / resume only, so a
+    /// host call (call_top, jobs) never stops half way
+    pub slicing: bool,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
     pub temp_roots: Vec<Val>,
@@ -521,6 +532,11 @@ impl Vm {
             made: 0,
             made_limit: MADE_MIN,
             native_depth: 0,
+            slice_ms: 0.0,
+            slice_t0: 0.0,
+            ticks: SLICE_TICKS,
+            suspended: false,
+            slicing: false,
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
@@ -3092,7 +3108,7 @@ impl Vm {
         self.native_depth += 1;
         self.run(base);
         self.native_depth -= 1;
-        if self.throwing {
+        if self.throwing || self.suspended {
             return Val::Undef;
         }
         self.stack.pop().unwrap()
@@ -3633,6 +3649,9 @@ impl Vm {
             if (self.frames.len() as int) <= base {
                 return;
             }
+            if self.slicing && self.frame_brk() {
+                return;
+            }
             let fi = self.frames.len() - 1;
             let pi = self.frames[fi].proto as usize;
             let bp = self.frames[fi].bp;
@@ -3750,6 +3769,9 @@ impl Vm {
                                     self.gc();
                                 }
                             }
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
                             pc = (op.a as int);
                         }
                     }
@@ -3768,6 +3790,9 @@ impl Vm {
                     OP_CASE_INT_JT => {
                         if let Val::Num(x) = self.stack[self.stack.len() - 1] {
                             if x == (op.b as double) {
+                                if self.slicing && self.brk(fi, (op.a as int)) {
+                                    return;
+                                }
                                 pc = (op.a as int);
                             }
                         }
@@ -3785,6 +3810,9 @@ impl Vm {
                                 if self.gc_due() {
                                     self.gc();
                                 }
+                            }
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
                             }
                             pc = (op.a as int);
                         }
@@ -3804,25 +3832,39 @@ impl Vm {
                             }
                         };
                         if hit {
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
                             pc = (op.a as int);
                         }
                     }
                     OP_JUMP => {
-                        if (op.a as int) < pc && self.gc_due() {
-                            self.frames[fi].pc = (op.a as int);
-                            self.gc();
+                        if (op.a as int) < pc {
+                            if self.gc_due() {
+                                self.frames[fi].pc = (op.a as int);
+                                self.gc();
+                            }
+                        }
+                        if self.slicing && self.brk(fi, (op.a as int)) {
+                            return;
                         }
                         pc = (op.a as int);
                     }
                     OP_JF => {
                         let v = self.pop();
                         if !truthy(&v) {
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
                             pc = (op.a as int);
                         }
                     }
                     OP_JT => {
                         let v = self.pop();
                         if truthy(&v) {
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
                             pc = (op.a as int);
                         }
                     }
@@ -4149,6 +4191,7 @@ impl Vm {
                     }
                     _ => {
                         self.frames[fi].pc = pc;
+                        let pc0 = pc;
                         let changed = self.step(op, pi, bp, fi, &mut pc);
                         if self.throwing {
                             if !self.unwind(base) {
@@ -4158,6 +4201,10 @@ impl Vm {
                         }
                         if changed {
                             continue 'frames;
+                        }
+                        // a branch in step (JF_KEEP, JNULLISH, ITER_NEXT...)
+                        if pc != pc0 && self.slicing && self.brk(fi, pc) {
+                            return;
                         }
                     }
                 }
@@ -4256,6 +4303,40 @@ impl Vm {
 
     pub fn freeze_obj(&mut self, o: int) {
         self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, &vec![Val::Obj(o)], false, Val::Undef);
+    }
+
+    /// At a branch, call or return with slices on: whether this slice is
+    /// over and the script can stop here, with no native code under it
+    /// (native_depth 0). The clock is read once in SLICE_TICKS branches.
+    pub fn slice_over(&mut self) -> bool {
+        self.ticks -= 1;
+        if self.ticks > 0 || self.native_depth != 0 {
+            return false;
+        }
+        self.ticks = SLICE_TICKS;
+        let now = crate::builtins::now_ms();
+        now - self.slice_t0 >= self.slice_ms
+    }
+
+    /// A taken branch to `to` with slices on: when the slice is over the
+    /// frame stops there (its pc is `to`) and the run returns.
+    pub fn brk(&mut self, fi: usize, to: int) -> bool {
+        if !self.slice_over() {
+            return false;
+        }
+        self.frames[fi].pc = to;
+        self.suspended = true;
+        true
+    }
+
+    /// Between frames (a call, a return, a catch) with slices on: when the
+    /// slice is over the run stops; every frame's pc is already stored.
+    pub fn frame_brk(&mut self) -> bool {
+        if !self.slice_over() {
+            return false;
+        }
+        self.suspended = true;
+        true
     }
 
     pub fn gc_due(&self) -> bool {
@@ -6779,3 +6860,7 @@ pub fn rc_trim(_rc: &mut Rc<String>) {}
 pub fn rc_push(_rc: &mut Rc<String>, _b: &str) -> bool {
     false
 }
+
+/// Back jumps between two reads of the clock while slices are on.
+pub const SLICE_TICKS: int = 1000;
+

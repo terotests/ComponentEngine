@@ -83,6 +83,27 @@ impl Vm {
         false
     }
 
+    /// Before suspended frames go on (Engine::resume, maybe in an engine
+    /// restored from a snapshot, which keeps no register code): every
+    /// running frame's function in register code, as a return goes
+    /// straight into its caller's.
+    pub fn translate_frames(&mut self) -> bool {
+        let mut i = 0;
+        while i < self.frames.len() {
+            let pi = self.frames[i].proto as usize;
+            if self.protos[pi].rstate == 0 {
+                unpack_code(&mut self.protos[pi]);
+                let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
+                if !e.is_empty() {
+                    self.throw_type(e.as_str());
+                    return false;
+                }
+            }
+            i += 1;
+        }
+        true
+    }
+
     /// Runs frames until the frame count falls back to `base`.
     pub fn rrun(&mut self, base: int) {
         'frames: loop {
@@ -92,6 +113,9 @@ impl Vm {
                 }
             }
             if (self.frames.len() as int) <= base {
+                return;
+            }
+            if self.slicing && self.frame_brk() {
                 return;
             }
             let mut fi = self.frames.len() - 1;
@@ -224,6 +248,9 @@ impl Vm {
                                 }
                             }
                             npc = (w3 as int);
+                            if self.slicing && self.brk(fi, npc) {
+                                return;
+                            }
                         }
                     }
                     R_LOOP => {
@@ -257,6 +284,9 @@ impl Vm {
                             self.rgc(want);
                         }
                         pc = (t as int);
+                        if self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_JUMP => {
@@ -265,14 +295,23 @@ impl Vm {
                             self.rgc(want);
                         }
                         pc = (w1 as int);
+                        if self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_JF => {
                         pc = if truthy(self.rget(bp, (w1 as int))) { next } else { (w2 as int) };
+                        if pc != next && self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_JT => {
                         pc = if truthy(self.rget(bp, (w1 as int))) { (w2 as int) } else { next };
+                        if pc != next && self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_CMP_JFK | R_CMP_JTK => {
@@ -299,15 +338,24 @@ impl Vm {
                             self.stack[(bp + ((w1 & 65535) as int)) as usize] = Val::Bool(r);
                             if r == (((w0 & 255) as int) == R_CMP_JTK) {
                                 npc = ((w1 >> 16 as int) as int);
+                                if self.slicing && self.brk(fi, npc) {
+                                    return;
+                                }
                             }
                         }
                     }
                     R_JF_KEEP => {
                         pc = if truthy(self.rget(bp, (w1 as int))) { next } else { (w2 as int) };
+                        if pc != next && self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_JT_KEEP => {
                         pc = if truthy(self.rget(bp, (w1 as int))) { (w2 as int) } else { next };
+                        if pc != next && self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_JNN_KEEP => {
@@ -316,6 +364,9 @@ impl Vm {
                             _ => false,
                         };
                         pc = if nullish { next } else { (w2 as int) };
+                        if pc != next && self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_LOCAL_NULL_JF => {
@@ -333,6 +384,9 @@ impl Vm {
                                 }
                             }
                             pc = (w3 as int);
+                            if self.slicing && self.brk(fi, pc) {
+                                return;
+                            }
                         } else {
                             pc = next;
                         }
@@ -344,6 +398,9 @@ impl Vm {
                             hit = *x == (w2 as double);
                         }
                         pc = if hit { (w3 as int) } else { next };
+                        if pc != next && self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_SWITCH => {
@@ -359,12 +416,18 @@ impl Vm {
                             t = self.rtab[(w2 + 1 + (self.rtab[w2 as usize] as i32)) as usize];
                         }
                         pc = t;
+                        if self.slicing && self.brk(fi, pc) {
+                            return;
+                        }
                         continue;
                     }
                     R_CASE_JT => {
                         let r = self.rcmp(OP_SEQ, pi, bp, (w1 as int), (w2 as int), fi, pc);
                         if r && !self.throwing {
                             npc = (w3 as int);
+                            if self.slicing && self.brk(fi, npc) {
+                                return;
+                            }
                         }
                     }
                     R_GET_PROP | R_GET_THIS_PROP => {
@@ -514,6 +577,9 @@ impl Vm {
                                 pc = self.frames[fi].pc;
                                 want = (bp + self.protos[pi].fsize) as usize;
                                 rb = self.protos[pi].rbase;
+                                if self.slicing && self.frame_brk() {
+                                    return;
+                                }
                                 continue;
                             }
                         }
@@ -558,6 +624,9 @@ impl Vm {
                             let to = if fr.ret >= 0 { fr.ret as usize } else { fpos };
                             self.stack[to] = v;
                             self.grow_stack(want);
+                            if self.slicing && self.frame_brk() {
+                                return;
+                            }
                             continue;
                         } else {
                             self.stack.truncate(fpos);
@@ -603,6 +672,9 @@ impl Vm {
                     R_ITER_NEXT => {
                         if !self.r_iter_next(bp, fi, pc, (w1 as int), (w3 as int)) && !self.throwing {
                             npc = (w2 as int);
+                            if self.slicing && self.brk(fi, npc) {
+                                return;
+                            }
                         }
                     }
                     R_TYPEOF => {
@@ -724,6 +796,9 @@ impl Vm {
                             continue 'frames;
                         }
                         npc = p2;
+                        if npc != next && self.slicing && self.brk(fi, npc) {
+                            return;
+                        }
                     }
                     _ => {
                         self.throw_type("register code: unknown instruction");

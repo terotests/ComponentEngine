@@ -22,7 +22,7 @@ use crate::value::*;
 use crate::vm::*;
 
 /// Bumped when the text or what it holds changes.
-pub const SNAPSHOT_FORMAT: int = 1;
+pub const SNAPSHOT_FORMAT: int = 2;
 
 struct Strings {
     index: HashMap<String, int>,
@@ -155,7 +155,10 @@ fn in_objs(v: &Val, no: int) -> bool {
 /// The engine's state as text; "" when it is not idle (a script running,
 /// an exception pending), which a snapshot cannot hold.
 pub fn snapshot(vm: &Vm) -> String {
-    if !vm.stack.is_empty() || !vm.frames.is_empty() || !vm.handlers.is_empty() || vm.throwing || vm.native_depth != 0 || !vm.temp_roots.is_empty() {
+    // idle, or stopped where a slice ran out (Engine::set_slice): then the
+    // frames, the stack and the handlers are written too
+    let idle = vm.stack.is_empty() && vm.frames.is_empty() && vm.handlers.is_empty();
+    if !(idle || vm.suspended) || vm.throwing || vm.native_depth != 0 || !vm.temp_roots.is_empty() {
         return String::new();
     }
     let mut st = Strings { index: HashMap::new(), list: Vec::new() };
@@ -325,6 +328,19 @@ pub fn snapshot(vm: &Vm) -> String {
             return String::new();
         }
         put_num(&mut b, st.id(k.as_str()));
+    }
+    // a suspended script: its stack, frames and handlers
+    put_num(&mut b, if vm.suspended { 1 } else { 0 });
+    put_vals(&mut b, &mut st, vm, &vm.stack);
+    put_num(&mut b, vm.frames.len() as int);
+    for f in vm.frames.iter() {
+        put_ints(&mut b, &vec![f.proto, f.fobj, f.pc, f.bp, f.env, f.args_obj, if f.construct { 1 } else { 0 }, f.gen, f.ret, f.mv_from, f.mv_to]);
+        put_val(&mut b, &mut st, vm, &f.this_val);
+        put_val(&mut b, &mut st, vm, &f.new_target);
+    }
+    put_num(&mut b, vm.handlers.len() as int);
+    for h in vm.handlers.iter() {
+        put_ints(&mut b, &vec![h.frame, h.catch_pc, h.sp, h.env]);
     }
     let mut out = String::new();
     put_num(&mut out, SNAPSHOT_FORMAT);
@@ -624,12 +640,63 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         vm.regex_cache.insert(key, i);
         i += 1;
     }
-    if r.bad || r.pos != r.len || !valid_heap(vm) {
+    vm.suspended = r.num() == 1;
+    vm.stack = get_vals(&mut r, &strs);
+    vm.frames = Vec::new();
+    let nf = r.num();
+    i = 0;
+    while i < nf && !r.bad {
+        let x = get_ints(&mut r);
+        if x.len() != 11 {
+            r.bad = true;
+            break;
+        }
+        let this_val = get_val(&mut r, &strs);
+        let new_target = get_val(&mut r, &strs);
+        vm.frames.push(Frame { proto: x[0], fobj: x[1], pc: x[2], bp: x[3], env: x[4], this_val: this_val, new_target: new_target, args_obj: x[5], construct: x[6] == 1, gen: x[7], ret: x[8], mv_from: x[9], mv_to: x[10] });
+        i += 1;
+    }
+    vm.handlers = Vec::new();
+    let nh = r.num();
+    i = 0;
+    while i < nh && !r.bad {
+        let x = get_ints(&mut r);
+        if x.len() != 4 {
+            r.bad = true;
+            break;
+        }
+        vm.handlers.push(Handler { frame: x[0], catch_pc: x[1], sp: x[2], env: x[3] });
+        i += 1;
+    }
+    if r.bad || r.pos != r.len || !valid_heap(vm) || !valid_frames(vm) {
         return false;
+    }
+    // the running functions' code unpacked, as a frame push leaves it
+    for f in vm.frames.iter() {
+        unpack_code(&mut vm.protos[f.proto as usize]);
     }
     vm.find_setters();
     // the counts are not in the text: made again from the heap
     vm.recount();
+    true
+}
+
+/// A suspended script's frames name protos, objects and stack places that
+/// exist.
+fn valid_frames(vm: &Vm) -> bool {
+    let np = vm.protos.len() as int;
+    let no = vm.objs.len() as int;
+    let ns = vm.stack.len() as int;
+    for f in vm.frames.iter() {
+        if f.proto < 0 || f.proto >= np || f.fobj >= no || f.env >= no || f.args_obj >= no || f.bp < 0 || f.bp > ns || f.pc < 0 {
+            return false;
+        }
+    }
+    for h in vm.handlers.iter() {
+        if h.frame < 0 || h.frame >= vm.frames.len() as int || h.sp < 0 || h.sp > ns || h.env >= no {
+            return false;
+        }
+    }
     true
 }
 

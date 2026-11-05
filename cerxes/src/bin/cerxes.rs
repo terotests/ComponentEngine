@@ -54,7 +54,19 @@ fn main() {
     }
     e.set_syntax_for_path(path.as_str());
     e.set_echo(true);
-    let r = e.eval(src.as_str());
+    // CERXES_SLICE_MS=n: the script runs in slices of n ms, resumed until
+    // it ends (what a host that detaches the engine pays for its checks)
+    let slice = std::env::var("CERXES_SLICE_MS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    e.set_slice(slice);
+    let mut r = e.eval(src.as_str());
+    let mut slices = 1;
+    while e.is_suspended() {
+        slices += 1;
+        r = e.resume();
+    }
+    if slice > 0.0 {
+        eprintln!("slices: {}", slices);
+    }
     if e.vm.rc_check || std::env::var("CERXES_STATS").is_ok() {
         let v = &e.vm;
         let free = v.objs.iter().filter(|o| o.free).count();

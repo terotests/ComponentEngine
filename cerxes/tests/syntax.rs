@@ -221,3 +221,89 @@ fn prelude_snapshot_is_current() {
     e.eval("print([3,1,2].sort().join(), typeof Symbol.iterator, JSON.stringify(new Map([[1,2]]).size))");
     assert_eq!(e.vm.out, vec![String::from("1,2,3 symbol 1")]);
 }
+
+/// Runs `src` in slices of `ms`, on the register machine when `regs`, a
+/// snapshot at every stop and the next slice in an engine made from it;
+/// answers the result, the output and the number of stops.
+fn run_in_slices(src: &str, ms: f64, regs: bool) -> (String, Vec<String>, i64) {
+    let mut e = Engine::new();
+    e.vm.regs = regs;
+    e.set_slice(ms);
+    let mut r = e.eval(src);
+    let mut stops = 0;
+    while e.is_suspended() {
+        stops += 1;
+        let snap = e.snapshot();
+        assert!(!snap.is_empty(), "no snapshot while suspended");
+        let mut next = Engine::from_snapshot(&snap);
+        assert!(next.error.is_empty(), "restore: {}", next.error);
+        next.vm.regs = regs;
+        next.set_slice(ms);
+        r = next.resume();
+        e = next;
+    }
+    (r, e.vm.out.clone(), stops)
+}
+
+/// `src` in slices on both machines answers as it does in one go, and
+/// stops at least `min_stops` times on each.
+fn check_slices(src: &str, ms: f64, min_stops: i64) {
+    for regs in [false, true] {
+        let mut plain = Engine::new();
+        plain.vm.regs = regs;
+        let want = plain.eval(src);
+        let (got, out, stops) = run_in_slices(src, ms, regs);
+        assert!(stops >= min_stops, "regs {}: {} stops", regs, stops);
+        assert_eq!(got, want, "regs {}", regs);
+        assert_eq!(out, plain.vm.out, "regs {}", regs);
+    }
+}
+
+#[test]
+fn slices_stop_in_loops_and_go_on_from_snapshots() {
+    // a loop at the top, in a function under try / finally, and in map and
+    // forEach callbacks: each stops when its slice runs out
+    check_slices(r#"
+        var o = { n: 0, t: 0, s: '' };
+        function f(x) { return x % 7; }
+        try { while (o.n < 600000) { o.n++; o.t += f(o.n); if (o.n % 200000 == 0) o.s += o.n + ','; } }
+        finally { o.s += 'end'; }
+        var r = [1, 2].map(function (x) { var k = 0; while (k < 300000) k++; return x * k; });
+        var s = 0; [5, 6].forEach(function (x) { var j = 0; while (j < 300000) { j++; s += x; } });
+        print(o.n, o.t, o.s, r.join(), s); o.t + s
+    "#, 1.0, 1);
+}
+
+#[test]
+fn slices_stop_in_while_true_and_at_calls_and_returns() {
+    // while (true) left with break; recursion with no loop at all stops at
+    // its calls and returns
+    check_slices(r#"
+        var n = 0; while (true) { n++; if (n == 500000) break; }
+        function fib(k) { return k < 2 ? k : fib(k - 1) + fib(k - 2); }
+        print(n, fib(24)); n
+    "#, 1.0, 1);
+}
+
+#[test]
+fn slices_stop_at_every_kind_of_branch() {
+    // a slice that is over at once: the run stops every SLICE_TICKS
+    // branches, calls and returns, so it stops at many kinds of them
+    check_slices(r#"
+        var log = [];
+        function sw(x) { switch (x % 5) { case 0: return 'a'; case 1: return 'b'; case 'x': return 'c'; default: return 'd'; } }
+        function nul(o) { return (o ?? { v: 1 }).v + (o?.w ?? 2) + (o && o.v || 3); }
+        class P { constructor(v) { this.v = v; } get d() { return this.v * 2; } }
+        var acc = 0;
+        for (var i = 0; i < 4000; i++) {
+            acc += sw(i).length + nul(i % 3 ? null : { v: i, w: i });
+            for (var k in { a: 1, b: 2 }) acc += k.length;
+            for (var x of [i, i + 1]) acc += x % 3;
+            try { if (i % 97 == 0) throw new Error('e' + i); acc += new P(i).d % 11; }
+            catch (e) { log.push(e.message); }
+            acc += [3, 1, 2].sort(function (a, b) { return a - b; })[0];
+            acc += i % 2 == 0 ? 1 : (i % 3 === 0 ? 2 : 3);
+        }
+        print(acc, log.length, log.slice(0, 3).join()); acc
+    "#, 0.0000001, 20);
+}
