@@ -693,7 +693,7 @@ impl Vm {
                         }
                     }
                     R_GET_METHOD => {
-                        self.r_get_method(bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
+                        self.r_get_method(bp, rb, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
                     }
                     R_CALL => {
                         let argc = w2;
@@ -1360,36 +1360,58 @@ impl Vm {
         self.set_elem(&target, &kv, val);
     }
 
+    /// R_GET_METHOD: the method and its receiver into w1, w1 + 1; the
+    /// chain cache answers here, the rest goes to r_get_method_slow.
     #[inline(never)]
-    fn r_get_method(&mut self, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
-        let v = self.rget(bp, w2).clone();
-        self.frames[fi].pc = pc + 1;
-        let atom = w3;
-        let mut f = Val::Undef;
-        let mut done = false;
-        if let Val::Obj(o) = &v {
-            let o = *o;
-            let site = self.rbase_of(fi) + pc;
+    fn r_get_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+        let v = *self.rget(bp, w2);
+        if let Val::Obj(o) = v {
+            if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
+                // the cache's shape: o's own data property
+                let f = *val_at(&self.ob(o).vals, (w3 & 65535) as usize);
+                if ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
+                    self.rset((bp + w1) as usize, f);
+                    self.rset((bp + w1 + 1) as usize, v);
+                    return;
+                }
+            }
+            let site = rb + pc;
             if (site as usize) < self.rpic.len() && self.rpic[site as usize] >= 0 {
-                // the chain cache first: a way that fits o's shape was
-                // learnt on that shape without the property of its own
+                // a way that fits o's shape was learnt on that shape
+                // without the property of its own
                 let h = self.pic_probe(site, o);
                 if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
                     let f = if h >= 0 { self.objs[h as usize].vals[self.pic[(self.pic_way + 3) as usize] as usize] } else { Val::Undef };
                     if ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
-                        self.stack[(bp + w1) as usize] = f;
-                        self.stack[(bp + w1 + 1) as usize] = v;
+                        self.rset((bp + w1) as usize, f);
+                        self.rset((bp + w1 + 1) as usize, v);
                         return;
                     }
                 }
             }
+        }
+        self.r_get_method_slow(bp, rb, fi, pc, w0, w1, v, w3);
+    }
+
+    #[inline(never)]
+    fn r_get_method_slow(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, v: Val, w3: int) {
+        self.frames[fi].pc = pc + 1;
+        let pi = self.frames[fi].proto as usize;
+        let atom = self.protos[pi].code[pc as usize].a as int;
+        let mut f = Val::Undef;
+        let mut done = false;
+        if let Val::Obj(o) = &v {
+            let o = *o;
             let slot = self.find(o, atom);
             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
                 f = self.objs[o as usize].vals[slot as usize].clone();
                 done = true;
+                let nc = self.ic_of(o, slot);
+                if nc >= 65536 {
+                    self.rcode[(rb + pc) as usize].c = nc as i32;
+                }
             } else if slot < 0 {
-                let site = self.rbase_of(fi) + pc;
-                let h = self.pic_get(site, o, atom);
+                let h = self.pic_get(rb + pc, o, atom);
                 if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
                     f = if h >= 0 { self.objs[h as usize].vals[self.pic[(self.pic_way + 3) as usize] as usize] } else { Val::Undef };
                     done = true;

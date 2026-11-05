@@ -738,7 +738,8 @@ impl Tr {
             } else if (c as int) == OP_GET_METHOD {
                 let o = self.opnd(d - 1);
                 self.popn(1);
-                self.set(i, R_GET_METHOD, (op.b as int), ns + d - 1, o, (op.a as int));
+                // c is the own-property cache; the atom is the stack op's
+                self.set(i, R_GET_METHOD, (op.b as int), ns + d - 1, o, 0);
                 self.push_own(-1);
                 self.push_own(-1);
             } else if (c as int) == OP_THIS {
