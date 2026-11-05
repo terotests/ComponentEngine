@@ -207,3 +207,17 @@ fn host_calls_reclaim_checked() {
     assert!(e.vm.reclaims > 0);
     assert_eq!(e.vm.rc_errors, 0, "{}", e.vm.rc_log.join("; "));
 }
+
+#[test]
+fn prelude_snapshot_is_current() {
+    // Engine::new restores src/prelude.snap instead of compiling the
+    // prelude; after a change to the prelude or the built-ins, write it
+    // again: cargo run --release --bin cerxes -- --prelude-snapshot > src/prelude.snap
+    let fresh = Engine::compiled(true).snapshot();
+    let kept = include_str!("../src/prelude.snap");
+    assert!(fresh == kept, "src/prelude.snap is stale: cargo run --release --bin cerxes -- --prelude-snapshot > src/prelude.snap");
+    let mut e = Engine::new();
+    assert!(e.error.is_empty());
+    e.eval("print([3,1,2].sort().join(), typeof Symbol.iterator, JSON.stringify(new Map([[1,2]]).size))");
+    assert_eq!(e.vm.out, vec![String::from("1,2,3 symbol 1")]);
+}

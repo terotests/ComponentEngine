@@ -2,7 +2,8 @@
 // The extension picks the syntax (see Engine::set_syntax_for_path).
 //
 // `cerxes --emit app.tsx` writes the script as JavaScript instead (src/emit.rs),
-// `cerxes --runtime` what such a script expects defined before it runs.
+// `cerxes --runtime` what such a script expects defined before it runs,
+// `cerxes --prelude-snapshot > src/prelude.snap` the prelude Engine::new restores.
 use cerxes::Engine;
 
 fn main() {
@@ -10,6 +11,11 @@ fn main() {
     let usage = "usage: cerxes [--emit] <file.ts|.tsx|.jsx|.js> | cerxes --runtime";
     if args.len() > 1 && args[1] == "--runtime" {
         print!("{}", cerxes::emit::runtime());
+        return;
+    }
+    if args.len() > 1 && args[1] == "--prelude-snapshot" {
+        // src/prelude.snap: what Engine::new restores instead of compiling
+        print!("{}", Engine::compiled(true).snapshot());
         return;
     }
     if args.len() > 1 && args[1] == "--emit" {

@@ -81,6 +81,22 @@ impl Engine {
     /// without a syntax tree (`pcomp`); TypeScript and JSX go through the
     /// parser either way.
     pub fn new_with(pcomp: bool) -> Engine {
+        if pcomp {
+            // the prelude as compiled when the crate was built (Rust), not
+            // compiled again: a third of the startup peak
+            let mut vm = Vm::new();
+            if prelude_snapshot(&mut vm) {
+                vm.pcomp = true;
+                return Engine { vm: vm, error: String::new(), through_text: false, syntax: Syntax::tsx() };
+            }
+        }
+        Engine::compiled(pcomp)
+    }
+
+    /// An engine whose prelude is compiled now, not read from
+    /// `prelude.snap`; `cerxes --prelude-snapshot` writes that file from
+    /// its snapshot.
+    pub fn compiled(pcomp: bool) -> Engine {
         let mut vm = Vm::new();
         vm.pcomp = pcomp;
         vm.setup();
@@ -335,4 +351,17 @@ impl Engine {
     pub fn heap_size(&self) -> int {
         (self.vm.objs.len() - self.vm.free_list.len()) as int
     }
+}
+
+/// Rust: the engine's state after the prelude, from `src/prelude.snap`
+/// (`cerxes --prelude-snapshot`, checked by tests/syntax.rs); false when
+/// it does not restore, and the prelude is then compiled.
+#[ranger::target(rust)]
+pub fn prelude_snapshot(vm: &mut Vm) -> bool {
+    snapshot::restore(vm, include_str!("prelude.snap"))
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn prelude_snapshot(_vm: &mut Vm) -> bool {
+    false
 }
