@@ -619,11 +619,12 @@ impl Vm {
                         let mut r = Val::Undef;
                         let mut done = false;
                         if let (Val::Obj(o), Val::Num(n)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
-                            let ob = &self.objs[*o as usize];
+                            let ob = obj_at(&self.objs, *o as usize);
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n {
-                                    r = self.evecs[ob.elems as usize].v[i as usize].clone();
+                                let ev = ob.elems as usize;
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == *n {
+                                    r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
                             }
@@ -658,10 +659,11 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == n && ob.pos != 2 {
-                                    old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
-                                    old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
-                                    self.evecs[ob.elems as usize].v[i as usize] = val.clone();
+                                let ev = ob.elems as usize;
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos != 2 {
+                                    old = obj_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
+                                    old_s = str_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
+                                    val_put(&mut evec_mut(&mut self.evecs, ev).v, i as usize, val.clone());
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
@@ -690,6 +692,10 @@ impl Vm {
                         }
                         if !done {
                             self.r_set_elem_slow(bp, fi, pc, (w1 as int), (w2 as int), val);
+                        }
+                        if ((w0 >> 8) & 255) == 1 {
+                            // the assignment's value, where the object was
+                            self.rset((bp + (w1 as int)) as usize, val);
                         }
                     }
                     R_GET_METHOD => {
@@ -1878,6 +1884,20 @@ pub fn evec_at(v: &Vec<Elems>, i: usize) -> &Elems {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn evec_at(v: &Vec<Elems>, i: usize) -> &Elems {
     &v[i]
+}
+
+/// `v[i]` of the element vectors, to write.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn evec_mut(v: &mut Vec<Elems>, i: usize) -> &mut Elems {
+    debug_assert!(i < v.len(), "element vector past evecs");
+    // SAFETY: as evec_at
+    unsafe { v.get_unchecked_mut(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn evec_mut(v: &mut Vec<Elems>, i: usize) -> &mut Elems {
+    &mut v[i]
 }
 
 /// Whether a value vector has no room left (Rust: grow_vals sizes it).
