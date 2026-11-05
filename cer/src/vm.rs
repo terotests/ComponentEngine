@@ -1481,12 +1481,8 @@ impl Vm {
             self.smark_root(v, list);
             i += 1;
         }
-        i = 0;
-        while i < self.atom_vals.len() {
-            let v = self.atom_vals[i];
-            self.smark_root(v, list);
-            i += 1;
-        }
+        // atom_vals are not scanned: atom_val pins each one (flag 1),
+        // so reclaim_strs never frees them
         i = 0;
         while i < self.type_vals.len() {
             let v = self.type_vals[i];
@@ -6848,8 +6844,12 @@ impl Vm {
 pub const MADE_MIN: int = 262144;
 pub const MADE_PER_LIVE: int = 8;
 
-/// The smallest zct that makes a reclaim.
-pub const ZCT_MIN: int = 8192;
+/// The smallest zct that makes a reclaim. Small, so that the objects a
+/// reclaim frees, and the slots it hands back, are still in the cache:
+/// at 8192 a reclaim reads objects made ~1 MB of work ago, and Chart.js
+/// missed a 2 MB L2 18M times (2048: 6.0M; 1024 and below cost more in
+/// reclaims than they save).
+pub const ZCT_MIN: int = 2048;
 /// strings made that make a collection due, at least (Vm.slimit)
 pub const SLIMIT_MIN: int = 65536;
 /// bytes of new strings that make a collection due, at least
