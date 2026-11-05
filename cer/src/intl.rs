@@ -530,7 +530,7 @@ impl Vm {
         self.method(g, "__cerIntlSource", NF_INTL_SOURCE, 0);
     }
 
-    pub fn call_native_intl(&mut self, id: int, args: Vec<Val>) -> Val {
+    pub fn call_native_intl(&mut self, id: int, args: &Vec<Val>) -> Val {
         if id == NF_INTL_SOURCE {
             return self.eval_source(INTL, false, false);
         }
@@ -553,7 +553,7 @@ impl Vm {
             let mut elems: Vec<Val> = Vec::new();
             if crate::intl_data::is_strings(name.as_str()) {
                 for line in text.split('\n') {
-                    elems.push(str_val(line));
+                    elems.push(self.str_val(line));
                 }
                 elems.pop();
             } else {

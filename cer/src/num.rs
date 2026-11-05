@@ -17,7 +17,7 @@ pub fn is_finite(x: double) -> bool {
 /// formatting machinery: `"k" + i` in a loop spends most of its time here.
 #[ranger::target(rust)]
 fn int_to_string(i: int) -> String {
-    let mut buf = [0u8; 12];
+    let mut buf = [0u8; 20];
     let mut n = i as u64;
     let mut p = buf.len();
     loop {
@@ -121,6 +121,19 @@ pub fn number_to_string(x: double) -> String {
     }
     if x == 0.0 {
         return String::from("0");
+    }
+    // whole numbers first: an int of every target holds them
+    if x > 0.0 && x < 2147483647.0 && x == ((x as int) as double) {
+        return int_to_string(x as int);
+    }
+    if x < 0.0 && x > -2147483647.0 && x == ((x as int) as double) {
+        let mut neg = String::from("-");
+        neg.push_str(int_to_string((-x) as int).as_str());
+        return neg;
+    }
+    let quick = quick_num_string(x);
+    if !quick.is_empty() {
+        return quick;
     }
     if x < 0.0 {
         return format!("-{}", number_to_string(-x));
@@ -591,4 +604,82 @@ pub fn to_fixed(x: double, d: int) -> String {
         return format!("-{}", s);
     }
     s
+}
+
+/// Rust: the shortest digits that read back as `x`, without an exponent,
+/// are what JavaScript writes for 1e-6 <= |x| < 1e21 (Number::toString);
+/// one formatting, no char vectors. Empty outside that range (and on the
+/// other targets): number_to_string's own way.
+#[ranger::target(rust)]
+pub fn quick_num_string(x: double) -> String {
+    let a = if x < 0.0 { -x } else { x };
+    if a >= 0.000001 && a < 1e15 {
+        let d = few_decimals(x, a);
+        if !d.is_empty() {
+            return d;
+        }
+    }
+    if a >= 0.000001 && a < 1e21 {
+        return format!("{}", x);
+    }
+    String::new()
+}
+
+/// `x` (|x| = a) as JavaScript writes it when its shortest form has at
+/// most 9 decimals: the least k for which m / 10^k is x, m the nearest
+/// whole number to a * 10^k, and no neighbour of m is x too (then the
+/// digits are both shortest and nearest). Empty when there is none.
+#[ranger::target(rust)]
+fn few_decimals(x: double, a: double) -> String {
+    if a == a.trunc() {
+        let mut s = String::with_capacity(17);
+        if x < 0.0 {
+            s.push('-');
+        }
+        s.push_str(int_to_string(a as i64).as_str());
+        return s;
+    }
+    let mut k: i64 = 1;
+    let mut p: f64 = 10.0;
+    let mut pi: i64 = 10;
+    while k <= 9 {
+        let m = (a * p).round();
+        if m >= 9007199254740992.0 {
+            return String::new();
+        }
+        let hit = m / p == a;
+        let lo = (m - 1.0) / p == a;
+        let hi = (m + 1.0) / p == a;
+        if lo || hi {
+            return String::new();
+        }
+        if hit {
+            let mi = m as i64;
+            let whole = mi / pi;
+            let frac = mi % pi;
+            let mut s = String::with_capacity(24);
+            if x < 0.0 {
+                s.push('-');
+            }
+            s.push_str(int_to_string(whole).as_str());
+            s.push('.');
+            let f = int_to_string(frac);
+            let mut z = k - f.as_bytes().len() as i64;
+            while z > 0 {
+                s.push('0');
+                z -= 1;
+            }
+            s.push_str(f.as_str());
+            return s;
+        }
+        k += 1;
+        p *= 10.0;
+        pi *= 10;
+    }
+    String::new()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn quick_num_string(_x: double) -> String {
+    String::new()
 }

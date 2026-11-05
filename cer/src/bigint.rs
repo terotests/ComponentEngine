@@ -530,7 +530,8 @@ impl Vm {
         self.method(bp, "toLocaleString", NF_BIGINTP_TOSTRING, 0);
         self.method(bp, "valueOf", NF_BIGINTP_VALUEOF, 0);
         let a_tag = self.intern("@@toStringTag");
-        self.add_prop(bp, a_tag, str_val("BigInt"), P_HIDDEN | P_READONLY);
+        let sv1 = self.str_val("BigInt");
+        self.add_prop(bp, a_tag, sv1, P_HIDDEN | P_READONLY);
     }
 
     /// The BigInt with decimal text `s` (canonical), made once.
@@ -540,7 +541,8 @@ impl Vm {
         }
         let bp = self.bigint_proto;
         let o = self.alloc(C_BIGINT, bp);
-        self.objs[o as usize].prim = str_val(s);
+        let sv0 = self.str_val(s);
+        self.put_prim(o, sv0);
         self.bigints.insert(String::from(s), o);
         self.symbols.push(o);
         Val::Obj(o)
@@ -554,7 +556,8 @@ impl Vm {
     pub fn big_text(&self, v: &Val) -> String {
         let o = obj_of(v);
         if o >= 0 {
-            if let Val::Str(s) = &self.objs[o as usize].prim {
+            if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
+                let s = self.sget(s.clone());
                 return s.as_ref().clone();
             }
         }
@@ -570,6 +573,7 @@ impl Vm {
         match &p {
             Val::Bool(b) => return self.bigint_val(if *b { "1" } else { "0" }),
             Val::Str(s) => {
+                let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 if t.is_empty() {
                     self.throw_syntax(format!("Cannot convert {} to a BigInt", s).as_str());
@@ -593,8 +597,8 @@ impl Vm {
             return v.clone();
         }
         let o = obj_of(v);
-        if o >= 0 && self.objs[o as usize].class == C_OBJECT && self.is_bigint(&self.objs[o as usize].prim.clone()) {
-            return self.objs[o as usize].prim.clone();
+        if o >= 0 && self.objs[o as usize].class == C_OBJECT && self.is_bigint(&self.colds[self.objs[o as usize].cold as usize].prim.clone()) {
+            return self.colds[self.objs[o as usize].cold as usize].prim.clone();
         }
         self.throw_type("BigInt.prototype method called on incompatible receiver");
         Val::Undef
@@ -674,6 +678,7 @@ impl Vm {
             return self.big_text(v);
         }
         if let Val::Str(s) = v {
+            let s = self.sget(s.clone());
             return from_string(s.as_str());
         }
         String::new()
@@ -689,6 +694,7 @@ impl Vm {
                 !t.is_empty() && t == x
             }
             Val::Str(s) => {
+                let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 !t.is_empty() && t == x
             }
@@ -702,7 +708,7 @@ impl Vm {
         }
     }
 
-    pub fn call_native_bigint(&mut self, id: int, this: Val, args: Vec<Val>, construct: bool) -> Val {
+    pub fn call_native_bigint(&mut self, id: int, this: Val, args: &Vec<Val>, construct: bool) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
         if id == NF_BIGINT {
@@ -755,6 +761,6 @@ impl Vm {
             return Val::Undef;
         }
         let t = self.big_text(&v);
-        string_val(to_radix(t.as_str(), radix as int))
+        self.string_val(to_radix(t.as_str(), radix as int))
     }
 }

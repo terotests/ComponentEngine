@@ -12,9 +12,14 @@ use crate::lexer::*;
 
 pub struct Parser {
     toks: Vec<Tok>,
+    /// the lexer, for the tokens' extras (Lexer.xs)
+    lx: Lexer,
     pos: int,
     pub ast: Ast,
     pub error: String,
+    /// what pcomp.rs does not read was found: never in CEr's JavaScript
+    /// (CErXes's parser sets it for JSX and modules)
+    pub beyond_js: bool,
     /// `in` is not an operator in the head of a `for`
     no_in: bool,
     in_function: bool,
@@ -133,15 +138,43 @@ pub fn is_reserved(w: &str) -> bool {
         || w == "enum"
 }
 
+/// CEr's parser reads only JavaScript: there is no text to write back for
+/// pcomp (CErXes's parser writes TypeScript, JSX and modules as JavaScript).
+pub const WRITES_JS: bool = false;
+
+/// Not used in CEr (`WRITES_JS`).
+pub fn eval_js(_code: &str, js_error: &str) -> (String, String) {
+    (String::new(), String::from(js_error))
+}
+
+/// A module's text as `eval` gets it (`module::HEADER`, the path, the comment's end, the source):
+/// its path, its source and how that is read. CEr has no modules: the path
+/// is empty.
+pub struct ModuleSource {
+    pub path: String,
+    pub body: String,
+    pub typescript: bool,
+    pub jsx: bool,
+    pub jsx_factory: String,
+    pub jsx_fragment: String,
+}
+
+/// Not used in CEr (`ModuleSource`).
+pub fn module_source(_code: &str) -> ModuleSource {
+    ModuleSource { path: String::new(), body: String::new(), typescript: false, jsx: false, jsx_factory: String::new(), jsx_fragment: String::new() }
+}
+
 impl Parser {
     pub fn new(src: &str) -> Parser {
         let mut lx = Lexer::new(src);
         let toks = lx.tokenize();
         let mut p = Parser {
             toks: toks,
+            lx: lx,
             pos: 0,
             ast: Ast::new(),
             error: String::new(),
+            beyond_js: false,
             no_in: false,
             in_function: false,
             in_class: false,
@@ -152,8 +185,8 @@ impl Parser {
             member_start: 0,
         };
         p.ast.source = String::from(src);
-        if !lx.error.is_empty() {
-            p.error = lx.error.clone();
+        if !p.lx.error.is_empty() {
+            p.error = p.lx.error.clone();
         }
         p
     }
@@ -1771,10 +1804,11 @@ impl Parser {
     /// cooked string is undefined) and the substitutions.
     fn template(&mut self, tagged: bool) -> int {
         let n = self.node(N_TEMPLATE);
-        let parts = self.toks[self.pos as usize].parts.clone();
-        let exprs = self.toks[self.pos as usize].exprs.clone();
-        let raws = self.toks[self.pos as usize].raws.clone();
-        let oks = self.toks[self.pos as usize].cooked_ok.clone();
+        let xi = self.toks[self.pos as usize].x as usize;
+        let parts = self.lx.xs[xi].parts.clone();
+        let exprs = self.lx.xs[xi].exprs.clone();
+        let raws = self.lx.xs[xi].raws.clone();
+        let oks = self.lx.xs[xi].cooked_ok.clone();
         let line = self.line();
         self.next();
         let mut strs: Vec<int> = Vec::new();
@@ -1851,7 +1885,8 @@ impl Parser {
         if k == T_REGEX {
             let n = self.node(N_REGEX);
             let s = self.text();
-            let f = self.toks[self.pos as usize].flags.clone();
+            let fx = self.toks[self.pos as usize].x;
+            let f = if fx >= 0 { self.lx.xs[fx as usize].flags.clone() } else { String::new() };
             self.ast.nodes[n as usize].s = s;
             self.ast.nodes[n as usize].op = f;
             self.next();

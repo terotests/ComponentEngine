@@ -407,6 +407,23 @@ const f = <T>(a: T) => a; f(3)
 ----
 3
 
+# a type alias of a generic function in TSX, `of<T>()` a method's type
+# parameters, a type that ends in `>>=`, `<T>x` before `<U>y`
+==== tsx
+type F = <T>(x: T) => T;
+const g: F = (x) => x;
+class L { static of<T>(v: T): T[] { return [v]; } }
+const n: Array<Array<number>>= [[1]];
+let m: Map<string, number>= new Map();
+[g(2), L.of(5)[0], n[0][0], m.size].join()
+----
+2,5,1,0
+
+==== ts
+const y = <string><unknown>'s'; y + typeof y
+----
+sstring
+
 # a value import reads a module the host defined (defineModule)
 ==== tsx
 import x from 'y'; x
@@ -475,6 +492,14 @@ import d, { a, bee, cue, fromB, M } from 'a.js';
 [d, a, bee, cue, fromB, M.q].join()
 ----
 3,1,2,7,b,7
+
+==== js [a TypeScript module's enum, namespace and abstract class; its anonymous default is named default]
+defineSourceModule('lib/t.ts', 'enum E { P, Q }\nnamespace N { export const z = 4; }\nexport abstract class D<T> { abstract m(): T; k(p: number): number { return p * 2; } }\ninterface I { a: number }\nexport type U = number;\nexport { E, N };\nexport default function (): string { return "d"; }');
+import f, { E, N, D } from 'lib/t.ts';
+import * as T from 'lib/t.ts';
+[E.Q, N.z, typeof D, f(), f.name, Object.keys(T).sort().join(' ')].join()
+----
+1,4,function,d,default,D E N default
 
 ==== js [a module is strict and its this is undefined]
 defineSourceModule('s.js', 'export const t = typeof this; export function f() { try { undeclared = 1; return "sloppy"; } catch (e) { return e.name; } }');

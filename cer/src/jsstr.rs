@@ -148,6 +148,18 @@ fn slice_units(s: &str, a: int, b: int) -> String {
     from_units(&u, x, y)
 }
 
+/// The first `n` bytes of `s` (a string table prefix, Vm::sref; only Rust
+/// appends in place, so only Rust has them).
+#[ranger::target(rust)]
+pub fn prefix(s: &str, n: int) -> &str {
+    &s[..(n as usize)]
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn prefix(s: &str, _n: int) -> &str {
+    s
+}
+
 /// Bytes [a, b) of an ASCII string, a and b in range.
 pub fn byte_slice(s: &str, a: int, b: int) -> String {
     let r: String = ranger::native!(rust: { String::from(&s[(a as usize)..(b as usize)]) }, es6: "{s}.substring({a}, {b})");

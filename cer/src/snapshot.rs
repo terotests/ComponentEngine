@@ -22,7 +22,7 @@ use crate::value::*;
 use crate::vm::*;
 
 /// Bumped when the text or what it holds changes.
-pub const SNAPSHOT_FORMAT: int = 1;
+pub const SNAPSHOT_FORMAT: int = 2;
 
 struct Strings {
     index: HashMap<String, int>,
@@ -43,7 +43,7 @@ impl Strings {
     }
 }
 
-fn put_val(out: &mut String, st: &mut Strings, v: &Val) {
+fn put_val(out: &mut String, st: &mut Strings, vm: &Vm, v: &Val) {
     match v {
         Val::Undef => put_num(out, 0),
         Val::Null => put_num(out, 1),
@@ -51,7 +51,7 @@ fn put_val(out: &mut String, st: &mut Strings, v: &Val) {
         Val::Num(x) => put_number(out, *x),
         Val::Str(s) => {
             put_num(out, 5);
-            put_num(out, st.id(s.as_str()));
+            put_num(out, st.id(vm.sref(*s)));
         }
         Val::Obj(o) => {
             put_num(out, 6);
@@ -118,10 +118,10 @@ fn get_ints(r: &mut Reader) -> Vec<int> {
     v
 }
 
-fn put_vals(out: &mut String, st: &mut Strings, v: &Vec<Val>) {
+fn put_vals(out: &mut String, st: &mut Strings, vm: &Vm, v: &Vec<Val>) {
     put_num(out, v.len() as int);
     for x in v.iter() {
-        put_val(out, st, x);
+        put_val(out, st, vm, x);
     }
 }
 
@@ -136,16 +136,13 @@ fn get_vals(r: &mut Reader, strs: &Vec<Val>) -> Vec<Val> {
     v
 }
 
-fn get_str(r: &mut Reader, strs: &Vec<Val>) -> String {
+fn get_str(r: &mut Reader, texts: &Vec<Rc<String>>) -> String {
     let k = r.num();
-    if k < 0 || k >= strs.len() as int {
+    if k < 0 || k >= texts.len() as int {
         r.bad = true;
         return String::new();
     }
-    match &strs[k as usize] {
-        Val::Str(s) => s.as_str().to_string(),
-        _ => String::new(),
-    }
+    texts[k as usize].as_str().to_string()
 }
 
 fn in_objs(v: &Val, no: int) -> bool {
@@ -158,7 +155,10 @@ fn in_objs(v: &Val, no: int) -> bool {
 /// The engine's state as text; "" when it is not idle (a script running,
 /// an exception pending), which a snapshot cannot hold.
 pub fn snapshot(vm: &Vm) -> String {
-    if !vm.stack.is_empty() || !vm.frames.is_empty() || !vm.handlers.is_empty() || vm.throwing || vm.native_depth != 0 || !vm.temp_roots.is_empty() {
+    // idle, or stopped where a slice ran out (Engine::set_slice): then the
+    // frames, the stack and the handlers are written too
+    let idle = vm.stack.is_empty() && vm.frames.is_empty() && vm.handlers.is_empty();
+    if !(idle || vm.suspended) || vm.throwing || vm.native_depth != 0 || !vm.temp_roots.is_empty() {
         return String::new();
     }
     let mut st = Strings { index: HashMap::new(), list: Vec::new() };
@@ -167,10 +167,19 @@ pub fn snapshot(vm: &Vm) -> String {
     for a in vm.atom_names.iter() {
         put_num(&mut b, st.id(a.as_str()));
     }
+    // by atom, so that the same state gives the same text
     put_num(&mut b, vm.symbol_atoms.len() as int);
-    for (k, v) in vm.symbol_atoms.iter() {
-        put_num(&mut b, *k);
-        put_num(&mut b, *v);
+    let mut a: int = 0;
+    let na = vm.atom_names.len() as int;
+    while a < na {
+        match vm.symbol_atoms.get(&a) {
+            Some(v) => {
+                put_num(&mut b, a);
+                put_num(&mut b, *v);
+            }
+            None => {}
+        }
+        a += 1;
     }
     // the compiled code
     put_num(&mut b, vm.protos.len() as int);
@@ -191,15 +200,16 @@ pub fn snapshot(vm: &Vm) -> String {
             bit = bit * 2;
         }
         put_num(&mut b, flags);
-        put_val(&mut b, &mut st, &p.src);
+        put_val(&mut b, &mut st, vm, &p.src);
         put_num(&mut b, p.src_start);
         put_num(&mut b, p.src_end);
-        put_vals(&mut b, &mut st, &p.consts);
-        put_num(&mut b, p.code.len() as int);
-        for op in p.code.iter() {
-            put_num(&mut b, op.code);
-            put_num(&mut b, op.a);
-            put_num(&mut b, op.b);
+        put_vals(&mut b, &mut st, vm, &p.consts);
+        let ops = proto_ops(p);
+        put_num(&mut b, ops.len() as int);
+        for op in ops.iter() {
+            put_num(&mut b, (op.code as int));
+            put_num(&mut b, (op.a as int));
+            put_num(&mut b, (op.b as int));
         }
     }
     // the objects
@@ -209,32 +219,33 @@ pub fn snapshot(vm: &Vm) -> String {
             put_num(&mut b, -1);
             continue;
         }
-        put_num(&mut b, o.class);
-        put_num(&mut b, o.proto);
-        put_ints(&mut b, &vm.shapes[o.shape as usize].keys);
-        put_vals(&mut b, &mut st, &o.vals);
-        put_ints(&mut b, &vm.shapes[o.shape as usize].attrs);
-        put_vals(&mut b, &mut st, &o.elems);
-        put_vals(&mut b, &mut st, &o.elems2);
-        put_num(&mut b, o.nums.len() as int);
-        for x in o.nums.iter() {
+        put_num(&mut b, o.class as int);
+        put_num(&mut b, o.proto as int);
+        put_ints(&mut b, &vm.shape_keys(o.shape as int));
+        put_vals(&mut b, &mut st, vm, &o.vals);
+        put_ints(&mut b, &vm.shape_attrs(o.shape as int));
+        put_vals(&mut b, &mut st, vm, &vm.evecs[o.elems as usize].v);
+        let cold = &vm.colds[o.cold as usize];
+        put_vals(&mut b, &mut st, vm, &cold.elems2);
+        put_num(&mut b, cold.nums.len() as int);
+        for x in cold.nums.iter() {
             put_number(&mut b, *x);
         }
-        put_num(&mut b, o.func);
-        put_num(&mut b, o.env);
-        put_val(&mut b, &mut st, &o.prim);
-        put_num(&mut b, o.home);
-        put_num(&mut b, o.pos);
-        put_num(&mut b, (if o.extensible { 1 } else { 0 }) + (if o.has_proto_obj { 2 } else { 0 }));
+        put_num(&mut b, o.func as int);
+        put_num(&mut b, o.env as int);
+        put_val(&mut b, &mut st, vm, &cold.prim);
+        put_num(&mut b, cold.home);
+        put_num(&mut b, o.pos as int);
+        put_num(&mut b, if o.extensible { 1 } else { 0 });
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
         if o.class == C_MAP || o.class == C_SET {
-            put_num(&mut b, o.index.len() as int);
-            for (k, v) in o.index.iter() {
+            put_num(&mut b, cold.index.len() as int);
+            for (k, v) in cold.index.iter() {
                 put_num(&mut b, *k);
                 put_num(&mut b, *v);
             }
-            put_ints(&mut b, &o.marks);
+            put_ints(&mut b, &cold.marks);
         }
     }
     put_ints(&mut b, &vm.free_list);
@@ -298,7 +309,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
     }
-    put_vals(&mut b, &mut st, &vm.jobs);
+    put_vals(&mut b, &mut st, vm, &vm.jobs);
     // the regular expressions by their cache key ("source/flags"), in order
     let mut keys: Vec<String> = Vec::new();
     let mut i: usize = 0;
@@ -318,6 +329,19 @@ pub fn snapshot(vm: &Vm) -> String {
         }
         put_num(&mut b, st.id(k.as_str()));
     }
+    // a suspended script: its stack, frames and handlers
+    put_num(&mut b, if vm.suspended { 1 } else { 0 });
+    put_vals(&mut b, &mut st, vm, &vm.stack);
+    put_num(&mut b, vm.frames.len() as int);
+    for f in vm.frames.iter() {
+        put_ints(&mut b, &vec![f.proto, f.fobj, f.pc, f.bp, f.env, f.args_obj, if f.construct { 1 } else { 0 }, f.gen, f.ret, f.mv_from, f.mv_to]);
+        put_val(&mut b, &mut st, vm, &f.this_val);
+        put_val(&mut b, &mut st, vm, &f.new_target);
+    }
+    put_num(&mut b, vm.handlers.len() as int);
+    for h in vm.handlers.iter() {
+        put_ints(&mut b, &vec![h.frame, h.catch_pc, h.sp, h.env]);
+    }
     let mut out = String::new();
     put_num(&mut out, SNAPSHOT_FORMAT);
     put_num(&mut out, st.list.len() as int);
@@ -336,24 +360,35 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         return false;
     }
     let ns = r.num();
+    // the snapshot's strings stay (pinned): constants and names mostly
+    vm.reset_strs();
+    vm.type_vals = Vec::new();
     let mut strs: Vec<Val> = Vec::new();
+    let mut texts: Vec<Rc<String>> = Vec::new();
     let mut i: int = 0;
     while i < ns && !r.bad {
-        strs.push(Val::Str(Rc::new(r.string())));
+        let t = Rc::new(r.string());
+        texts.push(t.clone());
+        let v = vm.pin_rc(t);
+        strs.push(v);
         i += 1;
     }
     vm.atoms = HashMap::new();
     vm.atom_names = Vec::new();
+    vm.atom_cache = Vec::new();
     vm.atom_vals = Vec::new();
     let na = r.num();
     i = 0;
     while i < na && !r.bad {
-        let a = get_str(&mut r, &strs);
+        let a = get_str(&mut r, &texts);
         vm.atoms.insert(a.clone(), i);
         vm.atom_names.push(a);
         i += 1;
     }
     vm.symbol_atoms = HashMap::new();
+    vm.atom_kinds = Vec::new();
+    vm.tostr_vals = Vec::new();
+    vm.a_tostringtag = -1;
     let nsym = r.num();
     i = 0;
     while i < nsym && !r.bad {
@@ -363,10 +398,16 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.protos = Vec::new();
+    vm.rcode = Vec::new();
+    vm.kvals = Vec::new();
+    vm.rtab = Vec::new();
+    vm.rpic = Vec::new();
+    vm.pic = Vec::new();
+    vm.shape_epoch += 1;
     let np = r.num();
     i = 0;
     while i < np && !r.bad {
-        let name = get_str(&mut r, &strs);
+        let name = get_str(&mut r, &texts);
         let mut p = Proto::new(name.as_str());
         p.length = r.num();
         p.nparams = r.num();
@@ -394,13 +435,22 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             let code = r.num();
             let a = r.num();
             let b = r.num();
-            p.code.push(Op { code: code, a: a, b: b, c: -1 });
+            p.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
             k += 1;
         }
+        pack_code(&mut p);
         vm.protos.push(p);
         i += 1;
     }
     vm.objs = Vec::new();
+    vm.colds = Vec::new();
+    vm.colds.push(Cold::new());
+    vm.free_colds = Vec::new();
+    vm.evecs = Vec::new();
+    vm.evecs.push(Elems { v: Vec::new() });
+    vm.efree = Vec::new();
+    vm.zct = Vec::new();
+    vm.freed = Vec::new();
     vm.shapes = Vec::new();
     vm.shapes.push(Shape::new());
     vm.free_shapes = Vec::new();
@@ -416,40 +466,54 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             continue;
         }
         let proto = r.num();
-        let mut o = JsObj::new(class, proto);
+        let mut o = JsObj::new(class as i32, proto as i32);
         let keys = get_ints(&mut r);
         let vals = get_vals(&mut r, &strs);
         let attrs = get_ints(&mut r);
-        o.elems = get_vals(&mut r, &strs);
-        o.elems2 = get_vals(&mut r, &strs);
+        let ev = get_vals(&mut r, &strs);
+        if !ev.is_empty() {
+            vm.evecs.push(Elems { v: ev });
+            o.elems = (vm.evecs.len() - 1) as i32;
+        }
+        let mut cold = Cold::new();
+        cold.elems2 = get_vals(&mut r, &strs);
+        let mut has_cold = !cold.elems2.is_empty();
         let nn = r.num();
         let mut k: int = 0;
         while k < nn && !r.bad {
             let x = get_val(&mut r, &strs);
-            o.nums.push(match x {
+            has_cold = true;
+            cold.nums.push(match x {
                 Val::Num(d) => d,
                 _ => 0.0,
             });
             k += 1;
         }
-        o.func = r.num();
-        o.env = r.num();
-        o.prim = get_val(&mut r, &strs);
-        o.home = r.num();
-        o.pos = r.num();
+        o.func = r.num() as i32;
+        o.env = r.num() as i32;
+        cold.prim = get_val(&mut r, &strs);
+        cold.home = r.num();
+        if !matches!(cold.prim, Val::Undef) || cold.home != -1 {
+            has_cold = true;
+        }
+        o.pos = r.num() as i32;
         let bits = r.num();
         o.extensible = bits % 2 == 1;
-        o.has_proto_obj = (bits / 2) % 2 == 1;
-        if class == C_MAP || class == C_SET {
+        if class == C_MAP as int || class == C_SET as int {
             let ni = r.num();
             let mut j: int = 0;
             while j < ni && !r.bad {
                 let k = r.num();
                 let v = r.num();
-                o.index.insert(k, v);
+                cold.index.insert(k, v);
                 j += 1;
             }
-            o.marks = get_ints(&mut r);
+            cold.marks = get_ints(&mut r);
+            has_cold = true;
+        }
+        if has_cold {
+            o.cold = (vm.colds.len() as int) as i32;
+            vm.colds.push(cold);
         }
         if keys.len() != vals.len() || keys.len() != attrs.len() {
             r.bad = true;
@@ -460,7 +524,10 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             let oi = (vm.objs.len() as int) - 1;
             let mut j: usize = 0;
             while j < keys.len() {
-                vm.add_own(oi, keys[j], vals[j].clone(), attrs[j]);
+                // the value straight in: the objects it names may come
+                // later, and recount() counts them at the end
+                let slot = vm.add_own(oi, keys[j], Val::Undef, attrs[j]);
+                vm.objs[oi as usize].vals[slot as usize] = vals[j].clone();
                 j += 1;
             }
         }
@@ -508,6 +575,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.array_values_fn = ints[33];
     vm.alloc_count = ints[34];
     vm.gc_threshold = ints[35];
+    vm.gc_recheck();
     vm.prelude_protos = ints[36];
     vm.rng = ints[37];
     vm.gc_runs = ints[38];
@@ -517,7 +585,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nb = r.num();
     i = 0;
     while i < nb && !r.bad {
-        let k = get_str(&mut r, &strs);
+        let k = get_str(&mut r, &texts);
         let v = r.num();
         vm.bigints.insert(k, v);
         i += 1;
@@ -527,7 +595,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nout = r.num();
     i = 0;
     while i < nout && !r.bad {
-        let l = get_str(&mut r, &strs);
+        let l = get_str(&mut r, &texts);
         vm.out.push(l);
         i += 1;
     }
@@ -536,7 +604,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nr = r.num();
     i = 0;
     while i < nr && !r.bad {
-        let k = get_str(&mut r, &strs);
+        let k = get_str(&mut r, &texts);
         let v = r.num();
         vm.symbol_registry.insert(k, v);
         i += 1;
@@ -548,7 +616,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     let nx = r.num();
     i = 0;
     while i < nx && !r.bad {
-        let key = get_str(&mut r, &strs);
+        let key = get_str(&mut r, &texts);
         // "source/flags": the flags are the letters after the last '/'
         let cs: Vec<char> = key.chars().collect();
         let mut cut = cs.len();
@@ -575,10 +643,63 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         vm.regex_cache.insert(key, i);
         i += 1;
     }
-    if r.bad || r.pos != r.len || !valid_heap(vm) {
+    vm.suspended = r.num() == 1;
+    vm.stack = get_vals(&mut r, &strs);
+    vm.frames = Vec::new();
+    let nf = r.num();
+    i = 0;
+    while i < nf && !r.bad {
+        let x = get_ints(&mut r);
+        if x.len() != 11 {
+            r.bad = true;
+            break;
+        }
+        let this_val = get_val(&mut r, &strs);
+        let new_target = get_val(&mut r, &strs);
+        vm.frames.push(Frame { proto: x[0], fobj: x[1], pc: x[2], bp: x[3], env: x[4], this_val: this_val, new_target: new_target, args_obj: x[5], construct: x[6] == 1, gen: x[7], ret: x[8], mv_from: x[9], mv_to: x[10] });
+        i += 1;
+    }
+    vm.handlers = Vec::new();
+    let nh = r.num();
+    i = 0;
+    while i < nh && !r.bad {
+        let x = get_ints(&mut r);
+        if x.len() != 4 {
+            r.bad = true;
+            break;
+        }
+        vm.handlers.push(Handler { frame: x[0], catch_pc: x[1], sp: x[2], env: x[3] });
+        i += 1;
+    }
+    if r.bad || r.pos != r.len || !valid_heap(vm) || !valid_frames(vm) {
         return false;
     }
+    // the running functions' code unpacked, as a frame push leaves it
+    for f in vm.frames.iter() {
+        unpack_code(&mut vm.protos[f.proto as usize]);
+    }
     vm.find_setters();
+    // the counts are not in the text: made again from the heap
+    vm.recount();
+    true
+}
+
+/// A suspended script's frames name protos, objects and stack places that
+/// exist.
+fn valid_frames(vm: &Vm) -> bool {
+    let np = vm.protos.len() as int;
+    let no = vm.objs.len() as int;
+    let ns = vm.stack.len() as int;
+    for f in vm.frames.iter() {
+        if f.proto < 0 || f.proto >= np || f.fobj >= no || f.env >= no || f.args_obj >= no || f.bp < 0 || f.bp > ns || f.pc < 0 {
+            return false;
+        }
+    }
+    for h in vm.handlers.iter() {
+        if h.frame < 0 || h.frame >= vm.frames.len() as int || h.sp < 0 || h.sp > ns || h.env >= no {
+            return false;
+        }
+    }
     true
 }
 
@@ -592,13 +713,13 @@ fn valid_heap(vm: &Vm) -> bool {
         if o.free {
             continue;
         }
-        if o.proto < -1 || o.proto >= no || o.env < -1 || o.env >= no || o.home < -1 || o.home >= no || !in_objs(&o.prim, no) {
+        if o.proto < -1 || o.proto >= no as i32 || o.env < -1 || o.env >= no as i32 || vm.colds[o.cold as usize].home < -1 || vm.colds[o.cold as usize].home >= no || !in_objs(&vm.colds[o.cold as usize].prim, no) {
             return false;
         }
-        if o.class == C_FUNCTION && (o.func < 0 || o.func >= np) {
+        if o.class == C_FUNCTION && (o.func < 0 || o.func >= np as i32) {
             return false;
         }
-        for k in vm.shapes[o.shape as usize].keys.iter() {
+        for k in vm.shape_keys(o.shape as int).iter() {
             if *k < 0 || *k >= na {
                 return false;
             }
@@ -608,12 +729,12 @@ fn valid_heap(vm: &Vm) -> bool {
                 return false;
             }
         }
-        for v in o.elems.iter() {
+        for v in vm.evecs[o.elems as usize].v.iter() {
             if !in_objs(v, no) {
                 return false;
             }
         }
-        for v in o.elems2.iter() {
+        for v in vm.colds[o.cold as usize].elems2.iter() {
             if !in_objs(v, no) {
                 return false;
             }

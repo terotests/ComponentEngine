@@ -14,6 +14,7 @@
 //! and its text when that is printable ASCII, else its code points.
 
 use ranger::prelude::*;
+use std::rc::Rc;
 use std::collections::HashMap;
 
 use crate::ast::*;
@@ -107,20 +108,22 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
     let base = vm.protos.len() as int;
     for pr in u.protos {
         let mut p = pr;
+        vm.link_strs(&mut p);
         let mut i: usize = 0;
         let n = p.code.len();
         while i < n {
             let op = p.code[i];
-            let k = atom_operand(op.code);
+            let k = atom_operand((op.code as int));
             if k == 1 {
-                p.code[i].a = map[op.a as usize];
+                p.code[i].a = (map[op.a as usize] as i32);
             } else if k == 2 {
-                p.code[i].b = map[op.b as usize];
-            } else if op.code == OP_CLOSURE {
-                p.code[i].a = op.a + base;
+                p.code[i].b = (map[op.b as usize] as i32);
+            } else if (op.code as int) == OP_CLOSURE {
+                p.code[i].a = op.a + (base as i32);
             }
             i += 1;
         }
+        pack_code(&mut p);
         vm.protos.push(p);
     }
     base + u.entry
@@ -220,7 +223,8 @@ pub fn encode(u: &Unit, input: &str) -> String {
         // where the function's text is: none, in the source, its own
         match &p.src {
             Val::Undef => put_num(&mut out, 0),
-            Val::Str(s) => {
+            Val::Str(k) => {
+                let s = &p.cstrs[*k as usize];
                 if s.as_str() == u.source.as_str() {
                     put_num(&mut out, 1);
                 } else {
@@ -242,18 +246,18 @@ pub fn encode(u: &Unit, input: &str) -> String {
                     put_num(&mut out, 4);
                     put_double(&mut out, *x);
                 }
-                Val::Str(s) => {
+                Val::Str(k) => {
                     put_num(&mut out, 5);
-                    put_str(&mut out, s.as_str());
+                    put_str(&mut out, p.cstrs[*k as usize].as_str());
                 }
                 Val::Obj(_) => return String::new(),
             }
         }
         put_num(&mut out, p.code.len() as int);
         for op in p.code.iter() {
-            put_num(&mut out, op.code);
-            put_num(&mut out, op.a);
-            put_num(&mut out, op.b);
+            put_num(&mut out, (op.code as int));
+            put_num(&mut out, (op.a as int));
+            put_num(&mut out, (op.b as int));
         }
     }
     out
@@ -337,7 +341,7 @@ pub fn decode(text: &str, input: &str) -> Unit {
     }
     let entry = r.num();
     let shared = if r.num() == 0 { String::from(input) } else { r.string() };
-    let src_val = string_val(shared.clone());
+    let src_rc = Rc::new(shared.clone());
     let na = r.num();
     let mut i: int = 0;
     while i < na && !r.bad {
@@ -367,9 +371,11 @@ pub fn decode(text: &str, input: &str) -> Unit {
         p.lexical_ctor = r.flag();
         let sk = r.num();
         if sk == 1 {
-            p.src = src_val.clone();
+            p.src = Val::Str(p.cstrs.len() as int);
+            p.cstrs.push(src_rc.clone());
         } else if sk == 2 {
-            p.src = string_val(r.string());
+            p.src = Val::Str(p.cstrs.len() as int);
+            p.cstrs.push(Rc::new(r.string()));
         }
         p.src_start = r.num();
         p.src_end = r.num();
@@ -386,7 +392,9 @@ pub fn decode(text: &str, input: &str) -> Unit {
             } else if t == 4 {
                 Val::Num(string_to_number(r.string().as_str()))
             } else if t == 5 {
-                string_val(r.string())
+                let k = p.cstrs.len() as int;
+                p.cstrs.push(Rc::new(r.string()));
+                Val::Str(k)
             } else {
                 Val::Undef
             };
@@ -399,7 +407,7 @@ pub fn decode(text: &str, input: &str) -> Unit {
             let code = r.num();
             let a = r.num();
             let b = r.num();
-            p.code.push(Op { code: code, a: a, b: b, c: -1 });
+            p.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
             m += 1;
         }
         u.protos.push(p);
@@ -421,14 +429,14 @@ fn valid(u: &Unit) -> bool {
     for p in u.protos.iter() {
         let nc = p.consts.len() as int;
         for op in p.code.iter() {
-            let k = atom_operand(op.code);
-            if (k == 1 && (op.a < 0 || op.a >= na)) || (k == 2 && (op.b < 0 || op.b >= na)) {
+            let k = atom_operand((op.code as int));
+            if (k == 1 && (op.a < 0 || (op.a as int) >= na)) || (k == 2 && (op.b < 0 || (op.b as int) >= na)) {
                 return false;
             }
-            if op.code == OP_CLOSURE && (op.a < 0 || op.a >= np) {
+            if (op.code as int) == OP_CLOSURE && (op.a < 0 || (op.a as int) >= np) {
                 return false;
             }
-            if (op.code == OP_CONST || op.code == OP_SET_NAME || op.code == OP_CHECK_TDZ) && (op.a < 0 || op.a >= nc) {
+            if ((op.code as int) == OP_CONST || (op.code as int) == OP_SET_NAME || (op.code as int) == OP_CHECK_TDZ) && (op.a < 0 || (op.a as int) >= nc) {
                 return false;
             }
         }

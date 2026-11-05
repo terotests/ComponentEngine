@@ -40,9 +40,12 @@ pub mod normalize;
 pub mod num;
 pub mod ops;
 pub mod parser;
+pub mod pcomp;
 pub mod prelude;
 pub mod proxy;
 pub mod regex;
+pub mod regs;
+pub mod rvm;
 pub mod snapshot;
 pub mod ts;
 pub mod typed;
@@ -69,8 +72,33 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// An engine; its JavaScript compiles with pcomp.rs (`new_with`).
     pub fn new() -> Engine {
+        Engine::new_with(true)
+    }
+
+    /// An engine whose JavaScript (the prelude too) compiles with pcomp.rs,
+    /// without a syntax tree (`pcomp`); TypeScript and JSX go through the
+    /// parser either way.
+    pub fn new_with(pcomp: bool) -> Engine {
+        if pcomp {
+            // the prelude as compiled when the crate was built (Rust), not
+            // compiled again: a third of the startup peak
+            let mut vm = Vm::new();
+            if prelude_snapshot(&mut vm) {
+                vm.pcomp = true;
+                return Engine { vm: vm, error: String::new(), through_text: false, syntax: Syntax::tsx() };
+            }
+        }
+        Engine::compiled(pcomp)
+    }
+
+    /// An engine whose prelude is compiled now, not read from
+    /// `prelude.snap`; `cerxes --prelude-snapshot` writes that file from
+    /// its snapshot.
+    pub fn compiled(pcomp: bool) -> Engine {
         let mut vm = Vm::new();
+        vm.pcomp = pcomp;
         vm.setup();
         let mut e = Engine { vm: vm, error: String::new(), through_text: false, syntax: Syntax::new(false, false) };
         // the built-ins written in JavaScript: CEr's, then the JSX runtime
@@ -161,8 +189,48 @@ impl Engine {
     /// or another. Sets `error` when the script is not one.
     pub fn compile(&mut self, src: &str) -> unit::Unit {
         self.error = String::new();
+        let mut pcomp_error = String::new();
+        if self.vm.pcomp && !self.syntax.typescript && !self.syntax.jsx {
+            // JavaScript, its `import`s the host's modules; what pcomp does
+            // not read goes to the parser
+            let u = pcomp::compile_script(src, false, false, "", "");
+            if u.error.is_empty() {
+                return u;
+            }
+            pcomp_error = u.error.clone();
+        }
+        if self.vm.pcomp && (self.syntax.typescript || self.syntax.jsx) {
+            // TypeScript and JSX: pcomp skips the types and the lexer
+            // writes each element as its factory's call; what pcomp does
+            // not read (decorators …) goes to the parser
+            let mut sx = self.syntax.clone();
+            crate::jsx::read_pragmas(src, &mut sx);
+            let u = pcomp::compile_script(src, sx.typescript, sx.jsx, sx.jsx_factory.as_str(), sx.jsx_fragment.as_str());
+            if u.error.is_empty() {
+                return u;
+            }
+        }
+        if self.vm.pcomp {
+            // TypeScript, JSX or a module: the parser writes it as
+            // JavaScript, which pcomp compiles; the parser and its tree are
+            // gone by then
+            let (js, error) = parser::script_js(src, self.syntax.clone(), pcomp_error.as_str());
+            if !error.is_empty() {
+                self.error = error;
+                return unit::Unit::new();
+            }
+            let u = pcomp::compile_unit(js.as_str());
+            if !u.error.is_empty() {
+                self.error = u.error.clone();
+            }
+            return u;
+        }
         let mut p = parser::Parser::with_syntax(src, self.syntax.clone());
         let root = p.parse_program();
+        if p.error.is_empty() && !pcomp_error.is_empty() && !p.beyond_js {
+            // plain JavaScript pcomp rejected: its early errors stand
+            p.error = pcomp_error;
+        }
         if !p.error.is_empty() {
             self.error = p.error.clone();
             return unit::Unit::new();
@@ -181,7 +249,20 @@ impl Engine {
             self.error = String::from("SyntaxError");
             return self.error.clone();
         }
+        self.vm.slice_t0 = builtins::now_ms();
+        self.vm.ticks = vm::SLICE_TICKS;
+        self.vm.slicing = self.vm.slice_ms > 0.0;
         let r = self.run_val(u);
+        self.vm.slicing = false;
+        if self.vm.suspended {
+            return String::new();
+        }
+        self.finish_run(r)
+    }
+
+    /// What `run` does once the script has returned: its jobs, then its
+    /// completion value or the uncaught exception.
+    fn finish_run(&mut self, r: Val) -> String {
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -192,11 +273,51 @@ impl Engine {
         self.vm.display(&r)
     }
 
+    /// Scripts run in slices of `ms` milliseconds: when one runs out at a
+    /// branch, call or return, `run` / `eval` return "" with `is_suspended`
+    /// true, and `resume` goes on from there (a snapshot taken meanwhile
+    /// goes on in another engine too). 0: no slices (the default).
+    pub fn set_slice(&mut self, ms: double) {
+        self.vm.slice_ms = ms;
+    }
+
+    /// The script stopped when its slice ran out (`set_slice`).
+    pub fn is_suspended(&self) -> bool {
+        self.vm.suspended
+    }
+
+    /// Goes on with a suspended script for another slice; answers as `run`
+    /// does, "" with `is_suspended` true when this slice runs out too.
+    pub fn resume(&mut self) -> String {
+        if !self.vm.suspended {
+            return String::new();
+        }
+        self.vm.suspended = false;
+        self.vm.slice_t0 = builtins::now_ms();
+        self.vm.ticks = vm::SLICE_TICKS;
+        self.vm.slicing = self.vm.slice_ms > 0.0;
+        if !self.vm.regs || self.vm.translate_frames() {
+            self.vm.run(0);
+        }
+        self.vm.slicing = false;
+        if self.vm.suspended {
+            return String::new();
+        }
+        if self.vm.throwing {
+            return self.uncaught();
+        }
+        let r = match self.vm.stack.pop() {
+            Some(v) => v,
+            None => Val::Undef,
+        };
+        self.finish_run(r)
+    }
+
     fn run_val(&mut self, u: unit::Unit) -> Val {
         let entry = unit::link(&mut self.vm, u);
         let fp = self.vm.function_proto;
         let f = self.vm.alloc(C_FUNCTION, fp);
-        self.vm.objs[f as usize].func = entry;
+        self.vm.objs[f as usize].func = entry as i32;
         let g = Val::Obj(self.vm.global);
         self.vm.run_program(Val::Obj(f), g)
     }
@@ -227,7 +348,7 @@ impl Engine {
                     format!("n:{}", num::number_to_string(*n))
                 }
             }
-            Val::Str(s) => format!("s:{}", s),
+            Val::Str(s) => format!("s:{}", self.vm.sref(*s)),
             Val::Obj(o) => format!("o:{}", self.vm.objs[*o as usize].class),
         }
     }
@@ -251,7 +372,7 @@ impl Engine {
         let a = self.vm.intern(name);
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));
-        let r = self.vm.call_value(f, Val::Undef, Vec::new());
+        let r = self.vm.call_top(f, Val::Undef, Vec::new());
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -283,4 +404,35 @@ impl Engine {
     pub fn heap_size(&self) -> int {
         (self.vm.objs.len() - self.vm.free_list.len()) as int
     }
+}
+
+/// Rust: the engine's state after the prelude, from `src/prelude_snap.rs`
+/// (a raw string written by `cerxes --prelude-snapshot`, checked by
+/// tests/syntax.rs; a .rs file so builds that copy src/*.rs get it, and
+/// not a module, so other targets do not carry it); false when it does
+/// not restore, and the prelude is then compiled.
+#[ranger::target(rust)]
+pub fn prelude_snapshot(vm: &mut Vm) -> bool {
+    snapshot::restore(vm, include!("prelude_snap.rs"))
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn prelude_snapshot(_vm: &mut Vm) -> bool {
+    false
+}
+
+/// Rust: a snapshot's text as the raw string literal `src/prelude_snap.rs`
+/// holds (enough `#` that the text cannot end it).
+#[ranger::target(rust)]
+pub fn prelude_snapshot_rs(text: &str) -> String {
+    let mut hashes = String::from("#");
+    while text.contains(format!("\"{}", hashes).as_str()) {
+        hashes.push('#');
+    }
+    format!("// written by `cerxes --prelude-snapshot`; see lib.rs prelude_snapshot\nr{}\"{}\"{}\n", hashes, text, hashes)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn prelude_snapshot_rs(_text: &str) -> String {
+    String::new()
 }

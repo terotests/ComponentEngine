@@ -88,6 +88,9 @@ pub struct Parser {
     pub exports: Vec<(String, String)>,
     /// the modules a module's `export * from "m"` passes on
     pub export_stars: Vec<String>,
+    /// the script has what plain JavaScript (pcomp.rs) does not read: JSX,
+    /// a module's `import` or `export`
+    pub beyond_js: bool,
 }
 
 fn binary_prec(op: &str) -> int {
@@ -149,6 +152,11 @@ fn is_assign_op(op: &str) -> bool {
         || op == "??="
 }
 
+/// Not a binding name in strict code.
+pub fn is_strict_reserved(w: &str) -> bool {
+    w == "implements" || w == "interface" || w == "let" || w == "package" || w == "private" || w == "protected" || w == "public" || w == "static" || w == "yield" || w == "eval" || w == "arguments"
+}
+
 pub fn is_reserved(w: &str) -> bool {
     w == "break"
         || w == "case"
@@ -188,6 +196,55 @@ pub fn is_reserved(w: &str) -> bool {
         || w == "enum"
 }
 
+/// What the parser read (TypeScript, JSX, a module) is written back as
+/// JavaScript (emit.rs) for pcomp to compile: no tree is compiled.
+pub const WRITES_JS: bool = true;
+
+/// `src` read as `syntax` and written as JavaScript, on the source's lines,
+/// or the syntax error. `js_error` is pcomp's error for the same text read
+/// as JavaScript: it stands when the text uses nothing beyond JavaScript.
+pub fn script_js(src: &str, syntax: Syntax, js_error: &str) -> (String, String) {
+    let p = Parser::with_syntax(src, syntax);
+    parsed_js(p, js_error)
+}
+
+/// What the parser `p` reads (`Parser::new` reads a module's text as the
+/// module) as JavaScript, or the syntax error (`script_js`).
+pub fn parsed_js(p0: Parser, js_error: &str) -> (String, String) {
+    let mut p = p0;
+    let root = p.parse_program();
+    if p.error.is_empty() && !js_error.is_empty() && !p.beyond_js {
+        return (String::new(), String::from(js_error));
+    }
+    if !p.error.is_empty() {
+        return (String::new(), p.error.clone());
+    }
+    let mut e = crate::emit::Emitter::new(p.ast);
+    e.program(root);
+    (e.out, String::new())
+}
+
+/// `code` as `eval` reads it (TSX, or a module's text), as JavaScript.
+pub fn eval_js(code: &str, js_error: &str) -> (String, String) {
+    parsed_js(Parser::new(code), js_error)
+}
+
+/// A module's text as `eval` gets it (`module::HEADER`, the path, the comment's end, the source),
+/// as pcomp reads it (`module::module_source`): the path, the function's
+/// source, and how that is read.
+pub struct ModuleSource {
+    pub path: String,
+    pub body: String,
+    pub typescript: bool,
+    pub jsx: bool,
+    pub jsx_factory: String,
+    pub jsx_fragment: String,
+}
+
+pub fn module_source(code: &str) -> ModuleSource {
+    crate::module::module_source(code)
+}
+
 impl Parser {
     /// A script read as TSX; a text that starts with `module::HEADER` (what
     /// the module registry hands `eval`) is read as that module.
@@ -218,6 +275,7 @@ impl Parser {
             module_path: String::new(),
             exports: Vec::new(),
             export_stars: Vec::new(),
+            beyond_js: false,
         }
     }
 
@@ -249,9 +307,16 @@ impl Parser {
     // ---- tokens
 
     /// The token `i`, read on demand.
+    /// The template token at pos has no substitutions.
+    pub(crate) fn template_plain(&mut self) -> bool {
+        let x = self.tk(self.pos).x;
+        x < 0 || self.lx.xs[x as usize].exprs.is_empty()
+    }
+
     pub(crate) fn tk(&mut self, i: int) -> &Tok {
         while (self.toks.len() as int) <= i {
             let t = self.lx.next_token();
+            grow_toks(&mut self.toks);
             self.toks.push(t);
         }
         &self.toks[i as usize]
@@ -1924,10 +1989,11 @@ impl Parser {
     /// cooked string is undefined) and the substitutions.
     fn template(&mut self, tagged: bool) -> int {
         let n = self.node(N_TEMPLATE);
-        let parts = self.tk(self.pos).parts.clone();
-        let exprs = self.tk(self.pos).exprs.clone();
-        let raws = self.tk(self.pos).raws.clone();
-        let oks = self.tk(self.pos).cooked_ok.clone();
+        let xi = self.tk(self.pos).x as usize;
+        let parts = self.lx.xs[xi].parts.clone();
+        let exprs = self.lx.xs[xi].exprs.clone();
+        let raws = self.lx.xs[xi].raws.clone();
+        let oks = self.lx.xs[xi].cooked_ok.clone();
         let line = self.line();
         self.next();
         let mut strs: Vec<int> = Vec::new();
@@ -2000,7 +2066,8 @@ impl Parser {
         if k == T_REGEX {
             let n = self.node(N_REGEX);
             let s = self.text();
-            let f = self.tk(self.pos).flags.clone();
+            let fx = self.tk(self.pos).x;
+            let f = if fx >= 0 { self.lx.xs[fx as usize].flags.clone() } else { String::new() };
             self.ast.nodes[n as usize].s = s;
             self.ast.nodes[n as usize].op = f;
             self.next();

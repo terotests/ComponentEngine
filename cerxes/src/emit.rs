@@ -643,10 +643,10 @@ impl Emitter {
             self.put("*");
         }
         let name = self.s(f);
-        if !name.is_empty() {
-            self.put(" ");
-            self.put(name.as_str());
-        }
+        // `function (a)` without a name, as most source writes it (its
+        // text is what Function.prototype.toString answers)
+        self.put(" ");
+        self.put(name.as_str());
         self.function_rest(f);
     }
 

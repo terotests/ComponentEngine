@@ -79,15 +79,17 @@ impl Vm {
         self.sym_method(itp, A_ITERATOR, "[Symbol.iterator]", NF_ITER_SELF, 0);
         self.iterator_proto = itp;
         let ip = self.iter_proto;
-        self.objs[ip as usize].proto = itp;
-        self.add_prop(ip, a_tag, str_val("Array Iterator"), P_HIDDEN | P_READONLY);
+        self.put_proto(ip, itp);
+        let sv16 = self.str_val("Array Iterator");
+        self.add_prop(ip, a_tag, sv16, P_HIDDEN | P_READONLY);
         // the other built-in iterators: the same machinery, own prototypes
         let mut made: Vec<int> = Vec::new();
         for tagname in vec!["Map Iterator", "Set Iterator", "String Iterator"] {
             let p = self.alloc(C_OBJECT, itp);
             self.roots.push(p);
             self.method(p, "next", NF_ITER_NEXT, 0);
-            self.add_prop(p, a_tag, str_val(tagname), P_HIDDEN | P_READONLY);
+            let sv15 = self.str_val(tagname);
+            self.add_prop(p, a_tag, sv15, P_HIDDEN | P_READONLY);
             made.push(p);
         }
         self.map_iter_proto = made[0];
@@ -99,7 +101,8 @@ impl Vm {
         self.method(gp, "next", NF_GEN_NEXT, 1);
         self.method(gp, "return", NF_GEN_RETURN, 1);
         self.method(gp, "throw", NF_GEN_THROW, 1);
-        self.add_prop(gp, a_tag, str_val("Generator"), P_HIDDEN | P_READONLY);
+        let sv14 = self.str_val("Generator");
+        self.add_prop(gp, a_tag, sv14, P_HIDDEN | P_READONLY);
         self.generator_proto = gp;
         // %GeneratorFunction.prototype%
         // %AsyncIteratorPrototype%, %AsyncGeneratorPrototype% and the
@@ -113,24 +116,28 @@ impl Vm {
         self.method(agp, "next", NF_AGEN_NEXT, 1);
         self.method(agp, "return", NF_AGEN_RETURN, 1);
         self.method(agp, "throw", NF_AGEN_THROW, 1);
-        self.add_prop(agp, a_tag, str_val("AsyncGenerator"), P_HIDDEN | P_READONLY);
+        let sv13 = self.str_val("AsyncGenerator");
+        self.add_prop(agp, a_tag, sv13, P_HIDDEN | P_READONLY);
         self.async_generator_proto = agp;
         let agfp = self.alloc(C_OBJECT, fp);
         self.roots.push(agfp);
         self.add_prop(agfp, A_PROTOTYPE, Val::Obj(agp), P_HIDDEN | P_READONLY);
         self.add_prop(agp, A_CONSTRUCTOR, Val::Obj(agfp), P_HIDDEN | P_READONLY);
-        self.add_prop(agfp, a_tag, str_val("AsyncGeneratorFunction"), P_HIDDEN | P_READONLY);
+        let sv12 = self.str_val("AsyncGeneratorFunction");
+        self.add_prop(agfp, a_tag, sv12, P_HIDDEN | P_READONLY);
         self.async_generator_function_proto = agfp;
         let gfp = self.alloc(C_OBJECT, fp);
         self.roots.push(gfp);
         self.add_prop(gfp, A_PROTOTYPE, Val::Obj(gp), P_HIDDEN | P_READONLY);
         self.add_prop(gp, A_CONSTRUCTOR, Val::Obj(gfp), P_HIDDEN | P_READONLY);
-        self.add_prop(gfp, a_tag, str_val("GeneratorFunction"), P_HIDDEN | P_READONLY);
+        let sv11 = self.str_val("GeneratorFunction");
+        self.add_prop(gfp, a_tag, sv11, P_HIDDEN | P_READONLY);
         self.generator_function_proto = gfp;
         // %AsyncFunction.prototype%
         let afp = self.alloc(C_OBJECT, fp);
         self.roots.push(afp);
-        self.add_prop(afp, a_tag, str_val("AsyncFunction"), P_HIDDEN | P_READONLY);
+        let sv10 = self.str_val("AsyncFunction");
+        self.add_prop(afp, a_tag, sv10, P_HIDDEN | P_READONLY);
         self.async_function_proto = afp;
         let g = self.global;
         self.method(g, "__setAsyncFromSync", NF_ASYNC_FROM_SYNC, 1);
@@ -166,21 +173,21 @@ impl Vm {
             }
         }
         let g = self.alloc(C_GENERATOR, if is_async { -1 } else { proto });
-        self.objs[g as usize].func = pi;
+        self.objs[g as usize].func = pi as i32;
         self.frames[fi].gen = g;
         self.frames[fi].pc = pc;
         self.gen_save(g);
-        self.objs[g as usize].pos = GS_START;
+        self.objs[g as usize].pos = GS_START as i32;
         if async_gen {
             let q = self.new_array(Vec::new());
-            self.objs[g as usize].elems2[G_PROMISE] = Val::Obj(q);
+            self.put_elem2(g, (G_PROMISE) as int, Val::Obj(q));
         }
         if !is_async {
             self.stack.push(Val::Obj(g));
             return;
         }
         let p = self.new_promise();
-        self.objs[g as usize].elems2[G_PROMISE] = Val::Obj(p);
+        self.put_elem2(g, (G_PROMISE) as int, Val::Obj(p));
         self.temp_roots.push(Val::Obj(g));
         self.async_step(g, GM_NEXT, Val::Undef);
         self.temp_roots.pop();
@@ -200,8 +207,8 @@ impl Vm {
             i += 1;
         }
         self.stack.truncate(start);
-        let promise = if self.objs[g as usize].elems2.len() > G_PROMISE { self.objs[g as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
-        let awaiting = if self.objs[g as usize].elems2.len() > G_AWAIT { self.objs[g as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
+        let promise = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_PROMISE { self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
+        let awaiting = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_AWAIT { self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
         let mut rest: Vec<Val> = Vec::new();
         {
             let f = &self.frames[fi];
@@ -229,8 +236,8 @@ impl Vm {
         }
         self.handlers.truncate(first);
         self.frames.pop();
-        self.objs[g as usize].elems = saved;
-        self.objs[g as usize].elems2 = rest;
+        self.put_elems(g, saved);
+        self.put_elems2(g, rest);
     }
 
     /// Runs `g` from where it stopped with `v` as the value of its `yield`
@@ -238,7 +245,7 @@ impl Vm {
     /// the yielded or returned value; `gen_done` tells which. An exception
     /// out of the coroutine is left thrown.
     pub fn gen_resume(&mut self, g: int, mode: int, v: Val) -> Val {
-        let state = self.objs[g as usize].pos;
+        let state = self.objs[g as usize].pos as int;
         self.gen_done = true;
         self.gen_raw = false;
         if state == GS_RUNNING {
@@ -255,14 +262,16 @@ impl Vm {
         }
         let base = self.frames.len() as int;
         let start = self.stack.len() as int;
-        let saved = self.objs[g as usize].elems.clone();
+        let saved = self.evecs[self.objs[g as usize].elems as usize].v.clone();
         for x in saved {
             self.stack.push(x);
         }
-        let rest = self.objs[g as usize].elems2.clone();
+        let rest = self.colds[self.objs[g as usize].cold as usize].elems2.clone();
         let args_obj = obj_of(&rest[G_ARGS]);
+        let gp = self.objs[g as usize].func as int;
+        unpack_code(&mut self.protos[gp as usize]);
         self.frames.push(Frame {
-            proto: self.objs[g as usize].func,
+            proto: self.objs[g as usize].func as int,
             fobj: obj_of(&rest[G_FOBJ]),
             pc: num_of(&rest[G_PC]),
             bp: start + 2,
@@ -272,6 +281,9 @@ impl Vm {
             args_obj: args_obj,
             construct: false,
             gen: g,
+            ret: -1,
+            mv_from: -1,
+            mv_to: -1,
         });
         let mut i = G_HANDLERS;
         while i + 2 < rest.len() {
@@ -283,8 +295,8 @@ impl Vm {
             });
             i += 3;
         }
-        self.objs[g as usize].elems = Vec::new();
-        self.objs[g as usize].pos = GS_RUNNING;
+        self.put_elems(g, Vec::new());
+        self.objs[g as usize].pos = GS_RUNNING as i32;
         if state == GS_YIELD {
             self.stack.push(v);
             self.stack.push(Val::Num(mode as double));
@@ -302,7 +314,7 @@ impl Vm {
         }
         let r = self.stack.pop().unwrap();
         if yielded {
-            self.objs[g as usize].pos = GS_YIELD;
+            self.objs[g as usize].pos = GS_YIELD as i32;
             self.gen_done = false;
         } else {
             self.gen_finish(g);
@@ -313,11 +325,11 @@ impl Vm {
     }
 
     fn gen_finish(&mut self, g: int) {
-        self.objs[g as usize].pos = GS_DONE;
-        self.objs[g as usize].elems = Vec::new();
-        let n = self.objs[g as usize].elems2.len();
+        self.objs[g as usize].pos = GS_DONE as i32;
+        self.put_elems(g, Vec::new());
+        let n = self.colds[self.objs[g as usize].cold as usize].elems2.len();
         if n > G_HANDLERS {
-            self.objs[g as usize].elems2.truncate(G_HANDLERS);
+            self.cut_elems2(g, (G_HANDLERS) as int);
         }
     }
 
@@ -373,7 +385,7 @@ impl Vm {
                 return 0;
             }
         }
-        let r = self.call_value(m, it, vec![received]);
+        let r = self.call_fixed(m, it, 1, received, Val::Undef, Val::Undef);
         if self.throwing {
             return 0;
         }
@@ -409,7 +421,7 @@ impl Vm {
         if self.throwing || !self.is_callable(&m) {
             return;
         }
-        let r = self.call_value(m, it.clone(), Vec::new());
+        let r = self.call_fixed(m, it.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
         if !self.throwing && !is_obj(&r) {
             self.throw_type("Iterator result is not an object");
         }
@@ -417,7 +429,7 @@ impl Vm {
 
     /// Resumes an async call's coroutine and wires the next `await`.
     pub fn async_step(&mut self, g: int, mode: int, v: Val) {
-        let p = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+        let p = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
         let r = self.gen_resume(g, mode, v);
         if self.throwing {
             self.throwing = false;
@@ -443,9 +455,9 @@ impl Vm {
             q
         };
         let ok = self.native_fn("", NF_ASYNC_OK, 1);
-        self.objs[ok as usize].env = g;
+        self.put_env(ok, g);
         let err = self.native_fn("", NF_ASYNC_ERR, 1);
-        self.objs[err as usize].env = g;
+        self.put_env(err, g);
         self.promise_then(awaited, Val::Obj(ok), Val::Obj(err));
     }
 
@@ -457,39 +469,39 @@ impl Vm {
         let mut v = v0;
         let mut resuming = after_await;
         loop {
-            let q = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
+            let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             if q < 0 {
                 return;
             }
             if !resuming {
-                if self.objs[q as usize].elems.is_empty() {
+                if self.evecs[self.objs[q as usize].elems as usize].v.is_empty() {
                     return;
                 }
-                let req = obj_of(&self.objs[q as usize].elems[0].clone());
-                mode = num_of(&self.objs[req as usize].elems[0].clone());
-                v = self.objs[req as usize].elems[1].clone();
+                let req = obj_of(&self.evecs[self.objs[q as usize].elems as usize].v[0].clone());
+                mode = num_of(&self.evecs[self.objs[req as usize].elems as usize].v[0].clone());
+                v = self.evecs[self.objs[req as usize].elems as usize].v[1].clone();
             }
             resuming = false;
             self.temp_roots.push(Val::Obj(g));
             let r = self.gen_resume(g, mode, v.clone());
             self.temp_roots.pop();
-            let q2 = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
-            if q2 < 0 || self.objs[q2 as usize].elems.is_empty() {
+            let q2 = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
+            if q2 < 0 || self.evecs[self.objs[q2 as usize].elems as usize].v.is_empty() {
                 return;
             }
-            let req = obj_of(&self.objs[q2 as usize].elems[0].clone());
-            let p = obj_of(&self.objs[req as usize].elems[2].clone());
+            let req = obj_of(&self.evecs[self.objs[q2 as usize].elems as usize].v[0].clone());
+            let p = obj_of(&self.evecs[self.objs[req as usize].elems as usize].v[2].clone());
             if self.throwing {
                 self.throwing = false;
                 let e = self.exc.clone();
                 self.exc = Val::Undef;
-                self.objs[q2 as usize].elems.remove(0);
+                self.remove_elem(q2, (0) as int);
                 self.settle(p, 2, e);
                 continue;
             }
             if !self.gen_done && self.gen_awaiting {
                 self.gen_awaiting = false;
-                self.objs[g as usize].elems2[G_AWAIT] = Val::Bool(true);
+                self.put_elem2(g, (G_AWAIT) as int, Val::Bool(true));
                 let awaited = if self.class_of(&r) == C_PROMISE {
                     obj_of(&r)
                 } else {
@@ -498,24 +510,24 @@ impl Vm {
                     w
                 };
                 let ok = self.native_fn("", NF_AGEN_AWAIT_OK, 1);
-                self.objs[ok as usize].env = g;
+                self.put_env(ok, g);
                 let err = self.native_fn("", NF_AGEN_AWAIT_ERR, 1);
-                self.objs[err as usize].env = g;
+                self.put_env(err, g);
                 self.promise_then(awaited, Val::Obj(ok), Val::Obj(err));
                 return;
             }
             let done = self.gen_done;
-            self.objs[q2 as usize].elems.remove(0);
+            self.remove_elem(q2, (0) as int);
             let res = self.iter_result(r, done);
             self.settle(p, 1, res);
         }
     }
 
-    pub fn call_native_co(&mut self, id: int, fobj: int, this: Val, args: Vec<Val>) -> Val {
+    pub fn call_native_co(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         if id == NF_AGEN_AWAIT_OK || id == NF_AGEN_AWAIT_ERR {
-            let g = self.objs[fobj as usize].env;
-            self.objs[g as usize].elems2[G_AWAIT] = Val::Bool(false);
+            let g = self.objs[fobj as usize].env as int;
+            self.put_elem2(g, (G_AWAIT) as int, Val::Bool(false));
             self.agen_run(g, if id == NF_AGEN_AWAIT_OK { GM_NEXT } else { GM_THROW }, a0, true);
             return Val::Undef;
         }
@@ -546,16 +558,16 @@ impl Vm {
                 GM_NEXT
             };
             let req = self.new_array(vec![Val::Num(mode as double), a0, Val::Obj(p)]);
-            let q = obj_of(&self.objs[g as usize].elems2[G_PROMISE].clone());
-            self.objs[q as usize].elems.push(Val::Obj(req));
-            let idle = self.objs[g as usize].pos != GS_RUNNING && !truthy(&self.objs[g as usize].elems2[G_AWAIT].clone());
-            if idle && self.objs[q as usize].elems.len() == 1 {
+            let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
+            self.push_elem(q, Val::Obj(req));
+            let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !truthy(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
+            if idle && self.evecs[self.objs[q as usize].elems as usize].v.len() == 1 {
                 self.agen_run(g, GM_NEXT, Val::Undef, false);
             }
             return Val::Obj(p);
         }
         if id == NF_ASYNC_OK || id == NF_ASYNC_ERR {
-            let g = self.objs[fobj as usize].env;
+            let g = self.objs[fobj as usize].env as int;
             self.async_step(g, if id == NF_ASYNC_OK { GM_NEXT } else { GM_THROW }, a0);
             return Val::Undef;
         }
@@ -622,10 +634,10 @@ impl Vm {
                 let k = self.get_index(&v, 0);
                 let val = if self.throwing { Val::Undef } else { self.get_index(&v, 1) };
                 if !self.throwing {
-                    self.call_value(adder.clone(), Val::Obj(m), vec![k, val]);
+                    self.call_fixed(adder.clone(), Val::Obj(m), 2, k, val, Val::Undef);
                 }
             } else {
-                self.call_value(adder.clone(), Val::Obj(m), vec![v]);
+                self.call_fixed(adder.clone(), Val::Obj(m), 1, v, Val::Undef, Val::Undef);
             }
             if self.throwing {
                 self.iter_close_on_throw(&it);

@@ -101,7 +101,8 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
         let msg = engine.error.clone();
         return finish(engine, msg);
     }
-    let r = engine.vm.call_value(f, Val::Undef, vec![string_val(arg)]);
+    let av = engine.vm.string_val(arg);
+    let r = engine.vm.call_value(f, Val::Undef, vec![av]);
     let value = if engine.vm.throwing {
         let exc = engine.vm.exc.clone();
         engine.vm.throwing = false;
@@ -116,7 +117,7 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
     } else {
         engine.vm.run_jobs();
         match &r {
-            Val::Str(s) => s.as_ref().clone(),
+            Val::Str(s) => engine.vm.sref(*s).to_string(),
             _ => engine.vm.display(&r),
         }
     };

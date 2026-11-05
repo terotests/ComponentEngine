@@ -1,0 +1,6664 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! From tokens to bytecode in one pass, with no syntax tree.
+//!
+//! The parser writes code as it reads. What it cannot know yet is left as
+//! a placeholder op (`PH_*`): a name's place (a stack slot, a slot of a
+//! scope object or a property of the global object depends on whether a
+//! closure read further on captures it), the scope objects a block needs,
+//! the functions hoisted to the top of a block. When the whole script has
+//! been read, `finish` resolves every name, places every binding and
+//! writes each function's code again with the placeholders expanded, the
+//! ops fused as `compiler.rs` fuses them and the jumps moved to match.
+//!
+//! Code that runs in another order than it is written is read again from
+//! its tokens: a `for` loop's update after its body, the cases of a
+//! `switch` before their statements, a `finally` block at every exit of
+//! its `try`, a destructuring target after the value it receives.
+
+use ranger::prelude::*;
+use std::rc::Rc;
+use std::collections::HashMap;
+
+use crate::ast::{F_ARROW, F_ASYNC, F_CTOR, F_DECL, F_DERIVED, F_GENERATOR, F_GETTER, F_METHOD, F_SETTER, F_STATIC, F_STRICT};
+use crate::lexer::*;
+use crate::num::number_to_string;
+use crate::ops::*;
+use crate::parser::{is_reserved, is_strict_reserved};
+use crate::value::*;
+
+const K_VAR: int = 0;
+const K_LET: int = 1;
+const K_CONST: int = 2;
+const K_FUNC: int = 3;
+const K_PARAM: int = 4;
+const K_CLASS: int = 5;
+const K_CATCH: int = 6;
+const K_ARGS: int = 7;
+const K_CALLEE: int = 8;
+
+/// a name: `a` the reference, `b` the mode (M_*), `c` the mode's extra
+const PH_REF: int = 1000;
+/// a scope entered: `a` the scope, `b` 1 for a function's own scope
+const PH_ENTER: int = 1001;
+/// a block scope left (also by a jump out of it)
+const PH_LEAVE: int = 1002;
+/// a `for` loop's scope object copied for the next iteration
+const PH_COPY_ENV: int = 1003;
+/// the function declarations of a scope, made where the scope starts
+const PH_HOIST: int = 1004;
+/// `var` and function names of the top level declared on the global object
+const PH_DECL_GLOBALS: int = 1005;
+/// a function's captured parameters, `arguments` and its own name
+const PH_PROLOGUE: int = 1006;
+/// body vars named like a parameter start with its value: `a` the body's
+/// scope, `b` the parameters'
+const PH_BODY_VARS: int = 1007;
+/// Annex B: a block's function copied to the function's var
+const PH_ANNEX: int = 1008;
+/// nothing
+const PH_NOP: int = 1009;
+
+const M_LOAD: int = 0;
+const M_STORE: int = 1;
+const M_INIT: int = 2;
+const M_TYPEOF: int = 3;
+const M_DELETE: int = 4;
+/// `x++`: c holds U_* flags
+const M_UPD: int = 5;
+/// `x += v;` / `x = x + v;`: the read of x (c the store's reference) and
+/// the add and store (c 1 when v assigns nothing)
+const M_ADDT_LOAD: int = 6;
+const M_ADDT_STORE: int = 7;
+
+const U_PREFIX: int = 1;
+const U_INC: int = 2;
+/// a statement of its own: the value is not kept
+const U_DISCARD: int = 4;
+/// ... at the top of the script: it is the completion value
+const U_TOP: int = 8;
+
+// control-stack entries
+const CT_LOOP: int = 0;
+const CT_SWITCH: int = 1;
+const CT_BLOCK: int = 2;
+const CT_TRY: int = 3;
+const CT_ENV: int = 4;
+const CT_ITEM: int = 5;
+const CT_ITER: int = 6;
+
+// what an expression was, for what follows it (an assignment, a call,
+// a condition)
+const E_OTHER: int = 0;
+const E_IDENT: int = 1;
+const E_MEMBER: int = 2;
+const E_INDEX: int = 3;
+const E_SUPER_MEMBER: int = 4;
+const E_ANON: int = 5;
+const E_CMP: int = 6;
+const E_NOT: int = 7;
+/// `x + v` with x a name: a the reference, b its op, c the assignments
+/// counted before v
+const E_ADD: int = 8;
+const E_NUM: int = 9;
+const E_ADDASSIGN: int = 10;
+const E_MEMBER_ADDASSIGN: int = 11;
+const E_UPDATE_IDENT: int = 12;
+const E_CHAIN: int = 13;
+const E_PRIVATE: int = 14;
+const E_LITERAL: int = 15;
+
+/// before every sequence number
+const SEQ_NEVER: int = 2000000000;
+
+#[derive(Clone, Copy)]
+pub struct Ex {
+    pub k: int,
+    pub a: int,
+    pub b: int,
+    pub c: int,
+}
+
+fn ex(k: int) -> Ex {
+    Ex { k: k, a: -1, b: -1, c: -1 }
+}
+
+pub struct PBind {
+    pub name: String,
+    pub kind: int,
+    pub captured: bool,
+    pub slot: int,
+    pub in_env: bool,
+    pub scope: int,
+    pub global: bool,
+    pub placed: bool,
+    pub tdz: bool,
+    /// the sequence number from which the binding is initialized (reads
+    /// before it check for the uninitialized marker)
+    pub init_seq: int,
+}
+
+pub struct PScope {
+    pub parent: int,
+    pub is_func: bool,
+    pub is_arrow: bool,
+    pub is_program: bool,
+    /// the scope of a function declaration, which may run before the
+    /// declarations of the scopes around it
+    pub decl_fn: bool,
+    pub is_switch: bool,
+    pub names: HashMap<String, int>,
+    pub binds: Vec<int>,
+    pub env_size: int,
+    pub has_env: bool,
+    /// the function (PFn) whose code enters it
+    pub fnid: int,
+    /// a `with` statement's scope: its object's binding
+    pub with_bind: int,
+    pub hoists: Vec<int>,
+}
+
+pub struct PRef {
+    pub name: String,
+    pub scope: int,
+    pub seq: int,
+    /// the name a let / const / parameter declares (not a reference)
+    pub decl: bool,
+    /// a binding known when the reference was made
+    pub direct: int,
+    pub bind: int,
+    pub with_list: int,
+    pub tdz: bool,
+    pub param_tdz: bool,
+}
+
+pub struct PHoist {
+    pub proto: int,
+    pub name: String,
+}
+
+pub struct PAnnex {
+    pub scope: int,
+    pub name: String,
+    pub proto: int,
+    pub var_bind: int,
+}
+
+/// a function, from its start to `finish`
+pub struct PFn {
+    pub fscope: int,
+    pub scopes: Vec<int>,
+    pub param_binds: Vec<int>,
+    pub base: int,
+    pub is_program: bool,
+    /// its index in `protos`
+    pub proto: int,
+    pub str_consts: HashMap<String, int>,
+    pub num_consts: HashMap<String, int>,
+}
+
+struct PCtl {
+    kind: int,
+    labels: Vec<String>,
+    breaks: Vec<int>,
+    conts: Vec<int>,
+    /// a try's finally block: the token of its `{`, -1 for none
+    fin: int,
+    installed: bool,
+    scope: int,
+}
+
+struct PState {
+    proto: Proto,
+    fnid: int,
+    ctl: Vec<PCtl>,
+    chain: Vec<Vec<int>>,
+    pending_labels: Vec<String>,
+    is_program: bool,
+    /// where its `var`s go
+    var_scope: int,
+    /// Annex B candidates: function declarations in its blocks
+    annex: Vec<int>,
+    /// parser state of the code around it
+    saved_in_function: bool,
+    saved_in_generator: bool,
+    saved_in_async: bool,
+    saved_strict: bool,
+    saved_scope: int,
+}
+
+fn new_ctl(kind: int) -> PCtl {
+    PCtl { kind: kind, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), fin: -1, installed: false, scope: -1 }
+}
+
+fn binary_prec(op: &str) -> int {
+    if op == "??" {
+        return 1;
+    }
+    if op == "||" {
+        return 2;
+    }
+    if op == "&&" {
+        return 3;
+    }
+    if op == "|" {
+        return 4;
+    }
+    if op == "^" {
+        return 5;
+    }
+    if op == "&" {
+        return 6;
+    }
+    if op == "==" || op == "!=" || op == "===" || op == "!==" {
+        return 7;
+    }
+    if op == "<" || op == ">" || op == "<=" || op == ">=" || op == "instanceof" || op == "in" {
+        return 8;
+    }
+    if op == "<<" || op == ">>" || op == ">>>" {
+        return 9;
+    }
+    if op == "+" || op == "-" {
+        return 10;
+    }
+    if op == "*" || op == "/" || op == "%" {
+        return 11;
+    }
+    if op == "**" {
+        return 12;
+    }
+    -1
+}
+
+fn is_assign_op(op: &str) -> bool {
+    op == "="
+        || op == "+="
+        || op == "-="
+        || op == "*="
+        || op == "/="
+        || op == "%="
+        || op == "**="
+        || op == "<<="
+        || op == ">>="
+        || op == ">>>="
+        || op == "&="
+        || op == "|="
+        || op == "^="
+        || op == "&&="
+        || op == "||="
+        || op == "??="
+}
+
+fn binary_code(op: &str) -> int {
+    match op {
+        "+" => OP_ADD,
+        "-" => OP_SUB,
+        "*" => OP_MUL,
+        "/" => OP_DIV,
+        "%" => OP_MOD,
+        "**" => OP_EXP,
+        "&" => OP_BAND,
+        "|" => OP_BOR,
+        "^" => OP_BXOR,
+        "<<" => OP_SHL,
+        ">>" => OP_SHR,
+        ">>>" => OP_USHR,
+        "==" => OP_EQ,
+        "!=" => OP_NE,
+        "===" => OP_SEQ,
+        "!==" => OP_SNE,
+        "<" => OP_LT,
+        ">" => OP_GT,
+        "<=" => OP_LE,
+        ">=" => OP_GE,
+        "instanceof" => OP_INSTANCEOF,
+        "in" => OP_IN,
+        _ => OP_NOP,
+    }
+}
+
+fn is_compare(code: int) -> bool {
+    code == OP_LT || code == OP_GT || code == OP_LE || code == OP_GE || code == OP_SEQ || code == OP_SNE || code == OP_EQ || code == OP_NE
+}
+
+/// Whether the op jumps to `a` (and, for YIELD_STAR, to `b`).
+fn is_jump(op: &Op) -> bool {
+    let c = op.code;
+    (c as int) == OP_JUMP
+        || (c as int) == OP_JF
+        || (c as int) == OP_JT
+        || (c as int) == OP_JNOT_UNDEF
+        || (c as int) == OP_JF_KEEP
+        || (c as int) == OP_JT_KEEP
+        || (c as int) == OP_JNN_KEEP
+        || (c as int) == OP_JNULLISH
+        || (c as int) == OP_CMP_JF
+        || (c as int) == OP_LOCAL_NULL_JF
+        || (c as int) == OP_CASE_INT_JT
+        || (c as int) == OP_CASE_JT
+        || (c as int) == OP_ITER_NEXT
+        || ((c as int) == OP_TEMPLATE_OBJ && op.b >= 0)
+        || (c as int) == OP_GEN_RESUME
+        || (c as int) == OP_YIELD_STAR
+        || (c as int) == OP_TRY
+}
+
+/// A token as pcomp keeps it: its text (or number) by index into
+/// PComp.names (PComp.nums), so that a script's tokens stay small.
+pub struct PTok {
+    pub kind: i32,
+    pub line: i32,
+    /// where the token starts and ends in the source (chars)
+    pub start: i32,
+    pub end: i32,
+    /// the text's index in `names`
+    pub v: i32,
+    /// a template's or a regular expression's extra (xs), a number's
+    /// value in `nums`, -1 for none
+    pub x: i32,
+    /// PT_NL, PT_ESCAPED
+    pub flags: i32,
+}
+
+/// a line break before the token
+pub const PT_NL: i32 = 1;
+/// an identifier written with an escape, or a string with an octal escape
+pub const PT_ESCAPED: i32 = 2;
+
+pub struct PComp {
+    toks: Vec<PTok>,
+    /// the tokens' texts, each once (`name_ids` finds one)
+    names: Vec<String>,
+    name_ids: HashMap<String, int>,
+    /// name_id's cache: a text's cheap hash to its index, -1 for none
+    name_cache: Vec<int>,
+    /// the number tokens' values
+    nums: Vec<double>,
+    /// the token closing each bracket (and the one opening each closing
+    /// one), -1 for others
+    mate: Vec<int>,
+    xs: Vec<TokX>,
+    pos: int,
+    /// counts tokens read, re-reads included: what came first
+    seq: int,
+    /// the source the tokens come from, shared by the functions' protos
+    src_rc: Rc<String>,
+    pub error: String,
+
+    pub atoms: HashMap<String, int>,
+    pub atom_names: Vec<String>,
+    pub protos: Vec<Proto>,
+    pub proto_base: int,
+    pub local_program: bool,
+    /// strict eval code: a "use strict" of its own also keeps its
+    /// declarations local
+    pub local_if_strict: bool,
+    keep_completion: bool,
+    /// TypeScript: types are read and skipped (`type_end`)
+    pub ts: bool,
+    /// JSX: elements are the factory's calls (the lexer writes them)
+    jsx: bool,
+    jsx_factory: String,
+    jsx_fragment: String,
+    /// a module's file (`compile_module`): its imports name it, and its
+    /// exports (names, the expressions that read them, `export *` modules)
+    /// are what it returns
+    pub module_path: String,
+    /// a host's script (CErXes `Engine::compile`) may `import` the host's
+    /// modules and keep its `export`ed declarations, as the parser reads it
+    pub script_imports: bool,
+    mex_names: Vec<String>,
+    mex_values: Vec<String>,
+    mex_stars: Vec<String>,
+    /// the type reader's token and how many `>` of a `>>` it has read
+    tp: int,
+    tg: int,
+    tbad: bool,
+
+    scopes: Vec<PScope>,
+    binds: Vec<PBind>,
+    refs: Vec<PRef>,
+    hoists: Vec<PHoist>,
+    annexes: Vec<PAnnex>,
+    fns: Vec<PFn>,
+    with_lists: Vec<Vec<int>>,
+    has_with: bool,
+    with_count: int,
+    fs: Vec<PState>,
+    cur_scope: int,
+
+    // parser state
+    no_in: bool,
+    in_function: bool,
+    in_class: bool,
+    in_generator: bool,
+    in_async: bool,
+    strict: bool,
+    member_start: int,
+    /// the statement being read stands directly in a statement list
+    list_stmt: bool,
+    /// assignments and updates read so far
+    assigns: int,
+    /// the value of the number literal read last
+    last_num: double,
+    /// bindings a declaration made, initialized once it is read
+    pending_inits: Vec<int>,
+    /// the names of the parameters being read
+    param_names: Vec<String>,
+    /// the name of the function read last
+    last_fn_name: String,
+    /// the field initializers of classes being read, set aside while
+    /// their other members are read (by id)
+    parked: Vec<PState>,
+    parked_ids: Vec<int>,
+    park_count: int,
+
+    // the code being expanded (finish)
+    xo: Vec<Op>,
+    xfixed: Vec<bool>,
+    xlabel: int,
+    xpi: usize,
+    xf: int,
+}
+
+impl PComp {
+    pub fn new(src: &str, atoms: HashMap<String, int>, atom_names: Vec<String>, proto_base: int) -> PComp {
+        PComp::new_syntax(src, atoms, atom_names, proto_base, false, "", "")
+    }
+
+    /// `new`, its JSX read as the factory's calls (crate::lexer::lexer_for).
+    pub fn new_syntax(src: &str, atoms: HashMap<String, int>, atom_names: Vec<String>, proto_base: int, jsx: bool, factory: &str, fragment: &str) -> PComp {
+        let mut lx = lexer_for(src, jsx, factory, fragment);
+        let mut c = PComp {
+            toks: Vec::new(),
+            names: Vec::new(),
+            name_ids: HashMap::new(),
+            name_cache: Vec::new(),
+            nums: Vec::new(),
+            mate: Vec::new(),
+            xs: Vec::new(),
+            pos: 0,
+            seq: 0,
+            src_rc: Rc::new(String::from(src)),
+            error: String::new(),
+            atoms: atoms,
+            atom_names: atom_names,
+            protos: Vec::new(),
+            proto_base: proto_base,
+            local_program: false,
+            local_if_strict: false,
+            keep_completion: true,
+            ts: false,
+            jsx: jsx,
+            jsx_factory: String::from(factory),
+            jsx_fragment: String::from(fragment),
+            module_path: String::new(),
+            script_imports: false,
+            mex_names: Vec::new(),
+            mex_values: Vec::new(),
+            mex_stars: Vec::new(),
+            tp: 0,
+            tg: 0,
+            tbad: false,
+            scopes: Vec::new(),
+            binds: Vec::new(),
+            refs: Vec::new(),
+            hoists: Vec::new(),
+            annexes: Vec::new(),
+            fns: Vec::new(),
+            with_lists: Vec::new(),
+            has_with: false,
+            with_count: 0,
+            fs: Vec::new(),
+            cur_scope: -1,
+            no_in: false,
+            in_function: false,
+            in_class: false,
+            in_generator: false,
+            in_async: false,
+            strict: false,
+            member_start: 0,
+            list_stmt: false,
+            assigns: 0,
+            last_num: 0.0,
+            pending_inits: Vec::new(),
+            param_names: Vec::new(),
+            last_fn_name: String::new(),
+            parked: Vec::new(),
+            parked_ids: Vec::new(),
+            park_count: 0,
+            xo: Vec::new(),
+            xfixed: Vec::new(),
+            xlabel: -1,
+            xpi: 0,
+            xf: 0,
+        };
+        c.lex_tokens(&mut lx, 0);
+        trim_toks(&mut c.toks);
+        if !lx.error.is_empty() {
+            c.error = lx.error.clone();
+        }
+        c.xs = lx.xs;
+        c.pos = 0;
+        c
+    }
+
+    /// The lexer's tokens after the ones there are, each kept small (PTok)
+    /// as it is read, with their brackets matched; `xbase` is where their
+    /// extras start in `xs`.
+    fn lex_tokens(&mut self, lx: &mut Lexer, xbase: int) {
+        let base = self.toks.len();
+        loop {
+            let t = next_tok(lx);
+            let k = t.kind;
+            let pt = self.small_tok(&t, xbase);
+            self.toks.push(pt);
+            if k == T_EOF {
+                break;
+            }
+        }
+        let n = self.toks.len();
+        let mut stack: Vec<int> = Vec::new();
+        let mut i: usize = base;
+        while i < n {
+            self.mate.push(-1);
+            if (self.toks[i].kind as int) as int == T_PUNCT {
+                let s = self.names[self.toks[i].v as usize].as_str();
+                if s == "(" || s == "[" || s == "{" {
+                    stack.push(i as int);
+                } else if s == ")" || s == "]" || s == "}" {
+                    if !stack.is_empty() {
+                        let o = stack.pop().unwrap();
+                        self.mate[o as usize] = i as int;
+                        self.mate[i] = o;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    fn small_tok(&mut self, t: &Tok, xbase: int) -> PTok {
+        let mut flags: i32 = 0;
+        if t.nl {
+            flags = flags | PT_NL;
+        }
+        if t.escaped {
+            flags = flags | PT_ESCAPED;
+        }
+        let v = self.name_id(t.text.as_str());
+        // a number's value is in `nums`, at its `x`
+        let x = if t.kind == T_NUM {
+            self.nums.push(t.num);
+            (self.nums.len() - 1) as int
+        } else if t.x >= 0 {
+            t.x + xbase
+        } else {
+            -1
+        };
+        PTok { kind: t.kind as i32, line: t.line as i32, start: t.start as i32, end: t.end as i32, v: v as i32, x: x as i32, flags: flags }
+    }
+
+    fn name_id(&mut self, s: &str) -> int {
+        // most texts repeat: a direct-mapped cache by a cheap hash first
+        let n = s.as_bytes().len();
+        let mut h: int = n as int;
+        let mut i: usize = 0;
+        while i < n && i < 8 {
+            h = (h * 131 + (s.as_bytes()[i] as int)) & 16777215;
+            i += 1;
+        }
+        if n > 8 {
+            h = (h * 131 + (s.as_bytes()[n - 1] as int)) & 16777215;
+        }
+        let slot = ((h ^ (h >> 14)) & 16383) as usize;
+        if self.name_cache.is_empty() {
+            let mut k = 0;
+            while k < 16384 {
+                self.name_cache.push(-1);
+                k += 1;
+            }
+        }
+        let c = self.name_cache[slot];
+        if c >= 0 && self.names[c as usize].as_str() == s {
+            return c;
+        }
+        let id = self.name_id_slow(s);
+        self.name_cache[slot] = id;
+        id
+    }
+
+    fn name_id_slow(&mut self, s: &str) -> int {
+        match self.name_ids.get(s) {
+            Some(i) => *i,
+            None => {
+                let i = self.names.len() as int;
+                self.names.push(String::from(s));
+                self.name_ids.insert(String::from(s), i);
+                i
+            }
+        }
+    }
+
+    /// Token `i`'s text.
+    fn tok_text(&self, i: int) -> String {
+        self.names[self.toks[i as usize].v as usize].clone()
+    }
+
+    /// Token `i`'s text is `s`.
+    fn text_is(&self, i: int, s: &str) -> bool {
+        self.names[self.toks[i as usize].v as usize].as_str() == s
+    }
+
+    fn tok_num(&self, i: int) -> double {
+        self.nums[self.toks[i as usize].x as usize]
+    }
+
+    fn nl_at(&self, i: int) -> bool {
+        (self.toks[i as usize].flags & PT_NL) != 0
+    }
+
+    fn tok_escaped(&self, i: int) -> bool {
+        (self.toks[i as usize].flags & PT_ESCAPED) != 0
+    }
+
+    pub fn atom(&mut self, s: &str) -> int {
+        match self.atoms.get(s) {
+            Some(a) => *a,
+            None => {
+                let a = self.atom_names.len() as int;
+                self.atom_names.push(String::from(s));
+                self.atoms.insert(String::from(s), a);
+                a
+            }
+        }
+    }
+
+    // =====================================================================
+    // tokens
+
+    fn kind(&self) -> int {
+        self.toks[self.pos as usize].kind as int
+    }
+
+    fn text(&self) -> String {
+        self.tok_text(self.pos)
+    }
+
+    fn line(&self) -> int {
+        self.toks[self.pos as usize].line as int
+    }
+
+    fn tok_count(&self) -> int {
+        self.toks.len() as int
+    }
+
+    fn peek_kind(&self, k: int) -> int {
+        let i = self.pos + k;
+        if i >= self.tok_count() {
+            return T_EOF;
+        }
+        self.toks[i as usize].kind as int
+    }
+
+    fn tok_is(&self, i: int, s: &str) -> bool {
+        if i < 0 || i >= self.tok_count() {
+            return false;
+        }
+        let t = &self.toks[i as usize];
+        ((t.kind as int) == T_PUNCT || ((t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0)) && self.names[t.v as usize].as_str() == s
+    }
+
+    fn peek_is(&self, k: int, s: &str) -> bool {
+        self.tok_is(self.pos + k, s)
+    }
+
+    fn is(&self, s: &str) -> bool {
+        self.peek_is(0, s)
+    }
+
+    fn nl_before(&self) -> bool {
+        self.nl_at(self.pos)
+    }
+
+    fn tok_nl(&self, i: int) -> bool {
+        if i < 0 || i >= self.tok_count() {
+            return false;
+        }
+        self.nl_at(i)
+    }
+
+    fn escaped(&self) -> bool {
+        self.tok_escaped(self.pos)
+    }
+
+    fn next(&mut self) {
+        if self.pos < self.tok_count() - 1 {
+            self.pos += 1;
+        }
+        self.seq += 1;
+    }
+
+    /// Moves to token `p` (not after an error, which stays at the end).
+    fn goto(&mut self, p: int) {
+        if self.error.is_empty() {
+            self.pos = p;
+        }
+    }
+
+    fn fail(&mut self, msg: &str) {
+        if self.error.is_empty() {
+            let l = self.line();
+            if msg.starts_with("SyntaxError") {
+                self.error = String::from(msg);
+            } else {
+                self.error = format!("SyntaxError: {} (line {})", msg, l);
+            }
+        }
+        self.pos = self.tok_count() - 1;
+    }
+
+    fn expect(&mut self, s: &str) {
+        if self.is(s) {
+            self.next();
+        } else {
+            let t = self.text();
+            self.fail(format!("expected '{}' but found '{}'", s, t).as_str());
+        }
+    }
+
+    fn eat(&mut self, s: &str) -> bool {
+        if self.is(s) {
+            self.next();
+            return true;
+        }
+        false
+    }
+
+    fn semicolon(&mut self) {
+        if self.eat(";") {
+            return;
+        }
+        if self.is("}") || self.kind() == T_EOF || self.nl_before() {
+            return;
+        }
+        let t = self.text();
+        self.fail(format!("unexpected token '{}'", t).as_str());
+    }
+
+    fn ident_name(&mut self) -> String {
+        if self.kind() == T_IDENT {
+            let s = self.text();
+            self.next();
+            return s;
+        }
+        let t = self.text();
+        self.fail(format!("expected a name but found '{}'", t).as_str());
+        String::new()
+    }
+
+    fn binding_ident(&mut self) -> String {
+        if self.kind() == T_IDENT {
+            let s = self.text();
+            if is_reserved(s.as_str()) || (self.strict && is_strict_reserved(s.as_str())) {
+                self.fail(format!("unexpected reserved word '{}'", s).as_str());
+                return s;
+            }
+            self.next();
+            return s;
+        }
+        let t = self.text();
+        self.fail(format!("expected an identifier but found '{}'", t).as_str());
+        String::new()
+    }
+
+    /// The token after the bracket at `i` closes, or -1.
+    fn after_mate(&self, i: int) -> int {
+        if i < 0 || i >= self.tok_count() {
+            return -1;
+        }
+        let m = self.mate[i as usize];
+        if m < 0 {
+            return -1;
+        }
+        m + 1
+    }
+
+    /// The token closing the bracket at `i`, or the last token.
+    fn mate_of(&self, i: int) -> int {
+        let m = if i >= 0 && i < self.tok_count() { self.mate[i as usize] } else { -1 };
+        if m < 0 {
+            return self.tok_count() - 1;
+        }
+        m
+    }
+
+    /// From `i`, the first token at bracket depth 0 that is one of the
+    /// punctuators `stops` (or `in` / `of` with `words`), or a closing
+    /// bracket of the depth around.
+    fn scan_to(&self, i: int, stops: &str, words: bool) -> int {
+        let n = self.tok_count();
+        let mut k = i;
+        while k < n {
+            let t = &self.toks[k as usize];
+            if (t.kind as int) == T_EOF {
+                return k;
+            }
+            if (t.kind as int) == T_PUNCT {
+                let s = self.names[t.v as usize].as_str();
+                if s == "(" || s == "[" || s == "{" {
+                    let m = self.mate[k as usize];
+                    if m < 0 {
+                        return n - 1;
+                    }
+                    k = m + 1;
+                    continue;
+                }
+                if s == ")" || s == "]" || s == "}" {
+                    return k;
+                }
+                let mut j: usize = 0;
+                let mut hit = false;
+                for p in stops.split(' ') {
+                    if p == s {
+                        hit = true;
+                    }
+                    j += 1;
+                }
+                let _ = j;
+                if hit {
+                    return k;
+                }
+            } else if words && (t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "in" || self.names[t.v as usize].as_str() == "of") {
+                return k;
+            }
+            k += 1;
+        }
+        n - 1
+    }
+
+    // =====================================================================
+    // scopes and bindings
+
+    fn new_scope(&mut self, parent: int, is_func: bool, is_arrow: bool) -> int {
+        let fnid = if self.fs.is_empty() { -1 } else { self.fs[self.fs.len() - 1].fnid };
+        self.scopes.push(PScope {
+            parent: parent,
+            is_func: is_func,
+            is_arrow: is_arrow,
+            is_program: false,
+            decl_fn: false,
+            is_switch: false,
+            names: HashMap::new(),
+            binds: Vec::new(),
+            env_size: 0,
+            has_env: false,
+            fnid: fnid,
+            with_bind: -1,
+            hoists: Vec::new(),
+        });
+        let id = (self.scopes.len() as int) - 1;
+        if fnid >= 0 {
+            self.fns[fnid as usize].scopes.push(id);
+        }
+        id
+    }
+
+    fn declare(&mut self, scope: int, name: &str, kind: int) -> int {
+        let existing = match self.scopes[scope as usize].names.get(name) {
+            Some(b) => *b,
+            None => -1,
+        };
+        if existing >= 0 {
+            if kind == K_FUNC {
+                self.binds[existing as usize].kind = K_FUNC;
+            }
+            return existing;
+        }
+        let global = self.scopes[scope as usize].is_program && !self.local_program;
+        self.binds.push(PBind {
+            name: String::from(name),
+            kind: kind,
+            captured: false,
+            slot: -1,
+            in_env: false,
+            scope: scope,
+            global: global,
+            placed: false,
+            tdz: false,
+            init_seq: SEQ_NEVER,
+        });
+        let id = (self.binds.len() as int) - 1;
+        self.scopes[scope as usize].names.insert(String::from(name), id);
+        self.scopes[scope as usize].binds.push(id);
+        id
+    }
+
+    /// The binding is initialized from here on (none in a switch, whose
+    /// cases can be jumped into past it).
+    fn mark_inited(&mut self, b: int) {
+        let s = self.binds[b as usize].scope;
+        if self.scopes[s as usize].is_switch {
+            return;
+        }
+        if self.binds[b as usize].init_seq == SEQ_NEVER {
+            self.binds[b as usize].init_seq = self.seq + 1;
+        }
+    }
+
+    fn mark_pending(&mut self) {
+        let list = self.pending_inits.clone();
+        self.pending_inits.clear();
+        for b in list.iter() {
+            self.mark_inited(*b);
+        }
+    }
+
+    fn new_ref(&mut self, name: &str, decl: bool, direct: int) -> int {
+        self.refs.push(PRef {
+            name: String::from(name),
+            scope: self.cur_scope,
+            seq: self.seq,
+            decl: decl,
+            direct: direct,
+            bind: -1,
+            with_list: -1,
+            tdz: false,
+            param_tdz: false,
+        });
+        (self.refs.len() as int) - 1
+    }
+
+    /// A placeholder for the name: its op's index.
+    fn emit_ref(&mut self, name: &str, mode: int, decl: bool) -> int {
+        let r = self.new_ref(name, decl, -1);
+        self.emit3(PH_REF, r, mode, 0)
+    }
+
+    /// A store to a binding known now.
+    fn emit_bind_init(&mut self, b: int) {
+        let name = self.binds[b as usize].name.clone();
+        let r = self.new_ref(name.as_str(), true, b);
+        self.emit3(PH_REF, r, M_INIT, 0);
+    }
+
+    fn lookup_here(&self, scope: int, name: &str) -> int {
+        let mut s = scope;
+        while s >= 0 {
+            if let Some(b) = self.scopes[s as usize].names.get(name) {
+                return *b;
+            }
+            s = self.scopes[s as usize].parent;
+        }
+        -1
+    }
+
+    fn lookup(&mut self, scope: int, name: &str) -> int {
+        let mut s = scope;
+        let mut crossed = false;
+        loop {
+            let found = match self.scopes[s as usize].names.get(name) {
+                Some(b) => *b,
+                None => -1,
+            };
+            if found >= 0 {
+                if crossed {
+                    self.binds[found as usize].captured = true;
+                }
+                return found;
+            }
+            let is_fn = self.scopes[s as usize].is_func;
+            if is_fn && !self.scopes[s as usize].is_arrow && !self.scopes[s as usize].is_program && name == "arguments" {
+                let b = self.declare(s, "arguments", K_ARGS);
+                if crossed {
+                    self.binds[b as usize].captured = true;
+                }
+                return b;
+            }
+            if is_fn {
+                crossed = true;
+            }
+            let p = self.scopes[s as usize].parent;
+            if p < 0 {
+                return -1;
+            }
+            s = p;
+        }
+    }
+
+    fn resolve_ref(&mut self, r: usize) {
+        let direct = self.refs[r].direct;
+        if direct >= 0 {
+            self.refs[r].bind = direct;
+            return;
+        }
+        let name = self.refs[r].name.clone();
+        let scope = self.refs[r].scope;
+        let decl = self.refs[r].decl;
+        let seq = self.refs[r].seq;
+        let b = self.lookup(scope, name.as_str());
+        let global = b >= 0 && self.binds[b as usize].global;
+        if self.has_with && !decl {
+            let target = if b >= 0 && !global { self.binds[b as usize].scope } else { -1 };
+            let mut list: Vec<int> = Vec::new();
+            let mut s = scope;
+            while s >= 0 && s != target {
+                let wb = self.scopes[s as usize].with_bind;
+                if wb >= 0 {
+                    let wn = self.binds[wb as usize].name.clone();
+                    let x = self.lookup(scope, wn.as_str());
+                    if x >= 0 {
+                        list.push(x);
+                    }
+                }
+                s = self.scopes[s as usize].parent;
+            }
+            if !list.is_empty() {
+                self.with_lists.push(list);
+                self.refs[r].with_list = (self.with_lists.len() as int) - 1;
+            }
+        }
+        if b < 0 || global {
+            self.refs[r].bind = -1;
+            return;
+        }
+        self.refs[r].bind = b;
+        let kind = self.binds[b as usize].kind;
+        let target = self.binds[b as usize].scope;
+        let inited = seq >= self.binds[b as usize].init_seq;
+        if kind == K_PARAM && !inited && !decl {
+            let mut s = scope;
+            let mut crossed = false;
+            while s >= 0 && s != target {
+                if self.scopes[s as usize].is_func {
+                    crossed = true;
+                }
+                s = self.scopes[s as usize].parent;
+            }
+            if !crossed {
+                self.refs[r].param_tdz = true;
+            }
+        }
+        if (kind == K_LET || kind == K_CONST || kind == K_CLASS) && !decl {
+            let mut early = !inited;
+            let mut s = scope;
+            while !early && s >= 0 && s != target {
+                if self.scopes[s as usize].is_func && self.scopes[s as usize].decl_fn {
+                    early = true;
+                }
+                s = self.scopes[s as usize].parent;
+            }
+            if early {
+                self.refs[r].tdz = true;
+                self.binds[b as usize].tdz = true;
+            }
+        }
+    }
+
+    // =====================================================================
+    // writing code (placeholders stay until `finish`)
+
+    fn f(&mut self) -> &mut PState {
+        let i = self.fs.len() - 1;
+        &mut self.fs[i]
+    }
+
+    fn pc(&self) -> int {
+        self.fs[self.fs.len() - 1].proto.code.len() as int
+    }
+
+    fn emit3(&mut self, code: int, a: int, b: int, c: int) -> int {
+        let i = self.fs.len() - 1;
+        self.fs[i].proto.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: (c as i32) });
+        (self.fs[i].proto.code.len() as int) - 1
+    }
+
+    fn emit(&mut self, code: int, a: int, b: int) -> int {
+        self.emit3(code, a, b, -1)
+    }
+
+    fn op(&mut self, code: int) {
+        self.emit3(code, 0, 0, -1);
+    }
+
+    fn last_op(&self) -> Op {
+        let f = &self.fs[self.fs.len() - 1];
+        let n = f.proto.code.len();
+        if n == 0 {
+            return Op { code: -1, a: 0, b: 0, c: -1 };
+        }
+        f.proto.code[n - 1]
+    }
+
+    fn pop_op(&mut self) {
+        let i = self.fs.len() - 1;
+        self.fs[i].proto.code.pop();
+    }
+
+    fn set_op(&mut self, at: int, code: int, a: int, b: int) {
+        let i = self.fs.len() - 1;
+        self.fs[i].proto.code[at as usize] = Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 };
+    }
+
+    fn patch(&mut self, at: int) {
+        let here = self.pc();
+        let i = self.fs.len() - 1;
+        self.fs[i].proto.code[at as usize].a = (here as i32);
+    }
+
+    fn patch_to(&mut self, at: int, target: int) {
+        let i = self.fs.len() - 1;
+        self.fs[i].proto.code[at as usize].a = (target as i32);
+    }
+
+    fn fn_str_const(&mut self, f: int, s: &str) -> int {
+        let found = match self.fns[f as usize].str_consts.get(s) {
+            Some(i) => *i,
+            None => -1,
+        };
+        if found >= 0 {
+            return found;
+        }
+        let pi = self.fns[f as usize].proto;
+        let i: int;
+        if pi >= 0 {
+            let p = &mut self.protos[pi as usize];
+            i = p.consts.len() as int;
+            let k = p.cstrs.len() as int;
+            p.cstrs.push(Rc::new(String::from(s)));
+            p.consts.push(Val::Str(k));
+        } else {
+            let top = self.fs.len() - 1;
+            let p = &mut self.fs[top].proto;
+            i = p.consts.len() as int;
+            let k = p.cstrs.len() as int;
+            p.cstrs.push(Rc::new(String::from(s)));
+            p.consts.push(Val::Str(k));
+        }
+        self.fns[f as usize].str_consts.insert(String::from(s), i);
+        i
+    }
+
+    fn str_const(&mut self, s: &str) -> int {
+        let f = self.fs[self.fs.len() - 1].fnid;
+        self.fn_str_const(f, s)
+    }
+
+    fn num_const(&mut self, v: double) -> int {
+        let key = if v == 0.0 && 1.0 / v < 0.0 { String::from("-0") } else { number_to_string(v) };
+        let f = self.fs[self.fs.len() - 1].fnid as usize;
+        let found = match self.fns[f].num_consts.get(&key) {
+            Some(i) => *i,
+            None => -1,
+        };
+        if found >= 0 {
+            return found;
+        }
+        let top = self.fs.len() - 1;
+        let p = &mut self.fs[top].proto;
+        let i = p.consts.len() as int;
+        p.consts.push(Val::Num(v));
+        self.fns[f].num_consts.insert(key, i);
+        i
+    }
+
+    fn push_num(&mut self, v: double) {
+        if v == ((v as int) as double) && v > -1073741824.0 && v < 1073741824.0 && !(v == 0.0 && 1.0 / v < 0.0) {
+            self.emit(OP_INT, v as int, 0);
+        } else {
+            let c = self.num_const(v);
+            self.emit(OP_CONST, c, 0);
+        }
+    }
+
+    fn push_str(&mut self, s: &str) {
+        let c = self.str_const(s);
+        self.emit(OP_CONST, c, 0);
+    }
+
+    fn mark_lexical_ctor(&mut self) {
+        let mut i = self.fs.len();
+        while i > 0 && self.fs[i - 1].proto.arrow {
+            self.fs[i - 1].proto.lexical_ctor = true;
+            i -= 1;
+        }
+    }
+
+    /// A block-like scope: entered here, left by `leave_block`.
+    fn enter_block(&mut self, scope: int) {
+        self.cur_scope = scope;
+        self.emit(PH_ENTER, scope, 0);
+        let mut c = new_ctl(CT_ENV);
+        c.scope = scope;
+        self.f().ctl.push(c);
+    }
+
+    fn leave_block(&mut self, scope: int, saved: int) {
+        self.emit(PH_LEAVE, scope, 0);
+        self.f().ctl.pop();
+        self.cur_scope = saved;
+    }
+
+    // =====================================================================
+    // the end: names, places, code
+
+    fn finish(&mut self) {
+        let n = self.refs.len();
+        let mut i: usize = 0;
+        while i < n {
+            self.resolve_ref(i);
+            i += 1;
+        }
+        let nf = self.fns.len() as int;
+        let mut f: int = 0;
+        while f < nf {
+            self.place(f);
+            f += 1;
+        }
+        f = 0;
+        while f < nf {
+            self.expand(f);
+            f += 1;
+        }
+    }
+
+    /// Slots for the function's bindings: parameters first, then each
+    /// scope's in turn; a captured one goes in its scope's object.
+    fn place(&mut self, f: int) {
+        let fi = f as usize;
+        let mut next_slot = self.fns[fi].base;
+        let pb = self.fns[fi].param_binds.clone();
+        let mut i: int = 0;
+        for b in pb.iter() {
+            let bi = *b;
+            if bi >= 0 && !self.binds[bi as usize].captured && !self.binds[bi as usize].placed {
+                self.binds[bi as usize].slot = i;
+                self.binds[bi as usize].placed = true;
+            }
+            i += 1;
+        }
+        let scopes = self.fns[fi].scopes.clone();
+        for s in scopes.iter() {
+            let binds = self.scopes[*s as usize].binds.clone();
+            let mut env_size: int = 0;
+            for b in binds.iter() {
+                let bi = *b as usize;
+                if self.binds[bi].global || self.binds[bi].placed {
+                    continue;
+                }
+                if self.binds[bi].captured {
+                    self.binds[bi].in_env = true;
+                    self.binds[bi].slot = env_size;
+                    env_size += 1;
+                } else {
+                    self.binds[bi].slot = next_slot;
+                    next_slot += 1;
+                }
+                self.binds[bi].placed = true;
+            }
+            self.scopes[*s as usize].env_size = env_size;
+            self.scopes[*s as usize].has_env = env_size > 0;
+        }
+        let pi = self.fns[fi].proto as usize;
+        self.protos[pi].nslots = next_slot;
+        let fs = self.fns[fi].fscope;
+        if !self.fns[fi].is_program || self.local_program {
+            self.protos[pi].env_size = self.scopes[fs as usize].env_size;
+        }
+    }
+
+    fn env_depth(&self, from: int, target: int) -> int {
+        let mut d: int = 0;
+        let mut s = from;
+        while s >= 0 && s != target {
+            if self.scopes[s as usize].has_env {
+                d += 1;
+            }
+            s = self.scopes[s as usize].parent;
+        }
+        d
+    }
+
+    fn xemit(&mut self, code: int, a: int, b: int) -> int {
+        let n = self.xo.len();
+        if n > 0 && self.xlabel < (n as int) {
+            let last = self.xo[n - 1];
+            let mut fused = -1;
+            let mut fa = 0;
+            let mut fb = 0;
+            if code == OP_GET_LOCAL && (last.code as int) == OP_GET_LOCAL {
+                fused = OP_GET_LOCAL2;
+                fa = last.a;
+                fb = a;
+            } else if code == OP_UNDEF && (last.code as int) == OP_GET_ENV {
+                fused = OP_GET_ENV_UNDEF;
+                fa = last.a;
+                fb = (last.b as int);
+            } else if code == OP_CASE_JT && (last.code as int) == OP_INT {
+                fused = OP_CASE_INT_JT;
+                fa = (a as i32);
+                fb = (last.a as int);
+            } else if code == OP_CMP_JF && (b == OP_SEQ || b == OP_SNE || b == OP_EQ || b == OP_NE) && n > 1 && self.xlabel < (n as int) - 1 {
+                let prev = self.xo[n - 2];
+                let mut slot = -1;
+                if (prev.code as int) == OP_NULL && (last.code as int) == OP_GET_LOCAL {
+                    slot = last.a;
+                } else if (prev.code as int) == OP_GET_LOCAL && (last.code as int) == OP_NULL {
+                    slot = prev.a;
+                }
+                if slot >= 0 {
+                    self.xo.pop();
+                    self.xfixed.pop();
+                    self.xo[n - 2] = Op { code: (OP_LOCAL_NULL_JF as i32), a: (a as i32), b: slot * 256 + (b as i32), c: -1 };
+                    self.xfixed[n - 2] = false;
+                    return (n as int) - 2;
+                }
+            }
+            if fused >= 0 {
+                self.xo[n - 1] = Op { code: (fused as i32), a: fa, b: (fb as i32), c: -1 };
+                self.xfixed[n - 1] = false;
+                return (n as int) - 1;
+            }
+        }
+        self.xo.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
+        self.xfixed.push(false);
+        (self.xo.len() as int) - 1
+    }
+
+    fn xop(&mut self, code: int) {
+        if code == OP_POP {
+            let n = self.xo.len();
+            if n > 0 {
+                let last = self.xo[n - 1].code;
+                if (last as int) == OP_SET_LOCAL {
+                    self.xo[n - 1].code = (OP_SET_LOCAL_POP as i32);
+                } else if (last as int) == OP_SET_PROP {
+                    self.xo[n - 1].code = (OP_SET_PROP_POP as i32);
+                } else if (last as int) == OP_SET_ELEM {
+                    self.xo[n - 1].code = (OP_SET_ELEM_POP as i32);
+                }
+            }
+        }
+        self.xemit(code, 0, 0);
+    }
+
+    /// A jump inside an expansion: points it here, for good.
+    fn xpatch(&mut self, at: int) {
+        let here = self.xo.len() as int;
+        self.xlabel = here;
+        self.xo[at as usize].a = (here as i32);
+        self.xfixed[at as usize] = true;
+    }
+
+    fn xstr(&mut self, s: &str) -> int {
+        let f = self.xf;
+        self.fn_str_const(f, s)
+    }
+
+    fn xpush_str(&mut self, s: &str) {
+        let c = self.xstr(s);
+        self.xemit(OP_CONST, c, 0);
+    }
+
+    fn xload_bind(&mut self, b: int, scope: int) {
+        let in_env = self.binds[b as usize].in_env;
+        let slot = self.binds[b as usize].slot;
+        if in_env {
+            let depth = self.env_depth(scope, self.binds[b as usize].scope);
+            self.xemit(OP_GET_ENV, depth, slot);
+        } else {
+            self.xemit(OP_GET_LOCAL, slot, 0);
+        }
+    }
+
+    fn xstore_bind(&mut self, b: int, init: bool, scope: int) {
+        let kind = self.binds[b as usize].kind;
+        if kind == K_CALLEE && !init {
+            if self.protos[self.xpi].strict {
+                let nm = self.binds[b as usize].name.clone();
+                let c = self.xstr(nm.as_str());
+                self.xemit(OP_CONST_ERROR, c, 0);
+            }
+            return;
+        }
+        if kind == K_CONST && !init {
+            let nm = self.binds[b as usize].name.clone();
+            let c = self.xstr(nm.as_str());
+            self.xemit(OP_CONST_ERROR, c, 0);
+            return;
+        }
+        if self.binds[b as usize].global {
+            let nm = self.binds[b as usize].name.clone();
+            let a = self.atom(nm.as_str());
+            self.xemit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
+            return;
+        }
+        let slot = self.binds[b as usize].slot;
+        if self.binds[b as usize].in_env {
+            let depth = self.env_depth(scope, self.binds[b as usize].scope);
+            self.xemit(OP_SET_ENV, depth, slot);
+        } else {
+            self.xemit(OP_SET_LOCAL, slot, 0);
+        }
+    }
+
+    fn xwith_lookup(&mut self, r: usize, store: bool) -> Vec<int> {
+        let mut ends: Vec<int> = Vec::new();
+        let li = self.refs[r].with_list;
+        if li < 0 {
+            return ends;
+        }
+        let name = self.refs[r].name.clone();
+        let scope = self.refs[r].scope;
+        let at = self.atom(name.as_str());
+        let list = self.with_lists[li as usize].clone();
+        for wb in list.iter() {
+            self.xpush_str(name.as_str());
+            self.xload_bind(*wb, scope);
+            self.xop(OP_IN);
+            let jf = self.xemit(OP_JF, 0, 0);
+            self.xfixed[jf as usize] = true;
+            self.xload_bind(*wb, scope);
+            if store {
+                self.xop(OP_SWAP);
+                self.xemit(OP_SET_PROP, at, 0);
+            } else {
+                self.xemit(OP_GET_PROP, at, 0);
+            }
+            let j = self.xemit(OP_JUMP, 0, 0);
+            self.xfixed[j as usize] = true;
+            ends.push(j);
+            self.xpatch(jf);
+        }
+        ends
+    }
+
+    fn xload_name_here(&mut self, r: usize) {
+        let name = self.refs[r].name.clone();
+        let b = self.refs[r].bind;
+        if b < 0 {
+            if name.as_str() == "undefined" {
+                self.xop(OP_UNDEF);
+                return;
+            }
+            let a = self.atom(name.as_str());
+            self.xemit(OP_GET_GLOBAL, a, 0);
+            return;
+        }
+        if self.refs[r].param_tdz {
+            self.xop(OP_TDZ);
+            let c = self.xstr(name.as_str());
+            self.xemit(OP_CHECK_TDZ, c, 0);
+            return;
+        }
+        let scope = self.refs[r].scope;
+        self.xload_bind(b, scope);
+        if self.refs[r].tdz {
+            let c = self.xstr(name.as_str());
+            self.xemit(OP_CHECK_TDZ, c, 0);
+        }
+    }
+
+    fn xload_name(&mut self, r: usize) {
+        let ends = self.xwith_lookup(r, false);
+        self.xload_name_here(r);
+        for j in ends.iter() {
+            self.xpatch(*j);
+        }
+    }
+
+    fn xstore_name(&mut self, r: usize, init: bool) {
+        let ends: Vec<int> = if init { Vec::new() } else { self.xwith_lookup(r, true) };
+        self.xstore_name_here(r, init);
+        for j in ends.iter() {
+            self.xpatch(*j);
+        }
+    }
+
+    fn xstore_name_here(&mut self, r: usize, init: bool) {
+        let name = self.refs[r].name.clone();
+        let b = self.refs[r].bind;
+        let scope = self.refs[r].scope;
+        if self.refs[r].direct >= 0 {
+            self.xstore_bind(b, init, scope);
+            return;
+        }
+        if b < 0 {
+            let gb = if self.scopes.is_empty() {
+                -1
+            } else {
+                match self.scopes[0].names.get(&name) {
+                    Some(x) => *x,
+                    None => -1,
+                }
+            };
+            if gb >= 0 && self.binds[gb as usize].kind == K_CONST && !init {
+                let c = self.xstr(name.as_str());
+                self.xemit(OP_CONST_ERROR, c, 0);
+                return;
+            }
+            let a = self.atom(name.as_str());
+            self.xemit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
+            return;
+        }
+        if !init && self.refs[r].tdz {
+            self.xload_bind(b, scope);
+            let c = self.xstr(name.as_str());
+            self.xemit(OP_CHECK_TDZ, c, 0);
+            self.xop(OP_POP);
+        }
+        self.xstore_bind(b, init, scope);
+    }
+
+    /// A plain slot of this frame: no scope object, no check, no `with`.
+    fn ref_local(&self, r: usize) -> bool {
+        let b = self.refs[r].bind;
+        b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && !self.refs[r].tdz && self.refs[r].with_list < 0 && !self.refs[r].param_tdz
+    }
+
+    fn expand_ref(&mut self, op: Op, top_completion: bool) {
+        let r = op.a as usize;
+        let mode = op.b;
+        if (mode as int) == M_LOAD {
+            self.xload_name(r);
+            return;
+        }
+        if (mode as int) == M_STORE {
+            self.xstore_name(r, false);
+            return;
+        }
+        if (mode as int) == M_INIT {
+            self.xstore_name(r, true);
+            return;
+        }
+        if (mode as int) == M_TYPEOF {
+            let b = self.refs[r].bind;
+            let name = self.refs[r].name.clone();
+            if self.refs[r].with_list >= 0 {
+                let ends = self.xwith_lookup(r, false);
+                if b >= 0 {
+                    self.xload_name_here(r);
+                } else {
+                    let at = self.atom(name.as_str());
+                    self.xemit(OP_TYPEOF_GLOBAL, at, 0);
+                    let j = self.xemit(OP_JUMP, 0, 0);
+                    self.xfixed[j as usize] = true;
+                    for e in ends.iter() {
+                        self.xpatch(*e);
+                    }
+                    self.xop(OP_TYPEOF);
+                    self.xpatch(j);
+                    return;
+                }
+                for e in ends.iter() {
+                    self.xpatch(*e);
+                }
+                self.xop(OP_TYPEOF);
+                return;
+            }
+            if b < 0 {
+                let at = self.atom(name.as_str());
+                self.xemit(OP_TYPEOF_GLOBAL, at, 0);
+                return;
+            }
+            self.xload_name(r);
+            self.xop(OP_TYPEOF);
+            return;
+        }
+        if (mode as int) == M_DELETE {
+            if self.refs[r].bind >= 0 {
+                self.xop(OP_FALSE);
+            } else {
+                let name = self.refs[r].name.clone();
+                let g = self.atom("globalThis");
+                self.xemit(OP_GET_GLOBAL, g, 0);
+                let at = self.atom(name.as_str());
+                self.xemit(OP_DEL_PROP, at, 0);
+            }
+            return;
+        }
+        if (mode as int) == M_UPD {
+            let flags = op.c;
+            let prefix = (flags & (U_PREFIX as i32)) != 0;
+            let inc = (flags & (U_INC as i32)) != 0;
+            let discard = (flags & (U_DISCARD as i32)) != 0;
+            let b = self.refs[r].bind;
+            if self.ref_local(r) && self.binds[b as usize].kind != K_CONST {
+                let slot = self.binds[b as usize].slot;
+                let delta = if inc { 1 } else { -1 };
+                if discard {
+                    self.xemit(OP_INC_LOCAL, slot, delta);
+                } else {
+                    self.xemit(if prefix { OP_PREINC_LOCAL } else { OP_POSTINC_LOCAL }, slot, delta);
+                }
+                return;
+            }
+            let code = if inc { OP_INC } else { OP_DEC };
+            self.xload_name(r);
+            self.xop(OP_TONUM);
+            if prefix {
+                self.xop(code);
+                self.xstore_name(r, false);
+            } else {
+                self.xop(OP_DUP);
+                self.xop(code);
+                self.xstore_name(r, false);
+                self.xop(OP_POP);
+            }
+            if discard {
+                if (flags & (U_TOP as i32)) != 0 {
+                    self.xemit(OP_SET_LOCAL, 0, 0);
+                }
+                self.xop(OP_POP);
+            }
+            return;
+        }
+        if (mode as int) == M_ADDT_LOAD || (mode as int) == M_ADDT_STORE {
+            let sr = if (mode as int) == M_ADDT_LOAD { (op.c / 2) as usize } else { r };
+            let b = self.refs[sr].bind;
+            let ok = b >= 0
+                && !self.binds[b as usize].global
+                && self.binds[b as usize].kind != K_CONST
+                && self.binds[b as usize].kind != K_CALLEE
+                && !self.refs[sr].tdz
+                && self.refs[sr].with_list < 0;
+            let in_env = ok && self.binds[b as usize].in_env;
+            let pure = if (mode as int) == M_ADDT_LOAD { (op.c % 2) == 1 } else { op.c == 1 };
+            if (mode as int) == M_ADDT_LOAD {
+                if ok && in_env {
+                    let slot = self.binds[b as usize].slot;
+                    let depth = self.env_depth(self.refs[sr].scope, self.binds[b as usize].scope);
+                    self.xemit(OP_GET_ENV, depth, slot);
+                } else if ok && pure {
+                    // nothing: ADD_LOCAL_POP reads x
+                } else {
+                    self.xload_name(r);
+                }
+                return;
+            }
+            let slot = if b >= 0 { self.binds[b as usize].slot } else { 0 };
+            if ok && in_env {
+                let depth = self.env_depth(self.refs[sr].scope, self.binds[b as usize].scope);
+                self.xemit(OP_ADD_ENV_POP, depth, slot);
+            } else if ok && pure {
+                self.xemit(OP_ADD_LOCAL_POP, slot, 0);
+            } else {
+                self.xop(OP_ADD);
+                self.xstore_name(r, false);
+                if top_completion {
+                    self.xemit(OP_SET_LOCAL, 0, 0);
+                }
+                self.xop(OP_POP);
+            }
+            return;
+        }
+    }
+
+    fn expand(&mut self, f: int) {
+        let pi = self.fns[f as usize].proto as usize;
+        self.xpi = pi;
+        self.xf = f;
+        let code = self.protos[pi].code.clone();
+        let n = code.len();
+        let mut target: Vec<bool> = Vec::new();
+        let mut i: usize = 0;
+        while i <= n {
+            target.push(false);
+            i += 1;
+        }
+        for o in code.iter() {
+            if is_jump(o) {
+                if o.a >= 0 && (o.a as usize) <= n {
+                    target[o.a as usize] = true;
+                }
+                if (o.code as int) == OP_YIELD_STAR && o.b >= 0 && (o.b as usize) <= n {
+                    target[o.b as usize] = true;
+                }
+            }
+        }
+        let mut map: Vec<int> = Vec::new();
+        i = 0;
+        while i <= n {
+            map.push(0);
+            i += 1;
+        }
+        self.xo = Vec::new();
+        self.xfixed = Vec::new();
+        self.xlabel = -1;
+        i = 0;
+        while i < n {
+            if target[i] {
+                self.xlabel = self.xo.len() as int;
+            }
+            map[i] = self.xo.len() as int;
+            let o = code[i];
+            let c = o.code;
+            if (c as int) == PH_REF {
+                // a local's property: fused
+                if (o.b as int) == M_LOAD && i + 1 < n && (code[i + 1].code as int) == OP_GET_PROP && !target[i + 1] && self.ref_local(o.a as usize) {
+                    let b = self.refs[o.a as usize].bind;
+                    let slot = self.binds[b as usize].slot;
+                    self.xemit(OP_GET_LOCAL_PROP, slot, (code[i + 1].a as int));
+                    map[i + 1] = map[i];
+                    i += 2;
+                    continue;
+                }
+                let top = (o.b as int) == M_ADDT_STORE && (o.c & 2) != 0;
+                let mut o2 = o;
+                if (o.b as int) == M_ADDT_STORE {
+                    o2.c = o.c & 1;
+                }
+                self.expand_ref(o2, top);
+            } else if (c as int) == OP_THIS && i + 1 < n && (code[i + 1].code as int) == OP_GET_PROP && !target[i + 1] {
+                self.xemit(OP_GET_THIS_PROP, (code[i + 1].a as int), 0);
+                map[i + 1] = map[i];
+                i += 2;
+                continue;
+            } else if (c as int) == PH_ENTER {
+                self.x_enter((o.a as int), o.b == 1);
+            } else if (c as int) == PH_LEAVE {
+                if self.scopes[o.a as usize].has_env {
+                    self.xop(OP_POP_ENV);
+                }
+            } else if (c as int) == PH_COPY_ENV {
+                if self.scopes[o.a as usize].has_env {
+                    self.xop(OP_COPY_ENV);
+                }
+            } else if (c as int) == PH_HOIST {
+                self.x_hoist((o.a as int));
+            } else if (c as int) == PH_DECL_GLOBALS {
+                if !self.local_program {
+                    let binds = self.scopes[o.a as usize].binds.clone();
+                    for b in binds.iter() {
+                        let k = self.binds[*b as usize].kind;
+                        if k == K_VAR || k == K_FUNC {
+                            let nm = self.binds[*b as usize].name.clone();
+                            let a = self.atom(nm.as_str());
+                            self.xemit(OP_DECL_GLOBAL, a, 0);
+                        }
+                    }
+                }
+            } else if (c as int) == PH_PROLOGUE {
+                self.x_prologue((o.a as int), f);
+            } else if (c as int) == PH_BODY_VARS {
+                self.x_body_vars((o.a as int), (o.b as int));
+            } else if (c as int) == PH_ANNEX {
+                self.x_annex((o.a as int));
+            } else if (c as int) == PH_NOP {
+                // nothing
+            } else if (c as int) == OP_POP {
+                self.xop(OP_POP);
+            } else {
+                let at = self.xemit((c as int), (o.a as int), (o.b as int));
+                if (c as int) == OP_TEMPLATE_OBJ || (c as int) == OP_YIELD_STAR {
+                    // not fused: keep both operands
+                    self.xo[at as usize] = Op { code: c, a: o.a, b: o.b, c: -1 };
+                }
+            }
+            i += 1;
+        }
+        map[n] = self.xo.len() as int;
+        let m = self.xo.len();
+        let mut k: usize = 0;
+        while k < m {
+            if !self.xfixed[k] && is_jump(&self.xo[k]) {
+                let a = self.xo[k].a;
+                if a >= 0 && (a as usize) <= n {
+                    self.xo[k].a = (map[a as usize] as i32);
+                }
+                if (self.xo[k].code as int) == OP_YIELD_STAR {
+                    let b = self.xo[k].b;
+                    if b >= 0 && (b as usize) <= n {
+                        self.xo[k].b = (map[b as usize] as i32);
+                    }
+                }
+            }
+            k += 1;
+        }
+        self.protos[pi].code = self.xo.clone();
+        self.xo = Vec::new();
+        self.xfixed = Vec::new();
+    }
+
+    fn x_enter(&mut self, scope: int, is_fn: bool) {
+        let si = scope as usize;
+        if !is_fn && self.scopes[si].has_env {
+            let es = self.scopes[si].env_size;
+            self.xemit(OP_PUSH_ENV, es, 0);
+        }
+        let binds = self.scopes[si].binds.clone();
+        for b in binds.iter() {
+            if self.binds[*b as usize].tdz && !self.binds[*b as usize].global {
+                self.xop(OP_TDZ);
+                self.xstore_bind(*b, true, scope);
+                self.xop(OP_POP);
+            }
+        }
+    }
+
+    fn x_hoist(&mut self, scope: int) {
+        let hs = self.scopes[scope as usize].hoists.clone();
+        for h in hs.iter() {
+            let p = self.hoists[*h as usize].proto;
+            let name = self.hoists[*h as usize].name.clone();
+            self.xemit(OP_CLOSURE, p, 0);
+            let b = self.lookup_here(scope, name.as_str());
+            if b >= 0 {
+                self.xstore_bind(b, true, scope);
+            } else {
+                let a = self.atom(name.as_str());
+                self.xemit(OP_SET_GLOBAL, a, 0);
+            }
+            self.xop(OP_POP);
+        }
+    }
+
+    fn x_prologue(&mut self, fscope: int, f: int) {
+        let pb = self.fns[f as usize].param_binds.clone();
+        let mut j: int = 0;
+        for b in pb.iter() {
+            if *b >= 0 && self.binds[*b as usize].in_env {
+                self.xemit(OP_GET_LOCAL, j, 0);
+                self.xstore_bind(*b, true, fscope);
+                self.xop(OP_POP);
+            }
+            j += 1;
+        }
+        let binds = self.scopes[fscope as usize].binds.clone();
+        for b in binds.iter() {
+            let k = self.binds[*b as usize].kind;
+            if k == K_ARGS {
+                self.protos[self.xpi].uses_args = true;
+                self.xop(OP_ARGUMENTS);
+                self.xstore_bind(*b, true, fscope);
+                self.xop(OP_POP);
+            } else if k == K_CALLEE {
+                self.xop(OP_CALLEE);
+                self.xstore_bind(*b, true, fscope);
+                self.xop(OP_POP);
+            }
+        }
+    }
+
+    fn x_body_vars(&mut self, bscope: int, fscope: int) {
+        let binds = self.scopes[bscope as usize].binds.clone();
+        for b in binds.iter() {
+            if self.binds[*b as usize].kind != K_VAR {
+                continue;
+            }
+            let nm = self.binds[*b as usize].name.clone();
+            let pb = match self.scopes[fscope as usize].names.get(&nm) {
+                Some(x) => *x,
+                None => -1,
+            };
+            if pb >= 0 && self.binds[pb as usize].kind == K_PARAM {
+                self.xload_bind(pb, bscope);
+                self.xstore_bind(*b, true, bscope);
+                self.xop(OP_POP);
+            }
+        }
+    }
+
+    fn x_annex(&mut self, k: int) {
+        let vb = self.annexes[k as usize].var_bind;
+        if vb < 0 {
+            return;
+        }
+        let scope = self.annexes[k as usize].scope;
+        let name = self.annexes[k as usize].name.clone();
+        let here = match self.scopes[scope as usize].names.get(&name) {
+            Some(b) => *b,
+            None => -1,
+        };
+        if here >= 0 && here != vb && self.binds[here as usize].kind == K_FUNC {
+            self.xload_bind(here, scope);
+        } else {
+            let p = self.annexes[k as usize].proto;
+            self.xemit(OP_CLOSURE, p, 0);
+        }
+        self.xstore_bind(vb, true, scope);
+        self.xop(OP_POP);
+    }
+}
+
+impl PComp {
+    // =====================================================================
+    // functions being written
+
+    fn push_fn(&mut self, proto: Proto, is_program: bool, base: int) -> int {
+        self.fns.push(PFn {
+            fscope: -1,
+            scopes: Vec::new(),
+            param_binds: Vec::new(),
+            base: base,
+            is_program: is_program,
+            proto: -1,
+            str_consts: HashMap::new(),
+            num_consts: HashMap::new(),
+        });
+        let fnid = (self.fns.len() as int) - 1;
+        self.fs.push(PState {
+            proto: proto,
+            fnid: fnid,
+            ctl: Vec::new(),
+            chain: Vec::new(),
+            pending_labels: Vec::new(),
+            is_program: is_program,
+            var_scope: -1,
+            annex: Vec::new(),
+            saved_in_function: self.in_function,
+            saved_in_generator: self.in_generator,
+            saved_in_async: self.in_async,
+            saved_strict: self.strict,
+            saved_scope: self.cur_scope,
+        });
+        fnid
+    }
+
+    /// Ends the function on top: its proto, as CLOSURE names it.
+    fn pop_fn(&mut self) -> int {
+        let st = self.fs.pop().unwrap();
+        self.cur_scope = st.saved_scope;
+        self.in_function = st.saved_in_function;
+        self.in_generator = st.saved_in_generator;
+        self.in_async = st.saved_in_async;
+        self.strict = st.saved_strict;
+        let fnid = st.fnid;
+        self.protos.push(st.proto);
+        let idx = (self.protos.len() as int) - 1;
+        self.fns[fnid as usize].proto = idx;
+        self.proto_base + idx
+    }
+
+    /// Annex B: a function declared in a block of sloppy code also sets
+    /// the function's var of that name, unless a lexical or parameter
+    /// binding there has the name.
+    fn end_annex(&mut self) {
+        if self.f().proto.strict {
+            return;
+        }
+        let list = self.f().annex.clone();
+        let vs = self.f().var_scope;
+        for k in list.iter() {
+            let nm = self.annexes[*k as usize].name.clone();
+            let existing = match self.scopes[vs as usize].names.get(&nm) {
+                Some(b) => *b,
+                None => -1,
+            };
+            if existing >= 0 {
+                let ek = self.binds[existing as usize].kind;
+                if ek != K_VAR && ek != K_FUNC {
+                    continue;
+                }
+            }
+            let b = self.declare(vs, nm.as_str(), K_VAR);
+            self.annexes[*k as usize].var_bind = b;
+        }
+    }
+
+    /// The function's source text: tokens `first` to the last read.
+    fn set_span(&mut self, p: int, first: int) {
+        if first < 0 || self.pos < 1 || first >= self.pos {
+            return;
+        }
+        let st = self.toks[first as usize].start as int;
+        let en = self.toks[(self.pos - 1) as usize].end as int;
+        if st < 0 || en < st {
+            return;
+        }
+        let pi = (p - self.proto_base) as usize;
+        let pr = &mut self.protos[pi];
+        pr.src = Val::Str(pr.cstrs.len() as int);
+        pr.cstrs.push(self.src_rc.clone());
+        pr.src_start = st;
+        pr.src_end = en;
+    }
+
+    // ---- tokens of other text (template substitutions, made-up code)
+
+    /// Reads `src` as tokens after the script's own; `pop_tokens` drops
+    /// them. Answers what pop_tokens needs back.
+    fn push_tokens(&mut self, src: &str) -> Vec<int> {
+        let mut lx = lexer_for(src, self.jsx, self.jsx_factory.as_str(), self.jsx_fragment.as_str());
+        let base = self.toks.len() as int;
+        let xbase = self.xs.len() as int;
+        let mut saved: Vec<int> = Vec::new();
+        saved.push(base);
+        saved.push(xbase);
+        saved.push(self.pos);
+        self.lex_tokens(&mut lx, xbase);
+        if !lx.error.is_empty() {
+            let e = lx.error.clone();
+            self.fail(e.as_str());
+        }
+        for x in lx.xs {
+            self.xs.push(x);
+        }
+        if self.error.is_empty() {
+            self.pos = base;
+        }
+        saved
+    }
+
+    fn pop_tokens(&mut self, saved: &Vec<int>) {
+        let base = saved[0] as usize;
+        let xbase = saved[1] as usize;
+        self.toks.truncate(base);
+        self.mate.truncate(base);
+        self.xs.truncate(xbase);
+        if self.error.is_empty() {
+            self.pos = saved[2];
+        } else {
+            self.pos = (base as int) - 1;
+        }
+    }
+
+    // =====================================================================
+    // the program
+
+    /// `"use strict"` at the top of a body: whether there is one.
+    fn directives(&mut self) -> bool {
+        let mut found = false;
+        let mut k = self.pos;
+        let n = self.tok_count();
+        while k < n && (self.toks[k as usize].kind as int) == T_STR {
+            if self.text_is(k, "use strict") && !self.tok_escaped(k) {
+                found = true;
+                self.strict = true;
+            }
+            k += 1;
+            if k < n && (self.toks[k as usize].kind as int) == T_PUNCT && self.text_is(k, ";") {
+                k += 1;
+            } else if !(k < n && self.tok_nl(k)) {
+                break;
+            }
+        }
+        found
+    }
+
+    /// Compiles the script; answers its proto, -1 when it is not one.
+    pub fn compile_program(&mut self) -> int {
+        if !self.error.is_empty() {
+            return -1;
+        }
+        let strict = self.directives();
+        if strict && self.local_if_strict {
+            self.local_program = true;
+        }
+        let mut proto = Proto::new("<script>");
+        proto.strict = strict;
+        let fnid = self.push_fn(proto, true, 1);
+        let s = self.new_scope(-1, true, false);
+        self.scopes[s as usize].is_program = true;
+        self.fns[fnid as usize].fscope = s;
+        self.f().var_scope = s;
+        self.cur_scope = s;
+        if self.local_program {
+            self.emit(PH_ENTER, s, 1);
+        }
+        self.emit(PH_DECL_GLOBALS, s, 0);
+        self.emit(PH_HOIST, s, 0);
+        self.op(OP_UNDEF);
+        self.emit(OP_SET_LOCAL, 0, 0);
+        self.op(OP_POP);
+        while self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.emit(OP_GET_LOCAL, 0, 0);
+        self.op(OP_RETURN);
+        self.end_annex();
+        let entry = self.pop_fn();
+        if !self.error.is_empty() {
+            return -1;
+        }
+        self.finish();
+        if !self.error.is_empty() {
+            return -1;
+        }
+        entry
+    }
+
+    // =====================================================================
+    // statements
+
+    fn take_labels(&mut self) -> Vec<String> {
+        let l = self.f().pending_labels.clone();
+        self.f().pending_labels.clear();
+        l
+    }
+
+    fn push_loop(&mut self, labels: Vec<String>) {
+        let mut c = new_ctl(CT_LOOP);
+        c.labels = labels;
+        self.f().ctl.push(c);
+    }
+
+    fn find_target(&self, label: &str, cont: bool) -> int {
+        let f = &self.fs[self.fs.len() - 1];
+        let mut i = (f.ctl.len() as int) - 1;
+        while i >= 0 {
+            let c = &f.ctl[i as usize];
+            if label.is_empty() {
+                if c.kind == CT_LOOP || (!cont && c.kind == CT_SWITCH) {
+                    return i;
+                }
+            } else {
+                let mut has = false;
+                for l in c.labels.iter() {
+                    if l.as_str() == label {
+                        has = true;
+                    }
+                }
+                if has {
+                    if cont && c.kind != CT_LOOP {
+                        return -1;
+                    }
+                    return i;
+                }
+            }
+            i -= 1;
+        }
+        -1
+    }
+
+    fn split_ctl(&mut self, at: int) -> Vec<PCtl> {
+        let mut rest: Vec<PCtl> = Vec::new();
+        while (self.f().ctl.len() as int) > at {
+            let c = self.f().ctl.pop().unwrap();
+            rest.push(c);
+        }
+        rest
+    }
+
+    fn join_ctl(&mut self, mut saved: Vec<PCtl>) {
+        while !saved.is_empty() {
+            let c = saved.pop().unwrap();
+            self.f().ctl.push(c);
+        }
+    }
+
+    /// The block statement at token `at`, read again here.
+    fn block_at(&mut self, at: int) {
+        let back = self.pos;
+        self.goto(at);
+        self.block_statement();
+        self.goto(back);
+    }
+
+    /// Leaves every control entry above `target` (-1: all, for `return`).
+    fn unwind_to(&mut self, target: int) {
+        let top = (self.f().ctl.len() as int) - 1;
+        let mut i = top;
+        let ret = target < 0;
+        let mut above: int = 1;
+        while i > target {
+            let kind = self.f().ctl[i as usize].kind;
+            if kind == CT_ITER {
+                self.op(OP_END_TRY);
+                if ret {
+                    self.emit(OP_ITER_CLOSE_AT, above, 0);
+                    above += 1;
+                } else {
+                    self.emit(OP_ITER_CLOSE, 0, 0);
+                }
+                i -= 1;
+                continue;
+            }
+            if kind == CT_ITEM && ret {
+                above += 1;
+            }
+            if kind == CT_TRY {
+                if self.f().ctl[i as usize].installed {
+                    self.op(OP_END_TRY);
+                }
+                let fin = self.f().ctl[i as usize].fin;
+                if fin >= 0 {
+                    let saved = self.split_ctl(i);
+                    self.block_at(fin);
+                    self.join_ctl(saved);
+                }
+            } else if kind == CT_ENV && !ret {
+                let s = self.f().ctl[i as usize].scope;
+                self.emit(PH_LEAVE, s, 0);
+            } else if kind == CT_ITEM && !ret {
+                self.op(OP_POP);
+            }
+            i -= 1;
+        }
+    }
+
+    fn is_program_top(&self) -> bool {
+        if !(self.fs.len() == 1 && self.fs[0].is_program && self.keep_completion) {
+            return false;
+        }
+        for c in self.fs[0].ctl.iter() {
+            if c.kind != CT_ENV {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn is_let_decl(&self) -> bool {
+        self.is("let") && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "[") || self.peek_is(1, "{"))
+    }
+
+    fn statement(&mut self) {
+        let in_list = self.list_stmt;
+        self.list_stmt = false;
+        if !self.error.is_empty() {
+            return;
+        }
+        let word = self.kind() == T_IDENT && !self.escaped();
+        let label = word && self.peek_is(1, ":") && !is_reserved(self.text().as_str());
+        let looping = word && (self.is("for") || self.is("while") || self.is("do"));
+        if !label && !looping {
+            self.f().pending_labels.clear();
+        }
+        if self.kind() == T_PUNCT {
+            if self.is("{") {
+                self.block_statement();
+                return;
+            }
+            if self.is(";") {
+                self.next();
+                return;
+            }
+        }
+        if word && self.ts && self.ts_statement(in_list) {
+            return;
+        }
+        if word {
+            let w = self.text();
+            let ws = w.as_str();
+            if ws == "var" || ws == "const" || (ws == "let" && self.is_let_decl()) {
+                self.var_decl();
+                self.semicolon();
+                return;
+            }
+            if ws == "function" {
+                self.function_decl(in_list, 0);
+                return;
+            }
+            if ws == "async" && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1) {
+                self.next();
+                self.function_decl(in_list, F_ASYNC);
+                return;
+            }
+            if ws == "class" {
+                self.class_decl();
+                return;
+            }
+            if ws == "if" {
+                self.if_statement();
+                return;
+            }
+            if ws == "for" {
+                self.for_statement();
+                return;
+            }
+            if ws == "while" {
+                self.while_statement();
+                return;
+            }
+            if ws == "do" {
+                self.do_statement();
+                return;
+            }
+            if ws == "return" {
+                if !self.in_function {
+                    self.fail("return outside a function");
+                    return;
+                }
+                self.next();
+                if !self.is(";") && !self.is("}") && self.kind() != T_EOF && !self.nl_before() {
+                    self.expression();
+                } else {
+                    self.op(OP_UNDEF);
+                }
+                self.semicolon();
+                self.unwind_to(-1);
+                self.op(OP_RETURN);
+                return;
+            }
+            if ws == "break" || ws == "continue" {
+                let cont = ws == "continue";
+                self.next();
+                let mut lab = String::new();
+                if self.kind() == T_IDENT && !self.nl_before() && !is_reserved(self.text().as_str()) {
+                    lab = self.text();
+                    self.next();
+                }
+                self.semicolon();
+                let target = self.find_target(lab.as_str(), cont);
+                if target < 0 {
+                    self.fail("SyntaxError: illegal break or continue");
+                    return;
+                }
+                self.unwind_to(target);
+                let j = self.emit(OP_JUMP, 0, 0);
+                if cont {
+                    self.f().ctl[target as usize].conts.push(j);
+                } else {
+                    self.f().ctl[target as usize].breaks.push(j);
+                }
+                return;
+            }
+            if ws == "throw" {
+                self.next();
+                if self.nl_before() {
+                    self.fail("line break after throw");
+                    return;
+                }
+                self.expression();
+                self.semicolon();
+                self.op(OP_THROW);
+                return;
+            }
+            if ws == "try" {
+                self.try_statement();
+                return;
+            }
+            if ws == "switch" {
+                self.switch_statement();
+                return;
+            }
+            if ws == "debugger" {
+                self.next();
+                self.semicolon();
+                return;
+            }
+            if ws == "with" {
+                self.with_statement();
+                return;
+            }
+            if ws == "import" && !self.peek_is(1, "(") && !self.peek_is(1, ".") {
+                if !self.module_path.is_empty() || self.script_imports {
+                    self.script_import();
+                    return;
+                }
+                self.fail("modules are not supported");
+                return;
+            }
+            if ws == "export" {
+                if !self.module_path.is_empty() {
+                    self.module_export(in_list);
+                    return;
+                }
+                if self.script_imports {
+                    self.script_export(in_list);
+                    return;
+                }
+                self.fail("modules are not supported");
+                return;
+            }
+            if label {
+                self.next();
+                self.next();
+                let body_loop = self.kind() == T_IDENT
+                    && !self.escaped()
+                    && (self.is("for") || self.is("while") || self.is("do") || (self.peek_is(1, ":") && !is_reserved(self.text().as_str())));
+                if body_loop {
+                    self.f().pending_labels.push(w.clone());
+                    self.statement();
+                    return;
+                }
+                let mut c = new_ctl(CT_BLOCK);
+                c.labels.push(w.clone());
+                self.f().ctl.push(c);
+                self.statement();
+                let ctl = self.f().ctl.pop().unwrap();
+                for x in ctl.breaks.iter() {
+                    self.patch(*x);
+                }
+                return;
+            }
+        }
+        let e = self.expression();
+        self.semicolon();
+        self.expr_statement_tail(e);
+    }
+
+    /// The body of an if, a loop: no lexical declaration there.
+    fn sub_statement(&mut self) {
+        if self.kind() == T_IDENT && !self.escaped() {
+            let w = self.text();
+            let lexical = w.as_str() == "const"
+                || w.as_str() == "class"
+                || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1))));
+            if lexical {
+                self.fail("Lexical declaration cannot appear in a single-statement context");
+                return;
+            }
+        }
+        self.statement();
+    }
+
+    /// An expression statement's end: its value dropped, or kept as the
+    /// script's completion; `i++` and `x += v` on a local in place.
+    fn expr_statement_tail(&mut self, e: Ex) {
+        let top = self.is_program_top();
+        if e.k == E_UPDATE_IDENT && e.a == self.pc() - 1 {
+            let i = self.fs.len() - 1;
+            let mut c = self.fs[i].proto.code[e.a as usize].c;
+            c |= (U_DISCARD as i32);
+            if top {
+                c |= (U_TOP as i32);
+            }
+            self.fs[i].proto.code[e.a as usize].c = c;
+            return;
+        }
+        if !top && e.k == E_ADDASSIGN && e.b == self.pc() - 1 && e.b > 0 {
+            let i = self.fs.len() - 1;
+            let add = self.fs[i].proto.code[(e.b - 1) as usize];
+            if (add.code as int) == OP_ADD {
+                let sr = self.fs[i].proto.code[e.b as usize].a;
+                let lr = self.fs[i].proto.code[e.a as usize].a;
+                let pure = if self.assigns == e.c { 1 } else { 0 };
+                self.fs[i].proto.code[e.a as usize] = Op { code: (PH_REF as i32), a: lr, b: (M_ADDT_LOAD as i32), c: sr * 2 + pure };
+                self.fs[i].proto.code[(e.b - 1) as usize] = Op { code: (PH_REF as i32), a: sr, b: (M_ADDT_STORE as i32), c: pure };
+                self.fs[i].proto.code[e.b as usize] = Op { code: (PH_NOP as i32), a: 0, b: 0, c: -1 };
+                return;
+            }
+        }
+        if !top && e.k == E_MEMBER_ADDASSIGN {
+            let last = self.last_op();
+            let n = self.pc();
+            if (last.code as int) == OP_SET_PROP && n >= 2 {
+                let i = self.fs.len() - 1;
+                if (self.fs[i].proto.code[(n - 2) as usize].code as int) == OP_ADD {
+                    self.pop_op();
+                    self.set_op(n - 2, OP_ADD_PROP_POP, (last.a as int), 0);
+                    return;
+                }
+            }
+        }
+        if top {
+            self.emit(OP_SET_LOCAL, 0, 0);
+        }
+        self.op(OP_POP);
+    }
+
+    fn block_statement(&mut self) {
+        let saved = self.cur_scope;
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        self.emit(PH_HOIST, s, 0);
+        self.expect("{");
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.expect("}");
+        self.leave_block(s, saved);
+    }
+
+    /// `var` / `let` / `const` and its declarators, no semicolon.
+    fn var_decl(&mut self) {
+        let kw = self.text();
+        self.next();
+        let kind = if kw.as_str() == "var" {
+            K_VAR
+        } else if kw.as_str() == "const" {
+            K_CONST
+        } else {
+            K_LET
+        };
+        loop {
+            let ts = self.pos;
+            let single = self.kind() == T_IDENT;
+            self.skip_binding_target();
+            self.skip_annotation();
+            if self.is("=") {
+                let name = if single { self.tok_text(ts) } else { String::new() };
+                self.next();
+                let e = self.assign();
+                if !name.is_empty() {
+                    self.name_anonymous(e, name.as_str());
+                }
+                let after = self.pos;
+                self.goto(ts);
+                self.pattern_target(kind);
+                self.goto(after);
+            } else if kind != K_VAR {
+                self.op(OP_UNDEF);
+                let after = self.pos;
+                self.goto(ts);
+                self.pattern_target(kind);
+                self.goto(after);
+            } else if single {
+                let nm = self.tok_text(ts);
+                if is_reserved(nm.as_str()) || (self.strict && is_strict_reserved(nm.as_str())) {
+                    self.fail(format!("unexpected reserved word '{}'", nm).as_str());
+                    return;
+                }
+                let vs = self.f().var_scope;
+                self.declare(vs, nm.as_str(), K_VAR);
+            } else {
+                self.fail("Missing initializer in destructuring declaration");
+                return;
+            }
+            self.mark_pending();
+            if !self.eat(",") {
+                break;
+            }
+        }
+    }
+
+    fn skip_binding_target(&mut self) {
+        if self.is("[") || self.is("{") {
+            let a = self.after_mate(self.pos);
+            if a < 0 {
+                self.fail("unbalanced brackets");
+                return;
+            }
+            self.goto(a);
+            return;
+        }
+        if self.kind() == T_IDENT {
+            self.next();
+            return;
+        }
+        let t = self.text();
+        self.fail(format!("expected an identifier but found '{}'", t).as_str());
+    }
+
+    fn if_statement(&mut self) {
+        self.next();
+        self.expect("(");
+        let e = self.expression();
+        self.expect(")");
+        self.cond_jump_false(e);
+        let jf = self.pc() - 1;
+        self.sub_statement();
+        if self.is("else") {
+            self.next();
+            let j = self.emit(OP_JUMP, 0, 0);
+            self.patch(jf);
+            self.sub_statement();
+            self.patch(j);
+        } else {
+            self.patch(jf);
+        }
+    }
+
+    fn while_statement(&mut self) {
+        self.next();
+        let labels = self.take_labels();
+        self.expect("(");
+        let top = self.pc();
+        let e = self.expression();
+        self.expect(")");
+        self.cond_jump_false(e);
+        let jf = self.pc() - 1;
+        self.push_loop(labels);
+        self.sub_statement();
+        let ctl = self.f().ctl.pop().unwrap();
+        for x in ctl.conts.iter() {
+            self.patch_to(*x, top);
+        }
+        self.emit(OP_JUMP, top, 0);
+        self.patch(jf);
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+    }
+
+    fn do_statement(&mut self) {
+        self.next();
+        let labels = self.take_labels();
+        let top = self.pc();
+        self.push_loop(labels);
+        self.sub_statement();
+        let ctl = self.f().ctl.pop().unwrap();
+        for x in ctl.conts.iter() {
+            self.patch(*x);
+        }
+        if !self.is("while") {
+            self.fail("expected 'while'");
+            return;
+        }
+        self.next();
+        self.expect("(");
+        self.expression();
+        self.expect(")");
+        self.eat(";");
+        self.emit(OP_JT, top, 0);
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+    }
+
+    fn for_statement(&mut self) {
+        self.next();
+        let mut is_await = false;
+        if self.is("await") {
+            if !self.in_async {
+                self.fail("for await is only valid in async functions");
+                return;
+            }
+            self.next();
+            is_await = true;
+        }
+        if !self.is("(") {
+            self.expect("(");
+            return;
+        }
+        let open = self.pos;
+        let close = self.mate_of(open);
+        self.next();
+        let head = self.pos;
+        // a for-in / for-of: `in` or `of` before any `;` (not a declared
+        // name `of`)
+        let mut k = self.scan_to(head, ";", true);
+        if self.tok_is(k, "of") && k == head + 1 && (self.tok_is(head, "var") || self.tok_is(head, "let") || self.tok_is(head, "const")) {
+            k = self.scan_to(k + 1, ";", true);
+        }
+        if k < close && (self.tok_is(k, "in") || self.tok_is(k, "of")) {
+            self.forin_statement(head, k, close, is_await);
+            return;
+        }
+        if is_await {
+            self.fail("for await needs 'of'");
+            return;
+        }
+        let labels = self.take_labels();
+        let saved = self.cur_scope;
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        if !self.is(";") {
+            let decl = self.is("var") || self.is("const") || self.is_let_decl();
+            self.no_in = true;
+            if decl {
+                self.var_decl();
+            } else {
+                let e = self.expression();
+                self.no_in = false;
+                self.expr_statement_tail(e);
+            }
+            self.no_in = false;
+        }
+        self.expect(";");
+        let top = self.pc();
+        let mut jf: int = -1;
+        if !self.is(";") {
+            let e = self.expression();
+            self.cond_jump_false(e);
+            jf = self.pc() - 1;
+        }
+        self.expect(";");
+        let upd = self.pos;
+        self.goto(close);
+        self.expect(")");
+        self.push_loop(labels);
+        self.sub_statement();
+        let ctl = self.f().ctl.pop().unwrap();
+        for x in ctl.conts.iter() {
+            self.patch(*x);
+        }
+        self.emit(PH_COPY_ENV, s, 0);
+        if upd < close {
+            let body_end = self.pos;
+            self.goto(upd);
+            let e = self.expression();
+            if self.pos != close {
+                self.expect(")");
+            }
+            self.expr_statement_tail(e);
+            self.goto(body_end);
+        }
+        self.emit(OP_JUMP, top, 0);
+        if jf >= 0 {
+            self.patch(jf);
+        }
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        self.leave_block(s, saved);
+    }
+
+    /// `for (head in|of obj) body`: `kw` the `in` / `of` token, `close`
+    /// the `)`.
+    fn forin_statement(&mut self, head: int, kw: int, close: int, is_await: bool) {
+        let of = self.tok_is(kw, "of");
+        let labels = self.take_labels();
+        let decl = self.tok_is(head, "var") || self.tok_is(head, "const") || (self.tok_is(head, "let") && head + 1 < kw);
+        let mut kind = K_VAR;
+        if decl {
+            if self.tok_is(head, "const") {
+                kind = K_CONST;
+            } else if self.tok_is(head, "let") {
+                kind = K_LET;
+            }
+            // one binding, an initializer only for `for (var x = … in …)`
+            let comma = self.scan_to(head + 1, ",", false);
+            if comma < kw && self.tok_is(comma, ",") {
+                self.fail("Invalid left-hand side in for-in or for-of loop: must have a single binding");
+                return;
+            }
+            let eq = self.scan_to(head + 1, "=", false);
+            if eq < kw && self.tok_is(eq, "=") {
+                let ident = eq == head + 2 && (self.toks[(head + 1) as usize].kind as int) == T_IDENT;
+                if of || kind != K_VAR || self.strict || !ident {
+                    self.fail("for-in or for-of loop variable declaration may not have an initializer");
+                    return;
+                }
+                // Annex B: the initializer is assigned first
+                let nm = self.tok_text(head + 1);
+                let vs = self.f().var_scope;
+                self.declare(vs, nm.as_str(), K_VAR);
+                self.goto(eq + 1);
+                self.no_in = true;
+                self.assign();
+                self.no_in = false;
+                self.emit_ref(nm.as_str(), M_STORE, false);
+                self.op(OP_POP);
+            }
+        }
+        self.goto(kw + 1);
+        if of {
+            self.assign();
+        } else {
+            self.expression();
+        }
+        if self.pos != close {
+            self.expect(")");
+            return;
+        }
+        self.next();
+        let body = self.pos;
+        if is_await {
+            if !of {
+                self.fail("for await needs 'of'");
+                return;
+            }
+            self.for_await_rest(head, kw, body, decl, kind, labels);
+            return;
+        }
+        let mut t: int = -1;
+        if of {
+            self.op(OP_ITER_VALUES);
+            t = self.emit(OP_TRY, 0, 0);
+            let mut c = new_ctl(CT_ITER);
+            c.installed = true;
+            self.f().ctl.push(c);
+        } else {
+            self.op(OP_ITER_KEYS);
+            self.f().ctl.push(new_ctl(CT_ITEM));
+        }
+        let top = self.pc();
+        let next = self.emit(OP_ITER_NEXT, 0, 0);
+        self.push_loop(labels);
+        let saved = self.cur_scope;
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        self.for_target(head, kw, decl, kind);
+        self.goto(body);
+        self.sub_statement();
+        self.leave_block(s, saved);
+        let ctl = self.f().ctl.pop().unwrap();
+        let cont = self.pc();
+        for x in ctl.conts.iter() {
+            self.patch_to(*x, cont);
+        }
+        self.emit(OP_JUMP, top, 0);
+        self.patch(next);
+        if !of {
+            for x in ctl.breaks.iter() {
+                self.patch(*x);
+            }
+            self.f().ctl.pop();
+            self.op(OP_POP);
+            return;
+        }
+        self.op(OP_END_TRY);
+        self.op(OP_POP);
+        let j_done = self.emit(OP_JUMP, 0, 0);
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        self.op(OP_END_TRY);
+        self.emit(OP_ITER_CLOSE, 0, 0);
+        let j_break = self.emit(OP_JUMP, 0, 0);
+        self.patch(t);
+        self.op(OP_SWAP);
+        self.emit(OP_ITER_CLOSE, 0, 1);
+        self.op(OP_THROW);
+        self.patch(j_done);
+        self.patch(j_break);
+        self.f().ctl.pop();
+    }
+
+    /// The loop's target, read from `head`: the value is on the stack.
+    fn for_target(&mut self, head: int, kw: int, decl: bool, kind: int) {
+        let back = self.pos;
+        self.goto(head);
+        if decl {
+            self.next();
+            self.pattern_target(kind);
+            if self.is("=") {
+                self.goto(kw);
+            }
+            self.mark_pending();
+        } else {
+            self.pattern_target(-2);
+        }
+        if self.pos != kw {
+            self.fail("invalid left-hand side in a for-in or for-of loop");
+            return;
+        }
+        self.goto(back);
+    }
+
+    /// `for await (x of y)`: each step awaits `it.next()`.
+    fn for_await_rest(&mut self, head: int, kw: int, body: int, decl: bool, kind: int, labels: Vec<String>) {
+        self.op(OP_ASYNC_ITER);
+        self.f().ctl.push(new_ctl(CT_ITEM));
+        let top = self.pc();
+        self.op(OP_DUP);
+        let a_next = self.atom("next");
+        self.emit(OP_GET_METHOD, a_next, 0);
+        self.emit(OP_CALL, 0, 0);
+        self.emit(OP_YIELD, 2, 0);
+        self.resume_point();
+        self.op(OP_DUP);
+        let a_done = self.atom("done");
+        self.emit(OP_GET_PROP, a_done, 0);
+        let exit = self.emit(OP_JT, 0, 0);
+        let a_value = self.atom("value");
+        self.emit(OP_GET_PROP, a_value, 0);
+        self.push_loop(labels);
+        let saved = self.cur_scope;
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        self.for_target(head, kw, decl, kind);
+        self.goto(body);
+        self.sub_statement();
+        self.leave_block(s, saved);
+        let ctl = self.f().ctl.pop().unwrap();
+        let cont = self.pc();
+        for x in ctl.conts.iter() {
+            self.patch_to(*x, cont);
+        }
+        self.emit(OP_JUMP, top, 0);
+        self.patch(exit);
+        self.op(OP_POP);
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        self.f().ctl.pop();
+        self.op(OP_POP);
+    }
+
+    fn try_statement(&mut self) {
+        self.next();
+        if !self.is("{") {
+            self.expect("{");
+            return;
+        }
+        // where the catch and finally blocks are
+        let mut p = self.after_mate(self.pos);
+        let mut has_catch = false;
+        let mut fin: int = -1;
+        if self.tok_is(p, "catch") {
+            has_catch = true;
+            p += 1;
+            if self.tok_is(p, "(") {
+                p = self.after_mate(p);
+            }
+            if self.tok_is(p, "{") {
+                p = self.after_mate(p);
+            }
+        }
+        if p >= 0 && self.tok_is(p, "finally") && self.tok_is(p + 1, "{") {
+            fin = p + 1;
+        }
+        if !has_catch && fin < 0 {
+            self.fail("try without catch or finally");
+            return;
+        }
+        let t = self.emit(OP_TRY, 0, 0);
+        let mut c = new_ctl(CT_TRY);
+        c.fin = fin;
+        c.installed = true;
+        self.f().ctl.push(c);
+        self.block_statement();
+        self.f().ctl.pop();
+        self.op(OP_END_TRY);
+        if fin >= 0 {
+            self.block_at(fin);
+        }
+        let j_end = self.emit(OP_JUMP, 0, 0);
+        self.patch(t);
+        if has_catch {
+            self.next();
+            let mut t2: int = -1;
+            if fin >= 0 {
+                t2 = self.emit(OP_TRY, 0, 0);
+                let mut c2 = new_ctl(CT_TRY);
+                c2.fin = fin;
+                c2.installed = true;
+                self.f().ctl.push(c2);
+            }
+            let saved = self.cur_scope;
+            let s = self.new_scope(saved, false, false);
+            self.enter_block(s);
+            if self.eat("(") {
+                self.pattern_target(K_CATCH);
+                self.skip_annotation();
+                self.expect(")");
+            } else {
+                self.op(OP_POP);
+            }
+            self.emit(PH_HOIST, s, 0);
+            self.expect("{");
+            while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+                self.list_stmt = true;
+                self.statement();
+            }
+            self.expect("}");
+            self.leave_block(s, saved);
+            if fin >= 0 {
+                self.f().ctl.pop();
+                self.op(OP_END_TRY);
+                self.block_at(fin);
+                let j2 = self.emit(OP_JUMP, 0, 0);
+                self.patch(t2);
+                self.finally_on_exception(fin);
+                self.patch(j2);
+            }
+        } else {
+            self.finally_on_exception(fin);
+        }
+        self.patch(j_end);
+        if fin >= 0 {
+            let a = self.after_mate(fin);
+            self.goto(a);
+        }
+    }
+
+    fn finally_on_exception(&mut self, fin: int) {
+        self.f().ctl.push(new_ctl(CT_ITEM));
+        self.block_at(fin);
+        self.f().ctl.pop();
+        self.op(OP_THROW);
+    }
+
+    /// From `i` in a switch's body, the next `case` / `default` of this
+    /// switch, or its `}`.
+    fn next_clause(&self, i: int, end: int) -> int {
+        let mut k = i;
+        while k < end {
+            let t = &self.toks[k as usize];
+            if (t.kind as int) == T_PUNCT {
+                let s = self.names[t.v as usize].as_str();
+                if s == "(" || s == "[" || s == "{" {
+                    let m = self.mate[k as usize];
+                    if m < 0 {
+                        return end;
+                    }
+                    k = m + 1;
+                    continue;
+                }
+            } else if (t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "case" || self.names[t.v as usize].as_str() == "default") {
+                if !(self.tok_is(k - 1, ".") || self.tok_is(k - 1, "?.")) {
+                    return k;
+                }
+            }
+            k += 1;
+        }
+        end
+    }
+
+    fn switch_statement(&mut self) {
+        self.next();
+        self.expect("(");
+        self.expression();
+        self.expect(")");
+        if !self.is("{") {
+            self.expect("{");
+            return;
+        }
+        let end = self.mate_of(self.pos);
+        self.next();
+        self.f().ctl.push(new_ctl(CT_ITEM));
+        let saved = self.cur_scope;
+        let s = self.new_scope(saved, false, false);
+        self.scopes[s as usize].is_switch = true;
+        self.enter_block(s);
+        let labels = self.take_labels();
+        let mut sw = new_ctl(CT_SWITCH);
+        sw.labels = labels;
+        self.f().ctl.push(sw);
+        self.emit(PH_HOIST, s, 0);
+        // the tests first, then the statements
+        let mut jumps: Vec<int> = Vec::new();
+        let mut bodies: Vec<int> = Vec::new();
+        let mut default_case: int = -1;
+        let mut idx: int = 0;
+        while self.pos < end && self.error.is_empty() {
+            if self.is("case") {
+                self.next();
+                self.expression();
+                let j = self.emit(OP_CASE_JT, 0, 0);
+                jumps.push(j);
+            } else if self.is("default") {
+                self.next();
+                if default_case >= 0 {
+                    self.fail("More than one default clause in switch statement");
+                    return;
+                }
+                default_case = idx;
+                jumps.push(-1);
+            } else {
+                self.fail("expected case or default");
+                return;
+            }
+            self.expect(":");
+            bodies.push(self.pos);
+            let nx = self.next_clause(self.pos, end);
+            self.goto(nx);
+            idx += 1;
+        }
+        let j_default = self.emit(OP_JUMP, 0, 0);
+        let mut i: int = 0;
+        while i < idx && self.error.is_empty() {
+            if i == default_case {
+                self.patch(j_default);
+            } else {
+                self.patch(jumps[i as usize]);
+            }
+            self.goto(bodies[i as usize]);
+            let stop = self.next_clause(self.pos, end);
+            while self.pos < stop && self.error.is_empty() {
+                self.list_stmt = true;
+                self.statement();
+            }
+            i += 1;
+        }
+        if default_case < 0 {
+            self.patch(j_default);
+        }
+        self.goto(end);
+        self.expect("}");
+        let ctl = self.f().ctl.pop().unwrap();
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        self.leave_block(s, saved);
+        self.f().ctl.pop();
+        self.op(OP_POP);
+    }
+
+    fn with_statement(&mut self) {
+        if self.strict || self.f().proto.strict {
+            self.fail("Strict mode code may not include a with statement");
+            return;
+        }
+        self.next();
+        self.expect("(");
+        self.expression();
+        self.expect(")");
+        let saved = self.cur_scope;
+        let s = self.new_scope(saved, false, false);
+        self.with_count += 1;
+        let wn = format!("%with{}", self.with_count);
+        let b = self.declare(s, wn.as_str(), K_LET);
+        self.mark_inited(b);
+        self.scopes[s as usize].with_bind = b;
+        self.has_with = true;
+        self.enter_block(s);
+        self.emit_bind_init(b);
+        self.op(OP_POP);
+        self.sub_statement();
+        self.leave_block(s, saved);
+    }
+
+    fn function_decl(&mut self, in_list: bool, extra: int) {
+        let decl_scope = self.cur_scope;
+        let at_body_top = in_list && decl_scope == self.f().var_scope;
+        let mut flags = extra;
+        if self.peek_is(1, "*") {
+            flags |= F_GENERATOR;
+        }
+        let name = if self.peek_is(1, "*") { self.tok_text(self.pos + 2) } else { self.tok_text(self.pos + 1) };
+        let p = self.function_expr(true, extra);
+        if !self.error.is_empty() {
+            return;
+        }
+        if in_list {
+            self.declare(decl_scope, name.as_str(), K_FUNC);
+            self.hoists.push(PHoist { proto: p, name: name.clone() });
+            let h = (self.hoists.len() as int) - 1;
+            self.scopes[decl_scope as usize].hoists.push(h);
+        }
+        if !at_body_top && (flags & (F_ASYNC | F_GENERATOR)) == 0 {
+            self.annexes.push(PAnnex { scope: decl_scope, name: name.clone(), proto: p, var_bind: -1 });
+            let k = (self.annexes.len() as int) - 1;
+            self.f().annex.push(k);
+            self.emit(PH_ANNEX, k, 0);
+        }
+    }
+
+    fn class_decl(&mut self) {
+        let name = self.tok_text(self.pos + 1);
+        let scope = self.cur_scope;
+        self.class_expr(true);
+        if !self.error.is_empty() {
+            return;
+        }
+        let b = self.declare(scope, name.as_str(), K_CLASS);
+        self.emit_bind_init(b);
+        self.op(OP_POP);
+        self.mark_inited(b);
+    }
+}
+
+impl PComp {
+    // =====================================================================
+    // destructuring
+    //
+    // `pk` is the binding kind of a declaration's pattern, or -1 for an
+    // assignment's target, -2 for a for-in / for-of loop's (written as an
+    // initialization). The value is on the stack; the code takes it.
+
+    /// A target and its default (`= d`), at the current token. The target
+    /// is read after the default, as its code runs after it.
+    fn pattern_elem(&mut self, pk: int) {
+        let ts = self.pos;
+        self.skip_target(pk);
+        let single = self.pos - ts == 1 && (self.toks[ts as usize].kind as int) == T_IDENT;
+        if pk == K_PARAM {
+            self.skip_annotation();
+        }
+        if self.is("=") {
+            self.next();
+            self.op(OP_DUP);
+            let j = self.emit(OP_JNOT_UNDEF, 0, 0);
+            self.op(OP_POP);
+            let e = self.assign();
+            if single {
+                let nm = self.tok_text(ts);
+                self.name_anonymous(e, nm.as_str());
+            }
+            self.patch(j);
+        }
+        let after = self.pos;
+        self.goto(ts);
+        self.pattern_target(pk);
+        self.goto(after);
+    }
+
+    fn skip_target(&mut self, pk: int) {
+        if (self.is("[") || self.is("{")) && (pk >= 0 || self.nested_pattern()) {
+            let a = self.after_mate(self.pos);
+            if a < 0 {
+                self.fail("unbalanced brackets");
+                return;
+            }
+            self.goto(a);
+            return;
+        }
+        if pk >= 0 {
+            if self.kind() == T_IDENT {
+                self.next();
+            } else {
+                let t = self.text();
+                self.fail(format!("expected an identifier but found '{}'", t).as_str());
+            }
+            return;
+        }
+        let k = self.scan_to(self.pos, ", =", pk == -2);
+        self.goto(k);
+    }
+
+    /// `[` / `{` here starts a nested pattern of an assignment target (not
+    /// a member of a literal).
+    fn nested_pattern(&self) -> bool {
+        let a = self.after_mate(self.pos);
+        if a < 0 {
+            return false;
+        }
+        self.tok_is(a, ",") || self.tok_is(a, "=") || self.tok_is(a, "]") || self.tok_is(a, "}") || self.tok_is(a, ")") || self.tok_is(a, "of") || self.tok_is(a, "in")
+    }
+
+    /// A target without its default.
+    fn pattern_target(&mut self, pk: int) {
+        if self.is("[") && (pk >= 0 || self.nested_pattern()) {
+            self.pattern_array(pk);
+            return;
+        }
+        if self.is("{") && (pk >= 0 || self.nested_pattern()) {
+            self.pattern_object(pk);
+            return;
+        }
+        if pk >= 0 {
+            let name = self.binding_ident();
+            if !self.error.is_empty() {
+                return;
+            }
+            if self.strict && (name.as_str() == "eval" || name.as_str() == "arguments") && pk != K_PARAM {
+                self.fail("Unexpected eval or arguments in strict mode");
+                return;
+            }
+            let scope = if pk == K_VAR { self.f().var_scope } else { self.cur_scope };
+            let b = self.declare(scope, name.as_str(), pk);
+            let decl = pk == K_LET || pk == K_CONST || pk == K_PARAM;
+            if decl {
+                self.pending_inits.push(b);
+            }
+            if pk == K_PARAM {
+                self.param_names.push(name.clone());
+            }
+            self.emit_ref(name.as_str(), M_INIT, decl);
+            self.op(OP_POP);
+            return;
+        }
+        let e = self.lhs();
+        if !self.error.is_empty() {
+            return;
+        }
+        let last = self.last_op();
+        if e.k == E_IDENT && (last.code as int) == PH_REF {
+            let name = self.refs[e.a as usize].name.clone();
+            if self.strict && (name.as_str() == "eval" || name.as_str() == "arguments") {
+                self.fail("Unexpected eval or arguments in strict mode");
+                return;
+            }
+            self.pop_op();
+            self.emit3(PH_REF, e.a, if pk == -2 { M_INIT } else { M_STORE }, 0);
+            self.op(OP_POP);
+            return;
+        }
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+            self.pop_op();
+            self.op(OP_SWAP);
+            self.emit(OP_SET_PROP, (last.a as int), 0);
+            self.op(OP_POP);
+            return;
+        }
+        if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
+            self.pop_op();
+            self.op(OP_ROT3);
+            self.op(OP_ROT3);
+            self.op(OP_SET_ELEM);
+            self.op(OP_POP);
+            return;
+        }
+        self.fail("invalid destructuring target");
+    }
+
+    fn pattern_array(&mut self, pk: int) {
+        let open = self.pos;
+        let close = self.mate_of(open);
+        // the elements, as the literal would count them
+        let mut items: int = 0;
+        let mut has_rest = false;
+        let mut k = open + 1;
+        while k < close {
+            if self.tok_is(k, ",") {
+                items += 1;
+                k += 1;
+                continue;
+            }
+            if self.tok_is(k, "...") {
+                has_rest = true;
+            }
+            items += 1;
+            k = self.scan_to(k, ",", false);
+            if k < close {
+                k += 1;
+            }
+        }
+        self.emit(OP_TO_ARRAY, if has_rest { 0 } else { items + 1 }, 0);
+        self.next();
+        let mut i: int = 0;
+        while !self.is("]") && self.kind() != T_EOF && self.error.is_empty() {
+            if self.is(",") {
+                self.next();
+                i += 1;
+                continue;
+            }
+            if self.eat("...") {
+                self.emit(OP_ARRAY_REST, i, 0);
+                self.pattern_target(pk);
+                i += 1;
+                if !self.is("]") {
+                    self.fail("Rest element must be last element");
+                    return;
+                }
+                continue;
+            }
+            self.op(OP_DUP);
+            self.emit(OP_INT, i, 0);
+            self.op(OP_GET_ELEM);
+            self.pattern_elem(pk);
+            i += 1;
+            if !self.is("]") {
+                self.expect(",");
+            }
+        }
+        self.expect("]");
+        self.op(OP_POP);
+    }
+
+    fn pattern_object(&mut self, pk: int) {
+        self.op(OP_REQUIRE_OBJ);
+        self.next();
+        let mut seen: Vec<String> = Vec::new();
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            if self.eat("...") {
+                let cnt = seen.len() as int;
+                for s in seen.clone() {
+                    self.push_str(s.as_str());
+                }
+                self.emit(OP_OBJ_REST, cnt, 0);
+                self.pattern_target(pk);
+                if !self.is("}") {
+                    self.expect(",");
+                }
+                continue;
+            }
+            let key_pos = self.pos;
+            let key_ident = self.kind() == T_IDENT;
+            self.op(OP_DUP);
+            if self.eat("[") {
+                self.assign();
+                self.expect("]");
+                self.op(OP_GET_ELEM);
+            } else {
+                let name = if self.kind() == T_STR {
+                    let s = self.text();
+                    self.next();
+                    s
+                } else if self.kind() == T_NUM {
+                    let v = self.tok_num(self.pos);
+                    self.next();
+                    number_to_string(v)
+                } else {
+                    self.ident_name()
+                };
+                seen.push(name.clone());
+                let at = self.atom(name.as_str());
+                self.emit(OP_GET_PROP, at, 0);
+            }
+            if self.eat(":") {
+                self.pattern_elem(pk);
+            } else if key_ident {
+                let nm = self.tok_text(key_pos);
+                if is_reserved(nm.as_str()) {
+                    self.fail("unexpected reserved word");
+                    return;
+                }
+                self.goto(key_pos);
+                self.pattern_elem(pk);
+            } else {
+                self.fail("expected ':' in a pattern");
+                return;
+            }
+            if !self.is("}") {
+                self.expect(",");
+            }
+        }
+        self.expect("}");
+        self.op(OP_POP);
+    }
+
+    // =====================================================================
+    // expressions
+
+    fn name_anonymous(&mut self, e: Ex, name: &str) {
+        if e.k == E_ANON {
+            // a module's `export default function () {}` (its binding is
+            // `__cerxesDefault`) is named default
+            let c = if name == "__cerxesDefault" { self.str_const("default") } else { self.str_const(name) };
+            self.emit(OP_SET_NAME, c, 0);
+        }
+    }
+
+    /// A jump taken when the condition just written is false; the jump is
+    /// the last op.
+    fn cond_jump_false(&mut self, e: Ex) {
+        let last = self.last_op();
+        if e.k == E_CMP && is_compare((last.code as int)) {
+            self.pop_op();
+            self.emit(OP_CMP_JF, 0, (last.code as int));
+            return;
+        }
+        if e.k == E_NOT && (last.code as int) == OP_NOT {
+            self.pop_op();
+            self.emit(OP_JT, 0, 0);
+            return;
+        }
+        self.emit(OP_JF, 0, 0);
+    }
+
+    fn resume_point(&mut self) {
+        let r = self.emit(OP_GEN_RESUME, 0, 0);
+        let j = self.emit(OP_JUMP, 0, 0);
+        self.patch(r);
+        self.unwind_to(-1);
+        self.op(OP_RETURN);
+        self.patch(j);
+    }
+
+    pub fn expression(&mut self) -> Ex {
+        let first = self.assign();
+        if !self.is(",") {
+            return first;
+        }
+        while self.eat(",") {
+            self.op(OP_POP);
+            self.assign();
+        }
+        ex(E_OTHER)
+    }
+
+    fn check_strict_target(&mut self, e: Ex) {
+        if self.strict && e.k == E_IDENT {
+            let s = self.refs[e.a as usize].name.clone();
+            if s.as_str() == "eval" || s.as_str() == "arguments" {
+                self.fail("Unexpected eval or arguments in strict mode");
+            }
+        }
+    }
+
+    /// TypeScript: the parameter here is a name with a type (`a: T`,
+    /// `a?: T`) and nothing more.
+    fn plain_typed_param(&mut self) -> bool {
+        let mut k = self.pos + 1;
+        if self.tok_is(k, "?") {
+            k += 1;
+        }
+        if !self.tok_is(k, ":") {
+            return self.tok_is(k, ",") || self.tok_is(k, ")");
+        }
+        let e = self.type_end(k + 1);
+        e >= 0 && (self.tok_is(e, ",") || self.tok_is(e, ")"))
+    }
+
+    fn arrow_ahead(&mut self) -> bool {
+        if self.ts {
+            return self.ts_arrow_ahead();
+        }
+        let mut k: int = 0;
+        if self.peek_is(0, "async") && !self.tok_nl(self.pos + 1) && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "(")) {
+            if self.peek_kind(1) == T_IDENT {
+                return self.peek_is(2, "=>");
+            }
+            k = 1;
+        }
+        if self.peek_kind(k) == T_IDENT && !self.peek_is(k, "(") {
+            return self.peek_is(k + 1, "=>") && k == 0 && !self.tok_nl(self.pos + 1);
+        }
+        if !self.peek_is(k, "(") {
+            return false;
+        }
+        let a = self.after_mate(self.pos + k);
+        if a < 0 {
+            return false;
+        }
+        self.tok_is(a, "=>") && !self.tok_nl(a)
+    }
+
+    /// arrow_ahead in TypeScript: type parameters before the list, a
+    /// return type after it (not in a conditional's first branch, where
+    /// `c ? (a) : b => d` is the conditional).
+    fn ts_arrow_ahead(&mut self) -> bool {
+        let mut k: int = self.pos;
+        if self.is("async") && !self.tok_nl(self.pos + 1) && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "(") || self.peek_is(1, "<")) {
+            if self.peek_kind(1) == T_IDENT && !self.peek_is(1, "(") {
+                return self.peek_is(2, "=>");
+            }
+            k += 1;
+        }
+        if self.tok_is(k, "<") {
+            let e = self.type_params_end(k);
+            if e < 0 || !self.tok_is(e, "(") {
+                return false;
+            }
+            k = e;
+        } else if (self.toks[k as usize].kind as int) == T_IDENT && !self.tok_is(k, "(") {
+            return k == self.pos && self.tok_is(k + 1, "=>") && !self.tok_nl(k + 1);
+        }
+        if !self.tok_is(k, "(") {
+            return false;
+        }
+        let a = self.after_mate(k);
+        if a < 0 {
+            return false;
+        }
+        if self.tok_is(a, "=>") {
+            return !self.tok_nl(a);
+        }
+        if self.tok_is(a, ":") && !(self.pos > 0 && self.tok_is(self.pos - 1, "?")) {
+            let e = self.return_type_end(a + 1);
+            return e >= 0 && self.tok_is(e, "=>") && !self.tok_nl(e);
+        }
+        false
+    }
+
+    fn yield_expr(&mut self) -> Ex {
+        self.next();
+        let mut delegate = false;
+        let mut has = false;
+        if !self.nl_before() && self.eat("*") {
+            delegate = true;
+            self.assign();
+            has = true;
+        } else if !self.nl_before() && !self.is(")") && !self.is("]") && !self.is("}") && !self.is(",") && !self.is(";") && !self.is(":") && self.kind() != T_EOF && !(self.kind() == T_IDENT && self.is("in")) {
+            self.assign();
+            has = true;
+        }
+        if !delegate {
+            if !has {
+                self.op(OP_UNDEF);
+            }
+            if self.f().proto.is_async {
+                self.emit(OP_YIELD, 2, 0);
+                self.resume_point();
+            }
+            self.emit(OP_YIELD, 0, 0);
+            self.resume_point();
+            return ex(E_OTHER);
+        }
+        self.op(OP_ITER_VALUES);
+        self.op(OP_UNDEF);
+        self.emit(OP_INT, 0, 0);
+        let top = self.pc();
+        let step = self.emit(OP_YIELD_STAR, 0, 0);
+        self.emit(OP_YIELD, 1, 0);
+        self.emit(OP_JUMP, top, 0);
+        let ret = self.pc();
+        self.unwind_to(-1);
+        self.op(OP_RETURN);
+        let done = self.pc();
+        let i = self.fs.len() - 1;
+        self.fs[i].proto.code[step as usize].a = (done as i32);
+        self.fs[i].proto.code[step as usize].b = (ret as i32);
+        ex(E_OTHER)
+    }
+
+    fn assign(&mut self) -> Ex {
+        if !self.error.is_empty() {
+            return ex(E_OTHER);
+        }
+        if self.arrow_ahead() {
+            return self.arrow();
+        }
+        if self.is("yield") && self.in_generator && !self.escaped() {
+            return self.yield_expr();
+        }
+        // `[a, b] = v`, `({a} = v)`: a pattern
+        if self.is("[") || self.is("{") {
+            let a = self.after_mate(self.pos);
+            if a >= 0 && self.tok_is(a, "=") {
+                let ts = self.pos;
+                self.goto(a);
+                self.next();
+                self.assigns += 1;
+                self.assign();
+                self.op(OP_DUP);
+                let after = self.pos;
+                self.goto(ts);
+                if self.is("[") {
+                    self.pattern_array(-1);
+                } else {
+                    self.pattern_object(-1);
+                }
+                self.goto(after);
+                return ex(E_OTHER);
+            }
+        }
+        let left = self.conditional();
+        if self.kind() != T_PUNCT {
+            return left;
+        }
+        let op = self.text();
+        if !is_assign_op(op.as_str()) {
+            return left;
+        }
+        self.next();
+        self.assigns += 1;
+        let o = op.as_str();
+        let last = self.last_op();
+        let n = self.pc();
+        let logical = o == "&&=" || o == "||=" || o == "??=";
+        let jcode = if o == "&&=" {
+            OP_JF_KEEP
+        } else if o == "||=" {
+            OP_JT_KEEP
+        } else {
+            OP_JNN_KEEP
+        };
+        if left.k == E_IDENT && (last.code as int) == PH_REF && left.b == n - 1 {
+            self.check_strict_target(left);
+            let r = left.a;
+            let name = self.refs[r as usize].name.clone();
+            if o == "=" {
+                self.pop_op();
+                let e = self.assign();
+                self.name_anonymous(e, name.as_str());
+                let st = self.emit3(PH_REF, r, M_STORE, 0);
+                if e.k == E_ADD && e.a >= 0 && self.refs[e.a as usize].name == name {
+                    return Ex { k: E_ADDASSIGN, a: e.b, b: st, c: e.c };
+                }
+                return ex(E_OTHER);
+            }
+            if logical {
+                let j = self.emit(jcode, 0, 0);
+                let e = self.assign();
+                self.name_anonymous(e, name.as_str());
+                self.emit3(PH_REF, r, M_STORE, 0);
+                self.patch(j);
+                return ex(E_OTHER);
+            }
+            let cnt = self.assigns;
+            self.assign();
+            let bop = &o[0..(o.as_bytes().len() - 1)];
+            let code = binary_code(bop);
+            self.op(code);
+            let st = self.emit3(PH_REF, r, M_STORE, 0);
+            if o == "+=" {
+                return Ex { k: E_ADDASSIGN, a: left.b, b: st, c: cnt };
+            }
+            return ex(E_OTHER);
+        }
+        if (left.k == E_MEMBER || left.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+            let at = last.a;
+            self.pop_op();
+            if o == "=" {
+                self.assign();
+                self.emit(OP_SET_PROP, (at as int), 0);
+                return ex(E_OTHER);
+            }
+            self.op(OP_DUP);
+            self.emit(OP_GET_PROP, (at as int), 0);
+            if logical {
+                let j = self.emit(jcode, 0, 0);
+                self.assign();
+                self.emit(OP_SET_PROP, (at as int), 0);
+                let jend = self.emit(OP_JUMP, 0, 0);
+                self.patch(j);
+                self.op(OP_SWAP);
+                self.op(OP_POP);
+                self.patch(jend);
+                return ex(E_OTHER);
+            }
+            self.assign();
+            let bop = &o[0..(o.as_bytes().len() - 1)];
+            let code = binary_code(bop);
+            self.op(code);
+            self.emit(OP_SET_PROP, (at as int), 0);
+            if o == "+=" {
+                return Ex { k: E_MEMBER_ADDASSIGN, a: (at as int), b: -1, c: -1 };
+            }
+            return ex(E_OTHER);
+        }
+        if left.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
+            self.pop_op();
+            if o == "=" {
+                self.assign();
+                self.op(OP_SET_ELEM);
+                return ex(E_OTHER);
+            }
+            self.op(OP_DUP2);
+            self.op(OP_GET_ELEM);
+            if logical {
+                let j = self.emit(jcode, 0, 0);
+                self.assign();
+                self.op(OP_SET_ELEM);
+                let jend = self.emit(OP_JUMP, 0, 0);
+                self.patch(j);
+                self.op(OP_ROT3);
+                self.op(OP_POP);
+                self.op(OP_POP);
+                self.patch(jend);
+                return ex(E_OTHER);
+            }
+            self.assign();
+            let bop = &o[0..(o.as_bytes().len() - 1)];
+            let code = binary_code(bop);
+            self.op(code);
+            self.op(OP_SET_ELEM);
+            return ex(E_OTHER);
+        }
+        if o == "=" {
+            self.fail("Invalid left-hand side in assignment");
+        } else {
+            self.fail("invalid assignment target");
+        }
+        ex(E_OTHER)
+    }
+
+    fn conditional(&mut self) -> Ex {
+        let t = self.binary(0);
+        if !self.is("?") {
+            return t;
+        }
+        self.next();
+        self.cond_jump_false(t);
+        let jf = self.pc() - 1;
+        let saved = self.no_in;
+        self.no_in = false;
+        self.assign();
+        self.no_in = saved;
+        let j = self.emit(OP_JUMP, 0, 0);
+        self.patch(jf);
+        self.expect(":");
+        self.assign();
+        self.patch(j);
+        ex(E_OTHER)
+    }
+
+    fn binary(&mut self, min: int) -> Ex {
+        let mut left = self.unary();
+        loop {
+            if !self.error.is_empty() {
+                break;
+            }
+            if self.ts && (self.is("as") || self.is("satisfies")) && !self.nl_before() && 8 >= min {
+                // `x as T`: the value of x
+                self.next();
+                if self.is("const") {
+                    self.next();
+                } else {
+                    self.skip_type_here();
+                }
+                continue;
+            }
+            if !(self.kind() == T_PUNCT || (self.kind() == T_IDENT && !self.escaped() && (self.is("instanceof") || self.is("in")))) {
+                break;
+            }
+            let op = self.text();
+            if op.as_str() == "in" && self.no_in {
+                break;
+            }
+            let prec = binary_prec(op.as_str());
+            if prec < 0 || prec < min {
+                break;
+            }
+            self.next();
+            let o = op.as_str();
+            if o == "&&" || o == "||" || o == "??" {
+                let code = if o == "&&" {
+                    OP_JF_KEEP
+                } else if o == "||" {
+                    OP_JT_KEEP
+                } else {
+                    OP_JNN_KEEP
+                };
+                let j = self.emit(code, 0, 0);
+                self.binary(prec + 1);
+                self.patch(j);
+                left = ex(E_OTHER);
+                continue;
+            }
+            let cnt = self.assigns;
+            if o == "**" {
+                self.binary(prec);
+            } else {
+                self.binary(prec + 1);
+            }
+            let code = binary_code(o);
+            self.op(code);
+            if is_compare(code) {
+                left = ex(E_CMP);
+            } else if o == "+" && left.k == E_IDENT {
+                left = Ex { k: E_ADD, a: left.a, b: left.b, c: cnt };
+            } else {
+                left = ex(E_OTHER);
+            }
+        }
+        left
+    }
+
+    /// `++` / `--` on the target just read (`e`).
+    fn update(&mut self, e: Ex, prefix: bool, inc: bool) -> Ex {
+        self.assigns += 1;
+        let last = self.last_op();
+        let code = if inc { OP_INC } else { OP_DEC };
+        if e.k == E_IDENT && (last.code as int) == PH_REF && e.b == self.pc() - 1 {
+            self.check_strict_target(e);
+            let mut flags = 0;
+            if prefix {
+                flags |= U_PREFIX;
+            }
+            if inc {
+                flags |= U_INC;
+            }
+            let i = self.fs.len() - 1;
+            self.fs[i].proto.code[e.b as usize] = Op { code: (PH_REF as i32), a: (e.a as i32), b: (M_UPD as i32), c: (flags as i32) };
+            return Ex { k: E_UPDATE_IDENT, a: e.b, b: -1, c: -1 };
+        }
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+            let at = last.a;
+            self.pop_op();
+            self.op(OP_DUP);
+            self.emit(OP_GET_PROP, (at as int), 0);
+            self.op(OP_TONUM);
+            if prefix {
+                self.op(code);
+                self.emit(OP_SET_PROP, (at as int), 0);
+            } else {
+                self.op(OP_DUP);
+                self.op(OP_ROT3);
+                self.op(code);
+                self.emit(OP_SET_PROP, (at as int), 0);
+                self.op(OP_POP);
+            }
+            return ex(E_OTHER);
+        }
+        if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
+            self.pop_op();
+            self.op(OP_DUP2);
+            self.op(OP_GET_ELEM);
+            self.op(OP_TONUM);
+            if prefix {
+                self.op(code);
+                self.op(OP_SET_ELEM);
+            } else {
+                self.op(OP_DUP);
+                self.op(OP_ROT4);
+                self.op(code);
+                self.op(OP_SET_ELEM);
+                self.op(OP_POP);
+            }
+            return ex(E_OTHER);
+        }
+        self.fail("invalid update target");
+        ex(E_OTHER)
+    }
+
+    fn unary(&mut self) -> Ex {
+        if self.ts && !self.jsx && self.is("<") {
+            // TypeScript's `<T>x` (not in TSX, where it opens an element)
+            let e = self.type_args_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return ex(E_OTHER);
+            }
+            self.goto(e);
+            return self.unary();
+        }
+        if self.kind() == T_PUNCT {
+            let op = self.text();
+            let s = op.as_str();
+            if s == "!" || s == "-" || s == "+" || s == "~" {
+                self.next();
+                let a = self.unary();
+                if self.is("**") {
+                    self.fail("unary operator before **");
+                    return ex(E_OTHER);
+                }
+                if s == "-" && a.k == E_NUM {
+                    let v = self.last_num;
+                    self.pop_op();
+                    self.push_num(-v);
+                    return ex(E_OTHER);
+                }
+                if s == "-" {
+                    self.op(OP_NEG);
+                } else if s == "+" {
+                    self.op(OP_TONUM);
+                } else if s == "!" {
+                    self.op(OP_NOT);
+                    return ex(E_NOT);
+                } else {
+                    self.op(OP_BNOT);
+                }
+                return ex(E_OTHER);
+            }
+            if s == "++" || s == "--" {
+                self.next();
+                let a = self.unary();
+                return self.update(a, true, s == "++");
+            }
+        }
+        if self.kind() == T_IDENT && !self.escaped() {
+            let op = self.text();
+            let s = op.as_str();
+            if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_async) {
+                self.next();
+                let a = self.unary();
+                if !self.error.is_empty() {
+                    return ex(E_OTHER);
+                }
+                let last = self.last_op();
+                if s == "typeof" {
+                    if a.k == E_IDENT && (last.code as int) == PH_REF {
+                        let i = self.fs.len() - 1;
+                        let n = self.fs[i].proto.code.len() - 1;
+                        self.fs[i].proto.code[n].b = (M_TYPEOF as i32);
+                    } else {
+                        self.op(OP_TYPEOF);
+                    }
+                } else if s == "delete" {
+                    if self.strict && a.k == E_IDENT {
+                        self.fail("Delete of an unqualified identifier in strict mode.");
+                        return ex(E_OTHER);
+                    }
+                    if (a.k == E_MEMBER || a.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+                        self.pop_op();
+                        self.emit(OP_DEL_PROP, (last.a as int), 0);
+                    } else if a.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
+                        self.pop_op();
+                        self.op(OP_DEL_ELEM);
+                    } else if a.k == E_IDENT && (last.code as int) == PH_REF {
+                        let i = self.fs.len() - 1;
+                        let n = self.fs[i].proto.code.len() - 1;
+                        self.fs[i].proto.code[n].b = (M_DELETE as i32);
+                    } else {
+                        self.op(OP_POP);
+                        self.op(OP_TRUE);
+                    }
+                } else if s == "void" {
+                    self.op(OP_POP);
+                    self.op(OP_UNDEF);
+                } else if self.f().proto.is_async {
+                    self.emit(OP_YIELD, 2, 0);
+                    self.resume_point();
+                }
+                return ex(E_OTHER);
+            }
+        }
+        let e = self.lhs();
+        if self.kind() == T_PUNCT && !self.nl_before() && (self.is("++") || self.is("--")) {
+            let inc = self.is("++");
+            self.next();
+            return self.update(e, false, inc);
+        }
+        e
+    }
+
+    /// Arguments of a call to the stack: their count, or -1 when there is
+    /// a spread (then an array of them).
+    fn call_args(&mut self) -> int {
+        self.expect("(");
+        let saved = self.no_in;
+        self.no_in = false;
+        let mut cnt: int = 0;
+        let mut spread = false;
+        while !self.is(")") && self.kind() != T_EOF && self.error.is_empty() {
+            if self.eat("...") {
+                if !spread {
+                    self.emit(OP_NEW_ARRAY, cnt, 0);
+                    spread = true;
+                }
+                self.assign();
+                self.op(OP_ARRAY_SPREAD);
+            } else {
+                self.assign();
+                if spread {
+                    self.op(OP_ARRAY_PUSH);
+                } else {
+                    cnt += 1;
+                }
+            }
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.no_in = saved;
+        self.expect(")");
+        if spread {
+            -1
+        } else {
+            cnt
+        }
+    }
+
+    /// The callee just read becomes a function and its `this`.
+    fn callee(&mut self, e: Ex, optional: bool) {
+        let last = self.last_op();
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+            self.pop_op();
+            self.emit(OP_GET_METHOD, (last.a as int), if optional { 1 } else { 0 });
+        } else if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
+            self.pop_op();
+            self.op(OP_GET_METHOD_ELEM);
+        } else if e.k == E_SUPER_MEMBER {
+            self.op(OP_THIS);
+        } else {
+            self.op(OP_UNDEF);
+        }
+    }
+
+    fn chain_check(&mut self) {
+        let j = self.emit(OP_JNULLISH, 0, 1);
+        let f = self.f();
+        let last = f.chain.len() - 1;
+        f.chain[last].push(j);
+    }
+
+    fn call(&mut self, e: Ex, optional: bool) {
+        self.callee(e, optional);
+        if optional {
+            self.emit(OP_OVER, 0, 0);
+            let j = self.emit(OP_JNULLISH, 0, 3);
+            let f = self.f();
+            let last = f.chain.len() - 1;
+            f.chain[last].push(j);
+        }
+        let n = self.call_args();
+        if n < 0 {
+            self.op(OP_CALL_SPREAD);
+        } else {
+            self.emit(OP_CALL, n, 0);
+        }
+    }
+
+    /// Member access, calls, `new`, optional chains.
+    fn lhs(&mut self) -> Ex {
+        self.f().chain.push(Vec::new());
+        let mut e: Ex;
+        if self.is("new") && !self.escaped() {
+            self.next();
+            if self.eat(".") {
+                let t = self.ident_name();
+                if t.as_str() != "target" {
+                    self.fail("new.target expected");
+                }
+                self.mark_lexical_ctor();
+                self.op(OP_NEW_TARGET);
+                e = ex(E_OTHER);
+            } else {
+                self.member_only();
+                if self.ts && self.is("<") {
+                    let a = self.type_args_end(self.pos);
+                    if a < 0 {
+                        self.ts_fail();
+                    } else {
+                        self.goto(a);
+                    }
+                }
+                let mut n: int = 0;
+                if self.is("(") {
+                    n = self.call_args();
+                }
+                if n < 0 {
+                    self.op(OP_NEW_SPREAD);
+                } else {
+                    self.emit(OP_NEW, n, 0);
+                }
+                e = ex(E_OTHER);
+            }
+        } else if self.is("super") && !self.escaped() {
+            self.next();
+            if self.is("(") {
+                self.mark_lexical_ctor();
+                let n = self.call_args();
+                if n < 0 {
+                    self.op(OP_SUPER_CALL_SPREAD);
+                } else {
+                    self.emit(OP_SUPER_CALL, n, 0);
+                }
+                e = ex(E_OTHER);
+            } else if self.eat(".") {
+                let name = self.ident_name();
+                let at = self.atom(name.as_str());
+                self.emit(OP_GET_SUPER, at, 0);
+                e = ex(E_SUPER_MEMBER);
+            } else if self.eat("[") {
+                self.expression();
+                self.expect("]");
+                self.op(OP_GET_SUPER_ELEM);
+                e = ex(E_SUPER_MEMBER);
+            } else {
+                self.fail("unexpected super");
+                e = ex(E_OTHER);
+            }
+        } else {
+            e = self.primary();
+        }
+        let mut chain = false;
+        loop {
+            if !self.error.is_empty() {
+                break;
+            }
+            if self.is(".") {
+                self.next();
+                if self.kind() == T_PRIVATE {
+                    let s = format!("\u{1}#{}", self.text());
+                    self.next();
+                    let at = self.atom(s.as_str());
+                    self.emit(OP_GET_PRIVATE, at, 0);
+                    e = Ex { k: E_PRIVATE, a: at, b: -1, c: -1 };
+                } else {
+                    let name = self.ident_name();
+                    let at = self.atom(name.as_str());
+                    self.emit(OP_GET_PROP, at, 0);
+                    e = Ex { k: E_MEMBER, a: at, b: -1, c: -1 };
+                }
+            } else if self.is("?.") {
+                self.next();
+                chain = true;
+                if self.kind() == T_PRIVATE {
+                    let s = format!("\u{1}#{}", self.text());
+                    self.next();
+                    self.chain_check();
+                    let at = self.atom(s.as_str());
+                    self.emit(OP_GET_PRIVATE, at, 0);
+                    e = Ex { k: E_PRIVATE, a: at, b: -1, c: -1 };
+                } else if self.is("(") {
+                    self.call(e, true);
+                    e = ex(E_OTHER);
+                } else if self.eat("[") {
+                    self.chain_check();
+                    self.expression();
+                    self.expect("]");
+                    self.op(OP_GET_ELEM);
+                    e = ex(E_INDEX);
+                } else {
+                    let name = self.ident_name();
+                    self.chain_check();
+                    let at = self.atom(name.as_str());
+                    self.emit(OP_GET_PROP, at, 0);
+                    e = Ex { k: E_MEMBER, a: at, b: -1, c: -1 };
+                }
+            } else if self.is("[") {
+                self.next();
+                let saved = self.no_in;
+                self.no_in = false;
+                self.expression();
+                self.no_in = saved;
+                self.expect("]");
+                self.op(OP_GET_ELEM);
+                e = ex(E_INDEX);
+            } else if self.is("(") {
+                self.call(e, false);
+                e = ex(E_OTHER);
+            } else if self.kind() == T_TEMPLATE {
+                self.tagged(e);
+                e = ex(E_OTHER);
+            } else if self.ts && self.is("!") && !self.nl_before() {
+                // `x!`: not null, for the types only
+                self.next();
+            } else if self.ts && self.is("<") {
+                // `f<T>(…)`; else a comparison
+                let a = self.type_args_end(self.pos);
+                if a >= 0 && (self.tok_is(a, "(") || (a < self.tok_count() && (self.toks[a as usize].kind as int) == T_TEMPLATE)) {
+                    self.goto(a);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        let i = self.fs.len() - 1;
+        let last = self.fs[i].chain.len() - 1;
+        let jumps = self.fs[i].chain[last].clone();
+        self.fs[i].chain.truncate(last);
+        for j in jumps.iter() {
+            self.patch(*j);
+        }
+        if chain {
+            return ex(E_CHAIN);
+        }
+        e
+    }
+
+    /// The callee of `new`: member accesses without calls.
+    fn member_only(&mut self) {
+        if self.is("new") && !self.escaped() {
+            self.next();
+            self.member_only();
+            let mut n: int = 0;
+            if self.is("(") {
+                n = self.call_args();
+            }
+            if n < 0 {
+                self.op(OP_NEW_SPREAD);
+            } else {
+                self.emit(OP_NEW, n, 0);
+            }
+        } else {
+            self.primary();
+        }
+        loop {
+            if !self.error.is_empty() {
+                break;
+            }
+            if self.eat(".") {
+                let name = self.ident_name();
+                let at = self.atom(name.as_str());
+                self.emit(OP_GET_PROP, at, 0);
+            } else if self.eat("[") {
+                self.expression();
+                self.expect("]");
+                self.op(OP_GET_ELEM);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// A template substitution's source, read and written here.
+    fn sub_expression(&mut self, src: &str) {
+        let saved_src = self.src_rc.clone();
+        self.src_rc = Rc::new(String::from(src));
+        let saved = self.push_tokens(src);
+        if self.error.is_empty() {
+            self.expression();
+            if self.kind() != T_EOF && self.error.is_empty() {
+                self.fail("bad template substitution");
+            }
+        }
+        self.pop_tokens(&saved);
+        self.src_rc = saved_src;
+    }
+
+    fn template(&mut self) -> Ex {
+        let xi = (self.toks[self.pos as usize].x as int) as usize;
+        let parts = self.xs[xi].parts.clone();
+        let exprs = self.xs[xi].exprs.clone();
+        let oks = self.xs[xi].cooked_ok.clone();
+        self.next();
+        for ok in oks.iter() {
+            if !*ok {
+                self.fail("Invalid escape sequence in template");
+                return ex(E_OTHER);
+            }
+        }
+        self.push_str(parts[0].as_str());
+        let mut i: usize = 0;
+        for src in exprs.iter() {
+            self.sub_expression(src.as_str());
+            self.op(OP_TOSTR);
+            self.op(OP_ADD);
+            if i + 1 < parts.len() && !parts[i + 1].is_empty() {
+                let s = parts[i + 1].clone();
+                self.push_str(s.as_str());
+                self.op(OP_ADD);
+            }
+            i += 1;
+        }
+        ex(E_OTHER)
+    }
+
+    fn tagged(&mut self, e: Ex) {
+        let last = self.last_op();
+        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+            self.pop_op();
+            self.emit(OP_GET_METHOD, (last.a as int), 0);
+        } else {
+            self.op(OP_UNDEF);
+        }
+        let xi = (self.toks[self.pos as usize].x as int) as usize;
+        let parts = self.xs[xi].parts.clone();
+        let exprs = self.xs[xi].exprs.clone();
+        let raws = self.xs[xi].raws.clone();
+        let oks = self.xs[xi].cooked_ok.clone();
+        self.next();
+        let fi = self.fs.len() - 1;
+        let slot = self.fs[fi].proto.consts.len() as int;
+        self.fs[fi].proto.consts.push(Val::Undef);
+        let cnt = parts.len() as int;
+        let site = self.emit(OP_TEMPLATE_OBJ, 0, slot);
+        let mut i: usize = 0;
+        for p in parts.iter() {
+            if i < oks.len() && !oks[i] {
+                self.op(OP_UNDEF);
+            } else {
+                self.push_str(p.as_str());
+            }
+            i += 1;
+        }
+        i = 0;
+        while i < parts.len() {
+            let r = if i < raws.len() { raws[i].clone() } else { String::new() };
+            self.push_str(r.as_str());
+            i += 1;
+        }
+        self.emit(OP_TEMPLATE_OBJ, cnt, -1 - slot);
+        self.patch(site);
+        let argc = (exprs.len() as int) + 1;
+        for src in exprs.iter() {
+            self.sub_expression(src.as_str());
+        }
+        self.emit(OP_CALL, argc, 0);
+    }
+
+    fn primary(&mut self) -> Ex {
+        let k = self.kind();
+        if k == T_IDENT && !self.module_path.is_empty() && self.is("__cerxesModuleExports") {
+            // what a module returns (`compile_module`)
+            self.next();
+            let src = self.module_exports_src();
+            return self.source_expr(src.as_str());
+        }
+        if k == T_NUM {
+            let raw = self.text();
+            if self.strict && raw.as_str() == "octal" {
+                self.fail("Octal literals are not allowed in strict mode.");
+                return ex(E_OTHER);
+            }
+            if raw.starts_with("n:") {
+                let digits: String = String::from(&raw[2..]);
+                self.next();
+                self.push_str(digits.as_str());
+                self.op(OP_BIGINT);
+                return ex(E_LITERAL);
+            }
+            let v = self.tok_num(self.pos);
+            self.next();
+            self.push_num(v);
+            self.last_num = v;
+            return ex(E_NUM);
+        }
+        if k == T_STR {
+            if self.strict && self.escaped() {
+                self.fail("Octal escape sequences are not allowed in strict mode.");
+                return ex(E_OTHER);
+            }
+            let s = self.text();
+            self.next();
+            self.push_str(s.as_str());
+            return ex(E_LITERAL);
+        }
+        if k == T_TEMPLATE {
+            return self.template();
+        }
+        if k == T_REGEX {
+            let s = self.text();
+            let fx = self.toks[self.pos as usize].x as int;
+            let f = if fx >= 0 { self.xs[fx as usize].flags.clone() } else { String::new() };
+            self.next();
+            let cs = self.str_const(s.as_str());
+            let cf = self.str_const(f.as_str());
+            self.emit(OP_REGEX, cs, cf);
+            return ex(E_LITERAL);
+        }
+        if k == T_PRIVATE {
+            let s = format!("\u{1}#{}", self.text());
+            self.next();
+            self.push_str(s.as_str());
+            return ex(E_LITERAL);
+        }
+        if k == T_IDENT {
+            let w = self.text();
+            let escaped = self.escaped();
+            let ws = w.as_str();
+            if !escaped {
+                if ws == "function" {
+                    let p = self.function_expr(false, 0);
+                    self.emit(OP_CLOSURE, p, 0);
+                    return ex(if self.last_fn_name.is_empty() { E_ANON } else { E_OTHER });
+                }
+                if ws == "async" && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1) {
+                    self.next();
+                    let p = self.function_expr(false, F_ASYNC);
+                    self.emit(OP_CLOSURE, p, 0);
+                    return ex(if self.last_fn_name.is_empty() { E_ANON } else { E_OTHER });
+                }
+                if ws == "class" {
+                    return self.class_expr(false);
+                }
+                if ws == "this" {
+                    self.next();
+                    self.op(OP_THIS);
+                    return ex(E_LITERAL);
+                }
+                if ws == "null" {
+                    self.next();
+                    self.op(OP_NULL);
+                    return ex(E_LITERAL);
+                }
+                if ws == "true" {
+                    self.next();
+                    self.op(OP_TRUE);
+                    return ex(E_LITERAL);
+                }
+                if ws == "false" {
+                    self.next();
+                    self.op(OP_FALSE);
+                    return ex(E_LITERAL);
+                }
+                if ws == "import" {
+                    self.fail("modules are not supported");
+                    return ex(E_OTHER);
+                }
+                if is_reserved(ws) {
+                    self.fail(format!("unexpected token '{}'", ws).as_str());
+                    return ex(E_OTHER);
+                }
+            }
+            self.next();
+            let at = self.emit_ref(ws, M_LOAD, false);
+            let r = self.fs[self.fs.len() - 1].proto.code[at as usize].a;
+            return Ex { k: E_IDENT, a: (r as int), b: at, c: -1 };
+        }
+        if self.is("(") {
+            self.next();
+            let saved = self.no_in;
+            self.no_in = false;
+            let e = self.expression();
+            self.no_in = saved;
+            self.expect(")");
+            return e;
+        }
+        if self.is("[") {
+            self.array_literal();
+            return ex(E_LITERAL);
+        }
+        if self.is("{") {
+            self.object_literal();
+            return ex(E_LITERAL);
+        }
+        let t = self.text();
+        self.fail(format!("unexpected token '{}'", t).as_str());
+        ex(E_OTHER)
+    }
+
+    fn array_literal(&mut self) {
+        self.next();
+        let saved = self.no_in;
+        self.no_in = false;
+        let mut cnt: int = 0;
+        let mut open = false;
+        while !self.is("]") && self.kind() != T_EOF && self.error.is_empty() {
+            if self.is(",") {
+                self.next();
+                if !open {
+                    self.emit(OP_NEW_ARRAY, cnt, 0);
+                    open = true;
+                }
+                self.op(OP_ARRAY_HOLE);
+                continue;
+            }
+            if self.eat("...") {
+                if !open {
+                    self.emit(OP_NEW_ARRAY, cnt, 0);
+                    open = true;
+                }
+                self.assign();
+                self.op(OP_ARRAY_SPREAD);
+            } else {
+                self.assign();
+                if open {
+                    self.op(OP_ARRAY_PUSH);
+                } else {
+                    cnt += 1;
+                }
+            }
+            if !self.is("]") {
+                self.expect(",");
+            }
+        }
+        self.no_in = saved;
+        self.expect("]");
+        if !open {
+            self.emit(OP_NEW_ARRAY, cnt, 0);
+        }
+    }
+
+    /// A property key: the code of a computed one is written; answers the
+    /// name ("" when computed) and sets key_flags (1 computed, 2 private).
+    fn prop_key(&mut self, key_flags: &mut int) -> String {
+        *key_flags = 0;
+        if self.eat("[") {
+            *key_flags = 1;
+            self.assign();
+            self.expect("]");
+            return String::new();
+        }
+        if self.kind() == T_PRIVATE {
+            *key_flags = 2;
+            let s = format!("\u{1}#{}", self.text());
+            self.next();
+            return s;
+        }
+        if self.kind() == T_STR {
+            let s = self.text();
+            self.next();
+            return s;
+        }
+        if self.kind() == T_NUM {
+            let v = self.tok_num(self.pos);
+            self.next();
+            return number_to_string(v);
+        }
+        self.ident_name()
+    }
+
+    fn object_literal(&mut self) {
+        self.op(OP_NEW_OBJECT);
+        self.next();
+        let saved = self.no_in;
+        self.no_in = false;
+        let mut protos = 0;
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            if self.eat("...") {
+                self.assign();
+                self.op(OP_INIT_SPREAD);
+                if !self.is("}") {
+                    self.expect(",");
+                }
+                continue;
+            }
+            let mut flags = 0;
+            let mut fflags = 0;
+            let ms = self.pos;
+            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") {
+                self.next();
+                fflags |= F_ASYNC;
+            }
+            if self.eat("*") {
+                fflags |= F_GENERATOR;
+            }
+            if (self.is("get") || self.is("set")) && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") {
+                if self.is("get") {
+                    flags |= F_GETTER;
+                } else {
+                    flags |= F_SETTER;
+                }
+                self.next();
+            }
+            let key_ident = self.kind() == T_IDENT;
+            let key_text = self.text();
+            let mut kf: int = 0;
+            let name = self.prop_key(&mut kf);
+            let computed = (kf & 1) != 0;
+            if self.is("(") {
+                self.member_start = ms;
+                let p = self.method(fflags | (flags & (F_GETTER | F_SETTER)), name.as_str());
+                self.emit(OP_CLOSURE, p, 0);
+                if (flags & (F_GETTER | F_SETTER)) != 0 {
+                    let getter = (flags & F_GETTER) != 0;
+                    if computed {
+                        self.emit(if getter { OP_INIT_GETTER_ELEM } else { OP_INIT_SETTER_ELEM }, 0, 0);
+                    } else {
+                        let at = self.atom(name.as_str());
+                        self.emit(if getter { OP_INIT_GETTER } else { OP_INIT_SETTER }, at, 0);
+                    }
+                } else if computed {
+                    self.emit(OP_DEFINE_METHOD_ELEM, 0, 0);
+                } else {
+                    let at = self.atom(name.as_str());
+                    self.emit(OP_DEFINE_METHOD, at, 0);
+                }
+            } else if (flags & (F_GETTER | F_SETTER)) != 0 {
+                self.fail("getter or setter without a body");
+                return;
+            } else if self.eat(":") {
+                if !computed && key_text.as_str() == "__proto__" {
+                    protos += 1;
+                    if protos > 1 {
+                        self.fail("Duplicate __proto__ fields are not allowed in object literals");
+                        return;
+                    }
+                }
+                let e = self.assign();
+                if computed {
+                    self.op(OP_INIT_ELEM);
+                } else {
+                    self.name_anonymous(e, name.as_str());
+                    let at = self.atom(name.as_str());
+                    let is_proto = name.as_str() == "__proto__";
+                    self.emit(OP_INIT_PROP, at, if is_proto { 1 } else { 0 });
+                }
+            } else if key_ident && !computed {
+                if self.is("=") {
+                    self.fail("Invalid shorthand property initializer");
+                    return;
+                }
+                if is_reserved(key_text.as_str()) {
+                    self.fail("unexpected reserved word");
+                    return;
+                }
+                self.emit_ref(key_text.as_str(), M_LOAD, false);
+                let at = self.atom(key_text.as_str());
+                self.emit(OP_INIT_PROP, at, 0);
+            } else {
+                self.fail("expected ':' in object literal");
+                return;
+            }
+            if !self.is("}") {
+                self.expect(",");
+            }
+        }
+        self.no_in = saved;
+        self.expect("}");
+    }
+}
+
+impl PComp {
+    // =====================================================================
+    // functions and classes
+
+    /// `function [*] [name] (…) { … }` from the `function` token.
+    fn function_expr(&mut self, decl: bool, extra: int) -> int {
+        let mut first = self.pos;
+        if (extra & F_ASYNC) != 0 && first > 0 && self.tok_is(first - 1, "async") {
+            first -= 1;
+        }
+        self.next();
+        let mut flags = extra;
+        if self.eat("*") {
+            flags |= F_GENERATOR;
+        }
+        if decl {
+            flags |= F_DECL;
+        }
+        let mut name = String::new();
+        if self.kind() == T_IDENT && !self.is("(") {
+            name = self.binding_ident();
+        } else if decl {
+            self.fail("function name expected");
+            return -1;
+        }
+        let p = self.function_rest(flags, name.as_str(), first);
+        self.last_fn_name = name;
+        p
+    }
+
+    fn arrow(&mut self) -> Ex {
+        let first = self.pos;
+        let mut flags = F_ARROW;
+        if self.is("async") && !self.peek_is(1, "=>") {
+            self.next();
+            flags |= F_ASYNC;
+        }
+        let p = self.function_rest(flags, "", first);
+        self.emit(OP_CLOSURE, p, 0);
+        ex(E_ANON)
+    }
+
+    fn method(&mut self, flags: int, name: &str) -> int {
+        let full = if (flags & F_GETTER) != 0 && !name.is_empty() {
+            format!("get {}", name)
+        } else if (flags & F_SETTER) != 0 && !name.is_empty() {
+            format!("set {}", name)
+        } else {
+            String::from(name)
+        };
+        let first = self.member_start;
+        self.function_rest(flags | F_METHOD, full.as_str(), first)
+    }
+
+    /// Parameters and body; answers the proto.
+    fn function_rest(&mut self, flags: int, name: &str, first: int) -> int {
+        let arrow = (flags & F_ARROW) != 0;
+        let mut proto = Proto::new(name);
+        proto.arrow = arrow;
+        let outer_strict = if self.fs.is_empty() { false } else { self.fs[self.fs.len() - 1].proto.strict };
+        proto.strict = outer_strict || (flags & (F_STRICT | F_METHOD)) != 0;
+        proto.method = (flags & F_METHOD) != 0;
+        proto.class_ctor = (flags & F_CTOR) != 0;
+        proto.derived = (flags & F_DERIVED) != 0;
+        proto.getter_setter = (flags & (F_GETTER | F_SETTER)) != 0;
+        proto.generator = (flags & F_GENERATOR) != 0;
+        proto.is_async = (flags & F_ASYNC) != 0;
+        let outer_parser_strict = self.strict;
+        let fnid = self.push_fn(proto, false, 0);
+        let parent = self.cur_scope;
+        let fscope = self.new_scope(parent, true, arrow);
+        self.scopes[fscope as usize].decl_fn = (flags & F_DECL) != 0;
+        self.fns[fnid as usize].fscope = fscope;
+        self.f().var_scope = fscope;
+        self.cur_scope = fscope;
+        self.emit(PH_ENTER, fscope, 1);
+        self.emit(PH_PROLOGUE, fscope, fnid);
+        let saved_names = self.param_names.clone();
+        self.param_names = Vec::new();
+        let saved_pending = self.pending_inits.clone();
+        self.pending_inits = Vec::new();
+        let mut i: int = 0;
+        let mut length: int = 0;
+        let mut counting = true;
+        let mut simple = true;
+        let mut param_exprs = false;
+        // TypeScript's parameter properties
+        let mut props: Vec<String> = Vec::new();
+        if arrow && !self.is("(") && !(self.ts && self.is("<")) {
+            let nm = self.binding_ident();
+            if self.error.is_empty() {
+                let b = self.declare(fscope, nm.as_str(), K_PARAM);
+                self.param_names.push(nm.clone());
+                self.fns[fnid as usize].param_binds.push(b);
+                self.mark_inited(b);
+            }
+            i = 1;
+            length = 1;
+        } else {
+            self.skip_type_params();
+            self.expect("(");
+            while !self.is(")") && self.kind() != T_EOF && self.error.is_empty() {
+                if self.ts && self.is("this") && self.peek_is(1, ":") {
+                    // `this: T` only types `this`
+                    self.next();
+                    self.skip_annotation();
+                    if !self.eat(",") {
+                        break;
+                    }
+                    continue;
+                }
+                if self.ts && (self.is("public") || self.is("private") || self.is("protected") || self.is("readonly") || self.is("override")) && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "(") {
+                    // a parameter property: `this.x = x` as the body starts
+                    if (flags & F_CTOR) == 0 {
+                        self.ts_fail();
+                        break;
+                    }
+                    while (self.is("public") || self.is("private") || self.is("protected") || self.is("readonly") || self.is("override")) && self.peek_kind(1) == T_IDENT {
+                        self.next();
+                    }
+                    if self.kind() != T_IDENT {
+                        self.ts_fail();
+                        break;
+                    }
+                    let pn = self.text();
+                    props.push(pn);
+                }
+                if self.eat("...") {
+                    self.f().proto.rest = i;
+                    counting = false;
+                    simple = false;
+                    if self.is("[") || self.is("{") {
+                        param_exprs = true;
+                    }
+                    self.emit(OP_GET_LOCAL, i, 0);
+                    self.pattern_target(K_PARAM);
+                    self.skip_annotation();
+                    self.mark_pending();
+                    self.fns[fnid as usize].param_binds.push(-1);
+                    i += 1;
+                    break;
+                }
+                let plain = self.kind() == T_IDENT && (self.peek_is(1, ",") || self.peek_is(1, ")") || (self.ts && self.plain_typed_param()));
+                if plain {
+                    let nm = self.binding_ident();
+                    if !self.error.is_empty() {
+                        break;
+                    }
+                    self.skip_annotation();
+                    let b = self.declare(fscope, nm.as_str(), K_PARAM);
+                    self.param_names.push(nm.clone());
+                    self.fns[fnid as usize].param_binds.push(b);
+                    self.mark_inited(b);
+                    if counting {
+                        length += 1;
+                    }
+                } else {
+                    simple = false;
+                    param_exprs = true;
+                    let ts = self.pos;
+                    self.skip_target(K_PARAM);
+                    self.skip_annotation();
+                    let has_default = self.is("=");
+                    self.goto(ts);
+                    if has_default {
+                        counting = false;
+                    } else if counting {
+                        length += 1;
+                    }
+                    self.emit(OP_GET_LOCAL, i, 0);
+                    self.pattern_elem(K_PARAM);
+                    self.mark_pending();
+                    self.fns[fnid as usize].param_binds.push(-1);
+                }
+                i += 1;
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect(")");
+            self.skip_return_type();
+        }
+        self.f().proto.nparams = i;
+        self.f().proto.length = length;
+        self.fns[fnid as usize].base = i;
+        if (flags & F_SETTER) != 0 && (i != 1 || self.f().proto.rest >= 0) {
+            self.fail("Setter must have exactly one formal parameter");
+        }
+        if (flags & F_GETTER) != 0 && i != 0 {
+            self.fail("Getter must not have any formal parameters");
+        }
+        if (flags & (F_GENERATOR | F_ASYNC)) != 0 {
+            self.op(OP_GEN_START);
+        }
+        if arrow {
+            self.expect("=>");
+        }
+        self.in_function = true;
+        self.in_generator = (flags & F_GENERATOR) != 0;
+        self.in_async = (flags & F_ASYNC) != 0;
+        let mut own_strict = false;
+        if arrow && !self.is("{") {
+            let saved_no_in = self.no_in;
+            self.assign();
+            self.no_in = saved_no_in;
+            self.op(OP_RETURN);
+        } else {
+            self.expect("{");
+            own_strict = self.directives();
+            if own_strict {
+                self.f().proto.strict = true;
+            }
+            let mut bscope: int = -1;
+            if param_exprs {
+                bscope = self.new_scope(fscope, false, false);
+                self.enter_block(bscope);
+                self.emit(PH_BODY_VARS, bscope, fscope);
+                self.f().var_scope = bscope;
+            }
+            let vs = self.f().var_scope;
+            self.emit(PH_HOIST, vs, 0);
+            if !props.is_empty() && (flags & F_DERIVED) == 0 {
+                self.param_props(&props);
+                props = Vec::new();
+            }
+            while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+                self.list_stmt = true;
+                let st = self.pos;
+                self.statement();
+                if !props.is_empty() && self.tok_is(st, "super") && self.tok_is(st + 1, "(") {
+                    // in a derived class, after `super(…)`
+                    self.param_props(&props);
+                    props = Vec::new();
+                }
+            }
+            if !props.is_empty() {
+                self.ts_fail();
+            }
+            self.expect("}");
+            self.op(OP_RETURN_UNDEF);
+            if bscope >= 0 {
+                self.leave_block(bscope, fscope);
+            }
+        }
+        if !arrow && (flags & (F_DECL | F_METHOD)) == 0 && !name.is_empty() && !self.scopes[fscope as usize].names.contains_key(name) {
+            self.declare(fscope, name, K_CALLEE);
+        }
+        self.end_annex();
+        self.check_params(simple, own_strict, flags, outer_parser_strict);
+        self.param_names = saved_names;
+        self.pending_inits = saved_pending;
+        let p = self.pop_fn();
+        if self.error.is_empty() {
+            self.set_span(p, first);
+        }
+        p
+    }
+
+    /// Early errors of a parameter list.
+    fn check_params(&mut self, simple: bool, own_strict: bool, flags: int, outer_strict: bool) {
+        if !simple && own_strict {
+            self.fail("Illegal 'use strict' directive in function with non-simple parameter list");
+            return;
+        }
+        let strict_here = own_strict || outer_strict;
+        let unique = !simple || (flags & (F_ARROW | F_METHOD)) != 0 || strict_here;
+        if !unique {
+            return;
+        }
+        let names = self.param_names.clone();
+        if strict_here {
+            for nm in names.iter() {
+                if is_strict_reserved(nm.as_str()) {
+                    self.fail("Unexpected eval or arguments in strict mode");
+                    return;
+                }
+            }
+        }
+        let mut i: usize = 0;
+        while i < names.len() {
+            let mut j = i + 1;
+            while j < names.len() {
+                if names[i] == names[j] {
+                    self.fail("Duplicate parameter name not allowed in this context");
+                    return;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+
+    /// The field initializer function `id` (-1: a new one) on top again.
+    fn resume_member_fn(&mut self, id: int, class_scope: int) -> int {
+        if id < 0 {
+            let mut proto = Proto::new("");
+            proto.strict = true;
+            proto.method = true;
+            let fnid = self.push_fn(proto, false, 0);
+            let fscope = self.new_scope(class_scope, true, false);
+            self.fns[fnid as usize].fscope = fscope;
+            self.f().var_scope = fscope;
+            self.cur_scope = fscope;
+            self.emit(PH_ENTER, fscope, 1);
+            self.emit(PH_PROLOGUE, fscope, fnid);
+            self.park_count += 1;
+            return self.park_count;
+        }
+        let mut j: usize = 0;
+        while j < self.parked_ids.len() {
+            if self.parked_ids[j] == id {
+                break;
+            }
+            j += 1;
+        }
+        let st = self.parked.remove(j);
+        self.parked_ids.remove(j);
+        let fnid = st.fnid;
+        self.fs.push(st);
+        self.cur_scope = self.fns[fnid as usize].fscope;
+        id
+    }
+
+    fn park_member_fn(&mut self, id: int) {
+        let st = self.fs.pop().unwrap();
+        self.cur_scope = st.saved_scope;
+        self.in_function = st.saved_in_function;
+        self.in_generator = st.saved_in_generator;
+        self.in_async = st.saved_in_async;
+        self.strict = st.saved_strict;
+        self.parked.push(st);
+        self.parked_ids.push(id);
+    }
+
+    fn finish_member_fn(&mut self, id: int, class_scope: int) -> int {
+        self.resume_member_fn(id, class_scope);
+        self.op(OP_RETURN_UNDEF);
+        self.pop_fn()
+    }
+
+    fn class_expr(&mut self, decl: bool) -> Ex {
+        let first = self.pos;
+        self.next();
+        let mut name = String::new();
+        if self.kind() == T_IDENT && !self.is("extends") && !self.is("{") && !(self.ts && self.is("implements")) {
+            name = self.binding_ident();
+        } else if decl {
+            self.fail("class name expected");
+            return ex(E_OTHER);
+        }
+        self.skip_type_params();
+        let derived = self.eat("extends");
+        if derived {
+            self.lhs();
+            if self.ts && self.is("<") {
+                let a = self.type_args_end(self.pos);
+                if a < 0 {
+                    self.ts_fail();
+                } else {
+                    self.goto(a);
+                }
+            }
+        }
+        if self.ts && self.eat("implements") {
+            loop {
+                self.skip_type_here();
+                if !self.eat(",") {
+                    break;
+                }
+            }
+        }
+        let saved = self.cur_scope;
+        let mut inner: int = -1;
+        let mut inner_b: int = -1;
+        if !name.is_empty() {
+            inner = self.new_scope(saved, false, false);
+            inner_b = self.declare(inner, name.as_str(), K_CONST);
+            self.enter_block(inner);
+        }
+        let class_scope = self.cur_scope;
+        let saved_in_class = self.in_class;
+        self.in_class = true;
+        let c_at = self.emit(OP_CLOSURE, -1, 0);
+        if derived {
+            self.op(OP_SWAP);
+        }
+        self.emit(OP_CLASS, if derived { 1 } else { 0 }, 0);
+        self.expect("{");
+        let mut ctor: int = -1;
+        let mut inst_id: int = -1;
+        let mut stat_id: int = -1;
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            if self.eat(";") {
+                continue;
+            }
+            if self.ts && self.ts_member_skipped() {
+                continue;
+            }
+            let mut flags = 0;
+            if self.is("static") && !self.peek_is(1, "(") && !self.peek_is(1, "=") {
+                self.next();
+                flags |= F_STATIC;
+                if self.ts && self.ts_member_skipped() {
+                    continue;
+                }
+                if self.is("{") {
+                    stat_id = self.resume_member_fn(stat_id, class_scope);
+                    self.in_function = true;
+                    self.in_generator = false;
+                    self.in_async = false;
+                    self.block_statement();
+                    self.park_member_fn(stat_id);
+                    continue;
+                }
+            }
+            let mut fflags = 0;
+            let ms = self.pos;
+            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.tok_nl(self.pos + 1) {
+                self.next();
+                fflags |= F_ASYNC;
+            }
+            if self.eat("*") {
+                fflags |= F_GENERATOR;
+            }
+            if (self.is("get") || self.is("set")) && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.peek_is(1, ";") && !self.peek_is(1, "}") {
+                if self.is("get") {
+                    flags |= F_GETTER;
+                } else {
+                    flags |= F_SETTER;
+                }
+                self.next();
+            }
+            let kpos = self.pos;
+            let computed = self.is("[");
+            let mut kend = if computed { self.after_mate(kpos) } else { kpos + 1 };
+            if self.ts && self.tok_is(kend, "?") && (self.tok_is(kend + 1, "(") || self.tok_is(kend + 1, "<")) {
+                // `m?(): T;` declares only; with a body the parser reads it
+                let e = self.sig_rest_end(kend + 1);
+                if e >= 0 && !self.tok_is(e, "{") {
+                    self.goto(e);
+                    self.semicolon();
+                    continue;
+                }
+                self.ts_fail();
+                return ex(E_OTHER);
+            }
+            if self.ts && kend >= 0 && (self.tok_is(kend, "<") || self.tok_is(kend, "(")) {
+                // an overload's signature (no body) is skipped
+                let e = self.sig_rest_end(kend);
+                if e >= 0 && !self.tok_is(e, "{") {
+                    self.goto(e);
+                    self.semicolon();
+                    continue;
+                }
+                if self.tok_is(kend, "<") {
+                    kend = self.type_params_end(kend);
+                }
+            }
+            let is_method = self.tok_is(kend, "(") || (self.ts && self.tok_is(kend, "<"));
+            if is_method {
+                let kk = self.kind();
+                let is_ctor = !computed && (flags & F_STATIC) == 0 && (kk == T_IDENT || kk == T_STR) && self.text().as_str() == "constructor";
+                if is_ctor {
+                    if (fflags & (F_GENERATOR | F_ASYNC)) != 0 || (flags & (F_GETTER | F_SETTER)) != 0 {
+                        self.fail("Class constructor may not be a generator, an async method or an accessor");
+                        return ex(E_OTHER);
+                    }
+                    self.next();
+                    let mut mf = fflags | F_CTOR | F_METHOD;
+                    if derived {
+                        mf |= F_DERIVED;
+                    }
+                    let p = self.function_rest(mf, name.as_str(), ms);
+                    self.set_op(c_at, OP_CLOSURE, p, 0);
+                    ctor = p;
+                    continue;
+                }
+                if (flags & F_STATIC) != 0 {
+                    self.op(OP_OVER);
+                } else {
+                    self.op(OP_DUP);
+                }
+                let mut kf: int = 0;
+                let kname = self.prop_key(&mut kf);
+                self.member_start = ms;
+                let mf = fflags | (flags & (F_GETTER | F_SETTER | F_STATIC));
+                let p = self.method(mf, kname.as_str());
+                self.emit(OP_CLOSURE, p, 0);
+                let at = if computed { 0 } else { self.atom(kname.as_str()) };
+                if (flags & F_GETTER) != 0 {
+                    self.emit(if computed { OP_INIT_GETTER_ELEM } else { OP_INIT_GETTER }, at, 1);
+                } else if (flags & F_SETTER) != 0 {
+                    self.emit(if computed { OP_INIT_SETTER_ELEM } else { OP_INIT_SETTER }, at, 1);
+                } else {
+                    self.emit(if computed { OP_DEFINE_METHOD_ELEM } else { OP_DEFINE_METHOD }, at, 0);
+                }
+                self.op(OP_POP);
+                continue;
+            }
+            // a field: `this.key = init` in the initializer function
+            let st = (flags & F_STATIC) != 0;
+            let id = self.resume_member_fn(if st { stat_id } else { inst_id }, class_scope);
+            if st {
+                stat_id = id;
+            } else {
+                inst_id = id;
+            }
+            self.in_function = true;
+            self.op(OP_THIS);
+            let mut kf: int = 0;
+            let kname = self.prop_key(&mut kf);
+            self.skip_annotation();
+            if self.eat("=") {
+                let e = self.assign();
+                if !computed {
+                    self.name_anonymous(e, kname.as_str());
+                }
+            } else {
+                self.op(OP_UNDEF);
+            }
+            if computed {
+                self.op(OP_DEFINE_FIELD_ELEM);
+            } else {
+                let at = self.atom(kname.as_str());
+                self.emit(OP_DEFINE_FIELD, at, 0);
+            }
+            self.op(OP_POP);
+            self.park_member_fn(id);
+            self.semicolon();
+        }
+        self.expect("}");
+        self.in_class = saved_in_class;
+        if !self.error.is_empty() {
+            return ex(E_OTHER);
+        }
+        if ctor < 0 {
+            let src = if derived { "(...args) { super(...args); }" } else { "() {}" };
+            let saved_tok = self.push_tokens(src);
+            let mut mf = F_CTOR | F_STRICT | F_METHOD;
+            if derived {
+                mf |= F_DERIVED;
+            }
+            let p = self.function_rest(mf, name.as_str(), -1);
+            self.pop_tokens(&saved_tok);
+            self.set_op(c_at, OP_CLOSURE, p, 0);
+            ctor = p;
+        }
+        // the class's text is its constructor's
+        self.set_span(ctor, first);
+        if inner_b >= 0 {
+            self.op(OP_OVER);
+            self.emit_bind_init(inner_b);
+            self.op(OP_POP);
+        }
+        if inst_id >= 0 {
+            self.op(OP_OVER);
+            let pf = self.finish_member_fn(inst_id, class_scope);
+            self.emit(OP_CLOSURE, pf, 0);
+            self.op(OP_SET_FIELDS);
+            self.op(OP_POP);
+        }
+        self.op(OP_POP);
+        if stat_id >= 0 {
+            self.op(OP_DUP);
+            let ps = self.finish_member_fn(stat_id, class_scope);
+            self.emit(OP_CLOSURE, ps, 0);
+            self.op(OP_SWAP);
+            self.emit(OP_CALL, 0, 0);
+            self.op(OP_POP);
+        }
+        if inner >= 0 {
+            self.leave_block(inner, saved);
+            self.mark_inited(inner_b);
+        }
+        if name.is_empty() {
+            ex(E_ANON)
+        } else {
+            ex(E_OTHER)
+        }
+    }
+}
+
+impl PComp {
+    // =====================================================================
+    // TypeScript's types, read only to be skipped: on the tokens, without
+    // emitting anything. Each `*_end` answers the token after what it
+    // read, or -1 when it is not one pcomp reads (the script then goes to
+    // the parser, crate::parser::script_js).
+
+    fn t_kind(&self) -> int {
+        if self.tp >= self.tok_count() {
+            return T_EOF;
+        }
+        self.toks[self.tp as usize].kind as int
+    }
+
+    fn t_is(&self, s: &str) -> bool {
+        self.tg == 0 && self.tok_is(self.tp, s)
+    }
+
+    fn t_peek_is(&self, k: int, s: &str) -> bool {
+        self.tg == 0 && self.tok_is(self.tp + k, s)
+    }
+
+    fn t_peek_kind(&self, k: int) -> int {
+        let i = self.tp + k;
+        if i >= self.tok_count() {
+            return T_EOF;
+        }
+        self.toks[i as usize].kind as int
+    }
+
+    fn t_nl(&self) -> bool {
+        self.tok_nl(self.tp)
+    }
+
+    fn t_next(&mut self) {
+        if self.tg != 0 {
+            self.tbad = true;
+        }
+        if self.tp < self.tok_count() - 1 {
+            self.tp += 1;
+        }
+    }
+
+    fn t_eat(&mut self, s: &str) -> bool {
+        if self.t_is(s) {
+            self.t_next();
+            return true;
+        }
+        false
+    }
+
+    fn t_expect(&mut self, s: &str) {
+        if !self.t_eat(s) {
+            self.tbad = true;
+        }
+    }
+
+    /// Past the bracket at the reader's token and its mate.
+    fn t_skip_balanced(&mut self) {
+        let a = self.after_mate(self.tp);
+        if a < 0 || self.tg != 0 {
+            self.tbad = true;
+            return;
+        }
+        self.tp = a;
+    }
+
+    /// A closing `>`, one of a `>>` / `>>>` too.
+    fn t_eat_gt(&mut self) {
+        if self.tbad || self.tp >= self.tok_count() || (self.toks[self.tp as usize].kind as int) != T_PUNCT {
+            self.tbad = true;
+            return;
+        }
+        let t = self.tok_text(self.tp);
+        let n = t.as_bytes().len() as int;
+        if self.tg >= n || t.as_bytes()[self.tg as usize] != 62 {
+            self.tbad = true;
+            return;
+        }
+        self.tg += 1;
+        if self.tg == n {
+            self.tg = 0;
+            self.tp += 1;
+        }
+    }
+
+    fn t_ident_name(&mut self) {
+        if self.t_kind() != T_IDENT || self.tg != 0 {
+            self.tbad = true;
+            return;
+        }
+        self.t_next();
+    }
+
+    /// `<T, U extends X = Y>`
+    fn t_type_params(&mut self) {
+        self.t_expect("<");
+        while !self.tbad && !self.t_is(">") && self.t_kind() != T_EOF {
+            while (self.t_is("const") || self.t_is("in") || self.t_is("out")) && self.t_peek_kind(1) == T_IDENT {
+                self.t_next();
+            }
+            self.t_ident_name();
+            if self.t_eat("extends") {
+                self.t_type(true);
+            }
+            if self.t_eat("=") {
+                self.t_type(true);
+            }
+            if !self.t_eat(",") {
+                break;
+            }
+        }
+        self.t_eat_gt();
+    }
+
+    /// `<A, B>`
+    fn t_type_args(&mut self) {
+        self.t_expect("<");
+        while !self.tbad && !self.t_is(">") && self.t_kind() != T_EOF {
+            self.t_type(true);
+            if !self.t_eat(",") {
+                break;
+            }
+        }
+        self.t_eat_gt();
+    }
+
+    /// A return type: a type, or `x is T` / `asserts x is T`.
+    fn t_return_type(&mut self) {
+        if self.t_is("asserts") && self.t_peek_kind(1) == T_IDENT && !self.tok_nl(self.tp + 1) {
+            self.t_next();
+            self.t_next();
+            if self.t_eat("is") {
+                self.t_type(true);
+            }
+            return;
+        }
+        if self.t_kind() == T_IDENT && self.t_peek_is(1, "is") && !self.tok_nl(self.tp + 1) {
+            self.t_next();
+            self.t_next();
+            self.t_type(true);
+            return;
+        }
+        self.t_type(true);
+    }
+
+    fn t_type(&mut self, cond: bool) {
+        if self.tbad {
+            return;
+        }
+        if self.t_is("<") {
+            self.t_type_params();
+            self.t_fn_type_rest();
+            return;
+        }
+        if self.t_is("abstract") && self.t_peek_is(1, "new") {
+            self.t_next();
+        }
+        if self.t_is("new") {
+            self.t_next();
+            if self.t_is("<") {
+                self.t_type_params();
+            }
+            self.t_fn_type_rest();
+            return;
+        }
+        self.t_eat("|");
+        self.t_intersection();
+        while !self.tbad && self.t_is("|") {
+            self.t_next();
+            self.t_intersection();
+        }
+        if cond && self.t_is("extends") && !self.t_nl() {
+            self.t_next();
+            self.t_type(false);
+            self.t_expect("?");
+            self.t_type(true);
+            self.t_expect(":");
+            self.t_type(true);
+        }
+    }
+
+    fn t_fn_type_rest(&mut self) {
+        if !self.t_is("(") {
+            self.tbad = true;
+            return;
+        }
+        self.t_skip_balanced();
+        self.t_expect("=>");
+        self.t_return_type();
+    }
+
+    fn t_intersection(&mut self) {
+        self.t_eat("&");
+        self.t_operator();
+        while !self.tbad && self.t_is("&") {
+            self.t_next();
+            self.t_operator();
+        }
+    }
+
+    fn t_starts(&self, k: int) -> bool {
+        let kd = self.t_peek_kind(k);
+        if kd == T_IDENT || kd == T_STR || kd == T_NUM || kd == T_TEMPLATE {
+            return true;
+        }
+        self.t_peek_is(k, "(") || self.t_peek_is(k, "[") || self.t_peek_is(k, "{") || self.t_peek_is(k, "-") || self.t_peek_is(k, "<")
+    }
+
+    fn t_operator(&mut self) {
+        if (self.t_is("keyof") || self.t_is("unique") || self.t_is("readonly")) && self.t_starts(1) {
+            self.t_next();
+            self.t_operator();
+            return;
+        }
+        if self.t_is("infer") && self.t_peek_kind(1) == T_IDENT {
+            self.t_next();
+            self.t_next();
+            if self.t_is("extends") && !self.t_nl() {
+                // `infer U extends X` inside a conditional's check
+                self.t_next();
+                self.t_type(false);
+            }
+            return;
+        }
+        self.t_primary();
+        while !self.tbad && self.t_is("[") && !self.t_nl() {
+            self.t_next();
+            if !self.t_is("]") {
+                self.t_type(true);
+            }
+            self.t_expect("]");
+        }
+    }
+
+    fn t_primary(&mut self) {
+        if self.tbad {
+            return;
+        }
+        let k = self.t_kind();
+        if self.t_is("(") {
+            self.t_skip_balanced();
+            if self.t_is("=>") {
+                self.t_next();
+                self.t_return_type();
+            }
+            return;
+        }
+        if self.t_is("{") || self.t_is("[") {
+            self.t_skip_balanced();
+            return;
+        }
+        if self.t_is("-") {
+            self.t_next();
+            if self.t_kind() != T_NUM {
+                self.tbad = true;
+                return;
+            }
+            self.t_next();
+            return;
+        }
+        if (k == T_STR || k == T_NUM || k == T_TEMPLATE) && self.tg == 0 {
+            self.t_next();
+            return;
+        }
+        if self.t_is("typeof") {
+            self.t_next();
+            if self.t_is("import") {
+                self.t_import_type();
+            } else {
+                self.t_entity();
+            }
+            if self.t_is("<") && !self.t_nl() {
+                self.t_type_args();
+            }
+            return;
+        }
+        if self.t_is("import") {
+            self.t_import_type();
+            return;
+        }
+        if k == T_IDENT && self.tg == 0 {
+            self.t_entity();
+            if self.t_is("<") && !self.t_nl() {
+                self.t_type_args();
+            }
+            return;
+        }
+        self.tbad = true;
+    }
+
+    fn t_entity(&mut self) {
+        self.t_ident_name();
+        while !self.tbad && self.t_is(".") {
+            self.t_next();
+            self.t_ident_name();
+        }
+    }
+
+    fn t_import_type(&mut self) {
+        self.t_next();
+        if !self.t_is("(") {
+            self.tbad = true;
+            return;
+        }
+        self.t_skip_balanced();
+        while !self.tbad && self.t_eat(".") {
+            self.t_ident_name();
+        }
+        if self.t_is("<") && !self.t_nl() {
+            self.t_type_args();
+        }
+    }
+
+    fn t_start(&mut self, i: int) {
+        self.tp = i;
+        self.tg = 0;
+        self.tbad = false;
+    }
+
+    fn t_done(&self) -> int {
+        if self.tbad || self.tg != 0 {
+            return -1;
+        }
+        self.tp
+    }
+
+    /// After the type at token `i`.
+    fn type_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_type(true);
+        self.t_done()
+    }
+
+    /// After the return type at token `i`.
+    fn return_type_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_return_type();
+        self.t_done()
+    }
+
+    /// After the type parameters `<…>` at token `i`.
+    fn type_params_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_type_params();
+        self.t_done()
+    }
+
+    /// After the type arguments `<…>` at token `i`.
+    fn type_args_end(&mut self, i: int) -> int {
+        self.t_start(i);
+        self.t_type_args();
+        self.t_done()
+    }
+
+    /// TypeScript's declarations at a statement: the erased ones skipped,
+    /// `abstract class` read as a class; true when it read the statement.
+    /// What has a runtime meaning (`enum`, `namespace`, `import`,
+    /// `export`) is the parser's.
+    fn ts_statement(&mut self, in_list: bool) -> bool {
+        let w = self.text();
+        let ws = w.as_str();
+        let next_ident = self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1);
+        if ws == "type" && next_ident && (self.peek_is(2, "=") || self.peek_is(2, "<")) {
+            self.next();
+            self.next();
+            self.skip_type_params();
+            self.expect("=");
+            self.skip_type_here();
+            self.semicolon();
+            return true;
+        }
+        if ws == "interface" && next_ident {
+            self.skip_to_body();
+            return true;
+        }
+        if ws == "declare" && next_ident {
+            self.next();
+            if self.is("var") || self.is("let") || self.is("const") {
+                self.next();
+                loop {
+                    self.skip_binding_target();
+                    self.skip_annotation();
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.semicolon();
+                return true;
+            }
+            if self.is("function") || (self.is("async") && self.peek_is(1, "function")) {
+                let e = self.fn_signature_end(self.pos);
+                if e < 0 {
+                    self.ts_fail();
+                    return true;
+                }
+                self.goto(e);
+                self.semicolon();
+                return true;
+            }
+            if self.is("type") {
+                return self.ts_statement(in_list);
+            }
+            if self.is("module") && self.peek_kind(1) == T_STR && !self.peek_is(2, "{") {
+                self.next();
+                self.next();
+                self.semicolon();
+                return true;
+            }
+            // class, abstract class, interface, enum, namespace, module, global
+            self.skip_to_body();
+            return true;
+        }
+        if ws == "abstract" && self.peek_is(1, "class") && !self.tok_nl(self.pos + 1) {
+            self.next();
+            self.class_decl();
+            return true;
+        }
+        if ws == "function" || (ws == "async" && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1)) {
+            // an overload's signature, without a body
+            let e = self.fn_signature_end(self.pos);
+            if e >= 0 && !self.tok_is(e, "{") {
+                self.goto(e);
+                self.semicolon();
+                return true;
+            }
+            return false;
+        }
+        if ws == "import" && self.type_only_import() {
+            self.skip_module_clause();
+            return true;
+        }
+        if ws == "export" && ((self.peek_is(1, "type") && (self.peek_is(2, "{") || self.peek_is(2, "*"))) || self.peek_is(1, "interface") || self.peek_is(1, "declare") || (self.peek_is(1, "type") && self.peek_kind(2) == T_IDENT && (self.peek_is(3, "=") || self.peek_is(3, "<")))) {
+            if self.peek_is(2, "{") || self.peek_is(2, "*") {
+                self.skip_module_clause();
+                return true;
+            }
+            self.next();
+            if self.ts_statement(in_list) {
+                return true;
+            }
+            self.ts_fail();
+            return true;
+        }
+        if (ws == "enum" && next_ident) || (ws == "const" && self.peek_is(1, "enum")) {
+            if ws == "const" {
+                self.next();
+            }
+            self.enum_decl();
+            return true;
+        }
+        if ws == "import" && !self.peek_is(1, "(") && !self.peek_is(1, ".") {
+            self.script_import();
+            return true;
+        }
+        if ws == "export" {
+            if !self.module_path.is_empty() {
+                self.module_export(in_list);
+                return true;
+            }
+            self.script_export(in_list);
+            return true;
+        }
+        if (ws == "namespace" || ws == "module") && next_ident && (self.peek_is(2, "{") || self.peek_is(2, ".")) {
+            self.namespace_decl();
+            return true;
+        }
+        if ((ws == "namespace" || ws == "module") && next_ident) || ws == "import" || ws == "export" {
+            self.ts_fail();
+            return true;
+        }
+        let _ = in_list;
+        false
+    }
+
+    /// `import type …`, or `import { type A, type B } from …`: only types.
+    fn type_only_import(&self) -> bool {
+        if self.peek_is(1, "type") && (self.peek_kind(2) == T_IDENT || self.peek_is(2, "{") || self.peek_is(2, "*")) && !self.peek_is(2, "from") {
+            return true;
+        }
+        if !self.peek_is(1, "{") {
+            return false;
+        }
+        let close = self.mate_of(self.pos + 1);
+        let mut k = self.pos + 2;
+        let mut any = false;
+        while k < close {
+            // each entry starts with `type`
+            let k1 = k + 1;
+            let named = (self.toks[k1 as usize].kind as int) == T_IDENT && !self.tok_is(k1, "as");
+            if !(self.tok_is(k, "type") && named) {
+                return false;
+            }
+            any = true;
+            while k < close && !self.tok_is(k, ",") {
+                k += 1;
+            }
+            k += 1;
+        }
+        any
+    }
+
+    /// Past an import's or an export's clause, to its `;`.
+    fn skip_module_clause(&mut self) {
+        self.next();
+        loop {
+            if self.kind() == T_EOF {
+                return;
+            }
+            if self.is(";") {
+                self.next();
+                return;
+            }
+            if self.is("{") {
+                let a = self.after_mate(self.pos);
+                if a < 0 {
+                    self.ts_fail();
+                    return;
+                }
+                self.goto(a);
+                if !self.is("from") {
+                    self.semicolon();
+                    return;
+                }
+                continue;
+            }
+            if self.is("from") || self.kind() == T_STR {
+                if self.is("from") {
+                    self.next();
+                }
+                if self.kind() == T_STR {
+                    self.next();
+                }
+                if (self.is("with") || self.is("assert")) && self.peek_is(1, "{") {
+                    self.next();
+                    let a = self.after_mate(self.pos);
+                    self.goto(a);
+                }
+                self.semicolon();
+                return;
+            }
+            self.next();
+        }
+    }
+
+    /// Past the `{ … }` that ends a declaration (`interface I extends A {`).
+    fn skip_to_body(&mut self) {
+        let mut k = self.pos;
+        while k < self.tok_count() && !self.tok_is(k, "{") && (self.toks[k as usize].kind as int) != T_EOF {
+            if self.tok_is(k, "(") || self.tok_is(k, "[") {
+                let a = self.after_mate(k);
+                if a < 0 {
+                    break;
+                }
+                k = a;
+                continue;
+            }
+            k += 1;
+        }
+        let a = self.after_mate(k);
+        if !self.tok_is(k, "{") || a < 0 {
+            self.ts_fail();
+            return;
+        }
+        self.goto(a);
+    }
+
+    /// After `function name<T>(…): R` at token `i` (`async` and `*` too),
+    /// or -1.
+    fn fn_signature_end(&mut self, i: int) -> int {
+        let mut k = i;
+        if self.tok_is(k, "async") {
+            k += 1;
+        }
+        if !self.tok_is(k, "function") {
+            return -1;
+        }
+        k += 1;
+        if self.tok_is(k, "*") {
+            k += 1;
+        }
+        if k < self.tok_count() && (self.toks[k as usize].kind as int) == T_IDENT && !self.tok_is(k, "(") {
+            k += 1;
+        }
+        self.sig_rest_end(k)
+    }
+
+    /// After `<T>(…): R` at token `k` (a method's or a function's), or -1.
+    fn sig_rest_end(&mut self, i: int) -> int {
+        let mut k = i;
+        if self.tok_is(k, "<") {
+            k = self.type_params_end(k);
+            if k < 0 {
+                return -1;
+            }
+        }
+        if !self.tok_is(k, "(") {
+            return -1;
+        }
+        k = self.after_mate(k);
+        if k < 0 {
+            return -1;
+        }
+        if self.tok_is(k, ":") {
+            k = self.return_type_end(k + 1);
+        }
+        k
+    }
+
+    /// TypeScript: a class member's modifiers (`public`, `readonly` …)
+    /// skipped; true when the whole member is one without code
+    /// (`declare x: T`, `abstract m(): T`, `[key: string]: T`).
+    fn ts_member_skipped(&mut self) -> bool {
+        loop {
+            let m = self.is("public") || self.is("private") || self.is("protected") || self.is("readonly") || self.is("override") || self.is("declare") || self.is("abstract") || self.is("accessor");
+            if !m {
+                break;
+            }
+            // the word is a member's name: `readonly() {}`, `public = 1`
+            if self.peek_is(1, "(") || self.peek_is(1, "=") || self.peek_is(1, ";") || self.peek_is(1, "}") || self.peek_is(1, ":") || self.peek_is(1, "?") || self.peek_is(1, "!") || self.peek_is(1, "<") || self.tok_nl(self.pos + 1) {
+                break;
+            }
+            if self.is("accessor") {
+                self.ts_fail();
+                return true;
+            }
+            if self.is("declare") || self.is("abstract") {
+                // no code: up to the member's end
+                self.next();
+                self.skip_member_sig();
+                return true;
+            }
+            self.next();
+        }
+        if self.is("[") && self.peek_kind(1) == T_IDENT && self.peek_is(2, ":") {
+            // an index signature
+            self.skip_member_sig();
+            return true;
+        }
+        if self.is("static") && self.peek_is(1, "[") && self.peek_kind(2) == T_IDENT && self.peek_is(3, ":") {
+            self.next();
+            self.skip_member_sig();
+            return true;
+        }
+        false
+    }
+
+    /// Past a member that has no code: its name, `?`, type or signature,
+    /// and the `;`.
+    fn skip_member_sig(&mut self) {
+        while self.is("static") || self.is("readonly") || self.is("public") || self.is("private") || self.is("protected") || self.is("override") || self.is("abstract") || self.is("declare") || self.is("get") || self.is("set") || self.is("async") || self.is("*") {
+            if self.peek_is(1, "(") || self.peek_is(1, ":") || self.peek_is(1, "?") || self.peek_is(1, ";") || self.peek_is(1, "<") {
+                break;
+            }
+            self.next();
+        }
+        if self.is("[") {
+            let a = self.after_mate(self.pos);
+            if a < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(a);
+        } else {
+            self.next();
+        }
+        if self.is("?") || self.is("!") {
+            self.next();
+        }
+        if self.is("<") || self.is("(") {
+            let e = self.sig_rest_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(e);
+        } else if self.is(":") {
+            self.next();
+            self.skip_type_here();
+        }
+        if self.is("=") {
+            // `declare x = 1` is an error; an abstract field has no value
+            self.ts_fail();
+            return;
+        }
+        self.semicolon();
+    }
+
+    /// `this.x = x` for each parameter property, as statements.
+    fn param_props(&mut self, names: &Vec<String>) {
+        let mut src = String::new();
+        for n in names.iter() {
+            src.push_str(format!("this.{} = {};\n", n, n).as_str());
+        }
+        let saved = self.push_tokens(src.as_str());
+        while self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.pop_tokens(&saved);
+    }
+
+    /// The source's text from token `a` to token `b` (both in).
+    fn src_text(&self, a: int, b: int) -> String {
+        let from = self.toks[a as usize].start as usize;
+        let to = self.toks[b as usize].end as usize;
+        self.src_rc.chars().skip(from).take(to - from).collect::<String>()
+    }
+
+    /// `enum E { A, B = 5, C = 'c' }` as TypeScript writes it:
+    ///   var E; (function (E) { E[E["A"] = 0] = "A"; var A = E["A"]; … })(E || (E = {}));
+    /// (each member's name stands for it in the later initializers).
+    fn enum_decl(&mut self) {
+        self.next();
+        let name = self.binding_ident();
+        if !self.is("{") {
+            self.ts_fail();
+            return;
+        }
+        let close = self.mate_of(self.pos);
+        self.next();
+        let mut body = format!("var {}; (function ({}) {{\n", name, name);
+        let mut prev = String::new();
+        let mut first = true;
+        while self.pos < close && self.error.is_empty() {
+            let member = if self.kind() == T_STR {
+                let t = self.text();
+                self.next();
+                t
+            } else {
+                self.ident_name()
+            };
+            if !self.error.is_empty() {
+                return;
+            }
+            let mq = pq(member.as_str());
+            let mut is_string = false;
+            let value: String;
+            if self.eat("=") {
+                let a = self.pos;
+                let e = self.scan_to(a, ",", false);
+                if e <= a {
+                    self.ts_fail();
+                    return;
+                }
+                is_string = e == a + 1 && self.kind() == T_STR;
+                if self.kind() == T_TEMPLATE {
+                    self.ts_fail();
+                    return;
+                }
+                let last = e - 1;
+                value = format!("({})", self.src_text(a, last));
+                self.goto(e);
+            } else if first {
+                value = String::from("0");
+            } else {
+                value = format!("{}[{}] + 1", name, pq(prev.as_str()));
+            }
+            if is_string {
+                body.push_str(format!("{}[{}] = {};\n", name, mq, value).as_str());
+            } else {
+                body.push_str(format!("{}[{}[{}] = {}] = {};\n", name, name, mq, value, mq).as_str());
+            }
+            if pcomp_ident(member.as_str()) && member != name {
+                body.push_str(format!("var {} = {}[{}];\n", member, name, mq).as_str());
+            }
+            prev = member;
+            first = false;
+            if !self.eat(",") {
+                break;
+            }
+        }
+        if self.pos != close {
+            self.ts_fail();
+            return;
+        }
+        self.next();
+        body.push_str(format!("}})({} || ({} = {{}}));\n", name, name).as_str());
+        self.ts_source(body.as_str());
+    }
+
+    /// `namespace N { … }` as TypeScript writes it, as the parser does:
+    ///   var N; (function (N) { …; N.a = a; })(N || (N = {}));
+    /// an exported declaration stays, its names set on N after it.
+    fn namespace_decl(&mut self) {
+        self.next();
+        let name = self.binding_ident();
+        if self.is(".") && self.error.is_empty() {
+            // `namespace A.B { … }`: each inner one exported from the outer
+            let mut chain: Vec<String> = Vec::new();
+            while self.eat(".") {
+                chain.push(self.ident_name());
+            }
+            if !self.is("{") || !self.error.is_empty() {
+                self.ts_fail();
+                return;
+            }
+            let open = self.pos;
+            let close = self.mate_of(open);
+            let mut src = format!("namespace {} {{", name);
+            for c in chain.iter() {
+                src.push_str(format!(" export namespace {} {{", c).as_str());
+            }
+            let inner = open + 1;
+            let t = self.src_text(inner, close);
+            src.push_str(t.as_str());
+            let mut depth: usize = 0;
+            while depth < chain.len() {
+                src.push_str(" }");
+                depth += 1;
+            }
+            src.push_str("\n");
+            self.goto(close);
+            self.next();
+            self.ts_source(src.as_str());
+            return;
+        }
+        if !self.is("{") || !self.error.is_empty() {
+            self.ts_fail();
+            return;
+        }
+        let open = self.pos;
+        let close = self.mate_of(open);
+        let mut body = format!("var {}; (function ({}) {{\n", name, name);
+        let mut pending: Vec<String> = Vec::new();
+        let mut from = open + 1;
+        let mut k = open + 1;
+        while k < close {
+            if self.tok_is(k, "{") || self.tok_is(k, "(") || self.tok_is(k, "[") {
+                k = self.mate_of(k) + 1;
+                continue;
+            }
+            let starts = k == open + 1 || self.tok_is(k - 1, ";") || self.tok_is(k - 1, "}") || self.tok_nl(k);
+            if starts && self.tok_is(k, "export") {
+                if k > from {
+                    let last = k - 1;
+                    let t = self.src_text(from, last);
+                    body.push_str(t.as_str());
+                    body.push_str("\n");
+                }
+                for n in pending.iter() {
+                    body.push_str(format!("{}.{} = {};\n", name, n, n).as_str());
+                }
+                pending = Vec::new();
+                // the names it declares
+                let mut j = k + 1;
+                if self.tok_is(j, "declare") {
+                    self.ts_fail();
+                    return;
+                }
+                if self.tok_is(j, "const") && self.tok_is(j + 1, "enum") {
+                    j += 1;
+                }
+                if self.tok_is(j, "abstract") || self.tok_is(j, "async") {
+                    j += 1;
+                }
+                if self.tok_is(j, "function") || self.tok_is(j, "class") || self.tok_is(j, "enum") || self.tok_is(j, "namespace") {
+                    let mut n = j + 1;
+                    if self.tok_is(n, "*") {
+                        n += 1;
+                    }
+                    pending.push(self.tok_text(n));
+                } else if self.tok_is(j, "const") || self.tok_is(j, "let") || self.tok_is(j, "var") {
+                    // plain names only: `export const a = 1, b = 2`
+                    let mut n = j + 1;
+                    loop {
+                        if (self.toks[n as usize].kind as int) != T_IDENT {
+                            self.ts_fail();
+                            return;
+                        }
+                        pending.push(self.tok_text(n));
+                        let e = self.scan_to(n + 1, ", ;", false);
+                        if !self.tok_is(e, ",") {
+                            break;
+                        }
+                        n = e + 1;
+                    }
+                } else if self.tok_is(j, "interface") || self.tok_is(j, "type") {
+                    // types only
+                } else {
+                    self.ts_fail();
+                    return;
+                }
+                from = k + 1;
+            }
+            k += 1;
+        }
+        if close > from {
+            let last = close - 1;
+            let t = self.src_text(from, last);
+            body.push_str(t.as_str());
+            body.push_str("\n");
+        }
+        for n in pending.iter() {
+            body.push_str(format!("{}.{} = {};\n", name, n, n).as_str());
+        }
+        body.push_str(format!("}})({} || ({} = {{}}));\n", name, name).as_str());
+        self.goto(close);
+        self.next();
+        self.ts_source(body.as_str());
+    }
+
+    /// A value `import` in a script, as the parser reads it: each name a
+    /// `const` read from `__cerxesImport("m")`; a type-only entry erased.
+    fn script_import(&mut self) {
+        self.next();
+        if self.kind() == T_STR {
+            let m = self.text();
+            self.next();
+            self.semicolon();
+            let call = self.import_text(m.as_str());
+            self.ts_source(format!("{};\n", call).as_str());
+            return;
+        }
+        let mut names: Vec<String> = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
+        if self.kind() == T_IDENT && !self.is("{") && !self.is("*") {
+            if self.peek_is(1, "=") {
+                // `import A = B.C`: an alias (`require` is the parser's)
+                if self.peek_is(2, "require") {
+                    self.ts_fail();
+                    return;
+                }
+                let n = self.text();
+                let a = self.pos + 2;
+                let mut e = a;
+                while e < self.tok_count() && (self.toks[e as usize].kind as int) != T_EOF && !self.tok_is(e, ";") && !(e > a && self.tok_nl(e)) {
+                    e += 1;
+                }
+                if e == a {
+                    self.ts_fail();
+                    return;
+                }
+                let last = e - 1;
+                let t = self.src_text(a, last);
+                self.goto(e);
+                self.semicolon();
+                self.ts_source(format!("var {} = {};\n", n, t).as_str());
+                return;
+            }
+            names.push(self.text());
+            keys.push(String::from("default"));
+            self.next();
+            self.eat(",");
+        }
+        if self.is("*") {
+            self.next();
+            if !self.eat("as") {
+                self.ts_fail();
+                return;
+            }
+            names.push(self.text());
+            keys.push(String::new());
+            self.next();
+        } else if self.is("{") {
+            self.next();
+            while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+                if self.is("type") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "as") && !self.peek_is(1, ",") && !self.peek_is(1, "}") {
+                    self.next();
+                    self.next();
+                    if self.eat("as") {
+                        self.next();
+                    }
+                } else {
+                    let k = self.text();
+                    self.next();
+                    let n = if self.eat("as") {
+                        let t = self.text();
+                        self.next();
+                        t
+                    } else {
+                        k.clone()
+                    };
+                    names.push(n);
+                    keys.push(k);
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("}");
+        }
+        if !self.eat("from") || self.kind() != T_STR {
+            self.ts_fail();
+            return;
+        }
+        let m = self.text();
+        self.next();
+        if (self.is("with") || self.is("assert")) && self.peek_is(1, "{") {
+            self.next();
+            let a = self.after_mate(self.pos);
+            self.goto(a);
+        }
+        self.semicolon();
+        let call = self.import_text(m.as_str());
+        if names.is_empty() {
+            self.ts_source(format!("{};\n", call).as_str());
+            return;
+        }
+        let mut src = String::from("const ");
+        let mut i: usize = 0;
+        while i < names.len() {
+            if i > 0 {
+                src.push_str(", ");
+            }
+            if keys[i].is_empty() {
+                src.push_str(format!("{} = {}", names[i], call).as_str());
+            } else {
+                src.push_str(format!("{} = {}[{}]", names[i], call, pq(keys[i].as_str())).as_str());
+            }
+            i += 1;
+        }
+        src.push_str(";\n");
+        self.ts_source(src.as_str());
+    }
+
+    /// `export` in a script: the declaration stays, the keyword goes;
+    /// export lists and re-exports are dropped.
+    fn script_export(&mut self, in_list: bool) {
+        self.next();
+        if self.eat("default") {
+            if self.is("function") || self.is("class") || (self.is("async") && self.peek_is(1, "function")) || self.is("abstract") || self.is("interface") {
+                self.list_stmt = in_list;
+                self.statement();
+                return;
+            }
+            // an expression (`export default { a, b }` is an object)
+            let e = self.assign();
+            self.semicolon();
+            self.expr_statement_tail(e);
+            return;
+        }
+        if self.is("=") || self.is("{") || self.is("*") || (self.is("as") && self.peek_is(1, "namespace")) {
+            self.pos -= 1;
+            self.skip_module_clause();
+            return;
+        }
+        if self.is("import") {
+            self.ts_fail();
+            return;
+        }
+        self.list_stmt = in_list;
+        self.statement();
+    }
+
+    /// `__cerxesImport("m")`; in a module, `__cerxesImport("m", "its/file")`,
+    /// so "./x" and "../x" are read from the module's folder.
+    fn import_text(&self, m: &str) -> String {
+        if self.module_path.is_empty() {
+            return format!("__cerxesImport({})", pq(m));
+        }
+        format!("__cerxesImport({}, {})", pq(m), pq(self.module_path.as_str()))
+    }
+
+    /// An export the module returns: its name, the expression that reads it.
+    fn module_export_name(&mut self, name: &str, value: &str) {
+        let mut i: usize = 0;
+        while i < self.mex_names.len() {
+            if self.mex_names[i].as_str() == name {
+                // the parser names the module in the error
+                self.ts_fail();
+                return;
+            }
+            i += 1;
+        }
+        self.mex_names.push(String::from(name));
+        self.mex_values.push(String::from(value));
+    }
+
+    /// The names the declaration statement at the current token declares in
+    /// the module's own scope, each exported under its own name, or all
+    /// under `default` when `as_default`.
+    fn module_export_decl(&mut self, in_list: bool, as_default: bool) {
+        let start = self.binds.len();
+        let scope = self.cur_scope;
+        let vs = self.f().var_scope;
+        self.list_stmt = in_list;
+        self.statement();
+        if !self.error.is_empty() {
+            return;
+        }
+        let mut found: Vec<String> = Vec::new();
+        let mut i = start;
+        while i < self.binds.len() {
+            let bs = self.binds[i].scope;
+            if bs == scope || bs == vs {
+                found.push(self.binds[i].name.clone());
+            }
+            i += 1;
+        }
+        for n in found.iter() {
+            if as_default {
+                self.module_export_name("default", n.as_str());
+            } else {
+                self.module_export_name(n.as_str(), n.as_str());
+            }
+        }
+    }
+
+    /// A name in an export list: a name or a string.
+    fn export_name(&mut self) -> String {
+        let t = self.text();
+        self.next();
+        t
+    }
+
+    /// `with { … }` / `assert { … }` after a module name, and the semicolon.
+    fn module_clause_end(&mut self) {
+        if (self.is("with") || self.is("assert")) && self.peek_is(1, "{") {
+            self.next();
+            let a = self.after_mate(self.pos);
+            if a < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(a);
+        }
+        self.semicolon();
+    }
+
+    /// `export` in a module (`compile_module`): the declaration stays, and
+    /// what it exports is noted for the module to return (as the parser's
+    /// `module_export` does).
+    fn module_export(&mut self, in_list: bool) {
+        self.next();
+        if self.eat("default") {
+            if self.ts && self.is("interface") {
+                self.skip_to_body();
+                return;
+            }
+            let named = (self.is("function") && (self.peek_kind(1) == T_IDENT || (self.peek_is(1, "*") && self.peek_kind(2) == T_IDENT)))
+                || (self.is("async") && self.peek_is(1, "function") && (self.peek_kind(2) == T_IDENT || (self.peek_is(2, "*") && self.peek_kind(3) == T_IDENT)))
+                || (self.is("class") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "extends") && !self.peek_is(1, "implements") && !self.peek_is(1, "{"))
+                || (self.is("abstract") && self.peek_is(1, "class") && self.peek_kind(2) == T_IDENT && !self.peek_is(2, "extends") && !self.peek_is(2, "implements") && !self.peek_is(2, "{"));
+            if named {
+                self.module_export_decl(in_list, true);
+                return;
+            }
+            let e = self.assign();
+            if !self.error.is_empty() {
+                return;
+            }
+            self.name_anonymous(e, "default");
+            self.semicolon();
+            let scope = self.cur_scope;
+            let b = self.declare(scope, "__cerxesDefault", K_CONST);
+            self.emit_bind_init(b);
+            self.op(OP_POP);
+            self.mark_inited(b);
+            self.module_export_name("default", "__cerxesDefault");
+            return;
+        }
+        if self.is("=") || (self.is("as") && self.peek_is(1, "namespace")) || (self.ts && self.is("type") && (self.peek_is(1, "{") || self.peek_is(1, "*"))) {
+            self.pos -= 1;
+            self.skip_module_clause();
+            return;
+        }
+        if self.is("*") {
+            self.next();
+            let mut alias = String::new();
+            let mut aliased = false;
+            if self.eat("as") {
+                alias = self.export_name();
+                aliased = true;
+            }
+            if !self.eat("from") || self.kind() != T_STR {
+                self.ts_fail();
+                return;
+            }
+            let m = self.text();
+            self.next();
+            self.module_clause_end();
+            if aliased {
+                let read = self.import_text(m.as_str());
+                self.module_export_name(alias.as_str(), read.as_str());
+            } else {
+                self.mex_stars.push(m);
+            }
+            return;
+        }
+        if self.is("{") {
+            self.next();
+            let mut names: Vec<String> = Vec::new();
+            let mut keys: Vec<String> = Vec::new();
+            while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+                if self.ts && self.is("type") && self.peek_kind(1) == T_IDENT && !self.peek_is(1, "as") && !self.peek_is(1, ",") && !self.peek_is(1, "}") {
+                    // `type T`: erased
+                    self.next();
+                    self.next();
+                    if self.eat("as") {
+                        self.next();
+                    }
+                } else {
+                    let k = self.export_name();
+                    let n = if self.eat("as") { self.export_name() } else { k.clone() };
+                    names.push(n);
+                    keys.push(k);
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect("}");
+            let mut from = String::new();
+            let mut has_from = false;
+            if self.eat("from") {
+                if self.kind() != T_STR {
+                    self.ts_fail();
+                    return;
+                }
+                from = self.text();
+                has_from = true;
+                self.next();
+            }
+            self.module_clause_end();
+            let mut i: usize = 0;
+            while i < names.len() {
+                let v = if has_from {
+                    let read = self.import_text(from.as_str());
+                    format!("{}[{}]", read, pq(keys[i].as_str()))
+                } else {
+                    keys[i].clone()
+                };
+                let n = names[i].clone();
+                self.module_export_name(n.as_str(), v.as_str());
+                i += 1;
+            }
+            return;
+        }
+        if self.is("import") {
+            self.ts_fail();
+            return;
+        }
+        self.module_export_decl(in_list, false);
+    }
+
+    /// What the module returns: its exports as an object (the modules of
+    /// `export *` under them, but their defaults).
+    fn module_exports_src(&self) -> String {
+        let mut fields: Vec<String> = Vec::new();
+        let mut i: usize = 0;
+        while i < self.mex_names.len() {
+            fields.push(format!("{}: {}", pq(self.mex_names[i].as_str()), self.mex_values[i]));
+            i += 1;
+        }
+        let own = format!("{{{}}}", fields.join(", "));
+        if self.mex_stars.is_empty() {
+            return format!("({})", own);
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for m in self.mex_stars.iter() {
+            let read = self.import_text(m.as_str());
+            parts.push(format!("__cerxesStar({})", read));
+        }
+        format!("Object.assign({{}}, {}, {})", parts.join(", "), own)
+    }
+
+    /// An expression written as source, compiled where the current token is.
+    fn source_expr(&mut self, src: &str) -> Ex {
+        let saved_src = self.src_rc.clone();
+        self.src_rc = Rc::new(String::from(src));
+        let saved = self.push_tokens(src);
+        let e = self.assign();
+        self.pop_tokens(&saved);
+        self.src_rc = saved_src;
+        e
+    }
+
+    /// Statements written as source for the ones read (`import`).
+    fn ts_source(&mut self, src: &str) {
+        let saved_src = self.src_rc.clone();
+        self.src_rc = Rc::new(String::from(src));
+        let saved = self.push_tokens(src);
+        while self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.pop_tokens(&saved);
+        self.src_rc = saved_src;
+    }
+
+    /// TypeScript cannot be read here: the parser reads it.
+    fn ts_fail(&mut self) {
+        self.fail("TypeScript pcomp does not read");
+    }
+
+    /// Skips the type at the current token (pcomp reads on after it).
+    fn skip_type_here(&mut self) {
+        let e = self.type_end(self.pos);
+        if e < 0 && self.type_ends_in_eq() {
+            return;
+        }
+        if e < 0 {
+            self.ts_fail();
+            return;
+        }
+        self.goto(e);
+    }
+
+    /// A type that ends inside a `>>=` / `>=` token (`a: A<B<C>>= v`): the
+    /// token becomes its `=`, where pcomp reads on; false when it did not.
+    fn type_ends_in_eq(&mut self) -> bool {
+        if self.tbad || self.tg <= 0 {
+            return false;
+        }
+        let t = self.tok_text(self.tp);
+        let g = self.tg as usize;
+        if g >= t.as_bytes().len() {
+            return false;
+        }
+        let rest = String::from(&t[g..]);
+        if rest.as_str() != "=" {
+            return false;
+        }
+        let eq = self.name_id("=");
+        let i = self.tp as usize;
+        self.toks[i].v = eq as i32;
+        self.toks[i].start += self.tg as i32;
+        self.tg = 0;
+        let at = self.tp;
+        self.goto(at);
+        true
+    }
+
+    /// `: T` (and a `?` / `!` before it) after a binding or a parameter.
+    fn skip_annotation(&mut self) {
+        if !self.ts {
+            return;
+        }
+        if self.is("?") || self.is("!") {
+            self.next();
+        }
+        if self.is(":") {
+            self.next();
+            self.skip_type_here();
+        }
+    }
+
+    /// `: R` after a parameter list.
+    fn skip_return_type(&mut self) {
+        if self.ts && self.is(":") {
+            self.next();
+            let e = self.return_type_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(e);
+        }
+    }
+
+    /// `<T>` before a parameter list.
+    fn skip_type_params(&mut self) {
+        if self.ts && self.is("<") {
+            let e = self.type_params_end(self.pos);
+            if e < 0 {
+                self.ts_fail();
+                return;
+            }
+            self.goto(e);
+        }
+    }
+}
+
+/// `s` as a JavaScript string literal.
+fn pq(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        if c == '"' {
+            out.push_str("\\\"");
+        } else if c == '\\' {
+            out.push_str("\\\\");
+        } else if c == '\n' {
+            out.push_str("\\n");
+        } else if c == '\r' {
+            out.push_str("\\r");
+        } else if (c as u32) < 32 || c == '\u{2028}' || c == '\u{2029}' {
+            out.push_str(format!("\\u{:04x}", c as u32).as_str());
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A name a `var` may declare.
+fn pcomp_ident(s: &str) -> bool {
+    if s.is_empty() || is_reserved(s) {
+        return false;
+    }
+    let mut first = true;
+    for c in s.chars() {
+        let ok = c == '_' || c == '$' || c.is_alphabetic() || (!first && c.is_numeric());
+        if !ok {
+            return false;
+        }
+        first = false;
+    }
+    true
+}
+
+/// A script compiled as a unit, read and written in one pass.
+pub fn compile_unit(src: &str) -> crate::unit::Unit {
+    compile_unit_with(src, false)
+}
+
+/// compile_unit, TypeScript's types skipped with `ts`.
+pub fn compile_unit_with(src: &str, ts: bool) -> crate::unit::Unit {
+    compile_unit_syntax(src, ts, false, "", "")
+}
+
+/// compile_unit: TypeScript's types skipped with `ts`, JSX read with `jsx`
+/// (`factory`, `fragment` its names).
+pub fn compile_unit_syntax(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str) -> crate::unit::Unit {
+    compile_unit_full(src, ts, jsx, factory, fragment, false)
+}
+
+/// A host's script (CErXes `Engine::compile`): compile_unit_syntax, and
+/// its `import`s read the host's modules (`script_imports`).
+pub fn compile_script(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str) -> crate::unit::Unit {
+    compile_unit_full(src, ts, jsx, factory, fragment, true)
+}
+
+fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str, imports: bool) -> crate::unit::Unit {
+    let names = crate::vm::first_atoms();
+    let mut atoms: HashMap<String, int> = HashMap::new();
+    let mut i: int = 0;
+    for n in names.iter() {
+        atoms.insert(n.clone(), i);
+        i += 1;
+    }
+    let mut c = PComp::new_syntax(src, atoms, names, 0, jsx, factory, fragment);
+    c.ts = ts;
+    c.script_imports = imports;
+    let entry = c.compile_program();
+    let mut u = crate::unit::Unit::new();
+    if !c.error.is_empty() || entry < 0 {
+        u.error = if c.error.is_empty() { String::from("SyntaxError") } else { c.error.clone() };
+        return u;
+    }
+    u.atom_names = c.atom_names;
+    u.protos = c.protos;
+    u.entry = entry;
+    u.source = String::from(src);
+    u
+}
+
+/// Rust: the script's tokens without the room their doubling left.
+#[ranger::target(rust)]
+fn trim_toks(v: &mut Vec<PTok>) {
+    v.shrink_to_fit();
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn trim_toks(_v: &mut Vec<PTok>) {}

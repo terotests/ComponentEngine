@@ -45,3 +45,65 @@ fn cases_txt() {
     }
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
 }
+
+/// The same cases with a reclaim at every safe point, each checked against
+/// a full mark: reference counting frees nothing a script can still reach
+/// (Vm::rc_stress).
+#[test]
+fn cases_txt_rc_checked() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases.txt")).unwrap();
+    let all = parse(&text);
+    let mut failed = Vec::new();
+    for (title, src, want) in all.iter() {
+        let mut e = Engine::new();
+        e.vm.rc_stress();
+        let got = e.eval(src);
+        if &got != want || e.vm.rc_errors > 0 {
+            failed.push(format!("[{}]\n  want: {}\n  got:  {}\n  rc: {}", title, want, got, e.vm.rc_log.join("; ")));
+        }
+    }
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
+}
+
+/// The same cases on the register VM (Vm.regs), with and without the
+/// reference counting check.
+#[test]
+fn cases_txt_regs() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases.txt")).unwrap();
+    let all = parse(&text);
+    let mut failed = Vec::new();
+    for stress in [false, true] {
+        for (title, src, want) in all.iter() {
+            let mut e = Engine::new();
+            e.vm.regs = true;
+            if stress {
+                e.vm.rc_stress();
+            }
+            let got = e.eval(src);
+            if &got != want || e.vm.rc_errors > 0 {
+                failed.push(format!("[{}{}]\n  want: {}\n  got:  {}", title, if stress { ", rc checked" } else { "" }, want, got));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
+}
+
+/// The same cases through the parser and the tree compiler (compiler.rs),
+/// on both machines.
+#[test]
+fn cases_txt_tree() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/cases.txt")).unwrap();
+    let all = parse(&text);
+    let mut failed = Vec::new();
+    for regs in [false, true] {
+        for (title, src, want) in all.iter() {
+            let mut e = Engine::new_with(false);
+            e.vm.regs = regs;
+            let got = e.eval(src);
+            if &got != want {
+                failed.push(format!("[{}{}]\n  want: {}\n  got:  {}", title, if regs { ", regs" } else { "" }, want, got));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
+}

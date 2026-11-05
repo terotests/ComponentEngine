@@ -51,18 +51,121 @@ impl Vm {
 
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
     pub fn proxy_call(&mut self, p: int, which: int, args: Vec<Val>) -> Val {
-        let target = self.objs[p as usize].env;
-        let handler = self.objs[p as usize].home;
+        let target = self.objs[p as usize].env as int;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
         if handler < 0 || target < 0 || self.proxy_hooks < 0 {
             self.throw_type("Cannot perform an operation on a proxy that has been revoked");
             return Val::Undef;
         }
-        let hook = self.objs[self.proxy_hooks as usize].elems[which as usize].clone();
+        let hook = self.evecs[self.objs[self.proxy_hooks as usize].elems as usize].v[which as usize].clone();
         let mut all: Vec<Val> = vec![Val::Obj(target), Val::Obj(handler)];
-        for a in args {
-            all.push(a);
+        for a in args.iter() {
+            all.push(*a);
         }
         self.call_value(hook, Val::Undef, all)
+    }
+
+    /// `p[atom]` (receiver r) for a proxy of a plain object: the trap is
+    /// called and its invariants checked here, not in the prelude's hook
+    /// (no descriptor object per get); other targets take the hook.
+    pub fn proxy_get_atom(&mut self, p: int, atom: int, r: Val) -> Val {
+        let target = self.objs[p as usize].env as int;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT {
+            let k = self.key_val(atom);
+            return self.proxy_call(p, PH_GET, vec![k, r]);
+        }
+        let trap = self.get_obj(handler, A_GET, &Val::Obj(handler));
+        if self.throwing {
+            return Val::Undef;
+        }
+        if matches!(trap, Val::Undef) || matches!(trap, Val::Null) {
+            return self.get_obj(target, atom, &r);
+        }
+        if !self.is_callable(&trap) {
+            self.throw_type("'get' on proxy: trap is not a function");
+            return Val::Undef;
+        }
+        let k = self.key_val(atom);
+        let v = self.call_fixed(trap, Val::Obj(handler), 3, Val::Obj(target), k, r);
+        if self.throwing {
+            return Val::Undef;
+        }
+        let slot = self.find(target, atom);
+        if slot >= 0 {
+            let attr = self.attr_at(target, slot);
+            if (attr & P_FIXED) != 0 {
+                if (attr & P_ACCESSOR) != 0 {
+                    let pair = obj_of(&self.objs[target as usize].vals[slot as usize]);
+                    let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
+                    if matches!(g, Val::Undef) && !matches!(v, Val::Undef) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'get' on proxy: property '{}' is a non-configurable accessor property on the proxy target and does not have a getter function, but the trap did not return 'undefined'", n).as_str());
+                        return Val::Undef;
+                    }
+                } else if (attr & P_READONLY) != 0 {
+                    let cur = self.objs[target as usize].vals[slot as usize].clone();
+                    if !self.same_value(&v, &cur) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'get' on proxy: property '{}' is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value", n).as_str());
+                        return Val::Undef;
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// `p[atom] = v` (receiver r) for a proxy of a plain object whose
+    /// handler has a set trap: the trap is called and its invariants
+    /// checked here; other cases take the prelude's hook.
+    pub fn proxy_set_atom(&mut self, p: int, atom: int, v: Val, r: Val) -> bool {
+        let target = self.objs[p as usize].env as int;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT {
+            let k = self.key_val(atom);
+            return self.proxy_bool(p, PH_SET, vec![k, v, r]);
+        }
+        let trap = self.get_obj(handler, A_SET, &Val::Obj(handler));
+        if self.throwing {
+            return false;
+        }
+        if matches!(trap, Val::Undef) || matches!(trap, Val::Null) {
+            let k = self.key_val(atom);
+            return self.proxy_bool(p, PH_SET, vec![k, v, r]);
+        }
+        if !self.is_callable(&trap) {
+            self.throw_type("'set' on proxy: trap is not a function");
+            return false;
+        }
+        let k = self.key_val(atom);
+        let ok = self.call_value(trap, Val::Obj(handler), vec![Val::Obj(target), k, v.clone(), r]);
+        if self.throwing || !truthy(&ok) {
+            return false;
+        }
+        let slot = self.find(target, atom);
+        if slot >= 0 {
+            let attr = self.attr_at(target, slot);
+            if (attr & P_FIXED) != 0 {
+                if (attr & P_ACCESSOR) != 0 {
+                    let pair = obj_of(&self.objs[target as usize].vals[slot as usize]);
+                    let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
+                    if matches!(s, Val::Undef) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'set' on proxy: trap returned truish for property '{}' which exists in the proxy target as a non-configurable and non-writable accessor property without a setter", n).as_str());
+                        return false;
+                    }
+                } else if (attr & P_READONLY) != 0 {
+                    let cur = self.objs[target as usize].vals[slot as usize].clone();
+                    if !self.same_value(&v, &cur) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'set' on proxy: trap returned truish for property '{}' which exists in the proxy target as a non-configurable and non-writable data property with a different value", n).as_str());
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     pub fn proxy_bool(&mut self, p: int, which: int, args: Vec<Val>) -> bool {
@@ -109,7 +212,7 @@ impl Vm {
             return false;
         }
         if self.objs[o as usize].class == C_PROXY {
-            let t = self.objs[o as usize].env;
+            let t = self.objs[o as usize].env as int;
             if t < 0 {
                 self.throw_type("Cannot perform 'IsArray' on a proxy that has been revoked");
                 return false;
@@ -119,7 +222,7 @@ impl Vm {
         self.objs[o as usize].class == C_ARRAY
     }
 
-    pub fn call_native_proxy(&mut self, id: int, args: Vec<Val>, construct: bool) -> Val {
+    pub fn call_native_proxy(&mut self, id: int, args: &Vec<Val>, construct: bool) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
         if id == NF_PROXY {
@@ -134,8 +237,8 @@ impl Vm {
                 return Val::Undef;
             }
             let p = self.alloc(C_PROXY, -1);
-            self.objs[p as usize].env = t;
-            self.objs[p as usize].home = h;
+            self.put_env(p, t);
+            self.put_home(p, h);
             if self.is_callable(&a0) {
                 self.objs[p as usize].pos = 1;
             }
@@ -147,8 +250,8 @@ impl Vm {
         if id == NF_PROXY_REVOKE {
             let p = obj_of(&a0);
             if self.is_proxy(p) {
-                self.objs[p as usize].env = -1;
-                self.objs[p as usize].home = -1;
+                self.put_env(p, -1);
+                self.put_home(p, -1);
             }
             return Val::Undef;
         }
@@ -184,7 +287,7 @@ impl Vm {
             return Val::Undef;
         }
         if i >= 0 {
-            return string_val(format!("{}", i));
+            return self.string_val(format!("{}", i));
         }
         self.key_val(a)
     }

@@ -1075,6 +1075,31 @@ var AP = Array.prototype;
   }[name];
   hide(AP, name, setLength(f, nat.length));
 });
+// forEach and map in JavaScript: the callback runs as one of the
+// interpreter's frames, so a time slice (Engine::set_slice) can stop in it
+var fcall = Function.prototype.call;
+function arrayThis(t) {
+  if (t === null || t === undefined) throw new TypeError('Array.prototype method called on null or undefined');
+  return Object(t);
+}
+hide(AP, 'forEach', setLength(function forEach(f, t) {
+  var o = arrayThis(this), n = toLength(o.length);
+  if (typeof f !== 'function') throw new TypeError('callback is not a function');
+  for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
+}, 1));
+hide(AP, 'map', setLength(function map(f, t) {
+  var o = arrayThis(this), n = toLength(o.length);
+  if (typeof f !== 'function') throw new TypeError('callback is not a function');
+  var A = arraySpecies(o, n), plain = A === null;
+  if (plain) A = new Array(n);
+  for (var i = 0; i < n; i++) {
+    if (i in o) {
+      var v = fcall.call(f, t, o[i], i, o);
+      if (plain) A[i] = v; else defineProperty(A, i, { value: v, writable: true, enumerable: true, configurable: true });
+    }
+  }
+  return A;
+}, 1));
 var nativeConcat = AP.concat;
 function spreadable(o) {
   if (!isObject(o)) return false;

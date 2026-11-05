@@ -69,7 +69,7 @@ pub fn read_pragmas(src: &str, sx: &mut Syntax) {
 /// `cleanJSXElementLiteralChild`): each line loses its indentation (not the
 /// first) and trailing spaces (not the last), blank lines go, and the rest
 /// are joined by one space. A tab counts as a space.
-fn clean_text(raw: &str) -> String {
+pub(crate) fn clean_text(raw: &str) -> String {
     let mut lines: Vec<Vec<char>> = Vec::new();
     let mut cur: Vec<char> = Vec::new();
     for c in raw.chars() {
@@ -130,6 +130,7 @@ fn clean_text(raw: &str) -> String {
 impl Parser {
     /// An element at the current `<` token.
     pub(crate) fn jsx_element(&mut self) -> int {
+        self.beyond_js = true;
         self.rewind_lexer();
         let e = self.jsx_at();
         // after an element a `/` divides

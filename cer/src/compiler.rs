@@ -10,6 +10,7 @@
 //! writes the code.
 
 use ranger::prelude::*;
+use std::rc::Rc;
 use std::collections::HashMap;
 
 use crate::ast::*;
@@ -115,7 +116,8 @@ pub struct Compiler {
     /// that receives it when the declaration is evaluated
     annex_var: HashMap<int, int>,
     /// the source text, shared by the functions' protos
-    src_val: Val,
+    src_rc: Rc<String>,
+    src_made: bool,
     fs: Vec<FnState>,
     pub error: String,
     /// completion value of the script: slot 0 of the program
@@ -152,7 +154,8 @@ impl Compiler {
             hoist_root: -1,
             nested_funcs: Vec::new(),
             annex_var: HashMap::new(),
-            src_val: Val::Undef,
+            src_rc: Rc::new(String::new()),
+            src_made: false,
             fs: Vec::new(),
             error: String::new(),
             keep_completion: true,
@@ -869,38 +872,38 @@ impl Compiler {
             let mut fused = -1;
             let mut fa = 0;
             let mut fb = 0;
-            if code == OP_GET_LOCAL && last.code == OP_GET_LOCAL {
+            if code == OP_GET_LOCAL && (last.code as int) == OP_GET_LOCAL {
                 fused = OP_GET_LOCAL2;
                 fa = last.a;
                 fb = a;
-            } else if code == OP_UNDEF && last.code == OP_GET_ENV {
+            } else if code == OP_UNDEF && (last.code as int) == OP_GET_ENV {
                 fused = OP_GET_ENV_UNDEF;
                 fa = last.a;
-                fb = last.b;
-            } else if code == OP_CASE_JT && last.code == OP_INT {
+                fb = (last.b as int);
+            } else if code == OP_CASE_JT && (last.code as int) == OP_INT {
                 fused = OP_CASE_INT_JT;
-                fa = a;
-                fb = last.a;
+                fa = (a as i32);
+                fb = (last.a as int);
             } else if code == OP_CMP_JF && (b == OP_SEQ || b == OP_SNE || b == OP_EQ || b == OP_NE) && n > 1 && (self.fs[i].label_at as usize) < n - 1 {
                 let prev = self.fs[i].proto.code[n - 2];
                 let mut slot = -1;
-                if prev.code == OP_NULL && last.code == OP_GET_LOCAL {
+                if (prev.code as int) == OP_NULL && (last.code as int) == OP_GET_LOCAL {
                     slot = last.a;
-                } else if prev.code == OP_GET_LOCAL && last.code == OP_NULL {
+                } else if (prev.code as int) == OP_GET_LOCAL && (last.code as int) == OP_NULL {
                     slot = prev.a;
                 }
                 if slot >= 0 {
                     self.fs[i].proto.code.pop();
-                    self.fs[i].proto.code[n - 2] = Op { code: OP_LOCAL_NULL_JF, a: a, b: slot * 256 + b, c: -1 };
+                    self.fs[i].proto.code[n - 2] = Op { code: (OP_LOCAL_NULL_JF as i32), a: (a as i32), b: slot * 256 + (b as i32), c: -1 };
                     return (n as int) - 2;
                 }
             }
             if fused >= 0 {
-                self.fs[i].proto.code[n - 1] = Op { code: fused, a: fa, b: fb, c: -1 };
+                self.fs[i].proto.code[n - 1] = Op { code: (fused as i32), a: fa, b: (fb as i32), c: -1 };
                 return (n as int) - 1;
             }
         }
-        self.fs[i].proto.code.push(Op { code: code, a: a, b: b, c: -1 });
+        self.fs[i].proto.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
         (self.fs[i].proto.code.len() as int) - 1
     }
 
@@ -912,12 +915,12 @@ impl Compiler {
             let n = self.fs[i].proto.code.len();
             if n > 0 {
                 let last = self.fs[i].proto.code[n - 1].code;
-                if last == OP_SET_LOCAL {
-                    self.fs[i].proto.code[n - 1].code = OP_SET_LOCAL_POP;
-                } else if last == OP_SET_PROP {
-                    self.fs[i].proto.code[n - 1].code = OP_SET_PROP_POP;
-                } else if last == OP_SET_ELEM {
-                    self.fs[i].proto.code[n - 1].code = OP_SET_ELEM_POP;
+                if (last as int) == OP_SET_LOCAL {
+                    self.fs[i].proto.code[n - 1].code = (OP_SET_LOCAL_POP as i32);
+                } else if (last as int) == OP_SET_PROP {
+                    self.fs[i].proto.code[n - 1].code = (OP_SET_PROP_POP as i32);
+                } else if (last as int) == OP_SET_ELEM {
+                    self.fs[i].proto.code[n - 1].code = (OP_SET_ELEM_POP as i32);
                 }
             }
         }
@@ -928,12 +931,12 @@ impl Compiler {
     fn patch(&mut self, at: int) {
         let here = self.pc();
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[at as usize].a = here;
+        self.fs[i].proto.code[at as usize].a = (here as i32);
     }
 
     fn patch_to(&mut self, at: int, target: int) {
         let i = self.fs.len() - 1;
-        self.fs[i].proto.code[at as usize].a = target;
+        self.fs[i].proto.code[at as usize].a = (target as i32);
     }
 
     fn str_const(&mut self, s: &str) -> int {
@@ -946,7 +949,9 @@ impl Compiler {
         }
         let f = self.f();
         let i = f.proto.consts.len() as int;
-        f.proto.consts.push(str_val(s));
+        let k = f.proto.cstrs.len() as int;
+        f.proto.cstrs.push(Rc::new(String::from(s)));
+        f.proto.consts.push(Val::Str(k));
         f.str_consts.insert(String::from(s), i);
         i
     }
@@ -1322,14 +1327,17 @@ impl Compiler {
             None => -1,
         };
         if let Some(t) = self.ast.span_text.get(&n) {
-            proto.src = string_val(t.clone());
+            proto.src = Val::Str(proto.cstrs.len() as int);
+            proto.cstrs.push(Rc::new(t.clone()));
             proto.src_start = 0;
             proto.src_end = t.chars().count() as int;
         } else if ss >= 0 {
-            if matches!(self.src_val, Val::Undef) {
-                self.src_val = string_val(self.ast.source.clone());
+            if !self.src_made {
+                self.src_rc = Rc::new(self.ast.source.clone());
+                self.src_made = true;
             }
-            proto.src = self.src_val.clone();
+            proto.src = Val::Str(proto.cstrs.len() as int);
+            proto.cstrs.push(self.src_rc.clone());
             proto.src_start = ss;
             proto.src_end = match self.ast.span_end.get(&n) {
                 Some(x) => *x,
@@ -2192,15 +2200,23 @@ impl Compiler {
                 self.block(d);
                 let j2 = self.emit(OP_JUMP, 0, 0);
                 self.patch(t2);
-                self.block(d);
-                self.op(OP_THROW);
+                self.finally_on_exception(d);
                 self.patch(j2);
             }
         } else {
-            self.block(d);
-            self.op(OP_THROW);
+            self.finally_on_exception(d);
         }
         self.patch(j_end);
+    }
+
+    /// A finally block run for an exception, [exception] under it, then
+    /// the rethrow. A break or continue out of the block pops the
+    /// exception, so every path to a jump target has the same stack.
+    fn finally_on_exception(&mut self, d: int) {
+        self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
+        self.block(d);
+        self.f().ctl.pop();
+        self.op(OP_THROW);
     }
 
     fn switch_statement(&mut self, n: int) {
@@ -2306,7 +2322,9 @@ impl Compiler {
     fn name_anonymous(&mut self, e: int, name: &str) {
         let k = self.ast.nodes[e as usize].kind;
         if (k == N_FUNC || k == N_CLASS) && self.ast.nodes[e as usize].s.is_empty() {
-            let c = self.str_const(name);
+            // a module's `export default function () {}` (its binding is
+            // `__cerxesDefault`) is named default
+            let c = if name == "__cerxesDefault" { self.str_const("default") } else { self.str_const(name) };
             self.emit(OP_SET_NAME, c, 0);
         }
     }
@@ -2355,8 +2373,8 @@ impl Compiler {
         let done = self.pc();
         let i = step as usize;
         let fi = self.fs.len() - 1;
-        self.fs[fi].proto.code[i].a = done;
-        self.fs[fi].proto.code[i].b = ret;
+        self.fs[fi].proto.code[i].a = (done as i32);
+        self.fs[fi].proto.code[i].b = (ret as i32);
     }
 
     fn expr(&mut self, n: int) {

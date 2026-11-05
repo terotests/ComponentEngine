@@ -9,7 +9,8 @@
 //!
 //! The pipeline: `lexer` → `parser` (a tree in an arena) → `compiler`
 //! (scopes, closures captured into scope objects, bytecode for a stack
-//! machine) → `vm` (objects in an arena with a mark-and-sweep collector,
+//! machine) → `vm` (objects in an arena, reference counted, with a
+//! mark-and-sweep collector for cycles,
 //! inline caches for property reads and writes). `builtins` / `builtins2`
 //! hold the standard library, `regex` a backtracking regular expression
 //! engine.
@@ -31,9 +32,12 @@ pub mod normalize;
 pub mod num;
 pub mod ops;
 pub mod parser;
+pub mod pcomp;
 pub mod prelude;
 pub mod proxy;
 pub mod regex;
+pub mod regs;
+pub mod rvm;
 pub mod snapshot;
 pub mod typed;
 pub mod uninorm;
@@ -55,8 +59,16 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// An engine; its scripts compile with pcomp.rs (`new_with`).
     pub fn new() -> Engine {
+        Engine::new_with(true)
+    }
+
+    /// An engine whose scripts, its prelude too, compile with pcomp.rs
+    /// (`pcomp`) or with the parser and the tree compiler.
+    pub fn new_with(pcomp: bool) -> Engine {
         let mut vm = Vm::new();
+        vm.pcomp = pcomp;
         vm.setup();
         let mut e = Engine { vm: vm, error: String::new(), through_text: false };
         // the built-ins written in JavaScript
@@ -128,6 +140,13 @@ impl Engine {
     /// or another. Sets `error` when the script is not one.
     pub fn compile(&mut self, src: &str) -> unit::Unit {
         self.error = String::new();
+        if self.vm.pcomp {
+            let u = pcomp::compile_unit(src);
+            if !u.error.is_empty() {
+                self.error = u.error.clone();
+            }
+            return u;
+        }
         let mut p = parser::Parser::new(src);
         let root = p.parse_program();
         if !p.error.is_empty() {
@@ -163,7 +182,7 @@ impl Engine {
         let entry = unit::link(&mut self.vm, u);
         let fp = self.vm.function_proto;
         let f = self.vm.alloc(C_FUNCTION, fp);
-        self.vm.objs[f as usize].func = entry;
+        self.vm.objs[f as usize].func = entry as i32;
         let g = Val::Obj(self.vm.global);
         self.vm.run_program(Val::Obj(f), g)
     }
@@ -194,7 +213,7 @@ impl Engine {
                     format!("n:{}", num::number_to_string(*n))
                 }
             }
-            Val::Str(s) => format!("s:{}", s),
+            Val::Str(s) => format!("s:{}", self.vm.sref(*s)),
             Val::Obj(o) => format!("o:{}", self.vm.objs[*o as usize].class),
         }
     }
@@ -218,7 +237,7 @@ impl Engine {
         let a = self.vm.intern(name);
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));
-        let r = self.vm.call_value(f, Val::Undef, Vec::new());
+        let r = self.vm.call_top(f, Val::Undef, Vec::new());
         if self.vm.throwing {
             return self.uncaught();
         }

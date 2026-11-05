@@ -211,7 +211,7 @@ impl Parser {
             let value: int;
             let mut is_string = false;
             if self.eat("=") {
-                is_string = self.kind() == T_STR || (self.kind() == T_TEMPLATE && self.tk(self.pos).exprs.is_empty());
+                is_string = self.kind() == T_STR || (self.kind() == T_TEMPLATE && self.template_plain());
                 value = self.assign();
             } else if first {
                 value = self.ast.add(N_NUM, l);
@@ -391,6 +391,7 @@ impl Parser {
     /// `import`: erased when it imports only types; `import A = B.C` an
     /// alias; a value import reads a module the host defined.
     pub(crate) fn import_stmt(&mut self) -> int {
+        self.beyond_js = true;
         let line = self.line();
         let ts = self.syntax.typescript;
         if ts && self.peek_is(1, "type") && (self.peek_kind(2) == T_IDENT || self.peek_is(2, "{") || self.peek_is(2, "*")) && !self.peek_is(2, "from") {
@@ -562,6 +563,7 @@ impl Parser {
     /// `export`: the declaration stays, the keyword goes; re-exports and
     /// export lists are dropped.
     pub(crate) fn export_stmt(&mut self) -> int {
+        self.beyond_js = true;
         self.next();
         if !self.module_path.is_empty() {
             return self.module_export();

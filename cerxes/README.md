@@ -25,6 +25,11 @@ node cerxes/bench/cases.mjs --targets=js,cpp,go --build   # … and C++ and Go
 npm run cerxes:conformance                    # CEr's conformance probes, read as TSX
 ```
 
+`cerxes/pgo.sh` builds `target/release/cerxes` with profile-guided
+optimisation, trained on `bench/cpu` and Octane (not on React or Chart.js).
+On those two apps it cuts instruction cache misses by 20–25 % and the
+instruction count by 1–3 %. It needs `rustup component add llvm-tools`.
+
 `tests/cases.txt` holds the syntax cases (a script and the value it
 answers). `tests/syntax.rs` runs them on the cargo build, and CEr's own
 cases (`../cer/tests/cases.txt`, plain JavaScript, values from Node) both

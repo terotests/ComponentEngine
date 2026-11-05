@@ -121,6 +121,37 @@ impl HostSync for NoHostSync {
 pub struct Vm {
     pub objs: Vec<JsObj>,
     pub free_list: Vec<int>,
+    /// the objects' Colds (value.rs); 0 is the empty one, never written
+    pub colds: Vec<Cold>,
+    pub free_colds: Vec<int>,
+    /// the objects' elements (JsObj.elems): 0 is the empty one, never
+    /// written
+    pub evecs: Vec<Elems>,
+    /// `evecs` no object holds
+    pub efree: Vec<i32>,
+    /// the objects whose count is 0 (JsObj.rc): garbage unless a root
+    /// holds one (Vm::reclaim)
+    pub zct: Vec<int>,
+    /// the buffer the next reclaim's zct takes (Rust: no new vector)
+    pub zct_spare: Vec<int>,
+    /// reclaim runs when zct grows past this, at least zct_min (ZCT_MIN;
+    /// tests make it 1: a reclaim at every safe point)
+    pub zct_limit: int,
+    pub zct_min: int,
+    /// slots reclaim freed, reused after the next reclaim or collection
+    pub freed: Vec<int>,
+    /// objects in use: allocated and not yet freed
+    pub live: int,
+    /// reference counting frees objects (false: only the collector)
+    pub rc_on: bool,
+    /// tests: every reclaim checks against a full mark that it frees only
+    /// unreachable objects, and every collection that no count was low;
+    /// rc_errors counts what was wrong
+    pub rc_check: bool,
+    pub rc_errors: int,
+    pub rc_log: Vec<String>,
+    pub rc_freed: int,
+    pub reclaims: int,
     /// object shapes (value.rs); 0 is the empty one
     pub shapes: Vec<Shape>,
     /// owned shapes of freed objects, for reuse
@@ -128,12 +159,21 @@ pub struct Vm {
     pub protos: Vec<Proto>,
     pub atoms: HashMap<String, int>,
     pub atom_names: Vec<String>,
+    /// intern's cache: atom by a hash of the text, -1 for none
+    pub atom_cache: Vec<int>,
     /// atom names as string values, made on first use (atom_val)
     pub atom_vals: Vec<Val>,
     /// "undefined", "object", … as string values for typeof (type_val)
     pub type_vals: Vec<Val>,
     /// atoms that are symbols (their description is the name)
     pub symbol_atoms: HashMap<int, int>,
+    /// what kind of key each atom is, found on first use (atom_kind): 0
+    /// not yet, 1 a name, 2 an array index, 3 a symbol, 4 a private name
+    pub atom_kinds: Vec<i32>,
+    /// Object.prototype.toString's answers by class ("[object Array]"…),
+    /// made on first use, and the @@toStringTag atom (-1 before)
+    pub tostr_vals: Vec<Val>,
+    pub a_tostringtag: int,
     pub stack: Vec<Val>,
     pub frames: Vec<Frame>,
     pub handlers: Vec<Handler>,
@@ -198,9 +238,86 @@ pub struct Vm {
     pub(crate) host_sync: Box<dyn HostSync>,
     pub(crate) host_sync_set: bool,
     pub echo: bool,
+    /// run frames on the register machine (rvm.rs)
+    pub regs: bool,
+    /// compile with pcomp.rs (tokens to bytecode in one pass, no tree)
+    pub pcomp: bool,
+    /// the register code of every translated function (Proto.rbase) and
+    /// the constants it reads (a register x < 0 is kvals[-1 - x])
+    pub rcode: Vec<Op>,
+    pub kvals: Vec<Val>,
+    /// the register code's switch tables
+    pub rtab: Vec<int>,
+    /// the string table: Val::Str(h) is strs[h] (0 is ""); sup[h] >= 0
+    /// when an append in place moved h's buffer on to that newer handle
+    /// (h is then its first slen[h] bytes); sflag 1 pinned (constants,
+    /// atoms), 2 free. collect() sweeps it (mark_strs).
+    pub strs: Vec<Rc<String>>,
+    pub sup: Vec<i32>,
+    pub slen: Vec<i32>,
+    pub sflag: Vec<i32>,
+    pub smark: Vec<bool>,
+    pub sfree: Vec<int>,
+    /// freed by the last collection, reused after the next one
+    pub sfreed: Vec<int>,
+    /// the heap's references to each string handle (object slots and the
+    /// prefixes whose text lies in it), as Vm.objs[].rc is for objects:
+    /// the stack, frames and other roots are not counted
+    pub srcs: Vec<i32>,
+    /// whether a handle is in szct
+    pub sinz: Vec<bool>,
+    /// the atom a string handle's text interns to, -1 before it is asked
+    /// (to_key: a string key looked up once per string, not per use)
+    pub satom: Vec<i32>,
+    /// handles whose count went to 0 (or that are new): reclaim() frees
+    /// those no root holds
+    pub szct: Vec<int>,
+    pub szct_spare: Vec<int>,
+    /// szct's length that makes a reclaim due
+    pub szct_limit: int,
+    /// strings reclaim() freed (statistics)
+    pub sfree_count: int,
+    /// strings made since the last collection, and how many make one due
+    pub snew: int,
+    pub slimit: int,
+    pub slimit_min: int,
+    /// bytes of strings made since the last collection, and the count
+    /// that makes one due: big strings die only when the table is swept
+    pub sbytes: int,
+    /// argument vectors for native calls, reused (Vm::call_op)
+    pub arg_pool: Vec<Vec<Val>>,
+    pub sbytes_limit: int,
+    pub sempty: Rc<String>,
+    /// prototype-chain caches of the register code's reads (rvm.rs
+    /// pic_get): rpic[i] is rcode[i]'s entry in pic (PIC_W ints), -1 none;
+    /// an entry holds while shape_epoch, which every change of an owned
+    /// shape moves, stays
+    pub rpic: Vec<i32>,
+    pub pic: Vec<i32>,
+    pub shape_epoch: int,
+    /// a collection or reclaim is due at the next safe point (gc_due)
+    pub gc_flag: bool,
+    /// where in pic the last pic_get hit or filled
+    pub pic_way: int,
     pub alloc_count: int,
     pub gc_threshold: int,
+    /// objects made since the last collection, freed or not, and how many
+    /// make one due: reference counting frees no cycle, so they wait for a
+    /// collection that the allocation volume, not the net growth, brings
+    pub made: int,
+    pub made_limit: int,
     pub native_depth: int,
+    /// time slices (Engine::set_slice): the slice's length in ms, 0 for
+    /// none; when it began; back jumps left before the clock is read again
+    pub slice_ms: double,
+    pub slice_t0: double,
+    pub ticks: int,
+    /// the script stopped at a branch when its slice ran out, its frames
+    /// kept (Engine::resume goes on)
+    pub suspended: bool,
+    /// slices are on for this run: set by Engine::run / resume only, so a
+    /// host call (call_top, jobs) never stops half way
+    pub slicing: bool,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
     pub temp_roots: Vec<Val>,
@@ -265,6 +382,15 @@ pub fn obj_of(v: &Val) -> int {
     }
 }
 
+/// The string handle of `v`, 0 (the empty string, never counted) when it
+/// is no string.
+pub fn str_of(v: &Val) -> int {
+    match v {
+        Val::Str(h) => *h,
+        _ => 0,
+    }
+}
+
 /// `===` (strict) or `==` of two values that are objects, null or
 /// undefined: 1 or 0; -1 when either is anything else.
 pub fn quick_eq(a: &Val, b: &Val, strict: bool) -> int {
@@ -298,7 +424,7 @@ pub fn truthy(v: &Val) -> bool {
         Val::Null => false,
         Val::Bool(b) => *b,
         Val::Num(n) => *n != 0.0 && *n == *n,
-        Val::Str(s) => !s.is_empty(),
+        Val::Str(h) => *h != 0,
         Val::Obj(_) => true,
     }
 }
@@ -308,12 +434,32 @@ impl Vm {
         let mut vm = Vm {
             objs: Vec::new(),
             free_list: Vec::new(),
+            colds: Vec::new(),
+            free_colds: Vec::new(),
+            evecs: Vec::new(),
+            efree: Vec::new(),
+            zct: Vec::new(),
+            zct_spare: Vec::new(),
+            zct_limit: ZCT_MIN,
+            zct_min: ZCT_MIN,
+            freed: Vec::new(),
+            live: 0,
+            rc_on: true,
+            rc_check: false,
+            rc_errors: 0,
+            rc_log: Vec::new(),
+            rc_freed: 0,
+            reclaims: 0,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             protos: Vec::new(),
             atoms: HashMap::new(),
+            atom_cache: Vec::new(),
             atom_names: Vec::new(),
             atom_vals: Vec::new(),
+            atom_kinds: Vec::new(),
+            tostr_vals: Vec::new(),
+            a_tostringtag: -1,
             type_vals: Vec::new(),
             symbol_atoms: HashMap::new(),
             stack: Vec::new(),
@@ -364,9 +510,47 @@ impl Vm {
             exc: Val::Undef,
             out: Vec::new(),
             echo: false,
+            regs: false,
+            pcomp: false,
+            rcode: Vec::new(),
+            kvals: Vec::new(),
+            rtab: Vec::new(),
+            strs: Vec::new(),
+            sup: Vec::new(),
+            slen: Vec::new(),
+            sflag: Vec::new(),
+            smark: Vec::new(),
+            sfree: Vec::new(),
+            sfreed: Vec::new(),
+            srcs: Vec::new(),
+            sinz: Vec::new(),
+            satom: Vec::new(),
+            szct: Vec::new(),
+            szct_spare: Vec::new(),
+            sfree_count: 0,
+            szct_limit: ZCT_MIN,
+            snew: 0,
+            slimit: SLIMIT_MIN,
+            slimit_min: SLIMIT_MIN,
+            sbytes: 0,
+            arg_pool: Vec::new(),
+            sbytes_limit: SBYTES_MIN,
+            sempty: Rc::new(String::new()),
+            rpic: Vec::new(),
+            pic: Vec::new(),
+            shape_epoch: 0,
+            gc_flag: false,
+            pic_way: 0,
             alloc_count: 0,
             gc_threshold: 200000,
+            made: 0,
+            made_limit: MADE_MIN,
             native_depth: 0,
+            slice_ms: 0.0,
+            slice_t0: 0.0,
+            ticks: SLICE_TICKS,
+            suspended: false,
+            slicing: false,
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
@@ -392,6 +576,8 @@ impl Vm {
             host_sync_set: false,
         };
         vm.shapes.push(Shape::new());
+        vm.colds.push(Cold::new());
+        vm.evecs.push(Elems { v: Vec::new() });
         for n in first_atoms() {
             vm.intern(n.as_str());
         }
@@ -522,17 +708,18 @@ impl Vm {
     /// which never changes, and the slot alone for an owned one, checked
     /// against its key. `plain`: a writable data property; else any data
     /// property.
-    #[inline]
+    #[inline(always)]
     pub fn ic_slot(&self, o: int, atom: int, c: int, plain: bool) -> int {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if c >= 65536 {
             return if (c >> 16) == sh { c & 65535 } else { -1 };
         }
-        if c >= 0 {
-            let s = &self.shapes[sh as usize];
-            if (c as usize) < s.keys.len() && s.keys[c as usize] == atom {
+        if c >= 0 && c < self.shapes[sh as usize].nkeys {
+            let s = &self.shapes[self.holder(sh)];
+            if s.keys[c as usize] == atom {
                 let a = s.attrs[c as usize];
-                if a == 0 || (!plain && (a & P_ACCESSOR) == 0) {
+                let bad = if plain { P_READONLY | P_ACCESSOR } else { P_ACCESSOR };
+                if (a & bad) == 0 {
                     return c;
                 }
             }
@@ -540,11 +727,11 @@ impl Vm {
         -1
     }
 
-    /// The inline cache for slot `slot` of `o`.
+    /// The inline cache for slot `slot` of `o` (an Op field: 32 bits).
     #[inline]
     pub fn ic_of(&self, o: int, slot: int) -> int {
-        let sh = self.objs[o as usize].shape;
-        if self.shapes[sh as usize].owned || slot >= 65536 {
+        let sh = self.objs[o as usize].shape as int;
+        if self.shapes[sh as usize].owned || slot >= 65536 || sh >= 32768 {
             return slot;
         }
         sh * 65536 + slot
@@ -563,8 +750,68 @@ impl Vm {
             return -1;
         }
         let nc = self.ic_of(o, slot);
-        self.protos[pi].code[(pc - 1) as usize].c = nc;
+        self.protos[pi].code[(pc - 1) as usize].c = (nc as i32);
         slot
+    }
+
+    /// `name = v` for a global (`create` 1 when a missing one is made even
+    /// in strict code); a writable data property's slot goes to the cache
+    /// of the op before `pc`.
+    pub fn set_global(&mut self, atom: int, v: Val, create: int, pi: usize, pc: int) {
+        let g = self.global;
+        let slot = self.find(g, atom);
+        if slot >= 0 && (self.attr_at(g, slot) & (P_READONLY | P_ACCESSOR)) == 0 {
+            let nc = self.ic_of(g, slot);
+            self.protos[pi].code[(pc - 1) as usize].c = (nc as i32);
+            self.put_slot(g, slot, v);
+        } else if slot < 0 && create == 0 && self.strict_now() && !self.has_atom(g, atom) {
+            // strict code does not create globals by assignment
+            let n = self.atom_str(atom);
+            self.throw_ref(format!("{} is not defined", n).as_str());
+        } else {
+            self.set_obj(g, atom, v);
+        }
+    }
+
+    /// ToNumeric of `v` (a BigInt stays).
+    pub fn to_numeric(&mut self, v: Val) -> Val {
+        if let Val::Num(_) = v {
+            return v;
+        }
+        if self.class_of(&v) == C_BIGINT {
+            return v;
+        }
+        let n = self.to_number(&v);
+        Val::Num(n)
+    }
+
+    /// -v (unary minus), BigInts too.
+    pub fn neg_val(&mut self, v: Val) -> Val {
+        let p = if is_obj(&v) { self.to_primitive(&v, "number") } else { v };
+        if self.throwing {
+            return Val::Undef;
+        }
+        if self.class_of(&p) == C_BIGINT {
+            let t = self.big_text(&p);
+            let r = crate::bigint::negate(t.as_str());
+            return self.bigint_val(r.as_str());
+        }
+        let n = self.to_number(&p);
+        Val::Num(-n)
+    }
+
+    /// `v` + d (d 1 or -1) for ++ / --, BigInts too.
+    pub fn inc_val(&mut self, v: Val, d: double) -> Val {
+        if self.class_of(&v) == C_BIGINT {
+            let t = self.big_text(&v);
+            let r = if d > 0.0 { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
+            return self.bigint_val(r.as_str());
+        }
+        let n = match v {
+            Val::Num(x) => x,
+            _ => self.to_number(&v),
+        };
+        Val::Num(n + d)
     }
 
     /// As ic_get for a writable data property, for a set.
@@ -575,49 +822,84 @@ impl Vm {
             return hit;
         }
         let slot = self.find(o, atom);
-        if slot < 0 || self.attr_at(o, slot) != 0 {
+        if slot < 0 || (self.attr_at(o, slot) & (P_READONLY | P_ACCESSOR)) != 0 {
             return -1;
         }
         let nc = self.ic_of(o, slot);
-        self.protos[pi].code[(pc - 1) as usize].c = nc;
+        self.protos[pi].code[(pc - 1) as usize].c = (nc as i32);
         slot
     }
 
 
+    /// The shape that holds shape `sh`'s keys (Shape.kref).
+    #[inline(always)]
+    pub fn holder(&self, sh: int) -> usize {
+        self.shapes[sh as usize].kref as usize
+    }
+
     /// The slot of own property `atom` of `o`, -1 when absent.
-    #[inline]
+    #[inline(always)]
     pub fn find(&self, o: int, atom: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].find(atom)
+        let sh = self.objs[o as usize].shape as int;
+        self.shapes[self.holder(sh)].find(atom, self.shapes[sh as usize].nkeys)
     }
 
     #[inline]
     pub fn nkeys(&self, o: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].keys.len() as int
+        self.shapes[self.objs[o as usize].shape as usize].nkeys
     }
 
     #[inline]
     pub fn key_at(&self, o: int, slot: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].keys[slot as usize]
+        self.shapes[self.holder(self.objs[o as usize].shape as int)].keys[slot as usize]
     }
 
     #[inline]
     pub fn attr_at(&self, o: int, slot: int) -> int {
-        self.shapes[self.objs[o as usize].shape as usize].attrs[slot as usize]
+        self.shapes[self.holder(self.objs[o as usize].shape as int)].attrs[slot as usize]
     }
 
     /// The own keys of `o` in order.
     pub fn keys_of(&self, o: int) -> Vec<int> {
-        self.shapes[self.objs[o as usize].shape as usize].keys.clone()
+        self.shape_keys(self.objs[o as usize].shape as int)
+    }
+
+    /// Shape `sh`'s keys in order.
+    pub fn shape_keys(&self, sh: int) -> Vec<int> {
+        let n = self.shapes[sh as usize].nkeys as usize;
+        let h = &self.shapes[self.holder(sh)];
+        let mut out: Vec<int> = Vec::with_capacity(n);
+        let mut i: usize = 0;
+        while i < n {
+            out.push(h.keys[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// Shape `sh`'s attributes in order.
+    pub fn shape_attrs(&self, sh: int) -> Vec<int> {
+        let n = self.shapes[sh as usize].nkeys as usize;
+        let h = &self.shapes[self.holder(sh)];
+        let mut out: Vec<int> = Vec::with_capacity(n);
+        let mut i: usize = 0;
+        while i < n {
+            out.push(h.attrs[i]);
+            i += 1;
+        }
+        out
     }
 
     /// Adds own property `atom` (absent) to `o`; its slot.
     pub fn add_own(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
-            self.objs[o as usize].vals.push(v);
+            self.shape_epoch += 1;
+            self.push_val(o, v);
+            self.shapes[sh as usize].nkeys += 1;
             return self.shapes[sh as usize].push(atom, attr);
         }
-        let slot = self.shapes[sh as usize].keys.len() as int;
+        let slot = self.shapes[sh as usize].nkeys;
         let mut next: int = -1;
         {
             let s = &self.shapes[sh as usize];
@@ -640,14 +922,27 @@ impl Vm {
             if slot >= SHAPE_MAX {
                 // a dictionary
                 self.own_shape(o);
-                let sh2 = self.objs[o as usize].shape;
-                self.objs[o as usize].vals.push(v);
+                self.shape_epoch += 1;
+                let sh2 = self.objs[o as usize].shape as int;
+                self.push_val(o, v);
+                self.shapes[sh2 as usize].nkeys += 1;
                 return self.shapes[sh2 as usize].push(atom, attr);
             }
-            let mut ns = self.shapes[sh as usize].copy();
-            ns.owned = false;
-            ns.push(atom, attr);
+            let h = self.holder(sh);
             next = self.shapes.len() as int;
+            let mut ns = Shape::new();
+            if (self.shapes[h].keys.len() as int) == slot {
+                // the chain's newest shape: its holder gets the key
+                self.shapes[h].push(atom, attr);
+                ns.kref = h as int;
+            } else {
+                // a branch: a holder of its own
+                ns = self.shapes[h].copy(slot);
+                ns.owned = false;
+                ns.push(atom, attr);
+                ns.kref = next;
+            }
+            ns.nkeys = slot + 1;
             self.shapes.push(ns);
             let s = &mut self.shapes[sh as usize];
             if (s.t_atom.len() as int) < T_LINEAR {
@@ -658,27 +953,38 @@ impl Vm {
                 s.t_map.insert(atom * 16 + attr, next);
             }
         }
-        self.objs[o as usize].shape = next;
-        self.objs[o as usize].vals.push(v);
+        self.objs[o as usize].shape = next as i32;
+        // the chain's holder has as many keys as the most an object on the
+        // chain has got: the values get room for that many at once
+        let most = self.shapes[self.holder(next)].keys.len();
+        grow_vals(&mut self.objs[o as usize].vals, most);
+        self.push_val(o, v);
         slot
     }
 
     /// Gives `o` an owned copy of its shape, to change in place.
     pub fn own_shape(&mut self, o: int) {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
             return;
         }
-        let ns = self.shapes[sh as usize].copy();
+        let n = self.shapes[sh as usize].nkeys;
+        let ns = self.shapes[self.holder(sh)].copy(n);
         let id = if self.free_shapes.is_empty() {
+            let i = self.shapes.len() as int;
+            let mut ns = ns;
+            ns.kref = i;
             self.shapes.push(ns);
-            (self.shapes.len() as int) - 1
+            i
         } else {
             let i = self.free_shapes.pop().unwrap();
+            let mut ns = ns;
+            ns.kref = i;
             self.shapes[i as usize] = ns;
+            self.shape_epoch += 1;
             i
         };
-        self.objs[o as usize].shape = id;
+        self.objs[o as usize].shape = id as i32;
     }
 
     pub fn set_attr(&mut self, o: int, slot: int, attr: int) {
@@ -686,23 +992,26 @@ impl Vm {
             return;
         }
         self.own_shape(o);
-        let sh = self.objs[o as usize].shape;
+        self.shape_epoch += 1;
+        let sh = self.objs[o as usize].shape as int;
         self.shapes[sh as usize].attrs[slot as usize] = attr;
     }
 
     pub fn remove_own(&mut self, o: int, slot: int) {
         self.own_shape(o);
-        let sh = self.objs[o as usize].shape;
+        self.shape_epoch += 1;
+        let sh = self.objs[o as usize].shape as int;
         self.shapes[sh as usize].remove(slot);
-        self.objs[o as usize].vals.remove(slot as usize);
+        self.remove_val(o, slot);
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
     pub fn free_shape(&mut self, o: int) {
-        let sh = self.objs[o as usize].shape;
+        let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
             self.shapes[sh as usize] = Shape::new();
             self.free_shapes.push(sh);
+            self.shape_epoch += 1;
         }
         self.objs[o as usize].shape = 0;
     }
@@ -731,7 +1040,8 @@ impl Vm {
         let mut si: usize = 0;
         while si < self.shapes.len() {
             let mut k: usize = 0;
-            while k < self.shapes[si].keys.len() {
+            // a holder's keys, the whole chain's
+            while self.shapes[si].kref == si as int && k < self.shapes[si].keys.len() {
                 if (self.shapes[si].attrs[k] & (P_READONLY | P_ACCESSOR)) != 0 {
                     let a = self.shapes[si].keys[k];
                     self.mark_setter(a);
@@ -742,8 +1052,547 @@ impl Vm {
         }
     }
 
+    // ---- the string table
+
+    /// An empty string table (handle 0 is "").
+    pub fn reset_strs(&mut self) {
+        self.strs = Vec::new();
+        self.sup = Vec::new();
+        self.slen = Vec::new();
+        self.sflag = Vec::new();
+        self.smark = Vec::new();
+        self.sfree = Vec::new();
+        self.sfreed = Vec::new();
+        self.srcs = Vec::new();
+        self.sinz = Vec::new();
+        self.satom = Vec::new();
+        self.szct = Vec::new();
+        self.snew = 0;
+        self.slimit = self.slimit_min;
+        self.sbytes = 0;
+        self.sbytes_limit = SBYTES_MIN;
+        let e = self.sempty.clone();
+        self.strs.push(e);
+        self.sup.push(-1);
+        self.slen.push(0);
+        self.sflag.push(1);
+        self.smark.push(false);
+        self.srcs.push(0);
+        self.sinz.push(false);
+        self.satom.push(-1);
+    }
+
+    fn new_handle(&mut self, s: Rc<String>, flag: int) -> int {
+        let h = self.take_handle(s.as_bytes().len() as int, flag);
+        self.strs[h as usize] = s;
+        h
+    }
+
+    /// A string handle for `n` bytes of text, its slot holding the box it
+    /// had (a reused one) or the empty string: the caller puts the text in.
+    fn take_handle(&mut self, n: int, flag: int) -> int {
+        if self.strs.is_empty() {
+            self.reset_strs();
+        }
+        self.snew += 1;
+        self.sbytes += n;
+        if self.snew >= self.slimit || self.sbytes >= self.sbytes_limit {
+            self.gc_flag = true;
+        }
+        let h = if !self.sfree.is_empty() {
+            let h = self.sfree.pop().unwrap();
+            let i = h as usize;
+            self.sup[i] = -1;
+            self.slen[i] = 0;
+            self.sflag[i] = flag as i32;
+            self.srcs[i] = 0;
+            self.satom[i] = -1;
+            h
+        } else {
+            let e = self.sempty.clone();
+            self.strs.push(e);
+            self.sup.push(-1);
+            self.slen.push(0);
+            self.sflag.push(flag as i32);
+            self.smark.push(false);
+            self.srcs.push(0);
+            self.sinz.push(false);
+            self.satom.push(-1);
+            (self.strs.len() - 1) as int
+        };
+        // a new string is held by nothing counted yet: reclaim() frees it
+        // unless a root or the heap has it by then
+        self.sinz[h as usize] = flag == 0;
+        if flag == 0 {
+            self.szct.push(h);
+            if (self.szct.len() as int) >= self.szct_limit {
+                self.gc_flag = true;
+            }
+        }
+        h
+    }
+
+    /// One more counted reference to string handle `h`.
+    #[inline]
+    pub fn sinc(&mut self, h: int) {
+        if h > 0 {
+            self.srcs[h as usize] += 1;
+        }
+    }
+
+    /// One counted reference to `h` fewer; at 0 it joins szct.
+    #[inline]
+    pub fn sdec(&mut self, h: int) {
+        if h > 0 {
+            let i = h as usize;
+            self.srcs[i] -= 1;
+            if self.srcs[i] <= 0 && !self.sinz[i] && self.sflag[i] == 0 {
+                self.sinz[i] = true;
+                self.szct.push(h);
+                if (self.szct.len() as int) >= self.szct_limit {
+                    self.gc_flag = true;
+                }
+            }
+        }
+    }
+
+    /// Frees string handle `h` (no count, no root): its buffer goes, and
+    /// the handle its text lay in (a prefix's) loses a reference.
+    fn free_str(&mut self, h: int) {
+        let i = h as usize;
+        let up = self.sup[i];
+        if up < 0 {
+            self.sbytes -= self.strs[i].as_bytes().len() as int;
+            if self.sbytes < 0 {
+                self.sbytes = 0;
+            }
+        }
+        if self.snew > 0 {
+            self.snew -= 1;
+        }
+        rc_vacate(&mut self.strs[i], &self.sempty);
+        self.sup[i] = -1;
+        self.slen[i] = 0;
+        self.sflag[i] = 2;
+        self.sinz[i] = false;
+        self.sfreed.push(h);
+        self.sfree_count += 1;
+        if up >= 0 {
+            self.sdec(up as int);
+        }
+    }
+
+    /// A string value for a shared string.
+    pub fn rc_val(&mut self, s: Rc<String>) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        Val::Str(self.new_handle(s, 0))
+    }
+
+    pub fn str_val(&mut self, s: &str) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        Val::Str(self.new_handle(Rc::new(String::from(s)), 0))
+    }
+
+    pub fn string_val(&mut self, s: String) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        let h = self.take_handle(s.as_bytes().len() as int, 0);
+        rc_refill(&mut self.strs[h as usize], s);
+        Val::Str(h)
+    }
+
+    /// A string value that is never swept (constants, atoms' names).
+    pub fn pin_rc(&mut self, s: Rc<String>) -> Val {
+        if s.is_empty() {
+            return Val::Str(0);
+        }
+        Val::Str(self.new_handle(s, 1))
+    }
+
+    /// The text of string handle `h`.
+    #[inline]
+    pub fn sref(&self, h: int) -> &str {
+        if self.sup[h as usize] < 0 {
+            self.strs[h as usize].as_str()
+        } else {
+            self.sref_up(h)
+        }
+    }
+
+    fn sref_up(&self, h: int) -> &str {
+        let mut x = self.sup[h as usize];
+        while self.sup[x as usize] >= 0 {
+            x = self.sup[x as usize];
+        }
+        jsstr::prefix(self.strs[x as usize].as_str(), self.slen[h as usize] as int)
+    }
+
+    /// String handle `h` as a shared string.
+    #[inline]
+    pub fn sget(&self, h: int) -> Rc<String> {
+        if self.sup[h as usize] < 0 {
+            self.strs[h as usize].clone()
+        } else {
+            Rc::new(String::from(self.sref_up(h)))
+        }
+    }
+
+    /// Handle `h`'s string with `b` appended in h's own buffer, when
+    /// nothing else holds that buffer: the new string's handle (h stays the
+    /// old text, a prefix of it), or -1 and nothing changed.
+    pub fn str_append(&mut self, h: int, b: &str) -> int {
+        let i = h as usize;
+        if h <= 0 || self.sup[i] >= 0 || self.sflag[i] != 0 {
+            return -1;
+        }
+        let n = self.strs[i].as_bytes().len() as int;
+        if !rc_push(&mut self.strs[i], b) {
+            return -1;
+        }
+        let rc = self.strs[i].clone();
+        let e = self.sempty.clone();
+        self.strs[i] = e;
+        let h2 = self.new_handle(rc, 0);
+        // only the appended bytes are new
+        self.sbytes -= n;
+        self.sup[i] = h2 as i32;
+        self.slen[i] = n as i32;
+        // h's text now lies in h2's buffer: h holds h2
+        self.srcs[h2 as usize] += 1;
+        h2
+    }
+
+    /// Links the strings of protos from a compiler (Proto.cstrs): their
+    /// constants and sources become pinned string values.
+    pub fn link_strs(&mut self, p: &mut Proto) {
+        trim_proto(p);
+        let n = p.cstrs.len();
+        if n == 0 {
+            return;
+        }
+        let mut map: Vec<Val> = Vec::new();
+        let mut i: usize = 0;
+        while i < n {
+            let s = p.cstrs[i].clone();
+            map.push(self.pin_rc(s));
+            i += 1;
+        }
+        let nc = p.consts.len();
+        i = 0;
+        while i < nc {
+            if let Val::Str(k) = p.consts[i] {
+                p.consts[i] = map[k as usize];
+            }
+            i += 1;
+        }
+        if let Val::Str(k) = p.src {
+            p.src = map[k as usize];
+        }
+        p.cstrs = Vec::new();
+    }
+
+    /// collect(): marks the strings the roots and the live objects (marked)
+    /// hold, then frees the rest of the table.
+    fn mark_strs(&mut self) {
+        // the counts start again from the heap (as the objects' in trace)
+        let ns = self.strs.len();
+        let mut old: Vec<i32> = Vec::new();
+        if self.rc_check {
+            old = self.srcs.clone();
+        }
+        let mut i: usize = 0;
+        while i < ns {
+            self.srcs[i] = 0;
+            i += 1;
+        }
+        let total = self.objs.len();
+        i = 0;
+        while i < total {
+            if self.objs[i].marked {
+                let p = self.colds[self.objs[i].cold as usize].prim;
+                self.smark_count(p);
+                let nv = self.objs[i].vals.len();
+                let mut j: usize = 0;
+                while j < nv {
+                    let v = self.objs[i].vals[j];
+                    self.smark_count(v);
+                    j += 1;
+                }
+                let ne = self.evecs[self.objs[i].elems as usize].v.len();
+                j = 0;
+                while j < ne {
+                    let v = self.evecs[self.objs[i].elems as usize].v[j];
+                    self.smark_count(v);
+                    j += 1;
+                }
+                let ne2 = self.colds[self.objs[i].cold as usize].elems2.len();
+                j = 0;
+                while j < ne2 {
+                    let v = self.colds[self.objs[i].cold as usize].elems2[j];
+                    self.smark_count(v);
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        let mut roots: Vec<int> = Vec::new();
+        self.smark_roots(&mut roots);
+        // a prefix keeps the handles its text lies in
+        i = 1;
+        while i < ns {
+            if self.smark[i] && self.sup[i] >= 0 {
+                let mut u = self.sup[i];
+                while u >= 0 && !self.smark[u as usize] {
+                    self.smark[u as usize] = true;
+                    u = self.sup[u as usize];
+                }
+            }
+            i += 1;
+        }
+        // and holds a reference to the next one
+        i = 1;
+        while i < ns {
+            if self.smark[i] && self.sup[i] >= 0 {
+                let u = self.sup[i] as usize;
+                self.srcs[u] += 1;
+            }
+            i += 1;
+        }
+        if self.rc_check {
+            i = 1;
+            while i < ns {
+                if self.smark[i] && self.sflag[i] == 2 {
+                    // a freed string is still referenced
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        self.rc_log.push(format!("rc: freed string #{} referenced", i));
+                    }
+                }
+                if self.smark[i] && self.sflag[i] == 0 && i < old.len() && old[i] < self.srcs[i] {
+                    // a reference to a string was not counted
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        let nr = self.srcs[i];
+                        let t = String::from(self.sref(i as int));
+                        self.rc_log.push(format!("rc: low string count {} < {} (#{} {:?})", old[i], nr, i, t));
+                    }
+                }
+                i += 1;
+            }
+        }
+        let nfr = self.sfreed.len();
+        i = 0;
+        while i < nfr {
+            let h = self.sfreed[i];
+            self.sfree.push(h);
+            i += 1;
+        }
+        self.sfreed.clear();
+        self.szct.clear();
+        let mut live: int = 0;
+        let mut bytes: int = 0;
+        i = 1;
+        while i < ns {
+            self.sinz[i] = false;
+            if self.sflag[i] == 0 && !self.smark[i] {
+                rc_vacate(&mut self.strs[i], &self.sempty);
+                self.sup[i] = -1;
+                self.sflag[i] = 2;
+                self.sfreed.push(i as int);
+            } else if self.sflag[i] != 2 {
+                live += 1;
+                bytes += self.strs[i].as_bytes().len() as int;
+                if self.sflag[i] == 0 {
+                    rc_trim(&mut self.strs[i]);
+                }
+                if self.sflag[i] == 0 && self.srcs[i] == 0 {
+                    // held by roots only
+                    self.sinz[i] = true;
+                    self.szct.push(i as int);
+                }
+            }
+            self.smark[i] = false;
+            i += 1;
+        }
+        self.snew = 0;
+        self.slimit = if live > self.slimit_min { live } else { self.slimit_min };
+        self.sbytes = 0;
+        self.sbytes_limit = if bytes > SBYTES_MIN { bytes } else { SBYTES_MIN };
+        self.szct_limit = self.next_szct_limit();
+    }
+
+    /// mark_strs: a heap reference to a string, marked and counted.
+    #[inline]
+    fn smark_count(&mut self, v: Val) {
+        if let Val::Str(h) = v {
+            self.smark[h as usize] = true;
+            if h > 0 {
+                self.srcs[h as usize] += 1;
+            }
+        }
+    }
+
+    /// A root's string marked; `list` gets each handle marked here.
+    #[inline]
+    fn smark_root(&mut self, v: Val, list: &mut Vec<int>) {
+        if let Val::Str(h) = v {
+            if !self.smark[h as usize] {
+                self.smark[h as usize] = true;
+                list.push(h);
+            }
+        }
+    }
+
+    /// Marks the strings the roots hold (not the heap): the stack, the
+    /// frames, the pending exception and jobs, and the machine's tables.
+    fn smark_roots(&mut self, list: &mut Vec<int>) {
+        let n = self.stack.len();
+        let mut i: usize = 0;
+        while i < n {
+            let v = self.stack[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        let nf = self.frames.len();
+        i = 0;
+        while i < nf {
+            let t = self.frames[i].this_val;
+            let nt = self.frames[i].new_target;
+            self.smark_root(t, list);
+            self.smark_root(nt, list);
+            i += 1;
+        }
+        let x = self.exc;
+        self.smark_root(x, list);
+        i = 0;
+        while i < self.temp_roots.len() {
+            let v = self.temp_roots[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.jobs.len() {
+            let v = self.jobs[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        // atom_vals are not scanned: atom_val pins each one (flag 1),
+        // so reclaim_strs never frees them
+        i = 0;
+        while i < self.type_vals.len() {
+            let v = self.type_vals[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.kvals.len() {
+            let v = self.kvals[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+        i = 0;
+        while i < self.regex_shown.len() {
+            let v = self.regex_shown[i];
+            self.smark_root(v, list);
+            i += 1;
+        }
+    }
+
+    /// reclaim(): frees the strings of szct that neither the heap nor a
+    /// root holds, and what only they held (a prefix's next handle).
+    fn reclaim_strs(&mut self) {
+        // handles freed by the last reclaim may be reused now
+        let nfr = self.sfreed.len();
+        let mut i: usize = 0;
+        while i < nfr {
+            let h = self.sfreed[i];
+            self.sfree.push(h);
+            i += 1;
+        }
+        self.sfreed.clear();
+        if self.szct.is_empty() {
+            return;
+        }
+        let mut marked: Vec<int> = Vec::new();
+        self.smark_roots(&mut marked);
+        let mut keep: Vec<int> = Vec::new();
+        while !self.szct.is_empty() {
+            let list = take_ints(&mut self.szct, &mut self.szct_spare);
+            let n = list.len();
+            i = 0;
+            while i < n {
+                let h = list[i];
+                i += 1;
+                let k = h as usize;
+                if !self.sinz[k] {
+                    continue;
+                }
+                self.sinz[k] = false;
+                if self.sflag[k] != 0 || self.srcs[k] > 0 {
+                    continue;
+                }
+                if self.smark[k] {
+                    // a root holds it
+                    self.sinz[k] = true;
+                    keep.push(h);
+                    continue;
+                }
+                self.free_str(h);
+            }
+            give_ints(&mut self.szct_spare, list);
+        }
+        self.szct = keep;
+        let nm = marked.len();
+        i = 0;
+        while i < nm {
+            let h = marked[i] as usize;
+            self.smark[h] = false;
+            i += 1;
+        }
+        self.szct_limit = self.next_szct_limit();
+    }
+
+    fn next_szct_limit(&self) -> int {
+        let n = (self.szct.len() as int) * 2;
+        if n > self.zct_min {
+            n
+        } else {
+            self.zct_min
+        }
+    }
+
     pub fn intern(&mut self, s: &str) -> int {
-        match self.atoms.get(s) {
+        // a direct-mapped cache in front of the map, by a cheap hash of the
+        // length and some of the bytes
+        let n = s.as_bytes().len();
+        let mut h: int = (n as int) & 65535;
+        if n > 0 {
+            h = (h * 31 + (s.as_bytes()[0] as int)) & 65535;
+            h = (h * 31 + (s.as_bytes()[n - 1] as int)) & 65535;
+            h = (h * 31 + (s.as_bytes()[n / 2] as int)) & 65535;
+            if n > 3 {
+                h = (h * 31 + (s.as_bytes()[1] as int)) & 65535;
+                h = (h * 31 + (s.as_bytes()[n - 2] as int)) & 65535;
+            }
+        }
+        let k = (h & 4095) as usize;
+        if self.atom_cache.is_empty() {
+            let mut i = 0;
+            while i < 4096 {
+                self.atom_cache.push(-1);
+                i += 1;
+            }
+        }
+        let c = self.atom_cache[k];
+        if c >= 0 && (c as usize) < self.atom_names.len() && self.atom_names[c as usize].as_str() == s {
+            return c;
+        }
+        let a = match self.atoms.get(s) {
             Some(a) => *a,
             None => {
                 let a = self.atom_names.len() as int;
@@ -751,16 +1600,41 @@ impl Vm {
                 self.atoms.insert(String::from(s), a);
                 a
             }
-        }
+        };
+        self.atom_cache[k] = a;
+        a
     }
 
     /// The name of atom `a` as a string value, shared.
+    /// The kind of key atom `a` is (Vm.atom_kinds).
+    pub fn atom_kind(&mut self, a: int) -> int {
+        while self.atom_kinds.len() <= a as usize {
+            self.atom_kinds.push(0);
+        }
+        let k = self.atom_kinds[a as usize];
+        if k != 0 {
+            return k as int;
+        }
+        let n: int = if self.atom_names[a as usize].starts_with('\u{1}') {
+            4
+        } else if self.symbol_atoms.contains_key(&a) {
+            3
+        } else if jsstr::array_index(self.atom_names[a as usize].as_str()) >= 0 {
+            2
+        } else {
+            1
+        };
+        self.atom_kinds[a as usize] = n as i32;
+        n
+    }
+
     pub fn atom_val(&mut self, a: int) -> Val {
         while self.atom_vals.len() <= a as usize {
             self.atom_vals.push(Val::Undef);
         }
         if let Val::Undef = self.atom_vals[a as usize] {
-            self.atom_vals[a as usize] = str_val(self.atom_names[a as usize].as_str());
+            let rc = Rc::new(self.atom_names[a as usize].clone());
+            self.atom_vals[a as usize] = self.pin_rc(rc);
         }
         self.atom_vals[a as usize].clone()
     }
@@ -768,14 +1642,22 @@ impl Vm {
     /// `typeof v` as a string value, shared.
     pub fn type_val(&mut self, v: &Val) -> Val {
         if self.type_vals.is_empty() {
-            self.type_vals.push(str_val("undefined"));
-            self.type_vals.push(str_val("object"));
-            self.type_vals.push(str_val("boolean"));
-            self.type_vals.push(str_val("number"));
-            self.type_vals.push(str_val("string"));
-            self.type_vals.push(str_val("function"));
-            self.type_vals.push(str_val("symbol"));
-            self.type_vals.push(str_val("bigint"));
+            let sv27 = self.str_val("undefined");
+            self.type_vals.push(sv27);
+            let sv26 = self.str_val("object");
+            self.type_vals.push(sv26);
+            let sv25 = self.str_val("boolean");
+            self.type_vals.push(sv25);
+            let sv24 = self.str_val("number");
+            self.type_vals.push(sv24);
+            let sv23 = self.str_val("string");
+            self.type_vals.push(sv23);
+            let sv22 = self.str_val("function");
+            self.type_vals.push(sv22);
+            let sv21 = self.str_val("symbol");
+            self.type_vals.push(sv21);
+            let sv20 = self.str_val("bigint");
+            self.type_vals.push(sv20);
         }
         let i = self.type_index(v);
         self.type_vals[i].clone()
@@ -791,19 +1673,34 @@ impl Vm {
 
     // ---- allocation
 
-    pub fn alloc(&mut self, class: int, proto: int) -> int {
+    pub fn alloc(&mut self, class: i32, proto: int) -> int {
         self.alloc_count += 1;
-        if !self.free_list.is_empty() {
+        self.made += 1;
+        self.live += 1;
+        if proto >= 0 {
+            self.objs[proto as usize].rc += 1;
+        }
+        let i = if !self.free_list.is_empty() {
             let i = self.free_list.pop().unwrap();
             let o = &mut self.objs[i as usize];
             o.class = class;
-            o.proto = proto;
+            o.proto = proto as i32;
             o.free = false;
             o.marked = false;
-            return i;
+            i
+        } else {
+            grow_objs(&mut self.objs);
+            self.objs.push(JsObj::new(class, proto as i32));
+            (self.objs.len() as int) - 1
+        };
+        if self.rc_on {
+            self.objs[i as usize].zct = true;
+            self.zct.push(i);
         }
-        self.objs.push(JsObj::new(class, proto));
-        (self.objs.len() as int) - 1
+        if self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.made >= self.made_limit {
+            self.gc_flag = true;
+        }
+        i
     }
 
     pub fn new_object(&mut self) -> int {
@@ -814,14 +1711,15 @@ impl Vm {
     pub fn new_array(&mut self, elems: Vec<Val>) -> int {
         let p = self.array_proto;
         let a = self.alloc(C_ARRAY, p);
-        self.objs[a as usize].elems = elems;
+        self.put_elems(a, elems);
         a
     }
 
     pub fn new_error(&mut self, proto: int, msg: &str) -> int {
         let e = self.alloc(C_ERROR, proto);
         if !msg.is_empty() {
-            self.add_own(e, A_MESSAGE, str_val(msg), P_HIDDEN);
+            let sv19 = self.str_val(msg);
+            self.add_own(e, A_MESSAGE, sv19, P_HIDDEN);
         }
         self.add_stack(e);
         e
@@ -837,11 +1735,11 @@ impl Vm {
             return;
         }
         let name = match &nv {
-            Val::Str(s) => s.as_str().to_string(),
+            Val::Str(s) => self.sref(*s).to_string(),
             _ => String::from("Error"),
         };
         let msg = match &mv {
-            Val::Str(s) => s.as_str().to_string(),
+            Val::Str(s) => self.sref(*s).to_string(),
             _ => String::new(),
         };
         let mut text = if msg.is_empty() { name } else if name.is_empty() { msg } else { format!("{}: {}", name, msg) };
@@ -861,7 +1759,8 @@ impl Vm {
             }
             k -= 1;
         }
-        self.add_own(e, A_STACK, string_val(text), P_HIDDEN);
+        let sv14 = self.string_val(text);
+        self.add_own(e, A_STACK, sv14, P_HIDDEN);
     }
 
     pub fn throw_val(&mut self, v: Val) {
@@ -901,7 +1800,7 @@ impl Vm {
 
     // ---- conversions
 
-    pub fn class_of(&self, v: &Val) -> int {
+    pub fn class_of(&self, v: &Val) -> i32 {
         match v {
             Val::Obj(o) => self.objs[*o as usize].class,
             _ => -1,
@@ -975,7 +1874,8 @@ impl Vm {
             return Val::Undef;
         }
         if self.is_callable(&tp) {
-            let r = self.call_value(tp, v.clone(), vec![str_val(hint)]);
+            let sv18 = self.str_val(hint);
+            let r = self.call_fixed(tp, v.clone(), 1, sv18, Val::Undef, Val::Undef);
             if self.throwing {
                 return Val::Undef;
             }
@@ -992,7 +1892,7 @@ impl Vm {
                 return Val::Undef;
             }
             if self.is_callable(&f) {
-                let r = self.call_value(f, v.clone(), Vec::new());
+                let r = self.call_fixed(f, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                 if self.throwing {
                     return Val::Undef;
                 }
@@ -1017,7 +1917,7 @@ impl Vm {
                     0.0
                 }
             }
-            Val::Str(s) => string_to_number(s.as_str()),
+            Val::Str(s) => string_to_number(self.sref(*s)),
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_SYMBOL {
                     self.throw_type("Cannot convert a Symbol value to a number");
@@ -1038,7 +1938,7 @@ impl Vm {
 
     pub fn to_str(&mut self, v: &Val) -> Rc<String> {
         match v {
-            Val::Str(s) => s.clone(),
+            Val::Str(s) => self.sget(*s),
             Val::Num(n) => Rc::new(number_to_string(*n)),
             Val::Undef => Rc::new(String::from("undefined")),
             Val::Null => Rc::new(String::from("null")),
@@ -1049,8 +1949,8 @@ impl Vm {
                     return Rc::new(String::new());
                 }
                 if self.objs[*o as usize].class == C_BIGINT {
-                    if let Val::Str(s) = &self.objs[*o as usize].prim {
-                        return s.clone();
+                    if let Val::Str(s) = self.colds[self.objs[*o as usize].cold as usize].prim {
+                        return self.sget(s);
                     }
                 }
                 let p = self.to_primitive(v, "string");
@@ -1073,14 +1973,14 @@ impl Vm {
                 if self.objs[*o as usize].class == C_BIGINT {
                     let p = self.bigint_proto;
                     let b = self.alloc(C_OBJECT, p);
-                    self.objs[b as usize].prim = v.clone();
+                    self.put_prim(b, v.clone());
                     return b;
                 }
                 if self.objs[*o as usize].class == C_SYMBOL {
                     // a Symbol object: the symbol in prim
                     let p = self.symbol_proto;
                     let b = self.alloc(C_OBJECT, p);
-                    self.objs[b as usize].prim = v.clone();
+                    self.put_prim(b, v.clone());
                     return b;
                 }
                 *o
@@ -1092,19 +1992,19 @@ impl Vm {
             Val::Bool(_) => {
                 let p = self.boolean_proto;
                 let o = self.alloc(C_BOOLEAN, p);
-                self.objs[o as usize].prim = v.clone();
+                self.put_prim(o, v.clone());
                 o
             }
             Val::Num(_) => {
                 let p = self.number_proto;
                 let o = self.alloc(C_NUMBER, p);
-                self.objs[o as usize].prim = v.clone();
+                self.put_prim(o, v.clone());
                 o
             }
             Val::Str(_) => {
                 let p = self.string_proto;
                 let o = self.alloc(C_STRING, p);
-                self.objs[o as usize].prim = v.clone();
+                self.put_prim(o, v.clone());
                 o
             }
         }
@@ -1113,7 +2013,7 @@ impl Vm {
     pub fn strict_equals(&self, a: &Val, b: &Val) -> bool {
         match (a, b) {
             (Val::Num(x), Val::Num(y)) => x == y,
-            (Val::Str(x), Val::Str(y)) => x.as_str() == y.as_str(),
+            (Val::Str(x), Val::Str(y)) => x == y || self.sref(*x) == self.sref(*y),
             (Val::Undef, Val::Undef) => true,
             (Val::Null, Val::Null) => true,
             (Val::Bool(x), Val::Bool(y)) => x == y,
@@ -1150,7 +2050,7 @@ impl Vm {
             (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => return true,
             (Val::Undef, _) | (Val::Null, _) | (_, Val::Undef) | (_, Val::Null) => return false,
             (Val::Num(x), Val::Num(y)) => return x == y,
-            (Val::Str(x), Val::Str(y)) => return x.as_str() == y.as_str(),
+            (Val::Str(x), Val::Str(y)) => return x == y || self.sref(*x) == self.sref(*y),
             (Val::Bool(x), Val::Bool(y)) => return x == y,
             (Val::Obj(x), Val::Obj(y)) => {
                 if x == y {
@@ -1180,8 +2080,8 @@ impl Vm {
             return self.loose_equals(a, &n);
         }
         match (a, b) {
-            (Val::Num(x), Val::Str(s)) => return *x == string_to_number(s.as_str()),
-            (Val::Str(s), Val::Num(y)) => return string_to_number(s.as_str()) == *y,
+            (Val::Num(x), Val::Str(s)) => return *x == string_to_number(self.sref(*s)),
+            (Val::Str(s), Val::Num(y)) => return string_to_number(self.sref(*s)) == *y,
             _ => {}
         }
         if (self.class_of(a) == C_BIGINT) != (self.class_of(b) == C_BIGINT) && !(is_obj(a) && self.class_of(a) != C_BIGINT) && !(is_obj(b) && self.class_of(b) != C_BIGINT) {
@@ -1228,16 +2128,23 @@ impl Vm {
                 (-1, a)
             }
             Val::Str(s) => {
-                let i = jsstr::array_index(s.as_str());
+                let h = *s as usize;
+                let known = self.satom[h];
+                if known >= 0 {
+                    return (-1, known as int);
+                }
+                let i = jsstr::array_index(self.sref(*s));
                 if i >= 0 {
                     return (i, -1);
                 }
-                let a = self.intern(s.as_str());
+                let t = self.sget(*s);
+                let a = self.intern(t.as_str());
+                self.satom[h] = a as i32;
                 (-1, a)
             }
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_SYMBOL {
-                    return (-1, self.objs[*o as usize].pos);
+                    return (-1, self.objs[*o as usize].pos as int);
                 }
                 let p = self.to_primitive(k, "string");
                 if self.throwing {
@@ -1258,10 +2165,14 @@ impl Vm {
         self.intern(s.as_str())
     }
 
-    pub fn key_val(&self, a: int) -> Val {
+    pub fn key_val(&mut self, a: int) -> Val {
+        if self.atom_kind(a) != 3 {
+            // not a symbol's atom (kept per atom): no table lookup
+            return self.atom_val(a);
+        }
         match self.symbol_atoms.get(&a) {
             Some(sym) => Val::Obj(*sym),
-            None => str_val(self.atom_names[a as usize].as_str()),
+            None => self.atom_val(a),
         }
     }
 
@@ -1270,7 +2181,7 @@ impl Vm {
     pub fn function_prototype(&mut self, f: int) -> Val {
         // made on first use; a generator's instances inherit from it and it
         // from %GeneratorPrototype%, with no `constructor`
-        let pi = self.objs[f as usize].func;
+        let pi = self.objs[f as usize].func as int;
         let generator = self.objs[f as usize].class == C_FUNCTION && self.protos[pi as usize].generator;
         let proto = if generator && self.protos[pi as usize].is_async {
             self.async_generator_proto
@@ -1284,13 +2195,13 @@ impl Vm {
             self.add_own(p, A_CONSTRUCTOR, Val::Obj(f), P_HIDDEN);
         }
         self.add_own(f, A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_FIXED);
-        self.objs[f as usize].has_proto_obj = true;
         Val::Obj(p)
     }
 
     /// A function with a `prototype` of its own that is not made yet.
     pub fn lazy_prototype(&self, f: int) -> bool {
-        if self.objs[f as usize].has_proto_obj {
+        // made (or set): an own property
+        if self.find(f, A_PROTOTYPE) >= 0 {
             return false;
         }
         let p = &self.protos[self.objs[f as usize].func as usize];
@@ -1301,14 +2212,15 @@ impl Vm {
     fn function_own(&mut self, f: int, atom: int) -> Val {
         let class = self.objs[f as usize].class;
         if class == C_FUNCTION {
-            let pi = self.objs[f as usize].func;
+            let pi = self.objs[f as usize].func as int;
             if atom == A_LENGTH {
                 return Val::Num(self.protos[pi as usize].length as double);
             }
             if atom == A_NAME {
-                return str_val(self.protos[pi as usize].name.as_str());
+                let nm = self.protos[pi as usize].name.clone();
+                return self.string_val(nm);
             }
-            if atom == A_PROTOTYPE && !self.objs[f as usize].has_proto_obj {
+            if atom == A_PROTOTYPE && self.find(f, A_PROTOTYPE) < 0 {
                 let p = &self.protos[pi as usize];
                 if p.generator || p.constructible() {
                     return self.function_prototype(f);
@@ -1316,15 +2228,15 @@ impl Vm {
             }
         } else if class == C_BOUND {
             if atom == A_NAME {
-                let t = self.objs[f as usize].env;
+                let t = self.objs[f as usize].env as int;
                 let n = self.get_obj(t, A_NAME, &Val::Obj(t));
                 let s = self.to_string(&n);
-                return string_val(format!("bound {}", s));
+                return self.string_val(format!("bound {}", s));
             }
             if atom == A_LENGTH {
-                let t = self.objs[f as usize].env;
+                let t = self.objs[f as usize].env as int;
                 let l = self.get_obj(t, A_LENGTH, &Val::Obj(t));
-                let n = self.to_number(&l) - (self.objs[f as usize].elems.len() as double);
+                let n = self.to_number(&l) - (self.evecs[self.objs[f as usize].elems as usize].v.len() as double);
                 return Val::Num(if n < 0.0 { 0.0 } else { n });
             }
         }
@@ -1341,9 +2253,9 @@ impl Vm {
                 let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
-                    let g = self.objs[pair as usize].elems[0].clone();
+                    let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
                     if self.is_callable(&g) {
-                        return self.call_value(g, receiver.clone(), Vec::new());
+                        return self.call_fixed(g, receiver.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                     }
                     return Val::Undef;
                 }
@@ -1352,11 +2264,10 @@ impl Vm {
             let class = self.objs[cur as usize].class;
             if class != C_OBJECT {
                 if class == C_PROXY {
-                    let k = self.key_val(atom);
-                    return self.proxy_call(cur, PH_GET, vec![k, receiver.clone()]);
+                    return self.proxy_get_atom(cur, atom, receiver.clone());
                 }
                 if (class == C_ARRAY || class == C_ARGUMENTS) && atom == A_LENGTH {
-                    return Val::Num(self.objs[cur as usize].elems.len() as double);
+                    return Val::Num(self.evecs[self.objs[cur as usize].elems as usize].v.len() as double);
                 }
                 if class == C_FUNCTION || class == C_BOUND {
                     if atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE {
@@ -1367,12 +2278,13 @@ impl Vm {
                     }
                 }
                 if class == C_STRING && atom == A_LENGTH {
-                    if let Val::Str(s) = self.objs[cur as usize].prim.clone() {
+                    if let Val::Str(s) = self.colds[self.objs[cur as usize].cold as usize].prim.clone() {
+                        let s = self.sget(s.clone());
                         return Val::Num(self.str_len(&s) as double);
                     }
                 }
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
             hops += 1;
             if hops > 10000 {
                 break;
@@ -1386,7 +2298,8 @@ impl Vm {
             Val::Obj(o) => self.get_obj(*o, atom, v),
             Val::Str(s) => {
                 if atom == A_LENGTH {
-                    return Val::Num(self.str_len(s) as double);
+                    let s = self.sget(*s);
+                    return Val::Num(self.str_len(&s) as double);
                 }
                 let p = self.string_proto;
                 self.get_obj(p, atom, v)
@@ -1413,8 +2326,8 @@ impl Vm {
             Val::Obj(o) => {
                 let ob = &self.objs[*o as usize];
                 if ob.class == C_ARRAY || ob.class == C_ARGUMENTS {
-                    if i < ob.elems.len() as int {
-                        return ob.elems[i as usize].clone();
+                    if i < self.evecs[ob.elems as usize].v.len() as int {
+                        return self.evecs[ob.elems as usize].v[i as usize].clone();
                     }
                     // an index far past the end is a property (set_index)
                     if ob.class == C_ARRAY && ob.shape == 0 {
@@ -1423,10 +2336,11 @@ impl Vm {
                 }
                 let class = ob.class;
                 if class == C_STRING {
-                    if let Val::Str(s) = ob.prim.clone() {
+                    if let Val::Str(s) = self.colds[ob.cold as usize].prim.clone() {
+                        let s = self.sget(s.clone());
                         let c = self.str_at(&s, i);
                         if c >= 0 {
-                            return string_val(jsstr::from_unit(c));
+                            return self.string_val(jsstr::from_unit(c));
                         }
                     }
                 }
@@ -1437,9 +2351,10 @@ impl Vm {
                 self.get_obj(*o, a, v)
             }
             Val::Str(s) => {
-                let c = self.str_at(s, i);
+                let s = self.sget(s.clone());
+                let c = self.str_at(&s, i);
                 if c >= 0 {
-                    return string_val(jsstr::from_unit(c));
+                    return self.string_val(jsstr::from_unit(c));
                 }
                 Val::Undef
             }
@@ -1474,20 +2389,20 @@ impl Vm {
     }
 
     /// A proxy up o's prototype chain (a write that misses goes to its trap).
-    fn proxy_on_chain(&self, o: int) -> bool {
-        let mut cur = self.objs[o as usize].proto;
+    pub fn proxy_on_chain(&self, o: int) -> bool {
+        let mut cur = self.objs[o as usize].proto as int;
         while cur >= 0 {
             if self.objs[cur as usize].class == C_PROXY {
                 return true;
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         false
     }
 
     fn setter_on_chain(&mut self, o: int, atom: int, v: &Val, receiver: &Val) -> bool {
         // true when an accessor or read-only property up the chain took it
-        let mut cur = self.objs[o as usize].proto;
+        let mut cur = self.objs[o as usize].proto as int;
         while cur >= 0 {
             if self.objs[cur as usize].class == C_PROXY {
                 let k = self.key_val(atom);
@@ -1499,9 +2414,9 @@ impl Vm {
                 let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
-                    let s = self.objs[pair as usize].elems[1].clone();
+                    let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                     if self.is_callable(&s) {
-                        self.call_value(s, receiver.clone(), vec![v.clone()]);
+                        self.call_fixed(s, receiver.clone(), 1, v.clone(), Val::Undef, Val::Undef);
                     } else if self.strict_now() {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("Cannot set property {} of #<Object> which has only a getter", n).as_str());
@@ -1517,15 +2432,14 @@ impl Vm {
                 }
                 return false;
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         false
     }
 
     pub fn set_obj(&mut self, o: int, atom: int, v: Val) {
         if self.objs[o as usize].class == C_PROXY {
-            let k = self.key_val(atom);
-            let ok = self.proxy_bool(o, PH_SET, vec![k, v, Val::Obj(o)]);
+            let ok = self.proxy_set_atom(o, atom, v, Val::Obj(o));
             if !ok && !self.throwing && self.strict_now() {
                 let n = self.atom_str(atom);
                 self.throw_type(format!("'set' on proxy: trap returned falsish for property '{}'", n).as_str());
@@ -1536,14 +2450,14 @@ impl Vm {
         if slot >= 0 {
             let attr = self.attr_at(o, slot);
             if attr == 0 {
-                self.objs[o as usize].vals[slot as usize] = v;
+                self.put_slot(o, slot, v);
                 return;
             }
             if (attr & P_ACCESSOR) != 0 {
                 let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
-                let s = self.objs[pair as usize].elems[1].clone();
+                let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                 if self.is_callable(&s) {
-                    self.call_value(s, Val::Obj(o), vec![v]);
+                    self.call_fixed(s, Val::Obj(o), 1, v, Val::Undef, Val::Undef);
                 } else if self.strict_now() {
                     let n = self.atom_str(atom);
                     self.throw_type(format!("Cannot set property {} of #<Object> which has only a getter", n).as_str());
@@ -1557,7 +2471,7 @@ impl Vm {
                 }
                 return;
             }
-            self.objs[o as usize].vals[slot as usize] = v;
+            self.put_slot(o, slot, v);
             return;
         }
         let class = self.objs[o as usize].class;
@@ -1580,9 +2494,6 @@ impl Vm {
             }
             return;
         }
-        if (class == C_FUNCTION || class == C_BOUND) && atom == A_PROTOTYPE {
-            self.objs[o as usize].has_proto_obj = true;
-        }
         self.add_own(o, atom, v, 0);
     }
 
@@ -1600,21 +2511,21 @@ impl Vm {
             return;
         }
         let len = n as int;
-        let cur = self.objs[o as usize].elems.len() as int;
+        let cur = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
         if len > cur + 100000000 {
             // elements are stored densely: a length this far out is refused
             self.throw_range("Invalid array length");
             return;
         }
         if len < cur {
-            self.objs[o as usize].elems.truncate(len as usize);
-            if self.objs[o as usize].elems2.len() > len as usize {
-                self.objs[o as usize].elems2.truncate(len as usize);
+            self.cut_elems(o, len);
+            if self.colds[self.objs[o as usize].cold as usize].elems2.len() > len as usize {
+                self.cut_elems2(o, len);
             }
         } else {
             let mut i = cur;
             while i < len {
-                self.objs[o as usize].elems.push(Val::Undef);
+                self.push_elem(o, Val::Undef);
                 i += 1;
             }
             let mut h = cur;
@@ -1649,7 +2560,7 @@ impl Vm {
             return;
         }
         if class == C_ARRAY || class == C_ARGUMENTS {
-            let len = self.objs[o as usize].elems.len() as int;
+            let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
             if i < len {
                 if class == C_ARRAY && self.objs[o as usize].pos == 2 {
                     // a frozen array's elements are read-only
@@ -1658,8 +2569,8 @@ impl Vm {
                     }
                     return;
                 }
-                self.objs[o as usize].elems[i as usize] = v;
-                if class == C_ARRAY && !self.objs[o as usize].elems2.is_empty() {
+                self.put_elem(o, i, v);
+                if class == C_ARRAY && !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() {
                     self.clear_hole(o, i);
                 }
                 return;
@@ -1667,10 +2578,10 @@ impl Vm {
             if class == C_ARRAY && self.objs[o as usize].extensible && i < len + 50000000 {
                 let mut k = len;
                 while k < i {
-                    self.objs[o as usize].elems.push(Val::Undef);
+                    self.push_elem(o, Val::Undef);
                     k += 1;
                 }
-                self.objs[o as usize].elems.push(v);
+                self.push_elem(o, v);
                 if i > len {
                     let mut h = len;
                     while h < i {
@@ -1716,7 +2627,7 @@ impl Vm {
     pub fn define(&mut self, o: int, atom: int, v: Val, attr: int) {
         let slot = self.find(o, atom);
         if slot >= 0 {
-            self.objs[o as usize].vals[slot as usize] = v;
+            self.put_slot(o, slot, v);
             self.set_attr(o, slot, attr);
         } else {
             self.add_own(o, atom, v, attr);
@@ -1724,10 +2635,6 @@ impl Vm {
         if (attr & P_READONLY) != 0 {
             self.any_setter = true;
             self.mark_setter(atom);
-        }
-        let class = self.objs[o as usize].class;
-        if (class == C_FUNCTION || class == C_BOUND) && atom == A_PROTOTYPE {
-            self.objs[o as usize].has_proto_obj = true;
         }
     }
 
@@ -1755,30 +2662,31 @@ impl Vm {
         }
         if pair < 0 {
             pair = self.alloc(C_ACCESSOR, -1);
-            self.objs[pair as usize].elems = vec![Val::Undef, Val::Undef];
+            self.put_elems(pair, vec![Val::Undef, Val::Undef]);
             let attr = P_ACCESSOR | if hidden { P_HIDDEN } else { 0 };
             if slot >= 0 {
-                self.objs[o as usize].vals[slot as usize] = Val::Obj(pair);
+                self.put_slot(o, slot, Val::Obj(pair));
                 self.set_attr(o, slot, attr);
             } else {
                 self.add_own(o, atom, Val::Obj(pair), attr);
             }
         }
-        self.objs[pair as usize].elems[which as usize] = f;
+        self.put_elem(pair, which, f);
     }
 
     pub fn has_property(&mut self, o: int, k: &Val) -> bool {
         let (i, a) = self.to_key(k);
         if i >= 0 {
             let class = self.objs[o as usize].class;
-            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int && !self.is_hole(o, i) {
+            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                 return true;
             }
             if class == C_TYPED {
                 return i < self.ta_length(o);
             }
             if class == C_STRING {
-                if let Val::Str(s) = &self.objs[o as usize].prim {
+                if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
+                    let s = self.sget(s.clone());
                     if i < jsstr::len(s.as_str()) {
                         return true;
                     }
@@ -1813,7 +2721,7 @@ impl Vm {
                     return true;
                 }
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         false
     }
@@ -1822,14 +2730,15 @@ impl Vm {
         let (i, a) = self.to_key(k);
         let class = self.objs[o as usize].class;
         if i >= 0 {
-            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.objs[o as usize].elems.len() as int && !self.is_hole(o, i) {
+            if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                 return true;
             }
             if class == C_TYPED {
                 return i < self.ta_length(o);
             }
             if class == C_STRING {
-                if let Val::Str(s) = &self.objs[o as usize].prim {
+                if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
+                    let s = self.sget(s.clone());
                     if i < jsstr::len(s.as_str()) {
                         return true;
                     }
@@ -1868,12 +2777,12 @@ impl Vm {
             return ok;
         }
         if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) {
-            let len = self.objs[o as usize].elems.len() as int;
+            let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
             if i < len {
                 if i == len - 1 && class == C_ARGUMENTS {
-                    self.objs[o as usize].elems.pop();
+                    self.pop_elem(o);
                 } else {
-                    self.objs[o as usize].elems[i as usize] = Val::Undef;
+                    self.put_elem(o, i, Val::Undef);
                     if class == C_ARRAY {
                         self.mark_hole(o, i);
                     }
@@ -1905,21 +2814,22 @@ impl Vm {
             return self.proxy_keys(o, !include_hidden, symbols);
         }
         if class == C_ARRAY || class == C_ARGUMENTS {
-            let n = self.objs[o as usize].elems.len();
+            let n = self.evecs[self.objs[o as usize].elems as usize].v.len();
             let mut i: usize = 0;
             while i < n {
                 if !self.is_hole(o, i as int) {
-                    out.push(string_val(format!("{}", i)));
+                    out.push(self.string_val(format!("{}", i)));
                 }
                 i += 1;
             }
         }
         if class == C_STRING {
-            if let Val::Str(s) = &self.objs[o as usize].prim {
+            if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
+                let s = self.sget(s.clone());
                 let n = jsstr::len(s.as_str());
                 let mut i: int = 0;
                 while i < n {
-                    out.push(string_val(format!("{}", i)));
+                    out.push(self.string_val(format!("{}", i)));
                     i += 1;
                 }
             }
@@ -1928,27 +2838,31 @@ impl Vm {
             let n = self.ta_length(o);
             let mut i: int = 0;
             while i < n {
-                out.push(string_val(format!("{}", i)));
+                out.push(self.string_val(format!("{}", i)));
                 i += 1;
             }
         }
-        let keys = self.keys_of(o);
-        let attrs = self.shapes[self.objs[o as usize].shape as usize].attrs.clone();
+        // the keys are read from the shape in place: atom_kind only reads
+        let sh = self.objs[o as usize].shape as int;
+        let nk = self.shapes[sh as usize].nkeys as usize;
+        let hk = self.holder(sh);
         let mut ints: Vec<int> = Vec::new();
-        let mut others: Vec<int> = Vec::new();
+        let mut others: Vec<int> = Vec::with_capacity(nk);
+        reserve_vals(&mut out, nk);
         let mut syms: Vec<int> = Vec::new();
         let mut k: usize = 0;
-        while k < keys.len() {
-            let a = keys[k];
-            if (attrs[k] & P_HIDDEN) != 0 && !include_hidden {
+        while k < nk {
+            let a = self.shapes[hk].keys[k];
+            if (self.shapes[hk].attrs[k] & P_HIDDEN) != 0 && !include_hidden {
                 k += 1;
                 continue;
             }
-            if self.atom_names[a as usize].starts_with('\u{1}') {
+            let kind = self.atom_kind(a);
+            if kind == 4 {
                 // a private name: never a key
-            } else if self.symbol_atoms.contains_key(&a) {
+            } else if kind == 3 {
                 syms.push(a);
-            } else if jsstr::array_index(self.atom_names[a as usize].as_str()) >= 0 {
+            } else if kind == 2 {
                 ints.push(a);
             } else {
                 others.push(a);
@@ -2003,11 +2917,13 @@ impl Vm {
             let mut vis: HashMap<String, bool> = HashMap::new();
             for v in visible.iter() {
                 if let Val::Str(s) = v {
+                    let s = self.sget(s.clone());
                     vis.insert(s.as_ref().clone(), true);
                 }
             }
             for v in all {
                 if let Val::Str(s) = &v {
+                    let s = self.sget(s.clone());
                     let key = s.as_ref().clone();
                     if seen.contains_key(&key) {
                         continue;
@@ -2020,7 +2936,7 @@ impl Vm {
             }
             let _ = first;
             first = false;
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         out
     }
@@ -2031,13 +2947,13 @@ impl Vm {
         if self.objs[o as usize].class == C_PROXY {
             return false;
         }
-        let mut cur = self.objs[o as usize].proto;
+        let mut cur = self.objs[o as usize].proto as int;
         while cur >= 0 {
             let c = self.objs[cur as usize].class;
             if c == C_PROXY || c == C_STRING || c == C_TYPED {
                 return false;
             }
-            if (c == C_ARRAY || c == C_ARGUMENTS) && !self.objs[cur as usize].elems.is_empty() {
+            if (c == C_ARRAY || c == C_ARGUMENTS) && !self.evecs[self.objs[cur as usize].elems as usize].v.is_empty() {
                 return false;
             }
             let n = self.nkeys(cur) as usize;
@@ -2055,7 +2971,7 @@ impl Vm {
                 }
                 k += 1;
             }
-            cur = self.objs[cur as usize].proto;
+            cur = self.objs[cur as usize].proto as int;
         }
         true
     }
@@ -2068,7 +2984,7 @@ impl Vm {
         let fo = obj_of(f);
         let hi = self.get_obj(fo, A_HASINSTANCE, f);
         if self.is_callable(&hi) && self.objs[obj_of(&hi) as usize].class != C_NATIVE {
-            let r = self.call_value(hi, f.clone(), vec![v.clone()]);
+            let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef, Val::Undef);
             return truthy(&r);
         }
         if !self.is_callable(f) {
@@ -2077,7 +2993,7 @@ impl Vm {
         }
         let mut target = fo;
         while self.objs[target as usize].class == C_BOUND {
-            target = self.objs[target as usize].env;
+            target = self.objs[target as usize].env as int;
         }
         let o = match v {
             Val::Obj(o) => *o,
@@ -2107,7 +3023,7 @@ impl Vm {
             let p = self.proxy_call(o, PH_GETPROTO, Vec::new());
             return obj_of(&p);
         }
-        self.objs[o as usize].proto
+        self.objs[o as usize].proto as int
     }
 
     // ---- arithmetic helpers
@@ -2116,10 +3032,39 @@ impl Vm {
         match (a, b) {
             (Val::Num(x), Val::Num(y)) => return Val::Num(x + y),
             (Val::Str(x), Val::Str(y)) => {
-                let mut s = String::new();
-                s.push_str(x.as_str());
-                s.push_str(y.as_str());
-                return string_val(s);
+                if *x == 0 {
+                    return Val::Str(*y);
+                }
+                if *y == 0 {
+                    return Val::Str(*x);
+                }
+                let n = self.sref(*x).as_bytes().len() + self.sref(*y).as_bytes().len();
+                let h = self.take_handle(n as int, 0);
+                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
+                s.push_str(self.sref(*x));
+                s.push_str(self.sref(*y));
+                rc_refill(&mut self.strs[h as usize], s);
+                return Val::Str(h);
+            }
+            (Val::Str(x), Val::Num(y)) => {
+                let t = number_to_string(*y);
+                let n = self.sref(*x).as_bytes().len() + t.as_bytes().len();
+                let h = self.take_handle(n as int, 0);
+                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
+                s.push_str(self.sref(*x));
+                s.push_str(t.as_str());
+                rc_refill(&mut self.strs[h as usize], s);
+                return Val::Str(h);
+            }
+            (Val::Num(x), Val::Str(y)) => {
+                let t = number_to_string(*x);
+                let n = t.as_bytes().len() + self.sref(*y).as_bytes().len();
+                let h = self.take_handle(n as int, 0);
+                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
+                s.push_str(t.as_str());
+                s.push_str(self.sref(*y));
+                rc_refill(&mut self.strs[h as usize], s);
+                return Val::Str(h);
             }
             _ => {}
         }
@@ -2140,7 +3085,7 @@ impl Vm {
             let mut s = String::new();
             s.push_str(x.as_str());
             s.push_str(y.as_str());
-            return string_val(s);
+            return self.string_val(s);
         }
         if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
             return self.big_arith(OP_ADD, &pa, &pb);
@@ -2167,7 +3112,7 @@ impl Vm {
             return -1;
         }
         if let (Val::Str(x), Val::Str(y)) = (&pa, &pb) {
-            return if jsstr::compare(x.as_str(), y.as_str()) < 0 { 1 } else { 0 };
+            return if jsstr::compare(self.sref(*x), self.sref(*y)) < 0 { 1 } else { 0 };
         }
         if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
             return self.big_less(&pa, &pb);
@@ -2269,7 +3214,7 @@ impl Vm {
             }
             return self.stack.pop().unwrap();
         }
-        self.call_value(f.clone(), Val::Undef, vec![a.clone(), b.clone()])
+        self.call_fixed(f.clone(), Val::Undef, 2, a.clone(), b.clone(), Val::Undef)
     }
 
     pub fn call_value(&mut self, f: Val, this: Val, args: Vec<Val>) -> Val {
@@ -2280,13 +3225,13 @@ impl Vm {
         }
         let class = self.objs[fo as usize].class;
         if class == C_NATIVE {
-            let id = self.objs[fo as usize].func;
-            return self.call_native(id, fo, this, args, false, Val::Undef);
+            let id = self.objs[fo as usize].func as int;
+            return self.call_native(id, fo, this, &args, false, Val::Undef);
         }
         if class == C_BOUND {
-            let target = self.objs[fo as usize].env;
-            let bthis = self.objs[fo as usize].prim.clone();
-            let mut all = self.objs[fo as usize].elems.clone();
+            let target = self.objs[fo as usize].env as int;
+            let bthis = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
+            let mut all = self.evecs[self.objs[fo as usize].elems as usize].v.clone();
             for a in args {
                 all.push(a);
             }
@@ -2309,7 +3254,48 @@ impl Vm {
         self.native_depth += 1;
         self.run(base);
         self.native_depth -= 1;
-        if self.throwing {
+        if self.throwing || self.suspended {
+            return Val::Undef;
+        }
+        self.stack.pop().unwrap()
+    }
+
+    /// call_value with up to three arguments (n of a, b, c) and no list
+    /// made for them when f is a compiled function.
+    pub fn call_fixed(&mut self, f: Val, this: Val, n: int, a: Val, b: Val, c: Val) -> Val {
+        let fo = obj_of(&f);
+        if fo < 0 || self.objs[fo as usize].class != C_FUNCTION {
+            let mut args: Vec<Val> = Vec::new();
+            if n > 0 {
+                args.push(a);
+            }
+            if n > 1 {
+                args.push(b);
+            }
+            if n > 2 {
+                args.push(c);
+            }
+            return self.call_value(f, this, args);
+        }
+        let base = self.frames.len() as int;
+        self.stack.push(f);
+        self.stack.push(this);
+        if n > 0 {
+            self.stack.push(a);
+        }
+        if n > 1 {
+            self.stack.push(b);
+        }
+        if n > 2 {
+            self.stack.push(c);
+        }
+        if !self.enter_function(fo, n, false, Val::Undef) {
+            return Val::Undef;
+        }
+        self.native_depth += 1;
+        self.run(base);
+        self.native_depth -= 1;
+        if self.throwing || self.suspended {
             return Val::Undef;
         }
         self.stack.pop().unwrap()
@@ -2319,7 +3305,20 @@ impl Vm {
     /// the script's own frames are safe points for the collector.
     pub fn run_program(&mut self, f: Val, this: Val) -> Val {
         self.native_depth -= 1;
-        let r = self.call_value(f, this, Vec::new());
+        let r = self.call_fixed(f, this, 0, Val::Undef, Val::Undef, Val::Undef);
+        self.native_depth += 1;
+        r
+    }
+
+    /// A call from the host, with no native code under it (native_depth
+    /// 0): the frames it runs are safe points, so what it leaves behind is
+    /// reclaimed while it runs. Inside a native call it is call_value.
+    pub fn call_top(&mut self, f: Val, this: Val, args: Vec<Val>) -> Val {
+        if self.native_depth != 0 {
+            return self.call_value(f, this, args);
+        }
+        self.native_depth -= 1;
+        let r = self.call_value(f, this, args);
         self.native_depth += 1;
         r
     }
@@ -2333,13 +3332,13 @@ impl Vm {
         }
         let class = self.objs[fo as usize].class;
         if class == C_NATIVE {
-            let id = self.objs[fo as usize].func;
+            let id = self.objs[fo as usize].func as int;
             let this = Val::Undef;
-            return self.call_native(id, fo, this, args, true, new_target);
+            return self.call_native(id, fo, this, &args, true, new_target);
         }
         if class == C_BOUND {
-            let target = self.objs[fo as usize].env;
-            let mut all = self.objs[fo as usize].elems.clone();
+            let target = self.objs[fo as usize].env as int;
+            let mut all = self.evecs[self.objs[fo as usize].elems as usize].v.clone();
             for a in args {
                 all.push(a);
             }
@@ -2350,7 +3349,7 @@ impl Vm {
             let arr = self.new_array(args);
             return self.proxy_call(fo, PH_CONSTRUCT, vec![Val::Obj(arr), new_target]);
         }
-        let pi = self.objs[fo as usize].func;
+        let pi = self.objs[fo as usize].func as int;
         if !self.protos[pi as usize].constructible() {
             self.throw_type("value is not a constructor");
             return Val::Undef;
@@ -2392,7 +3391,7 @@ impl Vm {
     /// Sets up a frame for the JS function `fo`; the stack holds
     /// [f, this, args…]. For a constructor call `this` is the new object.
     pub fn enter_function(&mut self, fo: int, argc: int, construct: bool, new_target: Val) -> bool {
-        let pi = self.objs[fo as usize].func;
+        let pi = self.objs[fo as usize].func as int;
         if !construct && !self.protos[pi as usize].uses_args && self.protos[pi as usize].rest < 0 && !self.protos[pi as usize].class_ctor {
             return self.enter_plain(fo, pi, argc);
         }
@@ -2409,6 +3408,7 @@ impl Vm {
         let mut args_obj: int = -1;
         if uses_args {
             let mut items: Vec<Val> = Vec::new();
+            reserve_vals(&mut items, argc as usize);
             let mut i = 0;
             while i < argc {
                 items.push(self.stack[(bp + i) as usize].clone());
@@ -2416,14 +3416,14 @@ impl Vm {
             }
             let p = self.object_proto;
             args_obj = self.alloc(C_ARGUMENTS, p);
-            self.objs[args_obj as usize].elems = items;
+            self.put_elems(args_obj, items);
             if strict {
                 // a strict function's arguments.callee throws
                 // non-configurable, so the shared pair never changes
                 if self.callee_pair < 0 {
                     let th = self.thrower;
                     let pair = self.alloc(C_ACCESSOR, -1);
-                    self.objs[pair as usize].elems = vec![Val::Obj(th), Val::Obj(th)];
+                    self.put_elems(pair, vec![Val::Obj(th), Val::Obj(th)]);
                     self.roots.push(pair);
                     self.callee_pair = pair;
                     self.any_setter = true;
@@ -2439,6 +3439,9 @@ impl Vm {
         }
         if rest >= 0 {
             let mut items: Vec<Val> = Vec::new();
+            if argc > rest {
+                reserve_vals(&mut items, (argc - rest) as usize);
+            }
             let mut i = rest;
             while i < argc {
                 items.push(self.stack[(bp + i) as usize].clone());
@@ -2460,9 +3463,9 @@ impl Vm {
         let mut this_val = self.stack[(bp - 1) as usize].clone();
         let mut nt = new_target;
         if arrow {
-            this_val = self.objs[fo as usize].prim.clone();
+            this_val = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
             // new.target as the arrow found it
-            nt = if self.objs[fo as usize].elems2.is_empty() { Val::Undef } else { self.objs[fo as usize].elems2[0].clone() };
+            nt = if self.colds[self.objs[fo as usize].cold as usize].elems2.is_empty() { Val::Undef } else { self.colds[self.objs[fo as usize].cold as usize].elems2[0].clone() };
         } else if !strict && !construct {
             if matches!(this_val, Val::Undef) || matches!(this_val, Val::Null) {
                 this_val = Val::Obj(self.global);
@@ -2472,16 +3475,17 @@ impl Vm {
                 this_val = Val::Obj(bo);
             }
         }
-        let mut env = self.objs[fo as usize].env;
+        let mut env = self.objs[fo as usize].env as int;
         if env_size > 0 {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
             while i < env_size {
-                self.objs[e as usize].elems.push(Val::Undef);
+                self.push_elem(e, Val::Undef);
                 i += 1;
             }
             env = e;
         }
+        unpack_code(&mut self.protos[pi as usize]);
         self.frames.push(Frame {
             proto: pi,
             fobj: fo,
@@ -2493,6 +3497,9 @@ impl Vm {
             args_obj: args_obj,
             construct: construct,
             gen: -1,
+            ret: -1,
+            mv_from: -1,
+            mv_to: -1,
         });
         if construct && class_ctor && !derived {
             self.run_fields(fo, &this_val);
@@ -2518,10 +3525,10 @@ impl Vm {
         }
         let arrow = self.protos[pi as usize].arrow;
         let mut nt = Val::Undef;
-        if arrow && !self.objs[fo as usize].elems2.is_empty() {
-            nt = self.objs[fo as usize].elems2[0].clone();
+        if arrow && !self.colds[self.objs[fo as usize].cold as usize].elems2.is_empty() {
+            nt = self.colds[self.objs[fo as usize].cold as usize].elems2[0].clone();
         }
-        let mut this_val = if arrow { self.objs[fo as usize].prim.clone() } else { self.stack[(bp - 1) as usize].clone() };
+        let mut this_val = if arrow { self.colds[self.objs[fo as usize].cold as usize].prim.clone() } else { self.stack[(bp - 1) as usize].clone() };
         if !arrow && !self.protos[pi as usize].strict {
             if matches!(this_val, Val::Undef) || matches!(this_val, Val::Null) {
                 this_val = Val::Obj(self.global);
@@ -2530,16 +3537,17 @@ impl Vm {
                 this_val = Val::Obj(bo);
             }
         }
-        let mut env = self.objs[fo as usize].env;
+        let mut env = self.objs[fo as usize].env as int;
         if env_size > 0 {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
             while i < env_size {
-                self.objs[e as usize].elems.push(Val::Undef);
+                self.push_elem(e, Val::Undef);
                 i += 1;
             }
             env = e;
         }
+        unpack_code(&mut self.protos[pi as usize]);
         self.frames.push(Frame {
             proto: pi,
             fobj: fo,
@@ -2551,22 +3559,25 @@ impl Vm {
             args_obj: -1,
             construct: false,
             gen: -1,
+            ret: -1,
+            mv_from: -1,
+            mv_to: -1,
         });
         true
     }
 
     /// The class's instance fields, defined on `this`.
     pub fn run_fields(&mut self, ctor: int, this: &Val) {
-        if self.objs[ctor as usize].elems2.is_empty() {
+        if self.colds[self.objs[ctor as usize].cold as usize].elems2.is_empty() {
             return;
         }
-        let f = self.objs[ctor as usize].elems2[0].clone();
-        self.call_value(f, this.clone(), Vec::new());
+        let f = self.colds[self.objs[ctor as usize].cold as usize].elems2[0].clone();
+        self.call_fixed(f, this.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
     }
 
     /// Unwinds to the innermost handler of this run; false when there is
     /// none and the exception leaves the run.
-    fn unwind(&mut self, base: int) -> bool {
+    pub fn unwind(&mut self, base: int) -> bool {
         loop {
             if self.handlers.is_empty() {
                 break;
@@ -2602,32 +3613,32 @@ impl Vm {
     /// or for an arrow the one it was made in.
     pub fn ctor_of_frame(&self, fi: usize) -> int {
         let fo = self.frames[fi].fobj;
-        if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION && self.objs[fo as usize].elems2.len() == 2 {
-            let pi = self.objs[fo as usize].func;
+        if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION && self.colds[self.objs[fo as usize].cold as usize].elems2.len() == 2 {
+            let pi = self.objs[fo as usize].func as int;
             if self.protos[pi as usize].arrow {
-                return obj_of(&self.objs[fo as usize].elems2[1]);
+                return obj_of(&self.colds[self.objs[fo as usize].cold as usize].elems2[1]);
             }
         }
         fo
     }
 
-    fn closure(&mut self, pi: int) -> int {
+    pub fn closure(&mut self, pi: int) -> int {
         let fp = self.closure_proto(pi);
         let f = self.alloc(C_FUNCTION, fp);
         let fi = self.frames.len() - 1;
         let env = self.frames[fi].env;
-        self.objs[f as usize].func = pi;
-        self.objs[f as usize].env = env;
+        self.objs[f as usize].func = pi as i32;
+        self.put_env(f, env);
         if self.protos[pi as usize].arrow {
             let t = self.frames[fi].this_val.clone();
-            self.objs[f as usize].prim = t;
-            let home = self.objs[self.frames[fi].fobj as usize].home;
-            self.objs[f as usize].home = home;
+            self.put_prim(f, t);
+            let home = self.colds[self.objs[self.frames[fi].fobj as usize].cold as usize].home;
+            self.put_home(f, home);
             if self.protos[pi as usize].lexical_ctor {
                 let nt = self.frames[fi].new_target.clone();
                 let owner = self.ctor_of_frame(fi);
-                self.objs[f as usize].elems2.push(nt);
-                self.objs[f as usize].elems2.push(Val::Obj(owner));
+                self.push_elem2(f, nt);
+                self.push_elem2(f, Val::Obj(owner));
             }
         }
         f
@@ -2642,23 +3653,24 @@ impl Vm {
                 if obj_of(&f) == self.array_values_fn || class == C_ARGUMENTS {
                     let ip = self.iter_proto;
                     let it = self.alloc(C_ITER, ip);
-                    self.objs[it as usize].env = *o;
+                    self.put_env(it, *o);
                     self.objs[it as usize].func = 0;
                     return Val::Obj(it);
                 }
             }
         }
         if let Val::Str(s) = v {
+            let s = self.sget(s.clone());
             let mut items: Vec<Val> = Vec::new();
             for c in s.chars() {
                 let mut t = String::new();
                 t.push(c);
-                items.push(string_val(t));
+                items.push(self.string_val(t));
             }
             let arr = self.new_array(items);
             let ip = self.iter_proto;
             let it = self.alloc(C_ITER, ip);
-            self.objs[it as usize].env = arr;
+            self.put_env(it, arr);
             self.objs[it as usize].func = 0;
             return Val::Obj(it);
         }
@@ -2670,7 +3682,7 @@ impl Vm {
             self.throw_type("object is not iterable");
             return Val::Undef;
         }
-        let it = self.call_value(f, v.clone(), Vec::new());
+        let it = self.call_fixed(f, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
         if self.throwing {
             return Val::Undef;
         }
@@ -2686,19 +3698,19 @@ impl Vm {
     pub fn iter_next(&mut self, it: &Val) -> Option<Val> {
         let o = obj_of(it);
         if o >= 0 && self.objs[o as usize].class == C_ITER {
-            let src = self.objs[o as usize].env;
-            let i = self.objs[o as usize].func;
-            let kind = self.objs[o as usize].pos;
+            let src = self.objs[o as usize].env as int;
+            let i = self.objs[o as usize].func as int;
+            let kind = self.objs[o as usize].pos as int;
             if src < 0 {
                 return None;
             }
-            let len = self.objs[src as usize].elems.len() as int;
+            let len = self.evecs[self.objs[src as usize].elems as usize].v.len() as int;
             if i >= len {
-                self.objs[o as usize].env = -1;
+                self.put_env(o, -1);
                 return None;
             }
-            self.objs[o as usize].func = i + 1;
-            let v = self.objs[src as usize].elems[i as usize].clone();
+            self.objs[o as usize].func = (i + 1) as i32;
+            let v = self.evecs[self.objs[src as usize].elems as usize].v[i as usize].clone();
             if kind == 1 {
                 return Some(Val::Num(i as double));
             }
@@ -2712,7 +3724,7 @@ impl Vm {
         if self.throwing {
             return None;
         }
-        let r = self.call_value(next, it.clone(), Vec::new());
+        let r = self.call_fixed(next, it.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
         if self.throwing {
             return None;
         }
@@ -2732,7 +3744,7 @@ impl Vm {
             if self.objs[*o as usize].class == C_ARRAY {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
-                    return self.objs[*o as usize].elems.clone();
+                    return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                 }
             }
         }
@@ -2762,7 +3774,7 @@ impl Vm {
             if self.objs[*o as usize].class == C_ARRAY {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
-                    return self.objs[*o as usize].elems.clone();
+                    return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                 }
             }
         }
@@ -2792,18 +3804,18 @@ impl Vm {
         out
     }
 
-    fn get_env(&self, depth: int) -> int {
+    pub fn get_env(&self, depth: int) -> int {
         let fi = self.frames.len() - 1;
         let mut e = self.frames[fi].env;
         let mut d = depth;
         while d > 0 {
-            e = self.objs[e as usize].proto;
+            e = self.objs[e as usize].proto as int;
             d -= 1;
         }
         e
     }
 
-    fn pop(&mut self) -> Val {
+    pub fn pop(&mut self) -> Val {
         self.stack.pop().unwrap()
     }
 
@@ -2815,6 +3827,10 @@ impl Vm {
 
     /// Runs frames until the frame count falls back to `base`.
     pub fn run(&mut self, base: int) {
+        if self.regs {
+            self.rrun(base);
+            return;
+        }
         'frames: loop {
             if self.throwing {
                 if !self.unwind(base) {
@@ -2824,6 +3840,9 @@ impl Vm {
             if (self.frames.len() as int) <= base {
                 return;
             }
+            if self.slicing && self.frame_brk() {
+                return;
+            }
             let fi = self.frames.len() - 1;
             let pi = self.frames[fi].proto as usize;
             let bp = self.frames[fi].bp;
@@ -2831,14 +3850,14 @@ impl Vm {
             loop {
                 let op = self.protos[pi].code[pc as usize];
                 pc += 1;
-                match op.code {
+                match (op.code as int) {
                     OP_GET_LOCAL => {
-                        let v = self.stack[(bp + op.a) as usize].clone();
+                        let v = self.stack[(bp + (op.a as int)) as usize].clone();
                         self.stack.push(v);
                     }
                     OP_SET_LOCAL => {
                         let v = self.stack[self.stack.len() - 1].clone();
-                        self.stack[(bp + op.a) as usize] = v;
+                        self.stack[(bp + (op.a as int)) as usize] = v;
                     }
                     OP_INT => self.stack.push(Val::Num(op.a as double)),
                     OP_CONST => {
@@ -2862,14 +3881,14 @@ impl Vm {
                         self.stack.push(v);
                     }
                     OP_GET_ENV => {
-                        let e = self.get_env(op.a);
-                        let v = self.objs[e as usize].elems[op.b as usize].clone();
+                        let e = self.get_env((op.a as int));
+                        let v = self.evecs[self.objs[e as usize].elems as usize].v[op.b as usize].clone();
                         self.stack.push(v);
                     }
                     OP_SET_ENV => {
-                        let e = self.get_env(op.a);
+                        let e = self.get_env((op.a as int));
                         let v = self.stack[self.stack.len() - 1].clone();
-                        self.objs[e as usize].elems[op.b as usize] = v;
+                        self.put_elem(e, (op.b as int), v);
                     }
                     OP_NOT => {
                         let v = self.pop();
@@ -2903,12 +3922,12 @@ impl Vm {
                         self.add_prop_pop(op);
                     }
                     OP_INC_LOCAL => {
-                        let i = (bp + op.a) as usize;
+                        let i = (bp + (op.a as int)) as usize;
                         if let Val::Num(n) = self.stack[i] {
                             self.stack[i] = Val::Num(n + (op.b as double));
                         } else {
                             let v = self.stack[i].clone();
-                            let (_, nv) = self.numeric_step(&v, op.b);
+                            let (_, nv) = self.numeric_step(&v, (op.b as int));
                             self.stack[i] = nv;
                         }
                     }
@@ -2916,7 +3935,7 @@ impl Vm {
                         let b = self.pop();
                         let a = self.pop();
                         let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
-                            match op.b {
+                            match (op.b as int) {
                                 OP_LT => x < y,
                                 OP_GT => x > y,
                                 OP_LE => x <= y,
@@ -2925,59 +3944,68 @@ impl Vm {
                                 _ => x != y,
                             }
                         } else {
-                            let strict = op.b == OP_SEQ || op.b == OP_SNE;
-                            let q = if strict || op.b == OP_EQ || op.b == OP_NE { quick_eq(&a, &b, strict) } else { -1 };
+                            let strict = (op.b as int) == OP_SEQ || (op.b as int) == OP_SNE;
+                            let q = if strict || (op.b as int) == OP_EQ || (op.b as int) == OP_NE { quick_eq(&a, &b, strict) } else { -1 };
                             if q >= 0 {
-                                (q == 1) == (op.b == OP_SEQ || op.b == OP_EQ)
+                                (q == 1) == ((op.b as int) == OP_SEQ || (op.b as int) == OP_EQ)
                             } else {
                                 self.frames[fi].pc = pc;
-                                self.compare(op.b, &a, &b)
+                                self.compare((op.b as int), &a, &b)
                             }
                         };
                         if !r {
-                            if op.a < pc {
-                                self.frames[fi].pc = op.a;
+                            if (op.a as int) < pc {
+                                self.frames[fi].pc = (op.a as int);
                                 if self.gc_due() {
                                     self.gc();
                                 }
                             }
-                            pc = op.a;
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
+                            pc = (op.a as int);
                         }
                     }
                     OP_GET_LOCAL2 => {
-                        let v = self.stack[(bp + op.a) as usize].clone();
-                        let w = self.stack[(bp + op.b) as usize].clone();
+                        let v = self.stack[(bp + (op.a as int)) as usize].clone();
+                        let w = self.stack[(bp + (op.b as int)) as usize].clone();
                         self.stack.push(v);
                         self.stack.push(w);
                     }
                     OP_GET_ENV_UNDEF => {
-                        let e = self.get_env(op.a);
-                        let v = self.objs[e as usize].elems[op.b as usize].clone();
+                        let e = self.get_env((op.a as int));
+                        let v = self.evecs[self.objs[e as usize].elems as usize].v[op.b as usize].clone();
                         self.stack.push(v);
                         self.stack.push(Val::Undef);
                     }
                     OP_CASE_INT_JT => {
                         if let Val::Num(x) = self.stack[self.stack.len() - 1] {
                             if x == (op.b as double) {
-                                pc = op.a;
+                                if self.slicing && self.brk(fi, (op.a as int)) {
+                                    return;
+                                }
+                                pc = (op.a as int);
                             }
                         }
                     }
                     OP_LOCAL_NULL_JF => {
                         let cmp = op.b % 256;
-                        let r = match self.stack[(bp + op.b / 256) as usize] {
-                            Val::Null => cmp == OP_SEQ || cmp == OP_EQ,
-                            Val::Undef => cmp == OP_SNE || cmp == OP_EQ,
-                            _ => cmp == OP_SNE || cmp == OP_NE,
+                        let r = match self.stack[(bp + ((op.b / 256) as int)) as usize] {
+                            Val::Null => (cmp as int) == OP_SEQ || (cmp as int) == OP_EQ,
+                            Val::Undef => (cmp as int) == OP_SNE || (cmp as int) == OP_EQ,
+                            _ => (cmp as int) == OP_SNE || (cmp as int) == OP_NE,
                         };
                         if !r {
-                            if op.a < pc {
-                                self.frames[fi].pc = op.a;
+                            if (op.a as int) < pc {
+                                self.frames[fi].pc = (op.a as int);
                                 if self.gc_due() {
                                     self.gc();
                                 }
                             }
-                            pc = op.a;
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
+                            pc = (op.a as int);
                         }
                     }
                     OP_CASE_JT => {
@@ -2995,26 +4023,40 @@ impl Vm {
                             }
                         };
                         if hit {
-                            pc = op.a;
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
+                            pc = (op.a as int);
                         }
                     }
                     OP_JUMP => {
-                        if op.a < pc && self.gc_due() {
-                            self.frames[fi].pc = op.a;
-                            self.gc();
+                        if (op.a as int) < pc {
+                            if self.gc_due() {
+                                self.frames[fi].pc = (op.a as int);
+                                self.gc();
+                            }
                         }
-                        pc = op.a;
+                        if self.slicing && self.brk(fi, (op.a as int)) {
+                            return;
+                        }
+                        pc = (op.a as int);
                     }
                     OP_JF => {
                         let v = self.pop();
                         if !truthy(&v) {
-                            pc = op.a;
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
+                            pc = (op.a as int);
                         }
                     }
                     OP_JT => {
                         let v = self.pop();
                         if truthy(&v) {
-                            pc = op.a;
+                            if self.slicing && self.brk(fi, (op.a as int)) {
+                                return;
+                            }
+                            pc = (op.a as int);
                         }
                     }
                     OP_ADD => {
@@ -3032,24 +4074,24 @@ impl Vm {
                         let b = self.pop();
                         let a = self.pop();
                         if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
-                            self.stack.push(Val::Num(arith_num(op.code, *x, *y)));
+                            self.stack.push(Val::Num(arith_num((op.code as int), *x, *y)));
                         } else {
                             self.frames[fi].pc = pc;
-                            let r = self.arith(op.code, &a, &b);
+                            let r = self.arith((op.code as int), &a, &b);
                             self.stack.push(r);
                         }
                     }
                     OP_LT | OP_GT | OP_LE | OP_GE | OP_EQ | OP_NE | OP_SEQ | OP_SNE => {
                         let b = self.pop();
                         let a = self.pop();
-                        let strict = op.code == OP_SEQ || op.code == OP_SNE;
-                        let q = if strict || op.code == OP_EQ || op.code == OP_NE { quick_eq(&a, &b, strict) } else { -1 };
+                        let strict = (op.code as int) == OP_SEQ || (op.code as int) == OP_SNE;
+                        let q = if strict || (op.code as int) == OP_EQ || (op.code as int) == OP_NE { quick_eq(&a, &b, strict) } else { -1 };
                         if q >= 0 {
-                            self.stack.push(Val::Bool((q == 1) == (op.code == OP_SEQ || op.code == OP_EQ)));
+                            self.stack.push(Val::Bool((q == 1) == ((op.code as int) == OP_SEQ || (op.code as int) == OP_EQ)));
                             continue;
                         }
                         self.frames[fi].pc = pc;
-                        let r = self.compare(op.code, &a, &b);
+                        let r = self.compare((op.code as int), &a, &b);
                         self.stack.push(Val::Bool(r));
                     }
                     OP_THIS => {
@@ -3058,21 +4100,21 @@ impl Vm {
                     }
                     OP_SET_LOCAL_POP => {
                         let v = self.pop();
-                        self.stack[(bp + op.a) as usize] = v;
+                        self.stack[(bp + (op.a as int)) as usize] = v;
                         pc += 1;
                     }
                     OP_POSTINC_LOCAL | OP_PREINC_LOCAL => {
-                        let i = (bp + op.a) as usize;
+                        let i = (bp + (op.a as int)) as usize;
                         if let Val::Num(old) = self.stack[i] {
                             let nv = old + (op.b as double);
                             self.stack[i] = Val::Num(nv);
-                            self.stack.push(Val::Num(if op.code == OP_PREINC_LOCAL { nv } else { old }));
+                            self.stack.push(Val::Num(if (op.code as int) == OP_PREINC_LOCAL { nv } else { old }));
                         } else {
                             self.frames[fi].pc = pc;
                             let v = self.stack[i].clone();
-                            let (old, nv) = self.numeric_step(&v, op.b);
+                            let (old, nv) = self.numeric_step(&v, (op.b as int));
                             self.stack[i] = nv.clone();
-                            self.stack.push(if op.code == OP_PREINC_LOCAL { nv } else { old });
+                            self.stack.push(if (op.code as int) == OP_PREINC_LOCAL { nv } else { old });
                         }
                     }
                     OP_SUB => {
@@ -3082,7 +4124,7 @@ impl Vm {
                             self.stack.push(Val::Num(x - y));
                         } else {
                             self.frames[fi].pc = pc;
-                            let r = self.arith(op.code, &a, &b);
+                            let r = self.arith((op.code as int), &a, &b);
                             self.stack.push(r);
                         }
                     }
@@ -3093,7 +4135,7 @@ impl Vm {
                             self.stack.push(Val::Num(x * y));
                         } else {
                             self.frames[fi].pc = pc;
-                            let r = self.arith(op.code, &a, &b);
+                            let r = self.arith((op.code as int), &a, &b);
                             self.stack.push(r);
                         }
                     }
@@ -3103,45 +4145,45 @@ impl Vm {
                         let mut done = false;
                         if let Val::Obj(o) = &v {
                             let o = *o;
-                            let slot = self.ic_get(o, atom, op.c, pi, pc);
+                            let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
                                 let r = self.objs[o as usize].vals[slot as usize].clone();
                                 self.stack.push(r);
                                 done = true;
-                            } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                            } else if (atom as int) == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, (atom as int)) < 0 {
                                 // an array's length is its element count
-                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                                 self.stack.push(r);
                                 done = true;
                             }
                         }
                         if !done {
                             self.frames[fi].pc = pc;
-                            let r = self.get(&v, atom);
+                            let r = self.get(&v, (atom as int));
                             self.stack.push(r);
                         }
                     }
                     OP_GET_LOCAL_PROP => {
-                        let v = self.stack[(bp + op.a) as usize].clone();
+                        let v = self.stack[(bp + (op.a as int)) as usize].clone();
                         let atom = op.b;
                         let mut done = false;
                         if let Val::Obj(o) = &v {
                             let o = *o;
-                            let slot = self.ic_get(o, atom, op.c, pi, pc);
+                            let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
                                 let r = self.objs[o as usize].vals[slot as usize].clone();
                                 self.stack.push(r);
                                 done = true;
-                            } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                            } else if (atom as int) == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, (atom as int)) < 0 {
                                 // an array's length is its element count
-                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                                 self.stack.push(r);
                                 done = true;
                             }
                         }
                         if !done {
                             self.frames[fi].pc = pc;
-                            let r = self.get(&v, atom);
+                            let r = self.get(&v, (atom as int));
                             self.stack.push(r);
                         }
                     }
@@ -3151,21 +4193,21 @@ impl Vm {
                         let mut done = false;
                         if let Val::Obj(o) = &v {
                             let o = *o;
-                            let slot = self.ic_get(o, atom, op.c, pi, pc);
+                            let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
                                 let r = self.objs[o as usize].vals[slot as usize].clone();
                                 self.stack.push(r);
                                 done = true;
-                            } else if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+                            } else if (atom as int) == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, (atom as int)) < 0 {
                                 // an array's length is its element count
-                                let r = Val::Num(self.objs[o as usize].elems.len() as double);
+                                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                                 self.stack.push(r);
                                 done = true;
                             }
                         }
                         if !done {
                             self.frames[fi].pc = pc;
-                            let r = self.get(&v, atom);
+                            let r = self.get(&v, (atom as int));
                             self.stack.push(r);
                         }
                     }
@@ -3176,17 +4218,17 @@ impl Vm {
                         let mut done = false;
                         if let Val::Obj(o) = &target {
                             let o = *o;
-                            let slot = self.ic_set(o, atom, op.c, pi, pc);
+                            let slot = self.ic_set(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
-                                self.objs[o as usize].vals[slot as usize] = val.clone();
+                                self.put_slot(o, slot, val.clone());
                                 done = true;
                             }
                         }
                         if !done {
                             self.frames[fi].pc = pc;
-                            self.set(&target, atom, val.clone());
+                            self.set(&target, (atom as int), val.clone());
                         }
-                        if op.code == OP_SET_PROP_POP {
+                        if (op.code as int) == OP_SET_PROP_POP {
                             pc += 1;
                         } else {
                             self.stack.push(val);
@@ -3200,8 +4242,8 @@ impl Vm {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n {
-                                    let r = ob.elems[i as usize].clone();
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n {
+                                    let r = self.evecs[ob.elems as usize].v[i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
                                 }
@@ -3219,27 +4261,48 @@ impl Vm {
                         let target = self.pop();
                         let mut done = false;
                         if let (Val::Obj(o), Val::Num(n)) = (&target, &k) {
+                            self.inc(&val);
                             let ob = &mut self.objs[*o as usize];
+                            let mut old: int = -1;
+                            let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < ob.elems.len() && (i as double) == *n && ob.pos != 2 {
-                                    ob.elems[i as usize] = val.clone();
-                                    if (i as usize) < ob.elems2.len() {
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 2 {
+                                    old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
+                                    old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
+                                    self.evecs[ob.elems as usize].v[i as usize] = val.clone();
+                                    let oc = ob.cold as usize;
+                                    if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
                                         // the element is no longer a hole
-                                        ob.elems2[i as usize] = Val::Bool(false);
+                                        self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == ob.elems.len() && (i as double) == *n && ob.extensible {
-                                    ob.elems.push(val.clone());
+                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.extensible {
+                                    if ob.elems == 0 {
+                                        if !self.efree.is_empty() {
+                                            ob.elems = self.efree.pop().unwrap();
+                                        } else {
+                                            grow_evecs(&mut self.evecs);
+                                            self.evecs.push(Elems { v: Vec::new() });
+                                            ob.elems = (self.evecs.len() - 1) as i32;
+                                        }
+                                    }
+                                    self.evecs[ob.elems as usize].v.push(val.clone());
                                     done = true;
                                 }
+                            }
+                            if done {
+                                self.dec_o(old);
+                                self.sdec(old_s);
+                            } else {
+                                self.dec(&val);
                             }
                         }
                         if !done {
                             self.frames[fi].pc = pc;
                             self.set_elem(&target, &k, val.clone());
                         }
-                        if op.code == OP_SET_ELEM_POP {
+                        if (op.code as int) == OP_SET_ELEM_POP {
                             pc += 1;
                         } else {
                             self.stack.push(val);
@@ -3254,17 +4317,17 @@ impl Vm {
                         if let Val::Obj(o) = &v {
                             // own slot, else the prototype's slot, cached
                             let o = *o;
-                            let slot = self.find(o, atom);
+                            let slot = self.find(o, (atom as int));
                             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
                                 f = self.objs[o as usize].vals[slot as usize].clone();
                                 done = true;
                             }
                         }
                         if !done {
-                            f = self.get(&v, atom);
+                            f = self.get(&v, (atom as int));
                         }
                         if !self.throwing && op.b == 0 && !self.is_callable(&f) {
-                            let name = self.atom_str(atom);
+                            let name = self.atom_str((atom as int));
                             self.throw_type(format!("{} is not a function", name).as_str());
                         }
                         self.stack.push(f);
@@ -3287,15 +4350,15 @@ impl Vm {
                         // a function of this program: straight in
                         let fo = obj_of(&self.stack[self.stack.len() - (argc as usize) - 2]);
                         if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION {
-                            self.enter_function(fo, argc, false, Val::Undef);
+                            self.enter_function(fo, (argc as int), false, Val::Undef);
                             continue 'frames;
                         }
-                        if self.call_op(argc) {
+                        if self.call_op((argc as int)) {
                             continue 'frames;
                         }
                     }
                     OP_RETURN | OP_RETURN_UNDEF => {
-                        let mut v = if op.code == OP_RETURN { self.pop() } else { Val::Undef };
+                        let mut v = if (op.code as int) == OP_RETURN { self.pop() } else { Val::Undef };
                         let fr = self.frames.pop().unwrap();
                         if fr.construct && !is_obj(&v) {
                             if !matches!(v, Val::Undef) && self.protos[fr.proto as usize].derived {
@@ -3319,6 +4382,7 @@ impl Vm {
                     }
                     _ => {
                         self.frames[fi].pc = pc;
+                        let pc0 = pc;
                         let changed = self.step(op, pi, bp, fi, &mut pc);
                         if self.throwing {
                             if !self.unwind(base) {
@@ -3328,6 +4392,10 @@ impl Vm {
                         }
                         if changed {
                             continue 'frames;
+                        }
+                        // a branch in step (JF_KEEP, JNULLISH, ITER_NEXT...)
+                        if pc != pc0 && self.slicing && self.brk(fi, pc) {
+                            return;
                         }
                     }
                 }
@@ -3349,12 +4417,12 @@ impl Vm {
         if fo < 0 || self.objs[fo as usize].class != C_FUNCTION || self.find(fo, A_NAME) >= 0 {
             return;
         }
-        let pi = self.objs[fo as usize].func;
+        let pi = self.objs[fo as usize].func as int;
         if !self.protos[pi as usize].name.is_empty() || self.protos[pi as usize].class_ctor {
             return;
         }
         let name = if self.class_of(k) == C_SYMBOL {
-            let d = self.objs[obj_of(k) as usize].prim.clone();
+            let d = self.colds[self.objs[obj_of(k) as usize].cold as usize].prim.clone();
             if matches!(d, Val::Undef) {
                 String::new()
             } else {
@@ -3363,7 +4431,8 @@ impl Vm {
         } else {
             self.to_string(k)
         };
-        self.add_prop(fo, A_NAME, string_val(name), P_HIDDEN | P_READONLY);
+        let sv17 = self.string_val(name);
+        self.add_prop(fo, A_NAME, sv17, P_HIDDEN | P_READONLY);
     }
 
     /// ToNumeric(v) and it plus `delta`: numbers or BigInts.
@@ -3385,37 +4454,38 @@ impl Vm {
     /// none.
     pub fn is_hole(&self, o: int, i: int) -> bool {
         let ob = &self.objs[o as usize];
-        if ob.class != C_ARRAY || i < 0 || (i as usize) >= ob.elems2.len() {
+        let e2 = &self.colds[ob.cold as usize].elems2;
+        if ob.class != C_ARRAY || i < 0 || (i as usize) >= e2.len() {
             return false;
         }
         // a binding, not matches!(.., Val::Bool(true)): rgrc's JS matches the
         // variant only and would count every marker as a hole
-        match &ob.elems2[i as usize] {
+        match &e2[i as usize] {
             Val::Bool(b) => *b,
             _ => false,
         }
     }
 
     pub fn mark_hole(&mut self, o: int, i: int) {
-        let n = self.objs[o as usize].elems.len();
-        while self.objs[o as usize].elems2.len() < n {
-            self.objs[o as usize].elems2.push(Val::Bool(false));
+        let n = self.evecs[self.objs[o as usize].elems as usize].v.len();
+        while self.colds[self.objs[o as usize].cold as usize].elems2.len() < n {
+            self.push_elem2(o, Val::Bool(false));
         }
         if (i as usize) < n {
-            self.objs[o as usize].elems2[i as usize] = Val::Bool(true);
+            self.put_elem2(o, i, Val::Bool(true));
         }
     }
 
     fn clear_hole(&mut self, o: int, i: int) {
-        if (i as usize) < self.objs[o as usize].elems2.len() {
-            self.objs[o as usize].elems2[i as usize] = Val::Bool(false);
+        if (i as usize) < self.colds[self.objs[o as usize].cold as usize].elems2.len() {
+            self.put_elem2(o, i, Val::Bool(false));
         }
     }
 
     /// HasProperty(o, i) for an index, holes counted as missing.
     pub fn has_index(&mut self, o: int, i: int) -> bool {
         let class = self.objs[o as usize].class;
-        if class == C_ARRAY && (i as usize) < self.objs[o as usize].elems.len() && !self.is_hole(o, i) {
+        if class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
             return true;
         }
         let k = Val::Num(i as double);
@@ -3423,16 +4493,56 @@ impl Vm {
     }
 
     pub fn freeze_obj(&mut self, o: int) {
-        self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, vec![Val::Obj(o)], false, Val::Undef);
+        self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, &vec![Val::Obj(o)], false, Val::Undef);
+    }
+
+    /// At a branch, call or return with slices on: whether this slice is
+    /// over and the script can stop here, with no native code under it
+    /// (native_depth 0). The clock is read once in SLICE_TICKS branches.
+    pub fn slice_over(&mut self) -> bool {
+        self.ticks -= 1;
+        if self.ticks > 0 || self.native_depth != 0 {
+            return false;
+        }
+        self.ticks = SLICE_TICKS;
+        let now = crate::builtins::now_ms();
+        now - self.slice_t0 >= self.slice_ms
+    }
+
+    /// A taken branch to `to` with slices on: when the slice is over the
+    /// frame stops there (its pc is `to`) and the run returns.
+    pub fn brk(&mut self, fi: usize, to: int) -> bool {
+        if !self.slice_over() {
+            return false;
+        }
+        self.frames[fi].pc = to;
+        self.suspended = true;
+        true
+    }
+
+    /// Between frames (a call, a return, a catch) with slices on: when the
+    /// slice is over the run stops; every frame's pc is already stored.
+    pub fn frame_brk(&mut self) -> bool {
+        if !self.slice_over() {
+            return false;
+        }
+        self.suspended = true;
+        true
     }
 
     pub fn gc_due(&self) -> bool {
-        self.alloc_count >= self.gc_threshold && self.native_depth == 0
+        self.gc_flag && self.native_depth == 0
+    }
+
+    /// gc_flag from the counts (Vm::gc_due): after a collection, and where
+    /// a limit changes.
+    pub fn gc_recheck(&mut self) {
+        self.gc_flag = self.alloc_count >= self.gc_threshold || self.made >= self.made_limit || (self.zct.len() as int) >= self.zct_limit || (self.szct.len() as int) >= self.szct_limit || self.snew >= self.slimit || self.sbytes >= self.sbytes_limit;
     }
 
     /// The calling part of OP_CALL; true when a frame was pushed or the
     /// stack changed frames.
-    fn call_op(&mut self, argc_in: int) -> bool {
+    pub fn call_op(&mut self, argc_in: int) -> bool {
         let mut argc = argc_in;
         loop {
             let fpos = (self.stack.len() as int) - argc - 2;
@@ -3447,7 +4557,7 @@ impl Vm {
                 return self.enter_function(fo, argc, false, Val::Undef) || true;
             }
             if class == C_NATIVE {
-                let id = self.objs[fo as usize].func;
+                let id = self.objs[fo as usize].func as int;
                 // f.call(this, …) and f.apply(this, args) run in this loop
                 if id == crate::builtins::NF_CALL {
                     // [call, f, this, a…] → [f, this, a…]
@@ -3505,6 +4615,50 @@ impl Vm {
                         return false;
                     }
                 }
+                // Math.min / Math.max of numbers
+                if (which == 31 || which == 32) && argc <= 8 {
+                    let mut r = if which == 31 { infinity() } else { -infinity() };
+                    let mut nan_seen = false;
+                    let mut numbers = true;
+                    let mut i: int = 0;
+                    while i < argc {
+                        if let Val::Num(n) = self.stack[(bp + i) as usize] {
+                            if is_nan(n) {
+                                nan_seen = true;
+                            } else if which == 31 {
+                                if n < r || (n == 0.0 && r == 0.0 && 1.0 / n < 0.0) {
+                                    r = n;
+                                }
+                            } else if n > r || (n == 0.0 && r == 0.0 && 1.0 / n > 0.0) {
+                                r = n;
+                            }
+                        } else {
+                            numbers = false;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if numbers {
+                        self.stack.truncate(fpos as usize);
+                        self.stack.push(Val::Num(if nan_seen { nan() } else { r }));
+                        return false;
+                    }
+                }
+                // String(x) of a string or a number
+                if id == crate::builtins::NF_STRING && argc >= 1 {
+                    let a = self.stack[bp as usize].clone();
+                    let mut r = Val::Undef;
+                    if let Val::Str(_) = a {
+                        r = a;
+                    } else if let Val::Num(n) = a {
+                        r = self.string_val(number_to_string(n));
+                    }
+                    if !matches!(r, Val::Undef) {
+                        self.stack.truncate(fpos as usize);
+                        self.stack.push(r);
+                        return false;
+                    }
+                }
                 // The hottest natives, straight off the stack: no argument
                 // vector, same checks as their builtins.
                 if argc >= 1 {
@@ -3514,10 +4668,17 @@ impl Vm {
                         let weak = self.objs[tobj as usize].func == 1;
                         let mut r = Val::Undef;
                         let mut hit = false;
-                        if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.objs[tobj as usize].elems2.is_empty() {
+                        if id == crate::builtins::NF_OP_HASOWN {
+                            let k = self.stack[bp as usize].clone();
+                            r = Val::Bool(self.has_own(tobj, &k));
+                            if self.throwing {
+                                return false;
+                            }
+                            hit = true;
+                        } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
                             let a = self.stack[bp as usize].clone();
-                            self.objs[tobj as usize].elems.push(a);
-                            r = Val::Num(self.objs[tobj as usize].elems.len() as double);
+                            self.push_elem(tobj, a);
+                            r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
                             hit = true;
                         } else if (tclass == C_MAP || tclass == C_SET) && !weak {
                             if id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS {
@@ -3526,7 +4687,7 @@ impl Vm {
                                 r = if id == crate::builtins::NF_MP_HAS {
                                     Val::Bool(i >= 0)
                                 } else if i >= 0 {
-                                    self.objs[tobj as usize].elems2[i as usize].clone()
+                                    self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
                                 } else {
                                     Val::Undef
                                 };
@@ -3551,17 +4712,19 @@ impl Vm {
                         }
                     }
                 }
-                let mut args: Vec<Val> = Vec::with_capacity(argc as usize);
+                // the arguments in a vector from the pool: no allocation per call
+                let mut args: Vec<Val> = take_args(&mut self.arg_pool);
                 let mut i = 0;
                 while i < argc {
-                    args.push(self.stack[(bp + i) as usize].clone());
+                    args.push(self.stack[(bp + i) as usize]);
                     i += 1;
                 }
                 let this = self.stack[(fpos + 1) as usize].clone();
                 self.stack.truncate(fpos as usize);
                 self.native_depth += 1;
-                let r = self.call_native(id, fo, this, args, false, Val::Undef);
+                let r = self.call_native(id, fo, this, &args, false, Val::Undef);
                 self.native_depth -= 1;
+                give_args(&mut self.arg_pool, args);
                 self.stack.push(r);
                 return false;
             }
@@ -3581,9 +4744,9 @@ impl Vm {
                 return false;
             }
             if class == C_BOUND {
-                let target = self.objs[fo as usize].env;
-                let bthis = self.objs[fo as usize].prim.clone();
-                let bargs = self.objs[fo as usize].elems.clone();
+                let target = self.objs[fo as usize].env as int;
+                let bthis = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
+                let bargs = self.evecs[self.objs[fo as usize].elems as usize].v.clone();
                 self.stack[fpos as usize] = Val::Obj(target);
                 self.stack[(fpos + 1) as usize] = bthis;
                 let mut k: usize = 0;
@@ -3606,7 +4769,7 @@ impl Vm {
             Val::Obj(o) => {
                 let class = self.objs[*o as usize].class;
                 if class == C_ARRAY || class == C_ARGUMENTS {
-                    return self.objs[*o as usize].elems.clone();
+                    return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                 }
                 let l = self.get(v, A_LENGTH);
                 let n = to_integer(self.to_number(&l)) as int;
@@ -3626,7 +4789,7 @@ impl Vm {
     }
 
     /// `new` in the loop: [f, args…]
-    fn new_op(&mut self, argc: int) -> bool {
+    pub fn new_op(&mut self, argc: int) -> bool {
         let fpos = (self.stack.len() as int) - argc - 1;
         let f = self.stack[fpos as usize].clone();
         let fo = obj_of(&f);
@@ -3636,7 +4799,7 @@ impl Vm {
         }
         let class = self.objs[fo as usize].class;
         if class == C_FUNCTION {
-            let pi = self.objs[fo as usize].func;
+            let pi = self.objs[fo as usize].func as int;
             if !self.protos[pi as usize].constructible() {
                 self.throw_type("value is not a constructor");
                 return false;
@@ -3662,36 +4825,56 @@ impl Vm {
 
     // the bodies of run()'s string-append ops; run() stays small enough for
     // Go's inliner to keep its per-op copies on the stack
+    /// `cur + b` appended in cur's own buffer when both are strings and
+    /// nothing else holds it (Vm::str_append): the new string's handle, or
+    /// -1 for the ordinary way.
     #[inline]
-    fn add_local_pop(&mut self, op: Op, bp: int) {
-        let b = self.pop();
-        let i = (bp + op.a) as usize;
-        let mut done = false;
-        if let Val::Str(bs) = &b {
-            done = append_in_place(&mut self.stack[i], bs.as_str());
+    pub fn append_val(&mut self, cur: Val, b: Val) -> int {
+        if let (Val::Str(h), Val::Str(hb)) = (cur, b) {
+            if hb == 0 {
+                return h;
+            }
+            let bs = self.sget(hb);
+            return self.str_append(h, bs.as_str());
         }
-        if !done {
-            let a = self.stack[i].clone();
+        -1
+    }
+
+    #[inline]
+    pub fn add_local_pop(&mut self, op: Op, bp: int) {
+        let b = self.pop();
+        let i = (bp + (op.a as int)) as usize;
+        let h = self.append_val(self.stack[i], b);
+        if h >= 0 {
+            self.stack[i] = Val::Str(h);
+        } else {
+            let a = self.stack[i];
             let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
             self.stack[i] = r;
         }
     }
 
     #[inline]
-    fn add_env_pop(&mut self, op: Op) {
+    pub fn add_env_pop(&mut self, op: Op) {
         let b = self.pop();
-        let e = self.get_env(op.a);
+        let e = self.get_env((op.a as int));
         let i = op.b as usize;
         let mut done = false;
-        if let Val::Str(bs) = &b {
+        if let Val::Str(_) = b {
             let n = self.stack.len() - 1;
-            if same_rc(&self.stack[n], &self.objs[e as usize].elems[i]) {
-                // the stack's copy goes, so the slot may hold the only one
-                self.stack.pop();
-                done = append_in_place(&mut self.objs[e as usize].elems[i], bs.as_str());
-                if !done {
-                    let a = self.objs[e as usize].elems[i].clone();
-                    self.stack.push(a);
+            let cur = self.evecs[self.objs[e as usize].elems as usize].v[i];
+            if let (Val::Str(x), Val::Str(y)) = (self.stack[n], cur) {
+                if x == y {
+                    let h = self.append_val(cur, b);
+                    if h >= 0 {
+                        self.stack.pop();
+                        self.evecs[self.objs[e as usize].elems as usize].v[i] = Val::Str(h);
+                        // the slot holds the new handle, no longer the old
+                        // (now its prefix)
+                        self.sinc(h);
+                        self.sdec(x);
+                        done = true;
+                    }
                 }
             }
         }
@@ -3699,29 +4882,59 @@ impl Vm {
             let a = self.pop();
             let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
             if !self.throwing {
-                self.objs[e as usize].elems[i] = r;
+                self.put_elem(e, (i) as int, r);
             }
         }
     }
 
+    /// Env slot `i` (`depth` envs out) becomes a + b, a its value before b
+    /// was worked out; a string grows in place when nothing else holds it.
+    pub fn add_env(&mut self, depth: int, i: int, a: Val, b: Val) {
+        let e = self.get_env(depth);
+        if let (Val::Str(x), Val::Str(_)) = (a, b) {
+            let cur = self.evecs[self.objs[e as usize].elems as usize].v[i as usize];
+            if let Val::Str(y) = cur {
+                if x == y {
+                    let h = self.append_val(cur, b);
+                    if h >= 0 {
+                        self.evecs[self.objs[e as usize].elems as usize].v[i as usize] = Val::Str(h);
+                        self.sinc(h);
+                        self.sdec(x);
+                        return;
+                    }
+                }
+            }
+        }
+        let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+        if !self.throwing {
+            self.put_elem(e, i, r);
+        }
+    }
+
     #[inline]
-    fn add_prop_pop(&mut self, op: Op) {
+    pub fn add_prop_pop(&mut self, op: Op) {
         let b = self.pop();
         let atom = op.a;
         let mut done = false;
-        if let Val::Str(bs) = &b {
+        if let Val::Str(_) = b {
             let n = self.stack.len();
             let o = obj_of(&self.stack[n - 2]);
             if o >= 0 {
-                let slot = self.find(o, atom);
-                if slot >= 0 && self.attr_at(o, slot) == 0 && same_rc(&self.stack[n - 1], &self.objs[o as usize].vals[slot as usize]) {
-                    self.stack.pop();
-                    done = append_in_place(&mut self.objs[o as usize].vals[slot as usize], bs.as_str());
-                    if done {
-                        self.stack.pop();
-                    } else {
-                        let a = self.objs[o as usize].vals[slot as usize].clone();
-                        self.stack.push(a);
+                let slot = self.find(o, (atom as int));
+                if slot >= 0 && self.attr_at(o, slot) == 0 {
+                    let cur = self.objs[o as usize].vals[slot as usize];
+                    if let (Val::Str(x), Val::Str(y)) = (self.stack[n - 1], cur) {
+                        if x == y {
+                            let h = self.append_val(cur, b);
+                            if h >= 0 {
+                                self.stack.pop();
+                                self.stack.pop();
+                                self.objs[o as usize].vals[slot as usize] = Val::Str(h);
+                                self.sinc(h);
+                                self.sdec(x);
+                                done = true;
+                            }
+                        }
                     }
                 }
             }
@@ -3731,53 +4944,53 @@ impl Vm {
             let target = self.pop();
             let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
             if !self.throwing {
-                self.set(&target, atom, r);
+                self.set(&target, (atom as int), r);
             }
         }
     }
 
     // the common case of a few ops run() would otherwise send to step()
     #[inline]
-    fn quick_op(&mut self, op: Op, pi: usize, pc: int) -> bool {
+    pub fn quick_op(&mut self, op: Op, pi: usize, pc: int) -> bool {
         let mut done = false;
         let n = self.stack.len();
-        if op.code == OP_GET_GLOBAL {
+        if (op.code as int) == OP_GET_GLOBAL {
             let g = self.global;
-            let slot = self.ic_slot(g, op.a, op.c, false);
+            let slot = self.ic_slot(g, (op.a as int), (op.c as int), false);
             if slot >= 0 {
                 let v = self.objs[g as usize].vals[slot as usize].clone();
                 self.stack.push(v);
                 done = true;
             }
-        } else if op.code == OP_INIT_PROP {
+        } else if (op.code as int) == OP_INIT_PROP {
             // `key: value` of a literal (b 1 is `__proto__: v`)
             if op.b != 1 {
                 let v = self.pop();
                 let o = obj_of(&self.stack[n - 2]);
-                // c caches the transition: shape before * 2^24 + after
-                let sh = self.objs[o as usize].shape;
+                // c caches the transition: shape before * 65536 + after
+                let sh = self.objs[o as usize].shape as int;
                 let c = op.c;
-                if c >= 0 && (c >> 24) == sh {
-                    self.objs[o as usize].shape = c & 16777215;
-                    self.objs[o as usize].vals.push(v);
+                if c >= 0 && ((c >> 16) as int) == sh {
+                    self.objs[o as usize].shape = c & 65535;
+                    self.push_val(o, v);
                 } else {
-                    self.define(o, op.a, v, 0);
-                    let sh2 = self.objs[o as usize].shape;
-                    if sh2 != sh && sh2 < 16777216 && !self.shapes[sh as usize].owned && !self.shapes[sh2 as usize].owned {
-                        self.protos[pi].code[(pc - 1) as usize].c = sh * 16777216 + sh2;
+                    self.define(o, (op.a as int), v, 0);
+                    let sh2 = self.objs[o as usize].shape as int;
+                    if sh2 != sh && sh < 32768 && sh2 < 65536 && !self.shapes[sh as usize].owned && !self.shapes[sh2 as usize].owned {
+                        self.protos[pi].code[(pc - 1) as usize].c = (sh * 65536 + sh2) as i32;
                     }
                 }
                 done = true;
             }
-        } else if op.code == OP_TOSTR {
+        } else if (op.code as int) == OP_TOSTR {
             if let Val::Str(_) = &self.stack[n - 1] {
                 done = true;
             }
         } else if let Val::Num(x) = self.stack[n - 1] {
-            if op.code == OP_TONUM {
+            if (op.code as int) == OP_TONUM {
                 done = true;
             } else {
-                self.stack[n - 1] = Val::Num(if op.code == OP_INC { x + 1.0 } else { x - 1.0 });
+                self.stack[n - 1] = Val::Num(if (op.code as int) == OP_INC { x + 1.0 } else { x - 1.0 });
                 done = true;
             }
         }
@@ -3785,8 +4998,8 @@ impl Vm {
     }
 
     /// The rarer operations; true when the current frame changed.
-    fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
-        match op.code {
+    pub fn step(&mut self, op: Op, pi: usize, bp: int, fi: usize, pc: &mut int) -> bool {
+        match (op.code as int) {
             OP_TDZ => {
                 self.stack.push(Val::Obj(self.tdz_obj));
             }
@@ -3829,7 +5042,7 @@ impl Vm {
             }
             OP_YIELD => {
                 let v = self.pop();
-                self.gen_yield(fi, *pc, v, op.a);
+                self.gen_yield(fi, *pc, v, (op.a as int));
                 return true;
             }
             OP_ASYNC_ITER => {
@@ -3842,7 +5055,7 @@ impl Vm {
                     return false;
                 }
                 if !matches!(m, Val::Undef) && !matches!(m, Val::Null) {
-                    let it = self.call_value(m, v, Vec::new());
+                    let it = self.call_fixed(m, v, 0, Val::Undef, Val::Undef, Val::Undef);
                     if !self.throwing && !is_obj(&it) {
                         self.throw_type("Result of the Symbol.asyncIterator method is not an object");
                     }
@@ -3854,14 +5067,14 @@ impl Vm {
                     return false;
                 }
                 let wrap = self.async_from_sync;
-                let it = self.call_value(Val::Obj(wrap), Val::Undef, vec![sync]);
+                let it = self.call_fixed(Val::Obj(wrap), Val::Undef, 1, sync, Val::Undef, Val::Undef);
                 self.stack.push(it);
             }
             OP_GEN_RESUME => {
                 let mode = self.pop();
                 if let Val::Num(m) = mode {
                     if m == 1.0 {
-                        *pc = op.a;
+                        *pc = (op.a as int);
                     } else if m == 2.0 {
                         let e = self.pop();
                         self.throw_val(e);
@@ -3871,9 +5084,9 @@ impl Vm {
             OP_YIELD_STAR => {
                 let r = self.yield_star_step();
                 if r == 1 {
-                    *pc = op.a;
+                    *pc = (op.a as int);
                 } else if r == 2 {
-                    *pc = op.b;
+                    *pc = (op.b as int);
                 }
             }
             OP_UNDEF => self.stack.push(Val::Undef),
@@ -3911,64 +5124,56 @@ impl Vm {
                 self.stack.insert(n - 3, z);
             }
             OP_GET_ENV => {
-                let e = self.get_env(op.a);
-                let v = self.objs[e as usize].elems[op.b as usize].clone();
+                let e = self.get_env((op.a as int));
+                let v = self.evecs[self.objs[e as usize].elems as usize].v[op.b as usize].clone();
                 self.stack.push(v);
             }
             OP_SET_ENV => {
-                let e = self.get_env(op.a);
+                let e = self.get_env((op.a as int));
                 let v = self.top().clone();
-                self.objs[e as usize].elems[op.b as usize] = v;
+                self.put_elem(e, (op.b as int), v);
             }
             OP_GET_GLOBAL => {
                 let g = self.global;
-                let slot = self.ic_get(g, op.a, op.c, pi, *pc);
+                let slot = self.ic_get(g, (op.a as int), (op.c as int), pi, *pc);
                 if slot >= 0 {
                     let v = self.objs[g as usize].vals[slot as usize].clone();
                     self.stack.push(v);
-                } else if self.has_atom(g, op.a) {
-                    let v = self.get_obj(g, op.a, &Val::Obj(g));
+                } else if self.has_atom(g, (op.a as int)) {
+                    let v = self.get_obj(g, (op.a as int), &Val::Obj(g));
                     self.stack.push(v);
                 } else {
-                    let n = self.atom_str(op.a);
+                    let n = self.atom_str((op.a as int));
                     self.throw_ref(format!("{} is not defined", n).as_str());
                 }
             }
             OP_SET_GLOBAL => {
-                let g = self.global;
                 let v = self.top().clone();
-                let slot = self.find(g, op.a);
-                if slot >= 0 && self.attr_at(g, slot) == 0 {
-                    self.objs[g as usize].vals[slot as usize] = v;
-                } else if slot < 0 && op.b == 0 && self.strict_now() && !self.has_atom(g, op.a) {
-                    // strict code does not create globals by assignment
-                    let n = self.atom_str(op.a);
-                    self.throw_ref(format!("{} is not defined", n).as_str());
-                } else {
-                    self.set_obj(g, op.a, v);
-                }
+                self.set_global((op.a as int), v, (op.b as int), pi, *pc);
             }
             OP_DECL_GLOBAL => {
                 let g = self.global;
-                if self.find(g, op.a) < 0 {
-                    self.add_own(g, op.a, Val::Undef, P_FIXED);
+                if self.find(g, (op.a as int)) < 0 {
+                    self.add_own(g, (op.a as int), Val::Undef, P_FIXED);
                 }
             }
             OP_TYPEOF_GLOBAL => {
                 let g = self.global;
-                if self.has_atom(g, op.a) {
-                    let v = self.get_obj(g, op.a, &Val::Obj(g));
+                if self.has_atom(g, (op.a as int)) {
+                    let v = self.get_obj(g, (op.a as int), &Val::Obj(g));
                     let t = self.type_of(&v);
-                    self.stack.push(string_val(t));
+                    let sv13 = self.string_val(t);
+                    self.stack.push(sv13);
                 } else {
-                    self.stack.push(str_val("undefined"));
+                    let sv12 = self.str_val("undefined");
+                    self.stack.push(sv12);
                 }
             }
             OP_DEL_PROP => {
                 let v = self.pop();
                 match v {
                     Val::Obj(o) => {
-                        let k = self.key_val(op.a);
+                        let k = self.key_val((op.a as int));
                         let r = self.delete(o, &k);
                         self.stack.push(Val::Bool(r));
                     }
@@ -3998,17 +5203,17 @@ impl Vm {
                 let v = self.pop();
                 let has = match &v {
                     Val::Obj(o) => {
-                        let k = self.key_val(op.a);
+                        let k = self.key_val((op.a as int));
                         self.has_property(*o, &k)
                     }
                     _ => false,
                 };
                 if !has {
-                    let n = self.atom_str(op.a);
+                    let n = self.atom_str((op.a as int));
                     let shown = if n.starts_with('\u{1}') { jsstr::slice(n.as_str(), 1, jsstr::len(n.as_str())) } else { n.clone() };
                     self.throw_type(format!("Cannot read private member {} from an object whose class did not declare it", shown).as_str());
                 } else {
-                    let r = self.get(&v, op.a);
+                    let r = self.get(&v, (op.a as int));
                     self.stack.push(r);
                 }
             }
@@ -4066,7 +5271,7 @@ impl Vm {
                 let v = self.pop();
                 if self.class_of(&v) == C_BIGINT {
                     let t = self.big_text(&v);
-                    let r = if op.code == OP_INC { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
+                    let r = if (op.code as int) == OP_INC { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
                     let b = self.bigint_val(r.as_str());
                     self.stack.push(b);
                     return false;
@@ -4075,7 +5280,7 @@ impl Vm {
                     Val::Num(x) => x,
                     _ => self.to_number(&v),
                 };
-                self.stack.push(Val::Num(if op.code == OP_INC { n + 1.0 } else { n - 1.0 }));
+                self.stack.push(Val::Num(if (op.code as int) == OP_INC { n + 1.0 } else { n - 1.0 }));
             }
             OP_TOSTR => {
                 let v = self.pop();
@@ -4083,19 +5288,20 @@ impl Vm {
                     self.stack.push(v);
                 } else {
                     let s = self.to_str(&v);
-                    self.stack.push(Val::Str(s));
+                    let sv11 = self.rc_val(s);
+                    self.stack.push(sv11);
                 }
             }
             OP_JF_KEEP => {
                 if !truthy(self.top()) {
-                    *pc = op.a;
+                    *pc = (op.a as int);
                 } else {
                     self.stack.pop();
                 }
             }
             OP_JT_KEEP => {
                 if truthy(self.top()) {
-                    *pc = op.a;
+                    *pc = (op.a as int);
                 } else {
                     self.stack.pop();
                 }
@@ -4103,7 +5309,7 @@ impl Vm {
             OP_JNN_KEEP => {
                 let t = self.top();
                 if !(matches!(t, Val::Undef) || matches!(t, Val::Null)) {
-                    *pc = op.a;
+                    *pc = (op.a as int);
                 } else {
                     self.stack.pop();
                 }
@@ -4111,7 +5317,7 @@ impl Vm {
             OP_JNOT_UNDEF => {
                 let v = self.pop();
                 if !matches!(v, Val::Undef) {
-                    *pc = op.a;
+                    *pc = (op.a as int);
                 }
             }
             OP_JNULLISH => {
@@ -4120,7 +5326,7 @@ impl Vm {
                     if matches!(t, Val::Undef) || matches!(t, Val::Null) {
                         self.stack.pop();
                         self.stack.push(Val::Undef);
-                        *pc = op.a;
+                        *pc = (op.a as int);
                     }
                 } else {
                     let v = self.pop();
@@ -4131,7 +5337,7 @@ impl Vm {
                             k += 1;
                         }
                         self.stack.push(Val::Undef);
-                        *pc = op.a;
+                        *pc = (op.a as int);
                     }
                 }
             }
@@ -4139,11 +5345,11 @@ impl Vm {
                 if self.gc_due() {
                     self.gc();
                 }
-                return self.new_op(op.a);
+                return self.new_op((op.a as int));
             }
             OP_CALL_SPREAD => {
                 let arr = self.pop();
-                let items = self.objs[obj_of(&arr) as usize].elems.clone();
+                let items = self.evecs[self.objs[obj_of(&arr) as usize].elems as usize].v.clone();
                 let argc = items.len() as int;
                 for x in items {
                     self.stack.push(x);
@@ -4152,7 +5358,7 @@ impl Vm {
             }
             OP_NEW_SPREAD => {
                 let arr = self.pop();
-                let items = self.objs[obj_of(&arr) as usize].elems.clone();
+                let items = self.evecs[self.objs[obj_of(&arr) as usize].elems as usize].v.clone();
                 let argc = items.len() as int;
                 for x in items {
                     self.stack.push(x);
@@ -4161,22 +5367,22 @@ impl Vm {
             }
             OP_SUPER_CALL | OP_SUPER_CALL_SPREAD => {
                 let mut args: Vec<Val> = Vec::new();
-                if op.code == OP_SUPER_CALL_SPREAD {
+                if (op.code as int) == OP_SUPER_CALL_SPREAD {
                     let arr = self.pop();
-                    args = self.objs[obj_of(&arr) as usize].elems.clone();
+                    args = self.evecs[self.objs[obj_of(&arr) as usize].elems as usize].v.clone();
                 } else {
                     let n = self.stack.len() as int;
-                    let mut i = n - op.a;
+                    let mut i = n - (op.a as int);
                     while i < n {
                         args.push(self.stack[i as usize].clone());
                         i += 1;
                     }
-                    self.stack.truncate((n - op.a) as usize);
+                    self.stack.truncate((n - (op.a as int)) as usize);
                 }
                 // the class whose constructor is running (arrows: the one
                 // they were made in)
                 let fobj = self.ctor_of_frame(fi);
-                let parent = self.objs[fobj as usize].proto;
+                let parent = self.objs[fobj as usize].proto as int;
                 let nt = self.frames[fi].new_target.clone();
                 let this = self.frames[fi].this_val.clone();
                 let pclass = if parent >= 0 { self.objs[parent as usize].class } else { -1 };
@@ -4227,7 +5433,7 @@ impl Vm {
                 self.stack.push(result);
             }
             OP_CLOSURE => {
-                let f = self.closure(op.a);
+                let f = self.closure((op.a as int));
                 self.stack.push(Val::Obj(f));
             }
             OP_CALLEE => {
@@ -4255,12 +5461,12 @@ impl Vm {
                 let o = obj_of(self.top());
                 if op.b == 1 {
                     match v {
-                        Val::Obj(p) => self.objs[o as usize].proto = p,
-                        Val::Null => self.objs[o as usize].proto = -1,
+                        Val::Obj(p) => self.put_proto(o, p),
+                        Val::Null => self.put_proto(o, -1),
                         _ => {}
                     }
                 } else {
-                    self.define(o, op.a, v, 0);
+                    self.define(o, (op.a as int), v, 0);
                 }
             }
             OP_INIT_ELEM => {
@@ -4274,7 +5480,7 @@ impl Vm {
                 let v = self.pop();
                 let o = obj_of(self.top());
                 if o >= 0 {
-                    self.define(o, op.a, v, 0);
+                    self.define(o, (op.a as int), v, 0);
                 }
             }
             OP_DEFINE_FIELD_ELEM => {
@@ -4288,8 +5494,8 @@ impl Vm {
             OP_INIT_GETTER | OP_INIT_SETTER => {
                 let f = self.pop();
                 let o = obj_of(self.top());
-                self.objs[obj_of(&f) as usize].home = o;
-                self.define_accessor(o, op.a, f, if op.code == OP_INIT_GETTER { 0 } else { 1 }, op.b == 1);
+                self.put_home(obj_of(&f), o);
+                self.define_accessor(o, (op.a as int), f, if (op.code as int) == OP_INIT_GETTER { 0 } else { 1 }, op.b == 1);
             }
             OP_INIT_GETTER_ELEM | OP_INIT_SETTER_ELEM => {
                 let f = self.pop();
@@ -4297,8 +5503,8 @@ impl Vm {
                 let o = obj_of(self.top());
                 let (i, a) = self.to_key(&k);
                 let atom = if i >= 0 { self.index_atom(i) } else { a };
-                self.objs[obj_of(&f) as usize].home = o;
-                self.define_accessor(o, atom, f, if op.code == OP_INIT_GETTER_ELEM { 0 } else { 1 }, op.b == 1);
+                self.put_home(obj_of(&f), o);
+                self.define_accessor(o, atom, f, if (op.code as int) == OP_INIT_GETTER_ELEM { 0 } else { 1 }, op.b == 1);
             }
             OP_INIT_SPREAD => {
                 let src = self.pop();
@@ -4313,11 +5519,13 @@ impl Vm {
                         self.define_elem(o, &k, v, 0);
                     }
                 } else if let Val::Str(s) = &src {
+                    let s = self.sget(s.clone());
                     let mut i: int = 0;
                     for c in s.chars() {
                         let mut t = String::new();
                         t.push(c);
-                        self.set_index(o, i, string_val(t));
+                        let sv10 = self.string_val(t);
+                        self.set_index(o, i, sv10);
                         i += 1;
                     }
                 }
@@ -4325,40 +5533,47 @@ impl Vm {
             OP_DEFINE_METHOD => {
                 let f = self.pop();
                 let o = obj_of(self.top());
-                self.objs[obj_of(&f) as usize].home = o;
+                self.put_home(obj_of(&f), o);
                 let hidden = self.is_class_proto(o) || self.is_class_ctor(o);
-                self.define(o, op.a, f, if hidden { P_HIDDEN } else { 0 });
+                self.define(o, (op.a as int), f, if hidden { P_HIDDEN } else { 0 });
             }
             OP_DEFINE_METHOD_ELEM => {
                 let f = self.pop();
                 let k = self.pop();
                 let o = obj_of(self.top());
                 self.name_by_key(&f, &k);
-                self.objs[obj_of(&f) as usize].home = o;
+                self.put_home(obj_of(&f), o);
                 let hidden = self.is_class_proto(o) || self.is_class_ctor(o);
                 self.define_elem(o, &k, f, if hidden { P_HIDDEN } else { 0 });
             }
             OP_NEW_ARRAY => {
+                // the items go straight into the slot's elements (a free
+                // slot keeps its small buffer), no vector in between
                 let n = self.stack.len() as int;
-                let mut items: Vec<Val> = Vec::with_capacity(op.a as usize);
-                let mut i = n - op.a;
+                let p = self.array_proto;
+                let a = self.alloc(C_ARRAY, p);
+                if op.a > 0 {
+                    let e = self.elems_id(a);
+                    reserve_vals(&mut self.evecs[e].v, op.a as usize);
+                }
+                let mut i = n - (op.a as int);
                 while i < n {
-                    items.push(self.stack[i as usize].clone());
+                    let v = self.stack[i as usize];
+                    self.push_elem(a, v);
                     i += 1;
                 }
-                self.stack.truncate((n - op.a) as usize);
-                let a = self.new_array(items);
+                self.stack.truncate((n - (op.a as int)) as usize);
                 self.stack.push(Val::Obj(a));
             }
             OP_ARRAY_PUSH => {
                 let v = self.pop();
                 let a = obj_of(self.top());
-                self.objs[a as usize].elems.push(v);
+                self.push_elem(a, v);
             }
             OP_ARRAY_HOLE => {
                 let a = obj_of(self.top());
-                self.objs[a as usize].elems.push(Val::Undef);
-                let i = (self.objs[a as usize].elems.len() as int) - 1;
+                self.push_elem(a, Val::Undef);
+                let i = (self.evecs[self.objs[a as usize].elems as usize].v.len() as int) - 1;
                 self.mark_hole(a, i);
             }
             OP_ARRAY_SPREAD => {
@@ -4369,7 +5584,7 @@ impl Vm {
                 }
                 let a = obj_of(self.top());
                 for x in items {
-                    self.objs[a as usize].elems.push(x);
+                    self.push_elem(a, x);
                 }
             }
             OP_TEMPLATE_OBJ => {
@@ -4379,7 +5594,7 @@ impl Vm {
                     let c = self.protos[pi].consts[op.b as usize].clone();
                     if is_obj(&c) {
                         self.stack.push(c);
-                        *pc = op.a;
+                        *pc = (op.a as int);
                     }
                     return false;
                 }
@@ -4387,16 +5602,16 @@ impl Vm {
                 let n = self.stack.len() as int;
                 let mut cooked: Vec<Val> = Vec::new();
                 let mut raws: Vec<Val> = Vec::new();
-                let mut i = n - 2 * op.a;
+                let mut i = n - (2 * op.a as int);
                 while i < n {
-                    if i < n - op.a {
+                    if i < n - (op.a as int) {
                         cooked.push(self.stack[i as usize].clone());
                     } else {
                         raws.push(self.stack[i as usize].clone());
                     }
                     i += 1;
                 }
-                self.stack.truncate((n - 2 * op.a) as usize);
+                self.stack.truncate((n - (2 * op.a as int)) as usize);
                 let raw = self.new_array(raws);
                 let a = self.new_array(cooked);
                 self.define(a, A_RAW, Val::Obj(raw), P_HIDDEN | P_READONLY | P_FIXED);
@@ -4413,7 +5628,7 @@ impl Vm {
             OP_TRY => {
                 let sp = self.stack.len() as int;
                 let env = self.frames[fi].env;
-                self.handlers.push(Handler { frame: fi as int, catch_pc: op.a, sp: sp, env: env });
+                self.handlers.push(Handler { frame: fi as int, catch_pc: (op.a as int), sp: sp, env: env });
             }
             OP_END_TRY => {
                 self.handlers.pop();
@@ -4423,11 +5638,12 @@ impl Vm {
                 let keys = match &v {
                     Val::Obj(o) => self.for_in_keys(*o),
                     Val::Str(s) => {
+                        let s = self.sget(s.clone());
                         let mut ks: Vec<Val> = Vec::new();
                         let n = jsstr::len(s.as_str());
                         let mut i = 0;
                         while i < n {
-                            ks.push(string_val(format!("{}", i)));
+                            ks.push(self.string_val(format!("{}", i)));
                             i += 1;
                         }
                         ks
@@ -4437,10 +5653,10 @@ impl Vm {
                 let arr = self.new_array(keys);
                 let ip = self.iter_proto;
                 let it = self.alloc(C_ITER, ip);
-                self.objs[it as usize].env = arr;
+                self.put_env(it, arr);
                 self.objs[it as usize].func = 0;
                 // for-in skips keys deleted during the loop
-                self.objs[it as usize].home = obj_of(&v);
+                self.put_home(it, obj_of(&v));
                 self.stack.push(Val::Obj(it));
             }
             OP_ITER_VALUES => {
@@ -4454,7 +5670,7 @@ impl Vm {
             OP_ITER_NEXT => {
                 let it = self.top().clone();
                 let o = obj_of(&it);
-                let src_obj = if o >= 0 { self.objs[o as usize].home } else { -1 };
+                let src_obj = if o >= 0 { self.colds[self.objs[o as usize].cold as usize].home } else { -1 };
                 loop {
                     match self.iter_next(&it) {
                         Some(v) => {
@@ -4468,7 +5684,7 @@ impl Vm {
                         }
                         None => {
                             if !self.throwing {
-                                *pc = op.a;
+                                *pc = (op.a as int);
                             }
                         }
                     }
@@ -4480,23 +5696,23 @@ impl Vm {
                 let e = self.alloc(C_ENV, parent);
                 let mut i = 0;
                 while i < op.a {
-                    self.objs[e as usize].elems.push(Val::Undef);
+                    self.push_elem(e, Val::Undef);
                     i += 1;
                 }
                 self.frames[fi].env = e;
             }
             OP_POP_ENV => {
                 let e = self.frames[fi].env;
-                self.frames[fi].env = self.objs[e as usize].proto;
+                self.frames[fi].env = self.objs[e as usize].proto as int;
             }
             OP_COPY_ENV => {
                 let e = self.frames[fi].env;
-                let parent = self.objs[e as usize].proto;
+                let parent = self.objs[e as usize].proto as int;
                 let n = self.alloc(C_ENV, parent);
                 let mut i = 0;
-                while i < self.objs[e as usize].elems.len() {
-                    let v = self.objs[e as usize].elems[i].clone();
-                    self.objs[n as usize].elems.push(v);
+                while i < self.evecs[self.objs[e as usize].elems as usize].v.len() {
+                    let v = self.evecs[self.objs[e as usize].elems as usize].v[i].clone();
+                    self.push_elem(n, v);
                     i += 1;
                 }
                 self.frames[fi].env = n;
@@ -4509,13 +5725,13 @@ impl Vm {
                     let flags = self.protos[pi].consts[op.b as usize].clone();
                     let s = self.to_string(&src);
                     let f = if matches!(flags, Val::Undef) { String::new() } else { self.to_string(&flags) };
-                    idx = self.regexp_index(s.as_str(), f.as_str());
+                    idx = (self.regexp_index(s.as_str(), f.as_str()) as i32);
                     if idx < 0 {
                         return false;
                     }
                     self.protos[pi].code[(*pc - 1) as usize].c = idx;
                 }
-                let r = self.make_regexp(idx, src);
+                let r = self.make_regexp((idx as int), src);
                 self.stack.push(r);
             }
             OP_CLASS => {
@@ -4544,7 +5760,7 @@ impl Vm {
                                     return false;
                                 }
                             }
-                            self.objs[ctor as usize].proto = *s;
+                            self.put_proto(ctor, *s);
                         }
                         _ => {
                             self.throw_type("Class extends value is not a constructor or null");
@@ -4556,25 +5772,25 @@ impl Vm {
                 self.add_own(p, A_CONSTRUCTOR, Val::Obj(ctor), P_HIDDEN);
                 self.objs[p as usize].pos = 1; // a class prototype: methods hidden
                 self.define(ctor, A_PROTOTYPE, Val::Obj(p), P_HIDDEN | P_READONLY | P_FIXED);
-                self.objs[ctor as usize].home = p;
+                self.put_home(ctor, p);
                 self.stack.push(Val::Obj(p));
             }
             OP_SET_FIELDS => {
                 let f = self.pop();
                 let ctor = obj_of(self.top());
-                self.objs[obj_of(&f) as usize].home = self.objs[ctor as usize].home;
-                self.objs[ctor as usize].elems2 = vec![f];
+                self.put_home(obj_of(&f), self.colds[self.objs[ctor as usize].cold as usize].home);
+                self.put_elems2(ctor, vec![f]);
             }
             OP_GET_SUPER | OP_GET_SUPER_ELEM => {
-                let key = if op.code == OP_GET_SUPER { self.key_val(op.a) } else { self.pop() };
+                let key = if (op.code as int) == OP_GET_SUPER { self.key_val((op.a as int)) } else { self.pop() };
                 let fobj = self.frames[fi].fobj;
-                let home = self.objs[fobj as usize].home;
+                let home = self.colds[self.objs[fobj as usize].cold as usize].home;
                 let this = self.frames[fi].this_val.clone();
                 if home < 0 {
                     self.throw_syntax("'super' keyword unexpected here");
                     return false;
                 }
-                let start = self.objs[home as usize].proto;
+                let start = self.objs[home as usize].proto as int;
                 if start < 0 {
                     self.stack.push(Val::Undef);
                 } else {
@@ -4593,20 +5809,20 @@ impl Vm {
             OP_OBJ_REST => {
                 let n = self.stack.len() as int;
                 let mut skip: Vec<String> = Vec::new();
-                let mut i = n - op.a;
+                let mut i = n - (op.a as int);
                 while i < n {
                     let k = self.stack[i as usize].clone();
                     let s = self.to_string(&k);
                     skip.push(s);
                     i += 1;
                 }
-                self.stack.truncate((n - op.a) as usize);
+                self.stack.truncate((n - (op.a as int)) as usize);
                 let src = self.top().clone();
                 let r = self.new_object();
                 if let Val::Obj(s) = &src {
                     let keys = self.own_keys(*s, false, true);
                     for k in keys {
-                        let ks = if let Val::Str(x) = &k { x.as_ref().clone() } else { String::new() };
+                        let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else { String::new() };
                         let mut skipped = false;
                         for x in skip.iter() {
                             if x.as_str() == ks.as_str() && !ks.is_empty() {
@@ -4628,7 +5844,7 @@ impl Vm {
                     self.throw_type("value is not iterable");
                     return false;
                 }
-                let items = if op.a > 0 { self.iterable_take(&v, op.a - 1) } else { self.iterable_to_vec(&v) };
+                let items = if op.a > 0 { self.iterable_take(&v, ((op.a - 1) as int)) } else { self.iterable_to_vec(&v) };
                 if self.throwing {
                     return false;
                 }
@@ -4637,11 +5853,11 @@ impl Vm {
             }
             OP_ARRAY_REST => {
                 let a = obj_of(self.top());
-                let n = self.objs[a as usize].elems.len() as int;
+                let n = self.evecs[self.objs[a as usize].elems as usize].v.len() as int;
                 let mut items: Vec<Val> = Vec::new();
                 let mut i = op.a;
-                while i < n {
-                    items.push(self.objs[a as usize].elems[i as usize].clone());
+                while (i as int) < n {
+                    items.push(self.evecs[self.objs[a as usize].elems as usize].v[i as usize].clone());
                     i += 1;
                 }
                 let r = self.new_array(items);
@@ -4653,9 +5869,10 @@ impl Vm {
                     let class = self.objs[f as usize].class;
                     let name = self.protos[pi].consts[op.a as usize].clone();
                     if class == C_FUNCTION {
-                        let fp = self.objs[f as usize].func;
+                        let fp = self.objs[f as usize].func as int;
                         if self.protos[fp as usize].name.is_empty() {
                             if let Val::Str(s) = &name {
+                                let s = self.sget(s.clone());
                                 self.protos[fp as usize].name = s.as_ref().clone();
                             }
                         }
@@ -4684,13 +5901,308 @@ impl Vm {
     }
 
     // ---- collection
+    //
+    // Reference counting frees most garbage when it becomes garbage; a
+    // mark-and-sweep collection frees the rest (cycles) and corrects the
+    // counts.
+    //
+    // A count (JsObj.rc) is the number of references to the object from
+    // other objects: properties, elements, a closure's scope, a prototype.
+    // References from the stack, the frames, the handlers and the machine's
+    // own fields (the roots) are not counted, so pushing, popping and
+    // moving values costs nothing (deferred reference counting). An object
+    // whose count falls to 0 goes to `zct` (and a new object starts there);
+    // when the table is full, at a safe point, `reclaim` frees the objects
+    // in it that no root holds, and what only they held.
+    //
+    // A missing increment would free a live object; the counts are
+    // therefore written where the heap changes (inc / dec, set_slot, ...),
+    // and `rc_check` (tests) checks every reclaim against a full mark.
 
-    fn mark_val(&mut self, v: &Val, work: &mut Vec<int>) {
-        if let Val::Obj(o) = v {
-            if !self.objs[*o as usize].marked {
-                self.objs[*o as usize].marked = true;
-                work.push(*o);
+    #[inline]
+    pub fn inc(&mut self, v: &Val) {
+        match v {
+            Val::Obj(o) => {
+                self.objs[*o as usize].rc += 1;
             }
+            Val::Str(h) => {
+                self.sinc(*h);
+            }
+            _ => {}
+        }
+    }
+
+    #[inline]
+    pub fn inc_o(&mut self, o: int) {
+        if o >= 0 {
+            self.objs[o as usize].rc += 1;
+        }
+    }
+
+    #[inline]
+    pub fn dec(&mut self, v: &Val) {
+        match v {
+            Val::Obj(o) => {
+                self.dec_o(*o);
+            }
+            Val::Str(h) => {
+                self.sdec(*h);
+            }
+            _ => {}
+        }
+    }
+
+    #[inline]
+    pub fn dec_o(&mut self, o: int) {
+        if o >= 0 {
+            let ob = &mut self.objs[o as usize];
+            ob.rc -= 1;
+            if ob.rc <= 0 && !ob.zct && !ob.free {
+                ob.zct = true;
+                self.zct.push(o);
+                if (self.zct.len() as int) >= self.zct_limit {
+                    self.gc_flag = true;
+                }
+            }
+        }
+    }
+
+    /// Counts each object of `vs` (values put in the heap at once).
+    pub fn inc_all(&mut self, vs: &Vec<Val>) {
+        let n = vs.len();
+        let mut i: usize = 0;
+        while i < n {
+            let v = vs[i];
+            self.inc(&v);
+            i += 1;
+        }
+    }
+
+    pub fn dec_all(&mut self, vs: &Vec<Val>) {
+        let n = vs.len();
+        let mut i: usize = 0;
+        while i < n {
+            let v = vs[i];
+            self.dec(&v);
+            i += 1;
+        }
+    }
+
+    /// Property slot `slot` of `o` becomes `v`.
+    #[inline]
+    pub fn put_slot(&mut self, o: int, slot: int, v: Val) {
+        self.inc(&v);
+        let old = self.objs[o as usize].vals[slot as usize];
+        self.objs[o as usize].vals[slot as usize] = v;
+        self.dec(&old);
+    }
+
+    /// Element `i` of `o` becomes `v`.
+    #[inline]
+    pub fn put_elem(&mut self, o: int, i: int, v: Val) {
+        self.inc(&v);
+        let old = self.evecs[self.objs[o as usize].elems as usize].v[i as usize];
+        self.evecs[self.objs[o as usize].elems as usize].v[i as usize] = v;
+        self.dec(&old);
+    }
+
+    #[inline]
+    pub fn push_val(&mut self, o: int, v: Val) {
+        self.inc(&v);
+        self.objs[o as usize].vals.push(v);
+    }
+
+    pub fn remove_val(&mut self, o: int, slot: int) {
+        let v = self.objs[o as usize].vals.remove(slot as usize);
+        self.dec(&v);
+    }
+
+    /// `o`'s elements' index in `evecs`, given one on its first element.
+    #[inline(always)]
+    pub fn elems_id(&mut self, o: int) -> usize {
+        let e = self.objs[o as usize].elems;
+        if e != 0 {
+            return e as usize;
+        }
+        let n = self.new_evec();
+        self.objs[o as usize].elems = n as i32;
+        n
+    }
+
+    /// An empty vector of elements in `evecs`, a free one when there is.
+    #[inline(never)]
+    pub fn new_evec(&mut self) -> usize {
+        if !self.efree.is_empty() {
+            return self.efree.pop().unwrap() as usize;
+        }
+        grow_evecs(&mut self.evecs);
+        self.evecs.push(Elems { v: Vec::new() });
+        self.evecs.len() - 1
+    }
+
+    #[inline(always)]
+    pub fn push_elem(&mut self, o: int, v: Val) {
+        self.inc(&v);
+        let e = self.elems_id(o);
+        self.evecs[e].v.push(v);
+    }
+
+    pub fn put_elem2(&mut self, o: int, i: int, v: Val) {
+        self.inc(&v);
+        let c = self.cold_id(o) as usize;
+        let old = self.colds[c].elems2[i as usize];
+        self.colds[c].elems2[i as usize] = v;
+        self.dec(&old);
+    }
+
+    pub fn push_elem2(&mut self, o: int, v: Val) {
+        self.inc(&v);
+        let c = self.cold_id(o) as usize;
+        self.colds[c].elems2.push(v);
+    }
+
+    /// `o`'s elements become `vs`.
+    pub fn put_elems(&mut self, o: int, vs: Vec<Val>) {
+        self.inc_all(&vs);
+        let n = self.evecs[self.objs[o as usize].elems as usize].v.len();
+        let mut i: usize = 0;
+        while i < n {
+            let x = self.evecs[self.objs[o as usize].elems as usize].v[i];
+            self.dec(&x);
+            i += 1;
+        }
+        let e = self.elems_id(o);
+        self.evecs[e].v = vs;
+    }
+
+    pub fn put_elems2(&mut self, o: int, vs: Vec<Val>) {
+        if vs.is_empty() && self.objs[o as usize].cold == 0 {
+            return;
+        }
+        self.inc_all(&vs);
+        let n = self.colds[self.objs[o as usize].cold as usize].elems2.len();
+        let mut i: usize = 0;
+        while i < n {
+            let x = self.colds[self.objs[o as usize].cold as usize].elems2[i];
+            self.dec(&x);
+            i += 1;
+        }
+        let c = self.cold_id(o) as usize;
+        self.colds[c].elems2 = vs;
+    }
+
+    /// `o`'s elements past `n` go.
+    pub fn cut_elems(&mut self, o: int, n: int) {
+        let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+        if n >= len {
+            return;
+        }
+        let mut i = n;
+        while i < len {
+            let x = self.evecs[self.objs[o as usize].elems as usize].v[i as usize];
+            self.dec(&x);
+            i += 1;
+        }
+        self.evecs[self.objs[o as usize].elems as usize].v.truncate(n as usize);
+    }
+
+    pub fn cut_elems2(&mut self, o: int, n: int) {
+        let len = self.colds[self.objs[o as usize].cold as usize].elems2.len() as int;
+        if n >= len {
+            return;
+        }
+        let mut i = n;
+        while i < len {
+            let x = self.colds[self.objs[o as usize].cold as usize].elems2[i as usize];
+            self.dec(&x);
+            i += 1;
+        }
+        let c = self.cold_id(o) as usize;
+        self.colds[c].elems2.truncate(n as usize);
+    }
+
+    /// The last element of `o`, taken out (the caller owns its count).
+    pub fn pop_elem_val(&mut self, o: int) -> Val {
+        match self.evecs[self.objs[o as usize].elems as usize].v.pop() {
+            Some(v) => v,
+            None => Val::Undef,
+        }
+    }
+
+    pub fn pop_elem(&mut self, o: int) {
+        let v = self.pop_elem_val(o);
+        self.dec(&v);
+    }
+
+    pub fn insert_elem(&mut self, o: int, i: int, v: Val) {
+        self.inc(&v);
+        let e = self.elems_id(o);
+        self.evecs[e].v.insert(i as usize, v);
+    }
+
+    pub fn remove_elem(&mut self, o: int, i: int) {
+        let v = self.evecs[self.objs[o as usize].elems as usize].v.remove(i as usize);
+        self.dec(&v);
+    }
+
+    pub fn put_prim(&mut self, o: int, v: Val) {
+        if self.objs[o as usize].cold == 0 && matches!(v, Val::Undef) {
+            return;
+        }
+        self.inc(&v);
+        let c = self.cold_id(o) as usize;
+        let old = self.colds[c].prim;
+        self.colds[c].prim = v;
+        self.dec(&old);
+    }
+
+    pub fn put_proto(&mut self, o: int, p: int) {
+        self.inc_o(p);
+        let old = self.objs[o as usize].proto as int;
+        self.objs[o as usize].proto = p as i32;
+        self.dec_o(old);
+    }
+
+    pub fn put_env(&mut self, o: int, e: int) {
+        self.inc_o(e);
+        let old = self.objs[o as usize].env as int;
+        self.objs[o as usize].env = e as i32;
+        self.dec_o(old);
+    }
+
+    pub fn put_home(&mut self, o: int, h: int) {
+        if self.objs[o as usize].cold == 0 && h < 0 {
+            return;
+        }
+        self.inc_o(h);
+        let c = self.cold_id(o) as usize;
+        let old = self.colds[c].home;
+        self.colds[c].home = h;
+        self.dec_o(old);
+    }
+
+    /// `o`'s Cold, made on first use.
+    pub fn cold_id(&mut self, o: int) -> int {
+        let c = self.objs[o as usize].cold as int;
+        if c > 0 {
+            return c;
+        }
+        let id = if self.free_colds.is_empty() {
+            self.colds.push(Cold::new());
+            (self.colds.len() as int) - 1
+        } else {
+            self.free_colds.pop().unwrap()
+        };
+        self.objs[o as usize].cold = id as i32;
+        id
+    }
+
+    pub fn free_cold(&mut self, o: int) {
+        let c = self.objs[o as usize].cold as int;
+        if c > 0 {
+            reset_cold(&mut self.colds, c as usize);
+            self.free_colds.push(c);
+            self.objs[o as usize].cold = 0;
         }
     }
 
@@ -4701,22 +6213,81 @@ impl Vm {
         }
     }
 
-    pub fn gc(&mut self) {
-        self.gc_runs += 1;
-        let mut work: Vec<int> = Vec::new();
+    /// Marks what the roots hold (not what that holds): the global object,
+    /// the host's roots, the stack, the frames, the handlers, the pending
+    /// exception and jobs, and the objects the machine keeps in its fields.
+    fn mark_roots(&mut self, work: &mut Vec<int>) {
         let g = self.global;
-        self.mark_obj(g, &mut work);
-        for r in self.roots.clone() {
-            self.mark_obj(r, &mut work);
+        self.mark_obj(g, work);
+        let nr = self.roots.len();
+        let mut r: usize = 0;
+        while r < nr {
+            let x = self.roots[r];
+            self.mark_obj(x, work);
+            r += 1;
         }
-        for s in self.symbols.clone() {
-            self.mark_obj(s, &mut work);
+        let ns = self.symbols.len();
+        r = 0;
+        while r < ns {
+            let x = self.symbols[r];
+            self.mark_obj(x, work);
+            r += 1;
+        }
+        let fields = vec![
+            self.object_proto,
+            self.function_proto,
+            self.array_proto,
+            self.string_proto,
+            self.number_proto,
+            self.boolean_proto,
+            self.symbol_proto,
+            self.error_proto,
+            self.type_error_proto,
+            self.range_error_proto,
+            self.reference_error_proto,
+            self.syntax_error_proto,
+            self.regexp_proto,
+            self.date_proto,
+            self.map_proto,
+            self.set_proto,
+            self.iter_proto,
+            self.promise_proto,
+            self.iterator_proto,
+            self.map_iter_proto,
+            self.set_iter_proto,
+            self.string_iter_proto,
+            self.generator_proto,
+            self.generator_function_proto,
+            self.async_function_proto,
+            self.async_generator_proto,
+            self.async_generator_function_proto,
+            self.async_from_sync,
+            self.proxy_hooks,
+            self.thrower,
+            self.callee_pair,
+            self.tdz_obj,
+            self.bigint_proto,
+            self.array_values_fn,
+        ];
+        for x in fields {
+            self.mark_obj(x, work);
+        }
+        let mut held: Vec<int> = Vec::new();
+        for (_, v) in self.bigints.iter() {
+            held.push(*v);
+        }
+        for (_, v) in self.symbol_registry.iter() {
+            held.push(*v);
+        }
+        for x in held {
+            self.mark_obj(x, work);
         }
         let n = self.stack.len();
         let mut i: usize = 0;
         while i < n {
-            let v = self.stack[i].clone();
-            self.mark_val(&v, &mut work);
+            if let Val::Obj(x) = self.stack[i] {
+                self.mark_obj(x, work);
+            }
             i += 1;
         }
         let nf = self.frames.len();
@@ -4724,84 +6295,566 @@ impl Vm {
         while k < nf {
             let (fo, env, t, nt, ao, gen) = {
                 let f = &self.frames[k];
-                (f.fobj, f.env, f.this_val.clone(), f.new_target.clone(), f.args_obj, f.gen)
+                (f.fobj, f.env, obj_of(&f.this_val), obj_of(&f.new_target), f.args_obj, f.gen)
             };
-            self.mark_obj(gen, &mut work);
-            self.mark_obj(fo, &mut work);
-            self.mark_obj(env, &mut work);
-            self.mark_val(&t, &mut work);
-            self.mark_val(&nt, &mut work);
-            self.mark_obj(ao, &mut work);
+            self.mark_obj(gen, work);
+            self.mark_obj(fo, work);
+            self.mark_obj(env, work);
+            self.mark_obj(t, work);
+            self.mark_obj(nt, work);
+            self.mark_obj(ao, work);
             k += 1;
         }
-        for h in 0..self.handlers.len() {
+        let nh = self.handlers.len();
+        let mut h: usize = 0;
+        while h < nh {
             let e = self.handlers[h].env;
-            self.mark_obj(e, &mut work);
+            self.mark_obj(e, work);
+            h += 1;
         }
-        let exc = self.exc.clone();
-        self.mark_val(&exc, &mut work);
-        for v in self.temp_roots.clone() {
-            self.mark_val(&v, &mut work);
+        let exc = obj_of(&self.exc);
+        self.mark_obj(exc, work);
+        let nt = self.temp_roots.len();
+        i = 0;
+        while i < nt {
+            if let Val::Obj(x) = self.temp_roots[i] {
+                self.mark_obj(x, work);
+            }
+            i += 1;
         }
-        for v in self.jobs.clone() {
-            self.mark_val(&v, &mut work);
+        let nj = self.jobs.len();
+        i = 0;
+        while i < nj {
+            if let Val::Obj(x) = self.jobs[i] {
+                self.mark_obj(x, work);
+            }
+            i += 1;
         }
+    }
+
+    /// Marks everything reachable from `work` (marked already); with
+    /// `count`, every reference followed is counted into JsObj.rc.
+    fn trace_ref(&mut self, x: int, count: bool, work: &mut Vec<int>) {
+        if x >= 0 {
+            if count {
+                self.objs[x as usize].rc += 1;
+            }
+            self.mark_obj(x, work);
+        }
+    }
+
+    fn trace(&mut self, work: &mut Vec<int>, count: bool) {
         while !work.is_empty() {
             let o = work.pop().unwrap();
             let (proto, env, home) = {
                 let ob = &self.objs[o as usize];
-                (ob.proto, ob.env, ob.home)
+                // an ArrayBuffer's home is what its numbers hold (typed.rs)
+                (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
             };
-            self.mark_obj(proto, &mut work);
-            self.mark_obj(env, &mut work);
-            self.mark_obj(home, &mut work);
-            let prim = self.objs[o as usize].prim.clone();
-            self.mark_val(&prim, &mut work);
+            let prim = obj_of(&self.colds[self.objs[o as usize].cold as usize].prim);
+            // no vector per object: four calls
+            self.trace_ref(proto as int, count, work);
+            self.trace_ref(env as int, count, work);
+            self.trace_ref(home, count, work);
+            self.trace_ref(prim, count, work);
             let nv = self.objs[o as usize].vals.len();
             let mut j: usize = 0;
             while j < nv {
                 if let Val::Obj(x) = self.objs[o as usize].vals[j] {
-                    self.mark_obj(x, &mut work);
+                    if count {
+                        self.objs[x as usize].rc += 1;
+                    }
+                    self.mark_obj(x, work);
                 }
                 j += 1;
             }
-            let ne = self.objs[o as usize].elems.len();
+            let ne = self.evecs[self.objs[o as usize].elems as usize].v.len();
             j = 0;
             while j < ne {
-                if let Val::Obj(x) = self.objs[o as usize].elems[j] {
-                    self.mark_obj(x, &mut work);
+                if let Val::Obj(x) = self.evecs[self.objs[o as usize].elems as usize].v[j] {
+                    if count {
+                        self.objs[x as usize].rc += 1;
+                    }
+                    self.mark_obj(x, work);
                 }
                 j += 1;
             }
-            let ne2 = self.objs[o as usize].elems2.len();
+            let ne2 = self.colds[self.objs[o as usize].cold as usize].elems2.len();
             j = 0;
             while j < ne2 {
-                if let Val::Obj(x) = self.objs[o as usize].elems2[j] {
-                    self.mark_obj(x, &mut work);
+                if let Val::Obj(x) = self.colds[self.objs[o as usize].cold as usize].elems2[j] {
+                    if count {
+                        self.objs[x as usize].rc += 1;
+                    }
+                    self.mark_obj(x, work);
                 }
                 j += 1;
             }
         }
+    }
+
+    /// A collection when one is due, else a reclaim (the safe points call
+    /// this when gc_due).
+    pub fn gc(&mut self) {
+        if self.rc_on && self.alloc_count < self.gc_threshold && self.made < self.made_limit && self.snew < self.slimit && self.sbytes < self.sbytes_limit {
+            self.reclaim();
+            return;
+        }
+        self.collect();
+    }
+
+    /// The mark-and-sweep collection: frees everything unreachable (cycles
+    /// too) and counts every object's references again.
+    pub fn collect(&mut self) {
+        self.gc_runs += 1;
         let total = self.objs.len();
-        let mut live: int = 0;
+        let mut old: Vec<int> = Vec::new();
         let mut i2: usize = 0;
+        while i2 < total {
+            if self.rc_check {
+                old.push(self.objs[i2].rc as int);
+            }
+            self.objs[i2].rc = 0;
+            i2 += 1;
+        }
+        let mut work: Vec<int> = Vec::new();
+        self.mark_roots(&mut work);
+        self.trace(&mut work, true);
+        if !self.strs.is_empty() {
+            self.mark_strs();
+        }
+        let mut live: int = 0;
+        self.zct.clear();
+        i2 = 0;
         while i2 < total {
             if self.objs[i2].marked {
                 self.objs[i2].marked = false;
                 live += 1;
+                if self.rc_check && old[i2] < self.objs[i2].rc as int {
+                    // a reference was not counted
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        let c = self.objs[i2].class;
+                        let nr = self.objs[i2].rc as int;
+                        self.rc_log.push(format!("rc: low count {} < {} (class {}, #{})", old[i2], nr, c, i2));
+                    }
+                }
+                if self.rc_on && self.objs[i2].rc == 0 {
+                    // held only by roots
+                    self.objs[i2].zct = true;
+                    self.zct.push(i2 as int);
+                } else {
+                    self.objs[i2].zct = false;
+                }
+                // a survivor's buffers to their size (it lives on)
+                let e = self.objs[i2].elems as usize;
+                trim_obj(&mut self.objs[i2], &mut self.evecs[e].v);
             } else if !self.objs[i2].free {
-                self.free_shape(i2 as int);
-                let ob = &mut self.objs[i2];
-                ob.clear();
-                ob.free = true;
+                self.release(i2 as int);
                 self.free_list.push(i2 as int);
+                let e = self.objs[i2].elems as usize;
+                drop_bufs(&mut self.objs[i2], &mut self.evecs[e].v);
+            } else {
+                let e = self.objs[i2].elems as usize;
+                drop_bufs(&mut self.objs[i2], &mut self.evecs[e].v);
             }
             i2 += 1;
         }
+        // the free element vectors' buffers go too
+        let ne = self.efree.len();
+        let mut q: usize = 0;
+        while q < ne {
+            let e = self.efree[q] as usize;
+            self.evecs[e].v = Vec::new();
+            q += 1;
+        }
+        let nf = self.freed.len();
+        let mut k: usize = 0;
+        while k < nf {
+            let x = self.freed[k];
+            self.free_list.push(x);
+            k += 1;
+        }
+        self.freed.clear();
+        self.live = live;
         self.alloc_count = 0;
         self.gc_threshold = if live * 2 > 200000 { live * 2 } else { 200000 };
+        self.made = 0;
+        self.made_limit = if live * MADE_PER_LIVE > MADE_MIN { live * MADE_PER_LIVE } else { MADE_MIN };
+        self.zct_limit = self.next_zct_limit();
+        self.gc_recheck();
+    }
+
+    /// Tests: every safe point reclaims and checks the counts (rc_errors,
+    /// rc_log).
+    pub fn rc_stress(&mut self) {
+        self.rc_check = true;
+        self.zct_min = 1;
+        self.zct_limit = 1;
+        // and the string table is swept after every few strings
+        self.slimit_min = 16;
+        self.slimit = 16;
+        self.sbytes_limit = 16;
+        self.gc_recheck();
+    }
+
+    fn next_zct_limit(&self) -> int {
+        let n = (self.zct.len() as int) * 2;
+        if n > self.zct_min {
+            n
+        } else {
+            self.zct_min
+        }
+    }
+
+    /// Empties slot `o` (garbage): its shape and Cold go back.
+    fn release(&mut self, o: int) {
+        self.free_shape(o);
+        self.free_cold(o);
+        let e = self.objs[o as usize].elems as usize;
+        if e > 0 {
+            clear_elems(&mut self.evecs[e].v);
+            self.efree.push(e as i32);
+            self.objs[o as usize].elems = 0;
+        }
+        let ob = &mut self.objs[o as usize];
+        ob.clear();
+        ob.free = true;
+        ob.zct = false;
+        ob.marked = false;
+    }
+
+    /// Frees the objects of `zct` that no root holds, and what only they
+    /// held. The slots freed are reused after the next reclaim: an id of a
+    /// dead object may still be compared somewhere (the host's ids).
+    pub fn reclaim(&mut self) {
+        self.reclaims += 1;
+        let nf = self.freed.len();
+        let mut k: usize = 0;
+        while k < nf {
+            let x = self.freed[k];
+            self.free_list.push(x);
+            k += 1;
+        }
+        self.freed.clear();
+        let mut rooted: Vec<int> = Vec::new();
+        self.mark_roots(&mut rooted);
+        let mut reach: Vec<bool> = Vec::new();
+        if self.rc_check {
+            reach = self.reachable();
+        }
+        let list = take_ints(&mut self.zct, &mut self.zct_spare);
+        let n = list.len();
+        let mut i: usize = 0;
+        let mut work: Vec<int> = Vec::new();
+        while i < n {
+            let o = list[i];
+            i += 1;
+            let ob = &mut self.objs[o as usize];
+            if !ob.zct {
+                continue;
+            }
+            ob.zct = false;
+            if ob.free || ob.rc > 0 {
+                continue;
+            }
+            if ob.marked {
+                ob.zct = true;
+                self.zct.push(o);
+                continue;
+            }
+            ob.free = true;
+            work.push(o);
+            while !work.is_empty() {
+                let x = work.pop().unwrap();
+                if self.rc_check && reach[x as usize] {
+                    self.rc_errors += 1;
+                    if self.rc_errors <= 20 {
+                        let c = self.objs[x as usize].class;
+                        self.rc_log.push(format!("rc: freed a reachable object (class {}, #{})", c, x));
+                    }
+                }
+                self.drop_refs(x, &mut work);
+                self.release(x);
+                self.freed.push(x);
+                self.live -= 1;
+                self.alloc_count -= 1;
+                self.rc_freed += 1;
+            }
+        }
+        let nr = rooted.len();
+        i = 0;
+        while i < nr {
+            let x = rooted[i] as usize;
+            self.objs[x].marked = false;
+            i += 1;
+        }
+        give_ints(&mut self.zct_spare, list);
+        self.reclaim_strs();
+        self.zct_limit = self.next_zct_limit();
+        self.gc_recheck();
+    }
+
+    /// The references `x` (being freed) holds are let go; what only it
+    /// held joins `work`.
+    fn drop_refs(&mut self, x: int, work: &mut Vec<int>) {
+        let (proto, env, home) = {
+            let ob = &self.objs[x as usize];
+            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
+        };
+        let primv = self.colds[self.objs[x as usize].cold as usize].prim;
+        let prim = obj_of(&primv);
+        self.sdec(str_of(&primv));
+        self.drop_ref(proto as int, work);
+        self.drop_ref(env as int, work);
+        self.drop_ref(home, work);
+        self.drop_ref(prim, work);
+        let nv = self.objs[x as usize].vals.len();
+        let mut j: usize = 0;
+        while j < nv {
+            match self.objs[x as usize].vals[j] {
+                Val::Obj(c) => {
+                    self.drop_ref(c, work);
+                }
+                Val::Str(h) => {
+                    self.sdec(h);
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let ne = self.evecs[self.objs[x as usize].elems as usize].v.len();
+        j = 0;
+        while j < ne {
+            match self.evecs[self.objs[x as usize].elems as usize].v[j] {
+                Val::Obj(c) => {
+                    self.drop_ref(c, work);
+                }
+                Val::Str(h) => {
+                    self.sdec(h);
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let ne2 = self.colds[self.objs[x as usize].cold as usize].elems2.len();
+        j = 0;
+        while j < ne2 {
+            match self.colds[self.objs[x as usize].cold as usize].elems2[j] {
+                Val::Obj(c) => {
+                    self.drop_ref(c, work);
+                }
+                Val::Str(h) => {
+                    self.sdec(h);
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+    }
+
+    #[inline]
+    fn drop_ref(&mut self, c: int, work: &mut Vec<int>) {
+        if c < 0 {
+            return;
+        }
+        let ob = &mut self.objs[c as usize];
+        ob.rc -= 1;
+        if ob.rc > 0 || ob.free {
+            return;
+        }
+        if ob.marked {
+            // a root holds it
+            if !ob.zct {
+                ob.zct = true;
+                self.zct.push(c);
+            }
+            return;
+        }
+        ob.free = true;
+        work.push(c);
+    }
+
+    /// rc_check: which objects a full mark reaches (the marks set by
+    /// mark_roots stay).
+    fn reachable(&mut self) -> Vec<bool> {
+        let total = self.objs.len();
+        let mut work: Vec<int> = Vec::new();
+        let mut i: usize = 0;
+        while i < total {
+            if self.objs[i].marked {
+                work.push(i as int);
+            }
+            i += 1;
+        }
+        let roots = work.clone();
+        self.trace(&mut work, false);
+        let mut out: Vec<bool> = Vec::new();
+        i = 0;
+        while i < total {
+            out.push(self.objs[i].marked);
+            i += 1;
+        }
+        // back to the roots' marks only
+        i = 0;
+        while i < total {
+            self.objs[i].marked = false;
+            i += 1;
+        }
+        for r in roots {
+            self.objs[r as usize].marked = true;
+        }
+        out
+    }
+
+    /// Counts every object's references again and puts the objects with
+    /// none in `zct` (a restored snapshot).
+    pub fn recount(&mut self) {
+        let total = self.objs.len();
+        let mut i: usize = 0;
+        while i < total {
+            self.objs[i].rc = 0;
+            self.objs[i].zct = false;
+            i += 1;
+        }
+        self.zct = Vec::new();
+        let mut live: int = 0;
+        i = 0;
+        while i < total {
+            if !self.objs[i].free {
+                live += 1;
+                self.count_refs(i as int);
+            }
+            i += 1;
+        }
+        i = 0;
+        while i < total {
+            if !self.objs[i].free && self.objs[i].rc == 0 && self.rc_on {
+                self.objs[i].zct = true;
+                self.zct.push(i as int);
+            }
+            i += 1;
+        }
+        self.live = live;
+        self.zct_limit = self.next_zct_limit();
+        self.recount_strs();
+        self.gc_recheck();
+    }
+
+    /// recount(): the strings' counts again from the live objects and
+    /// the prefixes; the unreferenced ones go to szct.
+    fn recount_strs(&mut self) {
+        let ns = self.strs.len();
+        let mut i: usize = 0;
+        while i < ns {
+            self.srcs[i] = 0;
+            self.sinz[i] = false;
+            i += 1;
+        }
+        let total = self.objs.len();
+        i = 0;
+        while i < total {
+            if !self.objs[i].free {
+                let p = self.colds[self.objs[i].cold as usize].prim;
+                self.sinc(str_of(&p));
+                let nv = self.objs[i].vals.len();
+                let mut j: usize = 0;
+                while j < nv {
+                    let h = str_of(&self.objs[i].vals[j]);
+                    self.sinc(h);
+                    j += 1;
+                }
+                let ne = self.evecs[self.objs[i].elems as usize].v.len();
+                j = 0;
+                while j < ne {
+                    let h = str_of(&self.evecs[self.objs[i].elems as usize].v[j]);
+                    self.sinc(h);
+                    j += 1;
+                }
+                let ne2 = self.colds[self.objs[i].cold as usize].elems2.len();
+                j = 0;
+                while j < ne2 {
+                    let h = str_of(&self.colds[self.objs[i].cold as usize].elems2[j]);
+                    self.sinc(h);
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        i = 1;
+        while i < ns {
+            if self.sflag[i] != 2 && self.sup[i] >= 0 {
+                let u = self.sup[i] as usize;
+                self.srcs[u] += 1;
+            }
+            i += 1;
+        }
+        self.szct.clear();
+        i = 1;
+        while i < ns {
+            if self.sflag[i] == 0 && self.srcs[i] == 0 {
+                self.sinz[i] = true;
+                self.szct.push(i as int);
+            }
+            i += 1;
+        }
+        self.szct_limit = self.next_szct_limit();
+    }
+
+    fn count_refs(&mut self, o: int) {
+        let (proto, env, home) = {
+            let ob = &self.objs[o as usize];
+            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
+        };
+        let prim = obj_of(&self.colds[self.objs[o as usize].cold as usize].prim);
+        self.inc_o(proto as int);
+        self.inc_o(env as int);
+        self.inc_o(home);
+        self.inc_o(prim);
+        let nv = self.objs[o as usize].vals.len();
+        let mut j: usize = 0;
+        while j < nv {
+            if let Val::Obj(c) = self.objs[o as usize].vals[j] {
+                self.objs[c as usize].rc += 1;
+            }
+            j += 1;
+        }
+        let ne = self.evecs[self.objs[o as usize].elems as usize].v.len();
+        j = 0;
+        while j < ne {
+            if let Val::Obj(c) = self.evecs[self.objs[o as usize].elems as usize].v[j] {
+                self.objs[c as usize].rc += 1;
+            }
+            j += 1;
+        }
+        let ne2 = self.colds[self.objs[o as usize].cold as usize].elems2.len();
+        j = 0;
+        while j < ne2 {
+            if let Val::Obj(c) = self.colds[self.objs[o as usize].cold as usize].elems2[j] {
+                self.objs[c as usize].rc += 1;
+            }
+            j += 1;
+        }
     }
 }
+
+/// Objects made that make a collection due, at least (Vm.made_limit), and
+/// per live object: a collection's cost is the live heap's, so it stays a
+/// small part of the work that made the objects.
+pub const MADE_MIN: int = 262144;
+pub const MADE_PER_LIVE: int = 8;
+
+/// The smallest zct that makes a reclaim. Small, so that the objects a
+/// reclaim frees, and the slots it hands back, are still in the cache:
+/// at 8192 a reclaim reads objects made ~1 MB of work ago, and Chart.js
+/// missed a 2 MB L2 18M times (2048: 6.0M; 1024 and below cost more in
+/// reclaims than they save).
+pub const ZCT_MIN: int = 2048;
+/// strings made that make a collection due, at least (Vm.slimit)
+pub const SLIMIT_MIN: int = 65536;
+/// bytes of new strings that make a collection due, at least
+/// (Vm.sbytes_limit)
+pub const SBYTES_MIN: int = 4194304;
 
 pub fn pow2(n: int) -> double {
     let mut r: double = 1.0;
@@ -4868,39 +6921,308 @@ pub fn arith_num(code: int, x: double, y: double) -> double {
     }
 }
 
-/// Appends `b` to the string in `slot` when nothing else holds that string,
-/// so `s += …` does not copy `s`; answers false (and changes nothing) when
-/// it cannot, and the caller adds the two the ordinary way.
+/// Rust: the slot table grows by an eighth (at least 1024 slots), not by
+/// doubling: a JsObj is big and most of a doubled table would stay empty.
+/// `v`'s items, `v` left empty. Rust: `v` takes `spare`'s buffer and the
+/// items keep theirs (no copy); the other targets copy them.
 #[ranger::target(rust)]
-fn append_in_place(slot: &mut Val, b: &str) -> bool {
-    if let Val::Str(rc) = slot {
-        if let Some(s) = Rc::get_mut(rc) {
-            s.push_str(b);
-            return true;
+pub fn take_ints(v: &mut Vec<int>, spare: &mut Vec<int>) -> Vec<int> {
+    let mut out = std::mem::take(spare);
+    std::mem::swap(v, &mut out);
+    out
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn take_ints(v: &mut Vec<int>, _spare: &mut Vec<int>) -> Vec<int> {
+    let out = v.clone();
+    v.clear();
+    out
+}
+
+/// `list`'s buffer becomes the next take_ints' spare (Rust only).
+#[ranger::target(rust)]
+pub fn give_ints(spare: &mut Vec<int>, mut list: Vec<int>) {
+    list.clear();
+    *spare = list;
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn give_ints(_spare: &mut Vec<int>, _list: Vec<int>) {}
+
+/// A vector for a native call's arguments, from the pool (Rust only; the
+/// other targets allocate one).
+#[ranger::target(rust)]
+pub fn take_args(pool: &mut Vec<Vec<Val>>) -> Vec<Val> {
+    match pool.pop() {
+        Some(v) => v,
+        None => Vec::new(),
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn take_args(_pool: &mut Vec<Vec<Val>>) -> Vec<Val> {
+    Vec::new()
+}
+
+#[ranger::target(rust)]
+pub fn give_args(pool: &mut Vec<Vec<Val>>, mut args: Vec<Val>) {
+    args.clear();
+    pool.push(args);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn give_args(_pool: &mut Vec<Vec<Val>>, _args: Vec<Val>) {}
+
+#[ranger::target(rust)]
+pub fn grow_objs(v: &mut Vec<JsObj>) {
+    if v.len() == v.capacity() {
+        let n = v.len() / 8;
+        v.reserve_exact(if n < 1024 { 1024 } else { n });
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_objs(_v: &mut Vec<JsObj>) {}
+
+#[ranger::target(rust)]
+pub fn grow_evecs(v: &mut Vec<Elems>) {
+    if v.len() == v.capacity() {
+        let n = v.len() / 8;
+        v.reserve_exact(if n < 1024 { 1024 } else { n });
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_evecs(_v: &mut Vec<Elems>) {}
+
+/// Rust: a compiled function's code and constants to their size (a
+/// compiler's buffers doubled as they grew).
+#[ranger::target(rust)]
+pub fn trim_proto(p: &mut Proto) {
+    p.code.shrink_to_fit();
+    p.consts.shrink_to_fit();
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn trim_proto(_p: &mut Proto) {}
+
+/// A free slot's buffers go (a collection: the slot may wait long for its
+/// next object).
+pub fn drop_bufs(o: &mut JsObj, elems: &mut Vec<Val>) {
+    if !o.vals.is_empty() || !elems.is_empty() {
+        o.vals = Vec::new();
+        elems.truncate(0);
+    }
+    drop_caps(o, elems);
+}
+
+/// A freed object's elements: small vectors stay allocated for the next
+/// object that takes them.
+pub fn clear_elems(elems: &mut Vec<Val>) {
+    if elems.len() <= 16 {
+        elems.truncate(0);
+    } else {
+        *elems = Vec::new();
+    }
+}
+
+/// Rust: a cleared Vec keeps its capacity; past KEEP_CAP it goes too.
+/// Keeping 4 saved Chart.js 1 % of its instructions but cost earley-boyer
+/// 12 MB (59 -> 71 MB), so a collection frees them all.
+#[ranger::target(rust)]
+pub fn drop_caps(o: &mut JsObj, elems: &mut Vec<Val>) {
+    if o.vals.capacity() > KEEP_CAP {
+        o.vals = Vec::new();
+    }
+    if elems.capacity() > KEEP_CAP {
+        *elems = Vec::new();
+    }
+}
+
+/// Rust: a full `v` grows to room for `most` values (up to what doubling
+/// gives) instead of doubling: an object on a chain of shapes most often
+/// gets as many properties as the most the chain has seen.
+#[ranger::target(rust)]
+pub fn grow_vals(v: &mut Vec<Val>, most: usize) {
+    let n = v.len();
+    if n == v.capacity() && most > n + 1 {
+        // at most what doubling would give (16 for a new object): a
+        // branch off a long chain does not take the chain's room
+        let lim = if n == 0 { 16 } else { 2 * n + 4 };
+        let cap = if most < lim { most } else { lim };
+        v.reserve_exact(cap - n);
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_vals(_v: &mut Vec<Val>, _most: usize) {}
+
+/// A freed Cold as new (Rust: emptied in place, small buffers kept and no
+/// new hash state; a map's table goes).
+#[ranger::target(rust)]
+pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
+    let c = &mut colds[i];
+    if c.index.capacity() > 0 {
+        c.index = HashMap::new();
+    }
+    if c.marks.capacity() > 16 {
+        c.marks = Vec::new();
+    } else {
+        c.marks.clear();
+    }
+    if c.nums.capacity() > 16 {
+        c.nums = Vec::new();
+    } else {
+        c.nums.clear();
+    }
+    if c.elems2.capacity() > 16 {
+        c.elems2 = Vec::new();
+    } else {
+        c.elems2.clear();
+    }
+    c.prim = Val::Undef;
+    c.home = -1;
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
+    colds[i] = Cold::new();
+}
+
+/// The stack grows to `n` values, undefined.
+#[ranger::target(rust)]
+pub fn grow_stack(v: &mut Vec<Val>, n: usize) {
+    v.resize(n, Val::Undef);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn grow_stack(v: &mut Vec<Val>, n: usize) {
+    while v.len() < n {
+        v.push(Val::Undef);
+    }
+}
+
+/// Room for `n` more values (Rust; the other targets grow as they push).
+#[ranger::target(rust)]
+pub fn reserve_vals(v: &mut Vec<Val>, n: usize) {
+    v.reserve_exact(n);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn reserve_vals(_v: &mut Vec<Val>, _n: usize) {}
+
+/// The capacity a free slot's buffers keep through a collection (0: none).
+pub const KEEP_CAP: usize = 0;
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn drop_caps(_o: &mut JsObj, _elems: &mut Vec<Val>) {}
+
+/// Rust: a live object's buffers shrink to what they hold, when a quarter
+/// or more is spare (Vm::collect); the other targets size their arrays.
+#[ranger::target(rust)]
+pub fn trim_obj(o: &mut JsObj, elems: &mut Vec<Val>) {
+    if o.vals.capacity() > o.vals.len() + o.vals.len() / 4 {
+        o.vals.shrink_to_fit();
+    }
+    if elems.capacity() > elems.len() + elems.len() / 4 {
+        elems.shrink_to_fit();
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn trim_obj(_o: &mut JsObj, _elems: &mut Vec<Val>) {}
+
+/// Appends `b` to the shared string `rc` when nothing else holds it, so
+/// `s += …` does not copy `s` (Vm::str_append); false (and nothing changed)
+/// when it cannot.
+#[ranger::target(rust)]
+pub fn rc_push(rc: &mut Rc<String>, b: &str) -> bool {
+    if let Some(s) = Rc::get_mut(rc) {
+        s.push_str(b);
+        return true;
+    }
+    false
+}
+
+/// A freed string slot lets its text go. Rust: the box stays when nothing
+/// else holds it, for the next string of the slot (rc_refill); the other
+/// targets point the slot at the empty string.
+#[ranger::target(rust)]
+pub fn rc_vacate(rc: &mut Rc<String>, empty: &Rc<String>) {
+    if let Some(s) = Rc::get_mut(rc) {
+        // a small buffer stays too (rc_take_buf)
+        if s.capacity() <= 64 {
+            s.clear();
+        } else {
+            *s = String::new();
+        }
+        return;
+    }
+    *rc = empty.clone();
+}
+
+/// The buffer a reused slot kept, empty, for its new text (Rust; the
+/// other targets start a new one).
+#[ranger::target(rust)]
+pub fn rc_take_buf(rc: &mut Rc<String>, n: usize) -> String {
+    if let Some(s) = Rc::get_mut(rc) {
+        let mut b = std::mem::take(s);
+        b.clear();
+        b.reserve(n);
+        return b;
+    }
+    String::with_capacity(n)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_take_buf(_rc: &mut Rc<String>, _n: usize) -> String {
+    String::new()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_vacate(rc: &mut Rc<String>, empty: &Rc<String>) {
+    *rc = empty.clone();
+}
+
+/// Slot `rc` takes the text `s`: into its own box when nothing else
+/// holds that (Rust), else a new one.
+#[ranger::target(rust)]
+pub fn rc_refill(rc: &mut Rc<String>, s: String) {
+    if let Some(m) = Rc::get_mut(rc) {
+        *m = s;
+        return;
+    }
+    *rc = Rc::new(s);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_refill(rc: &mut Rc<String>, s: String) {
+    *rc = Rc::new(s);
+}
+
+/// Rust: a string's buffer to its size when a quarter or more is spare
+/// and nothing else holds it (Vm::collect; appending in place doubles it).
+#[ranger::target(rust)]
+pub fn rc_trim(rc: &mut Rc<String>) {
+    if let Some(s) = Rc::get_mut(rc) {
+        let n = s.len();
+        if n >= 256 && s.capacity() > n + n / 4 {
+            s.shrink_to_fit();
         }
     }
-    false
-}
-
-/// Whether two values are the same string object (Rust's Rc), which is what
-/// lets an append in place stand for `x = x + v`; the other targets append
-/// as values and never ask.
-#[ranger::target(rust)]
-fn same_rc(a: &Val, b: &Val) -> bool {
-    if let (Val::Str(x), Val::Str(y)) = (a, b) {
-        return Rc::ptr_eq(x, y);
-    }
-    false
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn same_rc(_a: &Val, _b: &Val) -> bool {
-    false
-}
+pub fn rc_trim(_rc: &mut Rc<String>) {}
 
 /// The other targets' strings are immutable values (and their engines
-/// concatenate without copying where they can): always the ordinary way.
+/// concatenate without copying where they can): always the ordinary way,
+/// so no handle there is ever a prefix.
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn append_in_place(_slot: &mut Val, _b: &str) -> bool {
+pub fn rc_push(_rc: &mut Rc<String>, _b: &str) -> bool {
     false
 }
+
+/// Back jumps between two reads of the clock while slices are on.
+pub const SLICE_TICKS: int = 1000;
+
