@@ -619,11 +619,12 @@ impl Vm {
                         let mut r = Val::Undef;
                         let mut done = false;
                         if let (Val::Obj(o), Val::Num(n)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
-                            let ob = &self.objs[*o as usize];
+                            let ob = obj_at(&self.objs, *o as usize);
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n {
-                                    r = self.evecs[ob.elems as usize].v[i as usize].clone();
+                                let ev = ob.elems as usize;
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == *n {
+                                    r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
                             }
@@ -658,10 +659,11 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == n && ob.pos != 2 {
-                                    old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
-                                    old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
-                                    self.evecs[ob.elems as usize].v[i as usize] = val.clone();
+                                let ev = ob.elems as usize;
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos != 2 {
+                                    old = obj_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
+                                    old_s = str_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
+                                    val_put(&mut evec_mut(&mut self.evecs, ev).v, i as usize, val.clone());
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
@@ -690,6 +692,10 @@ impl Vm {
                         }
                         if !done {
                             self.r_set_elem_slow(bp, fi, pc, (w1 as int), (w2 as int), val);
+                        }
+                        if ((w0 >> 8) & 255) == 1 {
+                            // the assignment's value, where the object was
+                            self.rset((bp + (w1 as int)) as usize, val);
                         }
                     }
                     R_GET_METHOD => {
@@ -747,6 +753,63 @@ impl Vm {
                         }
                         pc = (pc + 1 + ((w0 >> 16) as int));
                         continue;
+                    }
+                    R_NEW_ARRAY => {
+                        self.r_new_array(bp, (w1 as int), (w2 as int));
+                    }
+                    R_NEW => {
+                        let argc = w2 as int;
+                        let fpos = bp + (w1 as int);
+                        let fo = obj_of(&self.stack[fpos as usize]);
+                        let mut plain = false;
+                        if fo >= 0 && self.ob(fo).class == C_FUNCTION {
+                            let p = &self.protos[self.ob(fo).func as usize];
+                            plain = !p.uses_args && p.rest < 0 && !p.class_ctor && p.constructible();
+                        }
+                        if plain {
+                            self.frames[fi].pc = (pc + 1 + ((w0 >> 16) as int));
+                            if self.gc_due() {
+                                self.rgc(want);
+                            }
+                            let top = (fpos + argc + 2) as usize;
+                            if self.stack.len() < top {
+                                grow_stack(&mut self.stack, top);
+                            }
+                            let mut k = argc;
+                            while k > 0 {
+                                self.stack[(fpos + 1 + k) as usize] = self.stack[(fpos + k) as usize];
+                                k -= 1;
+                            }
+                            let f = self.stack[fpos as usize];
+                            let this = self.make_this(&f);
+                            self.stack[(fpos + 1) as usize] = this;
+                            if !self.renter(fo, fpos, argc, fpos) {
+                                continue 'frames;
+                            }
+                            fi = self.frames.len() - 1;
+                            self.frames[fi].construct = true;
+                            self.frames[fi].new_target = f;
+                            pi = self.frames[fi].proto as usize;
+                            bp = fpos + 2;
+                            pc = self.frames[fi].pc;
+                            want = (bp + self.protos[pi].fsize) as usize;
+                            rb = self.protos[pi].rbase;
+                            if self.slicing && self.frame_brk() {
+                                return;
+                            }
+                            continue;
+                        }
+                        let p2 = self.r_win(pi, bp, fi, pc, (w3 as int), want);
+                        if self.throwing {
+                            if !self.unwind(base) {
+                                return;
+                            }
+                            continue 'frames;
+                        }
+                        if p2 < 0 {
+                            continue 'frames;
+                        }
+                        npc = p2;
                     }
                     R_RET | R_RET_UNDEF => {
                         let mut v = if ((w0 & 255) as int) == R_RET { self.rget(bp, (w1 as int)).clone() } else { Val::Undef };
@@ -1380,6 +1443,21 @@ impl Vm {
             }
             let site = rb + pc;
             if (site as usize) < self.rpic.len() && self.rpic[site as usize] >= 0 {
+                // the site's first way, a data property one prototype up
+                // (a method on its class's prototype): checked here first
+                let b = (self.rpic[site as usize] * (PIC_W as i32)) as usize;
+                if b + 6 < self.pic.len() && self.pic[b] == self.ob(o).shape && self.pic[b + 1] == (self.shape_epoch as i32) && self.pic[b + 2] == 1 && self.pic[b + 3] >= 0 && self.pic[b + 4] == 0 {
+                    let p = self.pic[b + 5];
+                    if self.ob(o).proto == p && self.ob(p as int).shape == self.pic[b + 6] {
+                        let f = *val_at(&self.ob(p as int).vals, self.pic[b + 3] as usize);
+                        let fun = if let Val::Obj(fo) = f { self.ob(fo).class == C_FUNCTION } else { false };
+                        if fun || ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
+                            self.rset((bp + w1) as usize, f);
+                            self.rset((bp + w1 + 1) as usize, v);
+                            return;
+                        }
+                    }
+                }
                 // a way that fits o's shape was learnt on that shape
                 // without the property of its own
                 let h = self.pic_probe(site, o);
@@ -1498,6 +1576,24 @@ impl Vm {
         }
         *v = self.frames[fi].this_val.clone();
         false
+    }
+
+    /// R_NEW_ARRAY: the n items from slot w1 on into a new array, which
+    /// goes to slot w1.
+    #[inline(never)]
+    fn r_new_array(&mut self, bp: int, w1: int, n: int) {
+        let p = self.array_proto;
+        let a = self.alloc(C_ARRAY, p);
+        let e = self.elems_id(a);
+        reserve_vals(&mut self.evecs[e].v, n as usize);
+        let from = bp + w1;
+        let mut i = from;
+        while i < from + n {
+            let v = self.stack[i as usize];
+            self.push_elem(a, v);
+            i += 1;
+        }
+        self.rset(from as usize, Val::Obj(a));
     }
 
     #[inline(never)]
@@ -1878,6 +1974,20 @@ pub fn evec_at(v: &Vec<Elems>, i: usize) -> &Elems {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn evec_at(v: &Vec<Elems>, i: usize) -> &Elems {
     &v[i]
+}
+
+/// `v[i]` of the element vectors, to write.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn evec_mut(v: &mut Vec<Elems>, i: usize) -> &mut Elems {
+    debug_assert!(i < v.len(), "element vector past evecs");
+    // SAFETY: as evec_at
+    unsafe { v.get_unchecked_mut(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn evec_mut(v: &mut Vec<Elems>, i: usize) -> &mut Elems {
+    &mut v[i]
 }
 
 /// Whether a value vector has no room left (Rust: grow_vals sizes it).

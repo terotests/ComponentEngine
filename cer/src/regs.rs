@@ -48,7 +48,8 @@ pub const R_GET_THIS_PROP: int = 7;
 pub const R_SET_PROP: int = 8;
 /// w1 dst, w2 obj, w3 key
 pub const R_GET_ELEM: int = 9;
-/// w1 obj, w2 key, w3 value
+/// w1 obj, w2 key, w3 value; sub 1: the value also into w1 (the
+/// assignment's result)
 pub const R_SET_ELEM: int = 10;
 /// w1 dst, w2 x, w3 y
 pub const R_ADD: int = 11;
@@ -143,6 +144,13 @@ pub const R_JNU: int = 54;
 /// does it, its result comes back (instanceof, in, delete o[k], a
 /// function's name, for-in keys, a short array literal)
 pub const R_STEP_K: int = 55;
+/// `new f(args)`: w1 f (the args after it), w2 argc, w3 the window's top.
+/// A plain JS constructor runs in rrun with `this` put after f (the
+/// args move up one slot); anything else runs the stack op on the window.
+pub const R_NEW: int = 56;
+/// `[a, b, c, …]`: w1 the first item's slot (the array goes there), w2
+/// the count
+pub const R_NEW_ARRAY: int = 57;
 
 const BAD: int = 1000000;
 
@@ -577,6 +585,12 @@ impl Tr {
             } else if (c as int) == OP_GET_LOCAL2 {
                 self.push_pend((op.a as int), i);
                 self.push_pend((op.b as int), i);
+            } else if (c as int) == OP_DUP2 {
+                // both copies load in one op (R_LOAD2 when both are used)
+                let s0 = self.opnd(d - 2);
+                let s1 = self.opnd(d - 1);
+                self.push_pend(s0, i);
+                self.push_pend(s1, i);
             } else if (c as int) == OP_DUP || (c as int) == OP_OVER {
                 let from = if (c as int) == OP_DUP { d - 1 } else { d - 2 };
                 let s = self.opnd(from);
@@ -632,6 +646,14 @@ impl Tr {
                 self.popn(3);
                 self.set(i, R_SET_ELEM, 0, o, k, v);
                 next = i + 2;
+            } else if (c as int) == OP_SET_ELEM {
+                // the value stays where the object was (as OP_SET_PROP)
+                self.mat(d - 3);
+                let k = self.opnd(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(3);
+                self.set(i, R_SET_ELEM, 1, ns + d - 3, k, v);
+                self.push_own(-1);
             } else if (c as int) >= OP_ADD && (c as int) <= OP_GE {
                 let x = self.opnd(d - 2);
                 let y = self.opnd(d - 1);
@@ -735,6 +757,19 @@ impl Tr {
                 self.popn(((op.a + 2) as int));
                 self.set(i, R_CALL, sub, ns + w, (op.a as int), 0);
                 self.push_own(i);
+            } else if (c as int) == OP_NEW_ARRAY && op.a > 2 {
+                let w = d - (op.a as int);
+                self.mat_from(w);
+                self.popn((op.a as int));
+                self.set(i, R_NEW_ARRAY, 0, ns + w, (op.a as int), 0);
+                self.push_own(-1);
+            } else if (c as int) == OP_NEW {
+                let w = d - (op.a as int) - 1;
+                // the stack op may run on the window: every operand in place
+                self.mat_all();
+                self.popn(((op.a + 1) as int));
+                self.set(i, R_NEW, 0, ns + w, (op.a as int), ns + d);
+                self.push_own(-1);
             } else if (c as int) == OP_GET_METHOD {
                 let o = self.opnd(d - 1);
                 self.popn(1);
