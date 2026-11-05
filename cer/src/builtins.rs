@@ -1053,7 +1053,7 @@ impl Vm {
             if a < 0 || b < 0 {
                 items.push(Val::Undef);
             } else {
-                items.push(self.string_val(jsstr::from_units(&self.rx_units, a, b)));
+                items.push(self.string_val(jsstr::sub_units(s.as_str(), &self.rx_units, a, b)));
             }
             g += 1;
         }
@@ -1218,14 +1218,14 @@ impl Vm {
                     break;
                 }
                 let (ms, me) = (caps[0], caps[1]);
-                out.push_str(jsstr::from_units(&units, last, ms).as_str());
-                let matched = jsstr::from_units(&units, ms, me);
+                out.push_str(jsstr::sub_units(s.as_str(), &units, last, ms).as_str());
+                let matched = jsstr::sub_units(s.as_str(), &units, ms, me);
                 let mut capv: Vec<Val> = Vec::new();
                 let mut g: int = 0;
                 while g <= ngroups {
                     let a = caps[(g * 2) as usize];
                     let b = caps[(g * 2 + 1) as usize];
-                    capv.push(if a < 0 || b < 0 { Val::Undef } else { self.string_val(jsstr::from_units(&units, a, b)) });
+                    capv.push(if a < 0 || b < 0 { Val::Undef } else { self.string_val(jsstr::sub_units(s.as_str(), &units, a, b)) });
                     g += 1;
                 }
                 let mut groups: Vec<(String, Val)> = Vec::new();
@@ -1266,7 +1266,7 @@ impl Vm {
             if global {
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
             }
-            out.push_str(jsstr::from_units(&units, last, units.len() as int).as_str());
+            out.push_str(jsstr::sub_units(s.as_str(), &units, last, units.len() as int).as_str());
             return self.string_val(out);
         }
         let pat = self.to_string(pattern);
@@ -1277,7 +1277,7 @@ impl Vm {
             if p < 0 {
                 break;
             }
-            out.push_str(jsstr::from_units(&units, last, p).as_str());
+            out.push_str(jsstr::sub_units(s.as_str(), &units, last, p).as_str());
             if fn_repl {
                 let sv7 = self.string_val(pat.clone());
                 let sv8 = self.rc_val(s.clone());
@@ -1301,7 +1301,7 @@ impl Vm {
                 break;
             }
         }
-        out.push_str(jsstr::from_units(&units, last, units.len() as int).as_str());
+        out.push_str(jsstr::sub_units(s.as_str(), &units, last, units.len() as int).as_str());
         self.string_val(out)
     }
 
@@ -1362,7 +1362,7 @@ impl Vm {
                     q += 1;
                     continue;
                 }
-                out.push(self.string_val(jsstr::from_units(&units, p, ms)));
+                out.push(self.string_val(jsstr::sub_units(s.as_str(), &units, p, ms)));
                 if out.len() as int >= lim {
                     let a = self.new_array(out);
                     return Val::Obj(a);
@@ -1371,7 +1371,7 @@ impl Vm {
                 while g <= ngroups {
                     let a = caps[(g * 2) as usize];
                     let b = caps[(g * 2 + 1) as usize];
-                    out.push(if a < 0 || b < 0 { Val::Undef } else { self.string_val(jsstr::from_units(&units, a, b)) });
+                    out.push(if a < 0 || b < 0 { Val::Undef } else { self.string_val(jsstr::sub_units(s.as_str(), &units, a, b)) });
                     if out.len() as int >= lim {
                         let arr = self.new_array(out);
                         return Val::Obj(arr);
@@ -1381,7 +1381,7 @@ impl Vm {
                 p = me;
                 q = if me == ms { me + 1 } else { me };
             }
-            out.push(self.string_val(jsstr::from_units(&units, p, n)));
+            out.push(self.string_val(jsstr::sub_units(s.as_str(), &units, p, n)));
             let a = self.new_array(out);
             return Val::Obj(a);
         }
@@ -1389,7 +1389,7 @@ impl Vm {
         if sepstr.is_empty() {
             let mut i: int = 0;
             while i < n && (out.len() as int) < lim {
-                out.push(self.string_val(jsstr::from_units(&units, i, i + 1)));
+                out.push(self.string_val(jsstr::sub_units(s.as_str(), &units, i, i + 1)));
                 i += 1;
             }
             let a = self.new_array(out);
@@ -1412,11 +1412,11 @@ impl Vm {
             if p < 0 || (out.len() as int) >= lim {
                 break;
             }
-            out.push(self.string_val(jsstr::from_units(&units, from, p)));
+            out.push(self.string_val(jsstr::sub_units(s.as_str(), &units, from, p)));
             from = p + slen;
         }
         if (out.len() as int) < lim {
-            out.push(self.string_val(jsstr::from_units(&units, from, n)));
+            out.push(self.string_val(jsstr::sub_units(s.as_str(), &units, from, n)));
         }
         let a = self.new_array(out);
         Val::Obj(a)

@@ -28,7 +28,13 @@ pub fn units(s: &str) -> Vec<int> {
 }
 
 fn units_of(s: &str) -> Vec<int> {
-    let mut out: Vec<int> = Vec::new();
+    let mut out: Vec<int> = Vec::with_capacity(s.as_bytes().len());
+    if is_ascii(s) {
+        for b in s.bytes() {
+            out.push(b as int);
+        }
+        return out;
+    }
     for c in s.chars() {
         let cp = c as int;
         if cp >= 0x10000 {
@@ -60,6 +66,20 @@ pub fn from_units(u: &Vec<int>, a: int, b: int) -> String {
         i += 1;
     }
     s
+}
+
+/// from_units(u, a, b) where u = units(s): for an ASCII s (as many bytes
+/// as units) the bytes [a, b) themselves.
+pub fn sub_units(s: &str, u: &Vec<int>, a: int, b: int) -> String {
+    let r: String = ranger::native!(rust: { sub_units_of(s, u, a, b) }, es6: "{s}.slice({a}, {b})");
+    r
+}
+
+fn sub_units_of(s: &str, u: &Vec<int>, a: int, b: int) -> String {
+    if s.as_bytes().len() == u.len() && a >= 0 && a <= b && (b as usize) <= u.len() {
+        return String::from(&s[(a as usize)..(b as usize)]);
+    }
+    from_units(u, a, b)
 }
 
 pub fn push_cp(s: &mut String, cp: int) {
