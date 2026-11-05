@@ -67,6 +67,14 @@ fn main() {
     if slice > 0.0 {
         eprintln!("slices: {}", slices);
     }
+    // CER_DUMP=name: the register code of the functions of that name
+    if let Ok(name) = std::env::var("CER_DUMP") {
+        for p in e.vm.protos.iter() {
+            if p.rstate == 1 && (name.is_empty() || p.name == name) {
+                eprintln!("{}", cerxes::regs::dump(p, &e.vm.rcode));
+            }
+        }
+    }
     if e.vm.rc_check || std::env::var("CERXES_STATS").is_ok() {
         let v = &e.vm;
         let free = v.objs.iter().filter(|o| o.free).count();

@@ -121,6 +121,23 @@ pub const R_SWITCH: int = 45;
 pub const R_TYPEOF: int = 46;
 /// w1 the iterator, w2 where to go when it is done, w3 the value's slot
 pub const R_ITER_NEXT: int = 47;
+/// w1 dst, w2 x: ToNumeric (sub 0) or -x (sub 1)
+pub const R_TONUM: int = 48;
+/// w1 dst, w2 x: x + 1 (sub 0) or x - 1 (sub 1)
+pub const R_INC: int = 49;
+/// w1 the value, w3 the atom: `name = value` for a global (the value
+/// stays where it is); the inline cache is the stack op's c
+pub const R_SET_GLOBAL: int = 50;
+/// sub env depth, w1 the old value, w2 what is added, w3 the env index:
+/// `x += v` for a closure variable (the stack op's a + b goes to the env)
+pub const R_ADD_ENV: int = 51;
+/// w1 dst (f; the receiver in dst + 1), w2 obj, w3 key: `o[k](...)`
+pub const R_GET_METHOD_ELEM: int = 52;
+/// w1 the value (it stays), sub 0: a let/const read before its
+/// declaration (w2 the name's constant), sub 1: destructuring null/undefined
+pub const R_CHECK: int = 53;
+/// w1 x, w2 where to go when x is not undefined (a default's test)
+pub const R_JNU: int = 54;
 
 const BAD: int = 1000000;
 
@@ -642,6 +659,12 @@ impl Tr {
             } else if (c as int) == OP_NOT {
                 let x = self.opnd(d - 1);
                 self.result(i, R_NOT, 0, 1, x, 0);
+            } else if (c as int) == OP_TONUM || (c as int) == OP_NEG {
+                let x = self.opnd(d - 1);
+                self.result(i, R_TONUM, if (c as int) == OP_NEG { 1 } else { 0 }, 1, x, 0);
+            } else if (c as int) == OP_INC || (c as int) == OP_DEC {
+                let x = self.opnd(d - 1);
+                self.result(i, R_INC, if (c as int) == OP_INC { 0 } else { 1 }, 1, x, 0);
             } else if (c as int) == OP_CMP_JF {
                 let x = self.opnd(d - 2);
                 let y = self.opnd(d - 1);
@@ -657,6 +680,11 @@ impl Tr {
                 self.popn(1);
                 self.mat_all();
                 self.set(i, if (c as int) == OP_JF { R_JF } else { R_JT }, 0, x, (op.a as int), 0);
+            } else if (c as int) == OP_JNOT_UNDEF {
+                let x = self.opnd(d - 1);
+                self.popn(1);
+                self.mat_all();
+                self.set(i, R_JNU, 0, x, (op.a as int), 0);
             } else if (c as int) == OP_JF_KEEP || (c as int) == OP_JT_KEEP || (c as int) == OP_JNN_KEEP {
                 self.mat_all();
                 let rop = if (c as int) == OP_JF_KEEP {
@@ -721,6 +749,24 @@ impl Tr {
                 self.set(i, R_SET_ENV, 0, v, (op.a as int), (op.b as int));
             } else if (c as int) == OP_GET_GLOBAL {
                 self.result(i, R_GET_GLOBAL, 0, 0, 0, (op.a as int));
+            } else if (c as int) == OP_ADD_ENV_POP && op.a < 256 {
+                let x = self.opnd(d - 2);
+                let y = self.opnd(d - 1);
+                self.popn(2);
+                self.set(i, R_ADD_ENV, (op.a as int), x, y, (op.b as int));
+            } else if (c as int) == OP_CHECK_TDZ || (c as int) == OP_REQUIRE_OBJ {
+                let x = self.opnd(d - 1);
+                self.set(i, R_CHECK, if (c as int) == OP_CHECK_TDZ { 0 } else { 1 }, x, (op.a as int), 0);
+            } else if (c as int) == OP_GET_METHOD_ELEM {
+                let o = self.opnd(d - 2);
+                let k = self.opnd(d - 1);
+                self.popn(2);
+                self.set(i, R_GET_METHOD_ELEM, 0, ns + d - 2, o, k);
+                self.push_own(-1);
+                self.push_own(-1);
+            } else if (c as int) == OP_SET_GLOBAL {
+                let v = self.opnd(d - 1);
+                self.set(i, R_SET_GLOBAL, (op.b as int), v, 0, (op.a as int));
             } else if (c as int) == OP_NEW_OBJECT {
                 self.result(i, R_NEW_OBJECT, 0, 0, 0, 0);
             } else if (c as int) == OP_INIT_PROP && op.b != 1 {
@@ -956,7 +1002,7 @@ impl Tr {
             self.rc[k].code += (65536 * run[(i + 1) as usize] as i32);
             let w = if (rop as int) == R_JUMP {
                 1
-            } else if (rop as int) == R_JF || (rop as int) == R_JT || (rop as int) == R_JF_KEEP || (rop as int) == R_JT_KEEP || (rop as int) == R_JNN_KEEP || (rop as int) == R_ITER_NEXT {
+            } else if (rop as int) == R_JF || (rop as int) == R_JT || (rop as int) == R_JF_KEEP || (rop as int) == R_JT_KEEP || (rop as int) == R_JNN_KEEP || (rop as int) == R_ITER_NEXT || (rop as int) == R_JNU {
                 2
             } else if (rop as int) == R_CMP_JF || (rop as int) == R_LOCAL_NULL_JF || (rop as int) == R_CASE_INT_JT || (rop as int) == R_CASE_JT {
                 3

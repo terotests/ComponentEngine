@@ -307,3 +307,82 @@ fn slices_stop_at_every_kind_of_branch() {
         print(acc, log.length, log.slice(0, 3).join()); acc
     "#, 0.0000001, 20);
 }
+
+#[test]
+fn proxy_get_checks_its_invariants() {
+    // the get trap runs natively for plain targets: same answers as the
+    // prelude's hook (Node gives the same)
+    let mut e = Engine::new();
+    let r = e.eval(r#"
+        var t = {}; Object.defineProperty(t, 'x', { value: 1, writable: false, configurable: false });
+        Object.defineProperty(t, 'y', { set: function (v) {}, configurable: false });
+        t.z = 5;
+        var p = new Proxy(t, { get: function (tt, k, r) { return k === 'z' ? 7 : 2; } });
+        var out = [];
+        try { p.x; out.push('no'); } catch (e) { out.push(e.constructor.name); }
+        try { p.y; out.push('no'); } catch (e) { out.push(e.constructor.name); }
+        out.push(p.z, p.w);
+        var q = new Proxy({ a: 1 }, {}); out.push(q.a, q.b);
+        var cnt = 0; var h = {}; Object.defineProperty(h, 'get', { get: function () { cnt++; return undefined; } });
+        var r = new Proxy({ a: 3 }, h); out.push(r.a, cnt);
+        try { new Proxy({}, { get: 5 }).a; } catch (e) { out.push(e.constructor.name); }
+        var rec = new Proxy({}, { get: function (tt, k, rr) { return rr === s; } }); var s = Object.create(rec); out.push(s.foo);
+        out.join()
+    "#);
+    assert_eq!(r, "TypeError,TypeError,7,2,1,,3,1,TypeError,true");
+}
+
+#[test]
+fn proxy_set_checks_its_invariants() {
+    // the set trap runs natively for plain targets (Node gives the same)
+    let mut e = Engine::new();
+    let r = e.eval(r#"
+        var out = [];
+        function t(f) { try { out.push(String(f())); } catch (e) { out.push(e.constructor.name); } }
+        var tg = {}; Object.defineProperty(tg, 'ro', { value: 1, writable: false, configurable: false });
+        Object.defineProperty(tg, 'acc', { get: function () { return 1; }, configurable: false });
+        var p = new Proxy(tg, { set: function (t, k, v, r) { return true; } });
+        t(function () { 'use strict'; p.ro = 2; return 'ok'; });
+        t(function () { 'use strict'; p.ro = 1; return 'ok'; });
+        t(function () { 'use strict'; p.acc = 1; return 'ok'; });
+        t(function () { p.x = 5; return tg.x; });
+        var q = new Proxy({}, { set: function (t, k, v, r) { t[k] = v * 2; return r === q; } });
+        t(function () { q.a = 3; return q.a; });
+        var z = new Proxy({}, { set: function () { return false; } });
+        t(function () { z.a = 1; return 'sloppy'; });
+        t(function () { 'use strict'; z.a = 1; return 'x'; });
+        t(function () { new Proxy({}, { set: 5 }).a = 1; });
+        var n = new Proxy({}, {}); t(function () { n.a = 4; return n.a; });
+        out.join()
+    "#);
+    assert_eq!(r, "TypeError,ok,TypeError,undefined,6,sloppy,TypeError,TypeError,4");
+}
+
+#[test]
+fn numbers_with_few_decimals_print_as_javascript_does() {
+    // the short way (few decimals) and the general one give Node's text
+    let mut e = Engine::new();
+    let r = e.eval(r#"
+        [0.5, 65.515, -655.1540484651923, 0.000001, 9979327917099, 1.2, 0.1 + 0.2, 123456789012345.6,
+         -0.25, 1e15 + 0.5, 5e-7, 0.001, 12.0625, -3.5e-6].map(String).join()
+    "#);
+    assert_eq!(r, "0.5,65.515,-655.1540484651923,0.000001,9979327917099,1.2,0.30000000000000004,123456789012345.6,-0.25,1000000000000000.5,5e-7,0.001,12.0625,-0.0000035");
+}
+
+#[test]
+fn hot_natives_off_the_stack_answer_as_their_builtins() {
+    // Math.min/max, String(x), hasOwnProperty and Object.prototype.toString
+    // have short ways; Node gives the same
+    let mut e = Engine::new();
+    let r = e.eval(r#"
+var o = {a:1}; var out = [];
+out.push(Math.min(3,1,2), Math.max(3,1,2), Math.min(), Math.max(), Math.min(1,NaN), Math.max(-0,0), 1/Math.min(0,-0), 1/Math.max(-0,0), Math.min('2', 5), Math.max(1,2,3,4,5,6,7,8,9,10));
+out.push(String('x'), String(1.5), String(-0), String(), String(null), String(Symbol('q')), String([1,2]), String(1e21));
+out.push(o.hasOwnProperty('a'), o.hasOwnProperty('b'), [1].hasOwnProperty(0), [1].hasOwnProperty('length'), Object.prototype.hasOwnProperty.call('ab', 1));
+var ts = Object.prototype.toString;
+out.push(ts.call([]), ts.call({}), ts.call(null), ts.call(undefined), ts.call(1), ts.call('s'), ts.call(function(){}), ts.call(new Map), ts.call({[Symbol.toStringTag]: 'Z'}), ts.call([]), ts.call(/x/), ts.call(new Date(0)));
+try { ({}).hasOwnProperty({toString: function(){ throw new Error('boom'); }}); } catch (e) { out.push(e.message); }
+out.join('|')
+    "#);
+    assert_eq!(r, "1|3|Infinity|-Infinity|NaN|0|-Infinity|Infinity|2|10|x|1.5|0||null|Symbol(q)|1,2|1e+21|true|false|true|true|true|[object Array]|[object Object]|[object Null]|[object Undefined]|[object Number]|[object String]|[object Function]|[object Map]|[object Z]|[object Array]|[object RegExp]|[object Date]|boom");
+}

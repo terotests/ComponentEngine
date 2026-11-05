@@ -65,6 +65,109 @@ impl Vm {
         self.call_value(hook, Val::Undef, all)
     }
 
+    /// `p[atom]` (receiver r) for a proxy of a plain object: the trap is
+    /// called and its invariants checked here, not in the prelude's hook
+    /// (no descriptor object per get); other targets take the hook.
+    pub fn proxy_get_atom(&mut self, p: int, atom: int, r: Val) -> Val {
+        let target = self.objs[p as usize].env as int;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT {
+            let k = self.key_val(atom);
+            return self.proxy_call(p, PH_GET, vec![k, r]);
+        }
+        let trap = self.get_obj(handler, A_GET, &Val::Obj(handler));
+        if self.throwing {
+            return Val::Undef;
+        }
+        if matches!(trap, Val::Undef) || matches!(trap, Val::Null) {
+            return self.get_obj(target, atom, &r);
+        }
+        if !self.is_callable(&trap) {
+            self.throw_type("'get' on proxy: trap is not a function");
+            return Val::Undef;
+        }
+        let k = self.key_val(atom);
+        let v = self.call_value(trap, Val::Obj(handler), vec![Val::Obj(target), k, r]);
+        if self.throwing {
+            return Val::Undef;
+        }
+        let slot = self.find(target, atom);
+        if slot >= 0 {
+            let attr = self.attr_at(target, slot);
+            if (attr & P_FIXED) != 0 {
+                if (attr & P_ACCESSOR) != 0 {
+                    let pair = obj_of(&self.objs[target as usize].vals[slot as usize]);
+                    let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
+                    if matches!(g, Val::Undef) && !matches!(v, Val::Undef) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'get' on proxy: property '{}' is a non-configurable accessor property on the proxy target and does not have a getter function, but the trap did not return 'undefined'", n).as_str());
+                        return Val::Undef;
+                    }
+                } else if (attr & P_READONLY) != 0 {
+                    let cur = self.objs[target as usize].vals[slot as usize].clone();
+                    if !self.same_value(&v, &cur) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'get' on proxy: property '{}' is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value", n).as_str());
+                        return Val::Undef;
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// `p[atom] = v` (receiver r) for a proxy of a plain object whose
+    /// handler has a set trap: the trap is called and its invariants
+    /// checked here; other cases take the prelude's hook.
+    pub fn proxy_set_atom(&mut self, p: int, atom: int, v: Val, r: Val) -> bool {
+        let target = self.objs[p as usize].env as int;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT {
+            let k = self.key_val(atom);
+            return self.proxy_bool(p, PH_SET, vec![k, v, r]);
+        }
+        let trap = self.get_obj(handler, A_SET, &Val::Obj(handler));
+        if self.throwing {
+            return false;
+        }
+        if matches!(trap, Val::Undef) || matches!(trap, Val::Null) {
+            let k = self.key_val(atom);
+            return self.proxy_bool(p, PH_SET, vec![k, v, r]);
+        }
+        if !self.is_callable(&trap) {
+            self.throw_type("'set' on proxy: trap is not a function");
+            return false;
+        }
+        let k = self.key_val(atom);
+        let ok = self.call_value(trap, Val::Obj(handler), vec![Val::Obj(target), k, v.clone(), r]);
+        if self.throwing || !truthy(&ok) {
+            return false;
+        }
+        let slot = self.find(target, atom);
+        if slot >= 0 {
+            let attr = self.attr_at(target, slot);
+            if (attr & P_FIXED) != 0 {
+                if (attr & P_ACCESSOR) != 0 {
+                    let pair = obj_of(&self.objs[target as usize].vals[slot as usize]);
+                    let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
+                    if matches!(s, Val::Undef) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'set' on proxy: trap returned truish for property '{}' which exists in the proxy target as a non-configurable and non-writable accessor property without a setter", n).as_str());
+                        return false;
+                    }
+                } else if (attr & P_READONLY) != 0 {
+                    let cur = self.objs[target as usize].vals[slot as usize].clone();
+                    if !self.same_value(&v, &cur) {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("'set' on proxy: trap returned truish for property '{}' which exists in the proxy target as a non-configurable and non-writable data property with a different value", n).as_str());
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     pub fn proxy_bool(&mut self, p: int, which: int, args: Vec<Val>) -> bool {
         let r = self.proxy_call(p, which, args);
         !self.throwing && truthy(&r)

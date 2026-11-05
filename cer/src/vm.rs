@@ -167,6 +167,13 @@ pub struct Vm {
     pub type_vals: Vec<Val>,
     /// atoms that are symbols (their description is the name)
     pub symbol_atoms: HashMap<int, int>,
+    /// what kind of key each atom is, found on first use (atom_kind): 0
+    /// not yet, 1 a name, 2 an array index, 3 a symbol, 4 a private name
+    pub atom_kinds: Vec<i32>,
+    /// Object.prototype.toString's answers by class ("[object Array]"…),
+    /// made on first use, and the @@toStringTag atom (-1 before)
+    pub tostr_vals: Vec<Val>,
+    pub a_tostringtag: int,
     pub stack: Vec<Val>,
     pub frames: Vec<Frame>,
     pub handlers: Vec<Handler>,
@@ -259,6 +266,9 @@ pub struct Vm {
     pub srcs: Vec<i32>,
     /// whether a handle is in szct
     pub sinz: Vec<bool>,
+    /// the atom a string handle's text interns to, -1 before it is asked
+    /// (to_key: a string key looked up once per string, not per use)
+    pub satom: Vec<i32>,
     /// handles whose count went to 0 (or that are new): reclaim() frees
     /// those no root holds
     pub szct: Vec<int>,
@@ -447,6 +457,9 @@ impl Vm {
             atom_cache: Vec::new(),
             atom_names: Vec::new(),
             atom_vals: Vec::new(),
+            atom_kinds: Vec::new(),
+            tostr_vals: Vec::new(),
+            a_tostringtag: -1,
             type_vals: Vec::new(),
             symbol_atoms: HashMap::new(),
             stack: Vec::new(),
@@ -511,6 +524,7 @@ impl Vm {
             sfreed: Vec::new(),
             srcs: Vec::new(),
             sinz: Vec::new(),
+            satom: Vec::new(),
             szct: Vec::new(),
             szct_spare: Vec::new(),
             sfree_count: 0,
@@ -704,7 +718,8 @@ impl Vm {
             let s = &self.shapes[self.holder(sh)];
             if s.keys[c as usize] == atom {
                 let a = s.attrs[c as usize];
-                if a == 0 || (!plain && (a & P_ACCESSOR) == 0) {
+                let bad = if plain { P_READONLY | P_ACCESSOR } else { P_ACCESSOR };
+                if (a & bad) == 0 {
                     return c;
                 }
             }
@@ -739,6 +754,66 @@ impl Vm {
         slot
     }
 
+    /// `name = v` for a global (`create` 1 when a missing one is made even
+    /// in strict code); a writable data property's slot goes to the cache
+    /// of the op before `pc`.
+    pub fn set_global(&mut self, atom: int, v: Val, create: int, pi: usize, pc: int) {
+        let g = self.global;
+        let slot = self.find(g, atom);
+        if slot >= 0 && (self.attr_at(g, slot) & (P_READONLY | P_ACCESSOR)) == 0 {
+            let nc = self.ic_of(g, slot);
+            self.protos[pi].code[(pc - 1) as usize].c = (nc as i32);
+            self.put_slot(g, slot, v);
+        } else if slot < 0 && create == 0 && self.strict_now() && !self.has_atom(g, atom) {
+            // strict code does not create globals by assignment
+            let n = self.atom_str(atom);
+            self.throw_ref(format!("{} is not defined", n).as_str());
+        } else {
+            self.set_obj(g, atom, v);
+        }
+    }
+
+    /// ToNumeric of `v` (a BigInt stays).
+    pub fn to_numeric(&mut self, v: Val) -> Val {
+        if let Val::Num(_) = v {
+            return v;
+        }
+        if self.class_of(&v) == C_BIGINT {
+            return v;
+        }
+        let n = self.to_number(&v);
+        Val::Num(n)
+    }
+
+    /// -v (unary minus), BigInts too.
+    pub fn neg_val(&mut self, v: Val) -> Val {
+        let p = if is_obj(&v) { self.to_primitive(&v, "number") } else { v };
+        if self.throwing {
+            return Val::Undef;
+        }
+        if self.class_of(&p) == C_BIGINT {
+            let t = self.big_text(&p);
+            let r = crate::bigint::negate(t.as_str());
+            return self.bigint_val(r.as_str());
+        }
+        let n = self.to_number(&p);
+        Val::Num(-n)
+    }
+
+    /// `v` + d (d 1 or -1) for ++ / --, BigInts too.
+    pub fn inc_val(&mut self, v: Val, d: double) -> Val {
+        if self.class_of(&v) == C_BIGINT {
+            let t = self.big_text(&v);
+            let r = if d > 0.0 { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
+            return self.bigint_val(r.as_str());
+        }
+        let n = match v {
+            Val::Num(x) => x,
+            _ => self.to_number(&v),
+        };
+        Val::Num(n + d)
+    }
+
     /// As ic_get for a writable data property, for a set.
     #[inline]
     pub fn ic_set(&mut self, o: int, atom: int, c: int, pi: usize, pc: int) -> int {
@@ -747,7 +822,7 @@ impl Vm {
             return hit;
         }
         let slot = self.find(o, atom);
-        if slot < 0 || self.attr_at(o, slot) != 0 {
+        if slot < 0 || (self.attr_at(o, slot) & (P_READONLY | P_ACCESSOR)) != 0 {
             return -1;
         }
         let nc = self.ic_of(o, slot);
@@ -793,7 +868,7 @@ impl Vm {
     pub fn shape_keys(&self, sh: int) -> Vec<int> {
         let n = self.shapes[sh as usize].nkeys as usize;
         let h = &self.shapes[self.holder(sh)];
-        let mut out: Vec<int> = Vec::new();
+        let mut out: Vec<int> = Vec::with_capacity(n);
         let mut i: usize = 0;
         while i < n {
             out.push(h.keys[i]);
@@ -806,7 +881,7 @@ impl Vm {
     pub fn shape_attrs(&self, sh: int) -> Vec<int> {
         let n = self.shapes[sh as usize].nkeys as usize;
         let h = &self.shapes[self.holder(sh)];
-        let mut out: Vec<int> = Vec::new();
+        let mut out: Vec<int> = Vec::with_capacity(n);
         let mut i: usize = 0;
         while i < n {
             out.push(h.attrs[i]);
@@ -990,6 +1065,7 @@ impl Vm {
         self.sfreed = Vec::new();
         self.srcs = Vec::new();
         self.sinz = Vec::new();
+        self.satom = Vec::new();
         self.szct = Vec::new();
         self.snew = 0;
         self.slimit = self.slimit_min;
@@ -1003,34 +1079,45 @@ impl Vm {
         self.smark.push(false);
         self.srcs.push(0);
         self.sinz.push(false);
+        self.satom.push(-1);
     }
 
     fn new_handle(&mut self, s: Rc<String>, flag: int) -> int {
+        let h = self.take_handle(s.as_bytes().len() as int, flag);
+        self.strs[h as usize] = s;
+        h
+    }
+
+    /// A string handle for `n` bytes of text, its slot holding the box it
+    /// had (a reused one) or the empty string: the caller puts the text in.
+    fn take_handle(&mut self, n: int, flag: int) -> int {
         if self.strs.is_empty() {
             self.reset_strs();
         }
         self.snew += 1;
-        self.sbytes += s.as_bytes().len() as int;
+        self.sbytes += n;
         if self.snew >= self.slimit || self.sbytes >= self.sbytes_limit {
             self.gc_flag = true;
         }
         let h = if !self.sfree.is_empty() {
             let h = self.sfree.pop().unwrap();
             let i = h as usize;
-            self.strs[i] = s;
             self.sup[i] = -1;
             self.slen[i] = 0;
             self.sflag[i] = flag as i32;
             self.srcs[i] = 0;
+            self.satom[i] = -1;
             h
         } else {
-            self.strs.push(s);
+            let e = self.sempty.clone();
+            self.strs.push(e);
             self.sup.push(-1);
             self.slen.push(0);
             self.sflag.push(flag as i32);
             self.smark.push(false);
             self.srcs.push(0);
             self.sinz.push(false);
+            self.satom.push(-1);
             (self.strs.len() - 1) as int
         };
         // a new string is held by nothing counted yet: reclaim() frees it
@@ -1083,8 +1170,7 @@ impl Vm {
         if self.snew > 0 {
             self.snew -= 1;
         }
-        let e = self.sempty.clone();
-        self.strs[i] = e;
+        rc_vacate(&mut self.strs[i], &self.sempty);
         self.sup[i] = -1;
         self.slen[i] = 0;
         self.sflag[i] = 2;
@@ -1115,7 +1201,9 @@ impl Vm {
         if s.is_empty() {
             return Val::Str(0);
         }
-        Val::Str(self.new_handle(Rc::new(s), 0))
+        let h = self.take_handle(s.as_bytes().len() as int, 0);
+        rc_refill(&mut self.strs[h as usize], s);
+        Val::Str(h)
     }
 
     /// A string value that is never swept (constants, atoms' names).
@@ -1312,8 +1400,7 @@ impl Vm {
         while i < ns {
             self.sinz[i] = false;
             if self.sflag[i] == 0 && !self.smark[i] {
-                let e = self.sempty.clone();
-                self.strs[i] = e;
+                rc_vacate(&mut self.strs[i], &self.sempty);
                 self.sup[i] = -1;
                 self.sflag[i] = 2;
                 self.sfreed.push(i as int);
@@ -1523,6 +1610,28 @@ impl Vm {
     }
 
     /// The name of atom `a` as a string value, shared.
+    /// The kind of key atom `a` is (Vm.atom_kinds).
+    pub fn atom_kind(&mut self, a: int) -> int {
+        while self.atom_kinds.len() <= a as usize {
+            self.atom_kinds.push(0);
+        }
+        let k = self.atom_kinds[a as usize];
+        if k != 0 {
+            return k as int;
+        }
+        let n: int = if self.atom_names[a as usize].starts_with('\u{1}') {
+            4
+        } else if self.symbol_atoms.contains_key(&a) {
+            3
+        } else if jsstr::array_index(self.atom_names[a as usize].as_str()) >= 0 {
+            2
+        } else {
+            1
+        };
+        self.atom_kinds[a as usize] = n as i32;
+        n
+    }
+
     pub fn atom_val(&mut self, a: int) -> Val {
         while self.atom_vals.len() <= a as usize {
             self.atom_vals.push(Val::Undef);
@@ -2023,12 +2132,18 @@ impl Vm {
                 (-1, a)
             }
             Val::Str(s) => {
-                let s = self.sget(s.clone());
-                let i = jsstr::array_index(s.as_str());
+                let h = *s as usize;
+                let known = self.satom[h];
+                if known >= 0 {
+                    return (-1, known as int);
+                }
+                let i = jsstr::array_index(self.sref(*s));
                 if i >= 0 {
                     return (i, -1);
                 }
-                let a = self.intern(s.as_str());
+                let t = self.sget(*s);
+                let a = self.intern(t.as_str());
+                self.satom[h] = a as i32;
                 (-1, a)
             }
             Val::Obj(o) => {
@@ -2149,8 +2264,7 @@ impl Vm {
             let class = self.objs[cur as usize].class;
             if class != C_OBJECT {
                 if class == C_PROXY {
-                    let k = self.key_val(atom);
-                    return self.proxy_call(cur, PH_GET, vec![k, receiver.clone()]);
+                    return self.proxy_get_atom(cur, atom, receiver.clone());
                 }
                 if (class == C_ARRAY || class == C_ARGUMENTS) && atom == A_LENGTH {
                     return Val::Num(self.evecs[self.objs[cur as usize].elems as usize].v.len() as double);
@@ -2325,8 +2439,7 @@ impl Vm {
 
     pub fn set_obj(&mut self, o: int, atom: int, v: Val) {
         if self.objs[o as usize].class == C_PROXY {
-            let k = self.key_val(atom);
-            let ok = self.proxy_bool(o, PH_SET, vec![k, v, Val::Obj(o)]);
+            let ok = self.proxy_set_atom(o, atom, v, Val::Obj(o));
             if !ok && !self.throwing && self.strict_now() {
                 let n = self.atom_str(atom);
                 self.throw_type(format!("'set' on proxy: trap returned falsish for property '{}'", n).as_str());
@@ -2741,11 +2854,12 @@ impl Vm {
                 k += 1;
                 continue;
             }
-            if self.atom_names[a as usize].starts_with('\u{1}') {
+            let kind = self.atom_kind(a);
+            if kind == 4 {
                 // a private name: never a key
-            } else if self.symbol_atoms.contains_key(&a) {
+            } else if kind == 3 {
                 syms.push(a);
-            } else if jsstr::array_index(self.atom_names[a as usize].as_str()) >= 0 {
+            } else if kind == 2 {
                 ints.push(a);
             } else {
                 others.push(a);
@@ -2915,10 +3029,39 @@ impl Vm {
         match (a, b) {
             (Val::Num(x), Val::Num(y)) => return Val::Num(x + y),
             (Val::Str(x), Val::Str(y)) => {
-                let mut s = String::new();
+                if *x == 0 {
+                    return Val::Str(*y);
+                }
+                if *y == 0 {
+                    return Val::Str(*x);
+                }
+                let n = self.sref(*x).as_bytes().len() + self.sref(*y).as_bytes().len();
+                let h = self.take_handle(n as int, 0);
+                let mut s = rc_take_buf(&mut self.strs[h as usize]);
                 s.push_str(self.sref(*x));
                 s.push_str(self.sref(*y));
-                return self.string_val(s);
+                rc_refill(&mut self.strs[h as usize], s);
+                return Val::Str(h);
+            }
+            (Val::Str(x), Val::Num(y)) => {
+                let t = number_to_string(*y);
+                let n = self.sref(*x).as_bytes().len() + t.as_bytes().len();
+                let h = self.take_handle(n as int, 0);
+                let mut s = rc_take_buf(&mut self.strs[h as usize]);
+                s.push_str(self.sref(*x));
+                s.push_str(t.as_str());
+                rc_refill(&mut self.strs[h as usize], s);
+                return Val::Str(h);
+            }
+            (Val::Num(x), Val::Str(y)) => {
+                let t = number_to_string(*x);
+                let n = t.as_bytes().len() + self.sref(*y).as_bytes().len();
+                let h = self.take_handle(n as int, 0);
+                let mut s = rc_take_buf(&mut self.strs[h as usize]);
+                s.push_str(t.as_str());
+                s.push_str(self.sref(*y));
+                rc_refill(&mut self.strs[h as usize], s);
+                return Val::Str(h);
             }
             _ => {}
         }
@@ -4424,6 +4567,50 @@ impl Vm {
                         return false;
                     }
                 }
+                // Math.min / Math.max of numbers
+                if (which == 31 || which == 32) && argc <= 8 {
+                    let mut r = if which == 31 { infinity() } else { -infinity() };
+                    let mut nan_seen = false;
+                    let mut numbers = true;
+                    let mut i: int = 0;
+                    while i < argc {
+                        if let Val::Num(n) = self.stack[(bp + i) as usize] {
+                            if is_nan(n) {
+                                nan_seen = true;
+                            } else if which == 31 {
+                                if n < r || (n == 0.0 && r == 0.0 && 1.0 / n < 0.0) {
+                                    r = n;
+                                }
+                            } else if n > r || (n == 0.0 && r == 0.0 && 1.0 / n > 0.0) {
+                                r = n;
+                            }
+                        } else {
+                            numbers = false;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if numbers {
+                        self.stack.truncate(fpos as usize);
+                        self.stack.push(Val::Num(if nan_seen { nan() } else { r }));
+                        return false;
+                    }
+                }
+                // String(x) of a string or a number
+                if id == crate::builtins::NF_STRING && argc >= 1 {
+                    let a = self.stack[bp as usize].clone();
+                    let mut r = Val::Undef;
+                    if let Val::Str(_) = a {
+                        r = a;
+                    } else if let Val::Num(n) = a {
+                        r = self.string_val(number_to_string(n));
+                    }
+                    if !matches!(r, Val::Undef) {
+                        self.stack.truncate(fpos as usize);
+                        self.stack.push(r);
+                        return false;
+                    }
+                }
                 // The hottest natives, straight off the stack: no argument
                 // vector, same checks as their builtins.
                 if argc >= 1 {
@@ -4433,7 +4620,14 @@ impl Vm {
                         let weak = self.objs[tobj as usize].func == 1;
                         let mut r = Val::Undef;
                         let mut hit = false;
-                        if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
+                        if id == crate::builtins::NF_OP_HASOWN {
+                            let k = self.stack[bp as usize].clone();
+                            r = Val::Bool(self.has_own(tobj, &k));
+                            if self.throwing {
+                                return false;
+                            }
+                            hit = true;
+                        } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
                             let a = self.stack[bp as usize].clone();
                             self.push_elem(tobj, a);
                             r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
@@ -4642,6 +4836,30 @@ impl Vm {
             if !self.throwing {
                 self.put_elem(e, (i) as int, r);
             }
+        }
+    }
+
+    /// Env slot `i` (`depth` envs out) becomes a + b, a its value before b
+    /// was worked out; a string grows in place when nothing else holds it.
+    pub fn add_env(&mut self, depth: int, i: int, a: Val, b: Val) {
+        let e = self.get_env(depth);
+        if let (Val::Str(x), Val::Str(_)) = (a, b) {
+            let cur = self.evecs[self.objs[e as usize].elems as usize].v[i as usize];
+            if let Val::Str(y) = cur {
+                if x == y {
+                    let h = self.append_val(cur, b);
+                    if h >= 0 {
+                        self.evecs[self.objs[e as usize].elems as usize].v[i as usize] = Val::Str(h);
+                        self.sinc(h);
+                        self.sdec(x);
+                        return;
+                    }
+                }
+            }
+        }
+        let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+        if !self.throwing {
+            self.put_elem(e, i, r);
         }
     }
 
@@ -4882,18 +5100,8 @@ impl Vm {
                 }
             }
             OP_SET_GLOBAL => {
-                let g = self.global;
                 let v = self.top().clone();
-                let slot = self.find(g, (op.a as int));
-                if slot >= 0 && self.attr_at(g, slot) == 0 {
-                    self.put_slot(g, slot, v);
-                } else if slot < 0 && op.b == 0 && self.strict_now() && !self.has_atom(g, (op.a as int)) {
-                    // strict code does not create globals by assignment
-                    let n = self.atom_str((op.a as int));
-                    self.throw_ref(format!("{} is not defined", n).as_str());
-                } else {
-                    self.set_obj(g, (op.a as int), v);
-                }
+                self.set_global((op.a as int), v, (op.b as int), pi, *pc);
             }
             OP_DECL_GLOBAL => {
                 let g = self.global;
@@ -6836,6 +7044,61 @@ pub fn rc_push(rc: &mut Rc<String>, b: &str) -> bool {
         return true;
     }
     false
+}
+
+/// A freed string slot lets its text go. Rust: the box stays when nothing
+/// else holds it, for the next string of the slot (rc_refill); the other
+/// targets point the slot at the empty string.
+#[ranger::target(rust)]
+pub fn rc_vacate(rc: &mut Rc<String>, empty: &Rc<String>) {
+    if let Some(s) = Rc::get_mut(rc) {
+        // a small buffer stays too (rc_take_buf)
+        if s.capacity() <= 64 {
+            s.clear();
+        } else {
+            *s = String::new();
+        }
+        return;
+    }
+    *rc = empty.clone();
+}
+
+/// The buffer a reused slot kept, empty, for its new text (Rust; the
+/// other targets start a new one).
+#[ranger::target(rust)]
+pub fn rc_take_buf(rc: &mut Rc<String>) -> String {
+    if let Some(s) = Rc::get_mut(rc) {
+        let mut b = std::mem::take(s);
+        b.clear();
+        return b;
+    }
+    String::new()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_take_buf(_rc: &mut Rc<String>) -> String {
+    String::new()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_vacate(rc: &mut Rc<String>, empty: &Rc<String>) {
+    *rc = empty.clone();
+}
+
+/// Slot `rc` takes the text `s`: into its own box when nothing else
+/// holds that (Rust), else a new one.
+#[ranger::target(rust)]
+pub fn rc_refill(rc: &mut Rc<String>, s: String) {
+    if let Some(m) = Rc::get_mut(rc) {
+        *m = s;
+        return;
+    }
+    *rc = Rc::new(s);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_refill(rc: &mut Rc<String>, s: String) {
+    *rc = Rc::new(s);
 }
 
 /// Rust: a string's buffer to its size when a quarter or more is spare

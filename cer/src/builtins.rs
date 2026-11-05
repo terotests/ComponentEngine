@@ -345,6 +345,9 @@ impl Vm {
         let sv8 = self.str_val(desc);
         self.put_prim(s, sv8);
         self.symbol_atoms.insert(atom, s);
+        if (atom as usize) < self.atom_kinds.len() {
+            self.atom_kinds[atom as usize] = 0;
+        }
         self.symbols.push(s);
         s
     }
@@ -1441,6 +1444,16 @@ impl Vm {
             }
             _ => {}
         }
+        // a string: twice its atom (cached per string handle); the rest:
+        // twice the atom of a tagged text, plus one
+        if let Val::Str(_) = k {
+            let (i, a) = self.to_key(k);
+            if a >= 0 {
+                return 2 * a;
+            }
+            let t = format!("{}", i);
+            return 2 * self.intern(t.as_str());
+        }
         let s = match k {
             Val::Undef => String::from("u"),
             Val::Null => String::from("l"),
@@ -1452,10 +1465,10 @@ impl Vm {
                     format!("n{}", number_to_string(*n))
                 }
             }
-            Val::Str(s) => format!("s{}", self.sref(*s)),
+            Val::Str(_) => String::new(),
             Val::Obj(o) => format!("o{}", o),
         };
-        self.intern(s.as_str())
+        2 * self.intern(s.as_str()) + 1
     }
 
     pub fn map_find(&mut self, m: int, k: &Val) -> int {
@@ -3136,6 +3149,9 @@ impl Vm {
                 let sv2 = self.string_val(desc);
                 self.put_prim(s, if matches!(a0, Val::Undef) { Val::Undef } else { sv2 });
                 self.symbol_atoms.insert(atom, s);
+                if (atom as usize) < self.atom_kinds.len() {
+                    self.atom_kinds[atom as usize] = 0;
+                }
                 self.symbols.push(s);
                 Val::Obj(s)
             }
@@ -3152,6 +3168,9 @@ impl Vm {
                 let sv1 = self.string_val(key.clone());
                 self.put_prim(s, sv1);
                 self.symbol_atoms.insert(atom, s);
+                if (atom as usize) < self.atom_kinds.len() {
+                    self.atom_kinds[atom as usize] = 0;
+                }
                 self.symbols.push(s);
                 self.symbol_registry.insert(key, s);
                 Val::Obj(s)
@@ -3619,18 +3638,26 @@ impl Vm {
                 Val::Bool((self.attr_at(o, slot) & P_HIDDEN) == 0)
             }
             NF_OP_TOSTRING => {
+                let mut class: int = -1;
                 let tag = match &this {
                     Val::Undef => String::from("Undefined"),
                     Val::Null => String::from("Null"),
                     _ => {
                         let o = self.to_object(&this);
-                        let a_tag = self.intern("@@toStringTag");
+                        if self.a_tostringtag < 0 {
+                            self.a_tostringtag = self.intern("@@toStringTag");
+                        }
+                        let a_tag = self.a_tostringtag;
                         let t = self.get_obj(o, a_tag, &this);
                         if let Val::Str(s) = t {
                             let s = self.sget(s.clone());
                             s.as_ref().clone()
                         } else {
                             let c = self.objs[o as usize].class;
+                            class = c as int;
+                            if (c as usize) < self.tostr_vals.len() && !matches!(self.tostr_vals[c as usize], Val::Undef) {
+                                return self.tostr_vals[c as usize].clone();
+                            }
                             String::from(match c {
                                 C_ARRAY => "Array",
                                 C_FUNCTION | C_NATIVE | C_BOUND => "Function",
@@ -3650,6 +3677,15 @@ impl Vm {
                         }
                     }
                 };
+                if class >= 0 {
+                    // the answer of a class is kept (a pinned string)
+                    let v = self.pin_rc(Rc::new(format!("[object {}]", tag)));
+                    while self.tostr_vals.len() <= class as usize {
+                        self.tostr_vals.push(Val::Undef);
+                    }
+                    self.tostr_vals[class as usize] = v.clone();
+                    return v;
+                }
                 self.string_val(format!("[object {}]", tag))
             }
             NF_OP_TOLOCALE => {

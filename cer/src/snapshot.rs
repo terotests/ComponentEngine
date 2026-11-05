@@ -386,6 +386,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.symbol_atoms = HashMap::new();
+    vm.atom_kinds = Vec::new();
+    vm.tostr_vals = Vec::new();
+    vm.a_tostringtag = -1;
     let nsym = r.num();
     i = 0;
     while i < nsym && !r.bad {
