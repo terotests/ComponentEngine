@@ -66,8 +66,14 @@ function engine() {
         fs.writeFileSync("/tmp/wjit-bad.wasm", bytes);
         throw new Error("wjit: invalid module (/tmp/wjit-bad.wasm): " + e.message);
       }
+      if (!jit.helpers) {
+        // from the function table: an export of a wasip1 module runs the
+        // constructors and destructors around every call
+        const t = x.__indirect_function_table;
+        jit.helpers = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow"].map((h, k) => t.get(x.cerxes_jit_helper(k)));
+      }
       const env = { memory: x.memory };
-      for (const h of ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow"]) env[h] = x["cerxes_jit_" + h];
+      ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow"].forEach((h, k) => (env[h] = jit.helpers[k]));
       const inst = new WebAssembly.Instance(m, { env });
       const t = x.__indirect_function_table;
       const idx = t.grow(1);
@@ -137,7 +143,7 @@ let failures = 0;
 if (opt("eval", "")) {
   // --eval=file: its answer with the JIT off and on (min 0)
   const src = fs.readFileSync(opt("eval", ""), "utf8");
-  for (const on of [false, true]) {
+  for (const on of opt("only-on", "") ? [true] : [false, true]) {
     const e = engine();
     e.setJit(on, on ? Number(opt("min", "0")) : 0);
     const r = e.eval(src);

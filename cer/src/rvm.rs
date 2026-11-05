@@ -85,15 +85,15 @@ impl Vm {
             self.jit_hot[pi] += 1;
             return pc;
         }
-        self.jit_go(pi, bp, fi, pc)
+        self.jit_go(pi, bp, fi, pc, true)
     }
 
     /// Runs the compiled code of function pi from pc: the pc to go on at,
     /// -1 the time slice ended (the frame is stopped), -2 an op threw (the
     /// frame's pc is set), -3 frames changed (go on with the top one).
-    pub fn jit_go(&mut self, pi: usize, bp: int, fi: usize, pc: int) -> int {
+    pub fn jit_go(&mut self, pi: usize, bp: int, fi: usize, pc: int, head: bool) -> int {
         let budget = if self.slicing { SLICE_TICKS } else { 1073741824 };
-        let r = jit_enter(self, pi, bp, pc, budget);
+        let r = jit_enter(self, pi, bp, pc, budget, head);
         if r >= 0 || r == -2 || r == -3 {
             return r;
         }
@@ -843,7 +843,7 @@ impl Vm {
                             }
                             if self.jit_on && ((rb + pc) as usize) < self.jit_res.len() && self.jit_res[(rb + pc) as usize] {
                                 // after a call out of compiled code: back in
-                                pc = self.jit_go(pi, bp, fi, pc);
+                                pc = self.jit_go(pi, bp, fi, pc, false);
                                 if pc < 0 {
                                     if pc == -1 || (pc == -2 && !self.unwind(base)) {
                                         return;
@@ -1980,12 +1980,12 @@ pub fn unknown_op() {}
 /// or -1 - pc when its budget ran out. Only Rust compiles; elsewhere the
 /// interpreter goes on at pc.
 #[ranger::target(rust)]
-pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int) -> int {
-    crate::wjit::enter(vm, pi, bp, pc, budget as i32)
+pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bool) -> int {
+    crate::wjit::enter(vm, pi, bp, pc, budget as i32, head)
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int) -> int {
+pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _head: bool) -> int {
     pc
 }
 

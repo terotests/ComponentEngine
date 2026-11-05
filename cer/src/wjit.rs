@@ -49,6 +49,12 @@ pub struct Layout {
     pub off_bool: u32,
     pub off_num: u32,
     pub off_int: u32,
+    /// a JsObj (value.rs) in Vm.objs: its size, where its shape is and
+    /// where the pointer to its vals' buffer is; obj_ok when found (wasm32)
+    pub obj_ok: bool,
+    pub obj_size: u32,
+    pub off_shape: u32,
+    pub off_vals: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -85,6 +91,10 @@ pub fn probe() -> Layout {
         off_bool: 0,
         off_num: 0,
         off_int: 0,
+        obj_ok: false,
+        obj_size: 0,
+        off_shape: 0,
+        off_vals: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -148,6 +158,34 @@ pub fn probe() -> Layout {
     l.off_num = on as u32;
     l.off_int = oi as u32;
     l.ok = true;
+    // the buffer pointer of a Vec<Val>: the word of the Vec that holds it
+    let v: Vec<Val> = Vec::with_capacity(7);
+    let ptr = v.as_ptr() as usize;
+    let vs = std::mem::size_of::<Vec<Val>>();
+    let ws = std::mem::size_of::<usize>();
+    let mut vp: i32 = -1;
+    if ws == 4 && vs == 12 {
+        let mut k = 0;
+        while k < vs {
+            let mut w: usize = 0;
+            for i in 0..ws {
+                // SAFETY: a Vec is three usize words, no padding
+                let b = unsafe { std::ptr::read_volatile((&v as *const Vec<Val> as *const u8).add(k + i)) };
+                w |= (b as usize) << (8 * i);
+            }
+            if w == ptr && ptr != 7 && ptr != 0 {
+                vp = k as i32;
+            }
+            k += ws;
+        }
+    }
+    drop(v);
+    if vp >= 0 {
+        l.obj_ok = true;
+        l.obj_size = std::mem::size_of::<JsObj>() as u32;
+        l.off_shape = std::mem::offset_of!(JsObj, shape) as u32;
+        l.off_vals = (std::mem::offset_of!(JsObj, vals) + vp as usize) as u32;
+    }
     l
 }
 
@@ -267,6 +305,7 @@ const L_TAG: u32 = 7;
 const L_LOOPED: u32 = 8;
 const L_ENTRY: u32 = 15;
 const L_C: u32 = 16;
+const L_T2: u32 = 17;
 const L_A: u32 = 9; // f64
 const L_B: u32 = 10; // f64
 const L_Q0: u32 = 11; // i64 x4 (R_LOAD2)
@@ -289,6 +328,8 @@ pub const OUT_THROW: i32 = i32::MIN + 4;
 pub const OUT_FRAMES: i32 = i32::MIN + 5;
 const CALL: u8 = 0x10;
 const I32_REM_S: u8 = 0x6f;
+const I32_ADD: u8 = 0x6a;
+const I32_MUL: u8 = 0x6c;
 
 // --------------------------------------------------------------- compiler
 
@@ -463,6 +504,10 @@ impl<'a> Cg<'a> {
     /// H_SLOW when one of its checks fails; for a comparison both leave
     /// the answer in L_C.
     fn with_slow(&mut self, pc: i64, next: i64, cmp_result: bool, fast: &dyn Fn(&mut Cg<'a>) -> bool) -> bool {
+        self.with_helper(H_SLOW, pc, next, cmp_result, fast)
+    }
+    /// with_slow with another helper for the slow block
+    fn with_helper(&mut self, h: u32, pc: i64, next: i64, cmp_result: bool, fast: &dyn Fn(&mut Cg<'a>) -> bool) -> bool {
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
@@ -479,7 +524,7 @@ impl<'a> Cg<'a> {
         }
         self.op(END);
         self.extra -= 1;
-        self.helper(H_SLOW, pc, next);
+        self.helper(h, pc, next);
         if cmp_result {
             let cell = cell_addr() as i64;
             self.i32c(cell);
@@ -630,6 +675,11 @@ impl<'a> Cg<'a> {
     }
     /// x <cmp> y for two numbers as an i32, or return pc
     fn cmp(&mut self, cmp: i32, x: i32, y: i32, pc: i64) -> bool {
+        let c = cmp as int;
+        if c == OP_SEQ || c == OP_SNE || c == OP_EQ || c == OP_NE {
+            self.equal(c, x, y, pc);
+            return true;
+        }
         let f = match cmp as int {
             OP_LT => F64_LT,
             OP_GT => F64_GT,
@@ -647,6 +697,182 @@ impl<'a> Cg<'a> {
         self.num(b);
         self.op(f);
         true
+    }
+    /// dst = obj.prop where obj has the shape the inline cache `c` (shape
+    /// * 65536 + slot, as the interpreter's R_GET_PROP) saw when this was
+    /// compiled: the slot read from the object's vals
+    fn get_prop_ic(&mut self, dst: u32, obj: u32, c: i32, pc: i64) -> bool {
+        let l = self.lay;
+        self.get(L_SP);
+        self.mem(I32_LOAD8_U, 0, obj * 16);
+        self.i32c(l.t_obj as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        // &objs[o]
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.i32c(l.obj_size as i64);
+        self.op(I32_MUL);
+        let cell = cell_addr() as i64;
+        self.i32c(cell);
+        self.mem(I32_LOAD, 2, 16);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_shape);
+        self.i32c((c >> 16) as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_vals);
+        self.set(L_T2);
+        let slot = (c & 65535) as u32;
+        self.get(L_T2);
+        self.mem(I64_LOAD, 3, slot * 16);
+        self.set(L_Q0);
+        self.get(L_T2);
+        self.mem(I64_LOAD, 3, slot * 16 + 8);
+        self.set(L_Q0 + 1);
+        self.store_val(dst, L_Q0);
+        true
+    }
+    /// x == y, x === y and their negations as an i32 on the wasm stack:
+    /// numbers, undefined, null, booleans and objects here; two strings
+    /// that are not the same handle, and a loose compare across types other
+    /// than undefined and null, fail to the slow path
+    fn equal(&mut self, c: int, x: i32, y: i32, pc: i64) {
+        let strict = c == OP_SEQ || c == OP_SNE;
+        let a = self.opnd(x);
+        let b = self.opnd(y);
+        let l = self.lay;
+        self.tag(a);
+        self.set(L_TAG);
+        self.tag(b);
+        self.set(L_T2);
+        self.op(BLOCK);
+        self.op(T_I32);
+        self.extra += 1;
+        // two numbers
+        self.get(L_TAG);
+        self.i32c(l.t_num as i64);
+        self.op(I32_EQ);
+        self.get(L_T2);
+        self.i32c(l.t_num as i64);
+        self.op(I32_EQ);
+        self.op(I32_AND);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.num(a);
+        self.num(b);
+        self.op(F64_EQ);
+        self.op(BR);
+        self.w.u(1);
+        self.extra -= 1;
+        self.op(END);
+        // other types
+        self.get(L_TAG);
+        self.get(L_T2);
+        self.op(I32_NE);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        if strict {
+            self.i32c(0);
+            self.op(BR);
+            self.w.u(1);
+        } else {
+            // undefined == null; anything else across types is the slow path's
+            self.get(L_TAG);
+            self.i32c(l.t_undef as i64);
+            self.op(I32_EQ);
+            self.get(L_TAG);
+            self.i32c(l.t_null as i64);
+            self.op(I32_EQ);
+            self.op(I32_OR);
+            self.get(L_T2);
+            self.i32c(l.t_undef as i64);
+            self.op(I32_EQ);
+            self.get(L_T2);
+            self.i32c(l.t_null as i64);
+            self.op(I32_EQ);
+            self.op(I32_OR);
+            self.op(I32_AND);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.i32c(1);
+            self.op(BR);
+            self.w.u(2);
+            self.extra -= 1;
+            self.op(END);
+            self.fail(pc);
+        }
+        self.extra -= 1;
+        self.op(END);
+        // the same type
+        let (ab, ao) = self.place(a);
+        let (bb, bo) = self.place(b);
+        let num_k = matches!(a, Opnd::Num(_)) || matches!(b, Opnd::Num(_));
+        if !num_k {
+            // bool: its byte
+            self.get(L_TAG);
+            self.i32c(l.t_bool as i64);
+            self.op(I32_EQ);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.get(ab);
+            self.mem(I32_LOAD8_U, 0, ao + l.off_bool);
+            self.get(bb);
+            self.mem(I32_LOAD8_U, 0, bo + l.off_bool);
+            self.op(I32_EQ);
+            self.op(BR);
+            self.w.u(1);
+            self.extra -= 1;
+            self.op(END);
+            // an object or a string: the same id or handle; two string
+            // handles that differ go to the slow path
+            self.get(L_TAG);
+            self.i32c(l.t_obj as i64);
+            self.op(I32_EQ);
+            self.get(L_TAG);
+            self.i32c(l.t_str as i64);
+            self.op(I32_EQ);
+            self.op(I32_OR);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.get(ab);
+            self.mem(I32_LOAD, 2, ao + l.off_int);
+            self.get(bb);
+            self.mem(I32_LOAD, 2, bo + l.off_int);
+            self.op(I32_EQ);
+            self.set(L_C);
+            self.get(L_C);
+            self.get(L_TAG);
+            self.i32c(l.t_obj as i64);
+            self.op(I32_EQ);
+            self.op(I32_OR);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.get(L_C);
+            self.op(BR);
+            self.w.u(2);
+            self.extra -= 1;
+            self.op(END);
+            self.fail(pc);
+            self.extra -= 1;
+            self.op(END);
+        }
+        // undefined or null (a number constant never gets here)
+        self.i32c(1);
+        self.extra -= 1;
+        self.op(END);
+        if c == OP_SNE || c == OP_NE {
+            self.op(I32_EQZ);
+        }
     }
     /// a binary number op into dst, or false when this file does not do it
     fn arith(&mut self, code: int, dst: i32, x: i32, y: i32, pc: i64) -> bool {
@@ -842,6 +1068,24 @@ impl<'a> Cg<'a> {
                     self.helper(H_SLOW, p, next);
                     true
                 }
+            }
+            R_THIS if w1 >= 0 => {
+                // the frame's this, through cell[5]
+                let cell = cell_addr() as i64;
+                self.i32c(cell);
+                self.mem(I32_LOAD, 2, 20);
+                self.set(L_T2);
+                self.get(L_T2);
+                self.mem(I64_LOAD, 3, 0);
+                self.set(L_Q0);
+                self.get(L_T2);
+                self.mem(I64_LOAD, 3, 8);
+                self.set(L_Q0 + 1);
+                self.store_val(w1 as u32, L_Q0);
+                true
+            }
+            R_GET_PROP if self.lay.obj_ok && w3 >= 65536 && w2 >= 0 && w1 >= 0 => {
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.get_prop_ic(w1 as u32, w2 as u32, w3, p))
             }
             R_CMP_JF | R_CMP_JT | R_LOOP | R_CMP_JFK | R_CMP_JTK => {
                 let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w2, w3) } else { (w1, w2) };
@@ -1244,13 +1488,17 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Option<Compiled> {
+pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry: usize) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
     let n = code.len();
     let mut starts = vec![false; n];
     starts[0] = true;
+    // where a call enters it (h_call)
+    if entry < n {
+        starts[entry] = true;
+    }
     let mut ts = Vec::new();
     for (i, op) in code.iter().enumerate() {
         targets(*op, i, &mut ts);
@@ -1299,7 +1547,7 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
         rb,
         slow_at: None,
     };
-    // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c (i32)
+    // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c, t2 (i32)
     cg.w.u(4);
     cg.w.u(3);
     cg.w.byte(T_I32);
@@ -1307,7 +1555,7 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
     cg.w.byte(T_F64);
     cg.w.u(4);
     cg.w.byte(T_I64);
-    cg.w.u(2);
+    cg.w.u(3);
     cg.w.byte(T_I32);
     cg.get(L_KEY);
     cg.set(L_ENTRY);
@@ -1372,17 +1620,19 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
         }
     }
     cg.op(END); // $exit
-    // a pc the code got to (past a back edge, or anywhere but where it
-    // started) carries 2^29: enter() counts the entries that did not; a
-    // negative out (budget, throw, frames) is returned as it is
+    // a pc the code got to carries 2^29 past a back edge and 2^28 when it
+    // is not where it started: enter() counts the entries that did not get
+    // on; a negative out (budget, throw, frames) is returned as it is
     cg.get(L_OUT);
     cg.i32c(0);
-    cg.get(L_LOOPED);
-    cg.i32c(1 << 29);
+    cg.i32c(1 << 28);
+    cg.i32c(0);
     cg.get(L_OUT);
     cg.get(L_ENTRY);
     cg.op(I32_NE);
     cg.op(SELECT);
+    cg.get(L_LOOPED);
+    cg.op(I32_OR);
     cg.get(L_OUT);
     cg.i32c(0);
     cg.op(I32_LT_S);
@@ -1392,9 +1642,6 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32) -> Opt
     cg.op(END); // $L
     cg.op(UNREACHABLE);
     cg.op(END); // function
-    if cg.backs == 0 {
-        return None;
-    }
     let done = cg.done;
     Some(Compiled { bytes: module(&cg.w.b), done, ops: n as u32, exits: cg.exits })
 }
@@ -1519,15 +1766,19 @@ impl Default for Stats {
 
 thread_local! {
     pub static STATS: std::cell::Cell<Stats> = std::cell::Cell::new(Stats::default());
+    /// Stats.entries, apart: it changes on every entry
+    static ENTRIES: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
 pub fn stats() -> Stats {
-    STATS.with(|s| s.get())
+    let mut s = STATS.with(|s| s.get());
+    s.entries = ENTRIES.with(|e| e.get());
+    s
 }
 
 /// Compiles the function pi (when it has none yet) and runs it from pc;
 /// the pc to go on at, or -1 - pc when its budget ran out.
-pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -> i64 {
+pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32, head: bool) -> i64 {
     if vm.jit_fn.len() <= pi {
         vm.jit_fn.resize(pi + 1, -1);
     }
@@ -1543,7 +1794,7 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
             eprintln!("{}", crate::regs::dump(p, &vm.rcode));
         }
         if rb + n <= vm.rcode.len() {
-            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, lay, pi as u32, rb as u32) {
+            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, lay, pi as u32, rb as u32, p.rentry as usize) {
                 let idx = host::put(&c.bytes);
                 STATS.with(|s| {
                     let mut t = s.get();
@@ -1595,11 +1846,8 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
     if vm.jit_miss[ri] > crate::rvm::JIT_MISS_MAX {
         return pc;
     }
-    STATS.with(|s| {
-        let mut t = s.get();
-        t.entries += 1;
-        s.set(t);
-    });
+    ENTRIES.with(|e| e.set(e.get() + 1));
+    fill_from(vm, bp as i32);
     let sp = vm.stack.as_ptr() as usize + (bp as usize) * 16;
     let kv = vm.kvals.as_ptr() as usize;
     let vp = vm as *mut crate::vm::Vm as usize;
@@ -1614,11 +1862,12 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
         // the budget ran out at -1 - r
         return -4 - (-1 - r) as i64;
     }
-    // jit_miss counts, by loop head, the entries that went back to the
-    // interpreter before a back edge: code that leaves at once on every
-    // pass only costs, and after enough of those that head is not entered
-    // again (another loop of the function still is)
-    if r & (1 << 29) != 0 {
+    // jit_miss counts, by where it was entered, the entries that went back
+    // to the interpreter before a back edge (from a loop head) or where
+    // they began (from a call or a return): code that leaves at once on
+    // every pass only costs, and after enough of those that place is not
+    // entered again (another loop of the function still is)
+    if r & (1 << 29) != 0 || (!head && r & (1 << 28) != 0) {
         if vm.jit_miss[ri] > 0 {
             vm.jit_miss[ri] -= 1;
         }
@@ -1628,11 +1877,14 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32) -
             STATS.with(|s| {
                 let mut t = s.get();
                 t.dropped += 1;
+                if MASK.with(|m| m.get()) & (1u64 << 62) != 0 {
+                    eprintln!("dropped {} {} at pc {} r {}", pi, vm.protos[pi].name, pc, r);
+                }
                 s.set(t);
             });
         }
     }
-    (r & !(1 << 29)) as i64
+    (r & !(3 << 28)) as i64
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1818,7 +2070,7 @@ fn h_set_prop(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
 // addresses again from a cell the helper filled in (cell[0] the frame's
 // registers, cell[1] kvals, cell[2] a pc for code 3).
 
-static mut CELL: [i32; 4] = [0; 4];
+static mut CELL: [i32; 8] = [0; 8];
 
 fn cell_addr() -> usize {
     // SAFETY: only the address is taken
@@ -1826,12 +2078,26 @@ fn cell_addr() -> usize {
 }
 
 fn fill_cell(vm: i32, bp: i32) {
-    // SAFETY: as vm_of; CELL is only touched on this (the VM's) thread
+    // SAFETY: as vm_of
+    fill_from(unsafe { vm_of(vm) }, bp);
+}
+
+fn fill_from(v: &crate::vm::Vm, bp: i32) {
+    // SAFETY: CELL is only touched on this (the VM's) thread
     unsafe {
-        let v = vm_of(vm);
         let c = &mut *std::ptr::addr_of_mut!(CELL);
         c[0] = (v.stack.as_ptr() as usize + (bp as usize) * 16) as i32;
         c[1] = v.kvals.as_ptr() as usize as i32;
+        c[4] = v.objs.as_ptr() as usize as i32;
+        c[5] = top_this(v);
+    }
+}
+
+/// the address of the top frame's this_val (cell[5])
+fn top_this(v: &crate::vm::Vm) -> i32 {
+    match v.frames.last() {
+        Some(f) => (&f.this_val as *const Val) as usize as i32,
+        None => 0,
     }
 }
 
@@ -1852,6 +2118,24 @@ macro_rules! export_helper {
             r
         }
     };
+}
+
+/// Helper k (HELPERS order) as its index in the function table. A host
+/// imports the helpers from the table rather than from the exports: a
+/// wasm32-wasip1 export is wrapped to run the constructors and destructors
+/// around each call.
+#[no_mangle]
+pub extern "C" fn cerxes_jit_helper(k: i32) -> i32 {
+    let f: extern "C" fn(i32, i32, i32, i32, i32) -> i32 = match k {
+        0 => cerxes_jit_get_elem,
+        1 => cerxes_jit_set_elem,
+        2 => cerxes_jit_get_prop,
+        3 => cerxes_jit_set_prop,
+        4 => cerxes_jit_op,
+        5 => cerxes_jit_call,
+        _ => cerxes_jit_slow,
+    };
+    f as usize as i32
 }
 
 export_helper!(cerxes_jit_get_elem, h_get_elem);
@@ -2179,17 +2463,62 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
     }
     let fpos = bp + w1;
     let fo = crate::vm::obj_of(&vm.stack[fpos as usize]);
-    if fo >= 0 && vm.objs[fo as usize].class == C_FUNCTION {
-        return 1;
-    }
     let nf = vm.frames.len();
     let fi = nf - 1;
     let pi = vm.frames[fi].proto as usize;
+    let want = (bp + vm.protos[pi].fsize) as usize;
+    if fo >= 0 && vm.objs[fo as usize].class == C_FUNCTION {
+        // a plain function runs here, nested, and the compiled code goes
+        // on after it; with slices on (a run must be able to stop at any
+        // frame), deep in nesting, or for a generator, an async function,
+        // one that uses arguments..., the interpreter makes the call
+        let tp = vm.objs[fo as usize].func as usize;
+        let plain = {
+            let p = &vm.protos[tp];
+            !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
+        };
+        if !plain || vm.slicing || NEST.with(|n| n.get()) >= NEST_MAX {
+            return 1;
+        }
+        let next = pc + 1 + (w0 >> 16);
+        vm.frames[fi].pc = next;
+        if ((w0 >> 8) & 255) == 1 {
+            vm.stack[(fpos + 1) as usize] = Val::Undef;
+        }
+        let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
+        vm.stack.truncate((fpos + w2 + 2) as usize);
+        if !vm.renter(fo, fpos, w2, dst) {
+            return settle(vm, fi, pc);
+        }
+        NEST.with(|n| n.set(n.get() + 1));
+        let done = call_compiled(vm, tp, nf, dst);
+        if !done {
+            vm.rrun(nf as int);
+        }
+        NEST.with(|n| n.set(n.get() - 1));
+        if done {
+            if vm.throwing {
+                return 4;
+            }
+            vm.grow_stack(want);
+            return after(vm);
+        }
+        if vm.throwing {
+            return 4;
+        }
+        if vm.suspended || vm.frames.len() != nf {
+            return 5;
+        }
+        // the callee's return left its value at fpos, the stack's end
+        let v = vm.stack.pop().unwrap_or(Val::Undef);
+        vm.grow_stack(want);
+        vm.stack[dst as usize] = v;
+        return after(vm);
+    }
     vm.frames[fi].pc = pc + 1 + (w0 >> 16);
     if ((w0 >> 8) & 255) == 1 {
         vm.stack[(fpos + 1) as usize] = Val::Undef;
     }
-    let want = (bp + vm.protos[pi].fsize) as usize;
     if vm.r_call_slow(fo, fpos, w2, bp, w3, want) {
         return 5;
     }
@@ -2202,7 +2531,61 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
     after(vm)
 }
 
+/// The callee's frame (pushed by renter, frames[nf]) runs its compiled
+/// code when it has some or is called often enough. true when it returned
+/// (its value in dst, its frame gone) or threw past it; false when the
+/// interpreter is to run the frame on from its pc.
+fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool {
+    while vm.jit_hot.len() <= tp {
+        vm.jit_hot.push(0);
+    }
+    let f = if tp < vm.jit_fn.len() { vm.jit_fn[tp] } else { -1 };
+    if f == -2 {
+        return false;
+    }
+    if f == -1 {
+        if vm.jit_hot[tp] < vm.jit_min {
+            vm.jit_hot[tp] += 1;
+            return false;
+        }
+    }
+    let bp = vm.frames[nf].bp;
+    let pc = vm.frames[nf].pc;
+    let r = enter(vm, tp, bp, pc, 1 << 30, false);
+    if r == -2 {
+        // threw: a handler in the callee goes on there
+        if vm.unwind(nf as int) {
+            return false;
+        }
+        return true;
+    }
+    if r == -3 || vm.frames.len() != nf + 1 {
+        return false;
+    }
+    let at = if r >= 0 { r } else { -4 - r };
+    let rb = vm.protos[tp].rbase;
+    let ins = vm.rcode[(rb + at) as usize];
+    let k = (ins.code & 255) as int;
+    if (k == R_RET || k == R_RET_UNDEF) && !vm.frames[nf].construct {
+        let v = if k == R_RET { *vm.rget(bp, ins.a as int) } else { Val::Undef };
+        vm.frames.pop();
+        while !vm.handlers.is_empty() && vm.handlers[vm.handlers.len() - 1].frame >= nf as int {
+            vm.handlers.pop();
+        }
+        vm.stack[dst as usize] = v;
+        return true;
+    }
+    vm.frames[nf].pc = at;
+    false
+}
+
+/// how deep plain calls from compiled code run nested (h_call): each one
+/// is a native rrun on the wasm stack, so past NEST_MAX the interpreter
+/// makes the call
+const NEST_MAX: u32 = 48;
+
 thread_local! {
+    static NEST: std::cell::Cell<u32> = std::cell::Cell::new(0);
     /// op kinds written as exits whatever they are (cerxes_jit_mask), to
     /// find which op's code goes wrong
     static MASK: std::cell::Cell<u64> = std::cell::Cell::new(0);
