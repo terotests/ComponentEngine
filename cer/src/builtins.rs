@@ -875,9 +875,9 @@ impl Vm {
         let g = self.global;
         let a = self.atoms[names[kind as usize]];
         let slot = self.find(g, a);
-        let c = obj_of(&self.objs[g as usize].vals[slot as usize]);
+        let c = obj_of(&self.objs[g as usize].get_slot(slot as usize));
         let ps = self.find(c, A_PROTOTYPE);
-        obj_of(&self.objs[c as usize].vals[ps as usize])
+        obj_of(&self.objs[c as usize].get_slot(ps as usize))
     }
 
     /// The prototype a constructor call should use: new.target's, else `d`.
@@ -1630,7 +1630,7 @@ impl Vm {
                     self.throw_type(msg.as_str());
                     return;
                 }
-                let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
+                let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
                 let g0 = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
                 let s0 = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                 if (has_get && !self.same_value(&get_v, &g0)) || (has_set && !self.same_value(&set_v, &s0)) {
@@ -1649,7 +1649,7 @@ impl Vm {
                     self.throw_type(msg.as_str());
                     return;
                 }
-                let cur = self.objs[o as usize].vals[slot as usize].clone();
+                let cur = self.objs[o as usize].get_slot(slot as usize).clone();
                 if has_value && !self.same_value(&value, &cur) {
                     self.throw_type(msg.as_str());
                     return;
@@ -1707,7 +1707,7 @@ impl Vm {
         let v = if has_value {
             value
         } else if slot >= 0 && (existing_attr & P_ACCESSOR) == 0 {
-            self.objs[o as usize].vals[slot as usize].clone()
+            self.objs[o as usize].get_slot(slot as usize).clone()
         } else {
             Val::Undef
         };
@@ -1767,13 +1767,13 @@ impl Vm {
         }
         let attr = self.attr_at(o, slot);
         if (attr & P_ACCESSOR) != 0 {
-            let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
+            let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
             let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
             let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
             self.add_own(d, A_GET, g, 0);
             self.add_own(d, A_SET, s, 0);
         } else {
-            let v = self.objs[o as usize].vals[slot as usize].clone();
+            let v = self.objs[o as usize].get_slot(slot as usize).clone();
             self.add_own(d, A_VALUE, v, 0);
             self.add_own(d, A_WRITABLE, Val::Bool((attr & P_READONLY) == 0), 0);
         }

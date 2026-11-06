@@ -111,9 +111,17 @@ pub struct JsObj {
     /// the prototype, -1 for none; for a scope, the enclosing scope
     pub proto: i32,
     /// the shape (`Vm.shapes`): property keys (atoms) in insertion order
-    /// and their attributes; `vals` holds the values, slot by slot
+    /// and their attributes; the values are slot by slot in inl0, inl1 and
+    /// then vals (get_slot / set_slot), nv of them
     pub shape: i32,
+    /// the first two property values, in the object itself: most objects
+    /// have no more and need no buffer of their own
+    pub inl0: Val,
+    pub inl1: Val,
+    /// the values of slots 2 on
     pub vals: Vec<Val>,
+    /// the property count
+    pub nv: i32,
     /// the object's Cold (`Vm.colds`), 0 for none
     pub cold: i32,
     /// array elements, scope slots, a bound function's arguments, an
@@ -142,7 +150,10 @@ impl JsObj {
             class: class,
             proto: proto,
             shape: 0,
+            inl0: Val::Undef,
+            inl1: Val::Undef,
             vals: Vec::new(),
+            nv: 0,
             cold: 0,
             elems: 0,
             func: -1,
@@ -161,6 +172,9 @@ impl JsObj {
         // the shape and the Cold are the caller's (Vm::free_shape,
         // Vm::free_cold)
         self.shape = 0;
+        self.inl0 = Val::Undef;
+        self.inl1 = Val::Undef;
+        self.nv = 0;
         if self.vals.len() as int <= INDEX_AT {
             self.vals.truncate(0);
         } else {
@@ -172,6 +186,76 @@ impl JsObj {
         self.pos = 0;
         self.rc = 0;
         self.extensible = true;
+    }
+
+    /// Property slot `i`'s value.
+    #[inline(always)]
+    pub fn get_slot(&self, i: usize) -> Val {
+        if i == 0 {
+            self.inl0
+        } else if i == 1 {
+            self.inl1
+        } else {
+            self.vals[i - 2]
+        }
+    }
+
+    /// Writes property slot `i` (counts are the caller's).
+    #[inline(always)]
+    pub fn set_slot(&mut self, i: usize, v: Val) {
+        if i == 0 {
+            self.inl0 = v;
+        } else if i == 1 {
+            self.inl1 = v;
+        } else {
+            self.vals[i - 2] = v;
+        }
+    }
+
+    /// A new last slot (counts are the caller's).
+    pub fn push_slot(&mut self, v: Val) {
+        let n = self.nv;
+        if n == 0 {
+            self.inl0 = v;
+        } else if n == 1 {
+            self.inl1 = v;
+        } else {
+            self.vals.push(v);
+        }
+        self.nv = n + 1;
+    }
+
+    /// Takes slot `i` out, the later ones moving down one.
+    pub fn remove_slot(&mut self, i: usize) -> Val {
+        let v = self.get_slot(i);
+        let n = self.nv as usize;
+        let mut k = i;
+        while k + 1 < n {
+            let x = self.get_slot(k + 1);
+            self.set_slot(k, x);
+            k += 1;
+        }
+        if n > 2 {
+            self.vals.pop();
+        } else if n == 2 {
+            self.inl1 = Val::Undef;
+        } else {
+            self.inl0 = Val::Undef;
+        }
+        self.nv = (n - 1) as i32;
+        v
+    }
+
+    /// All the property values, in slot order.
+    pub fn slots(&self) -> Vec<Val> {
+        let n = self.nv as usize;
+        let mut out: Vec<Val> = Vec::with_capacity(n);
+        let mut i: usize = 0;
+        while i < n {
+            out.push(self.get_slot(i));
+            i += 1;
+        }
+        out
     }
 }
 
