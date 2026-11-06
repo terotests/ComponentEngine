@@ -142,7 +142,7 @@ function makeCard(prog, i) {
   el.querySelector(".sbx-host").onchange = (ev) => move(s, ev.target.value);
   el.querySelector(".b-pause").onclick = () => setPaused(s, !s.paused);
   el.querySelector(".b-freeze").onclick = () => (s.frozen ? thaw(s) : freeze(s));
-  el.querySelector(".b-home").onclick = () => setView(s, prog.view[0], prog.view[1], prog.view[2], null);
+  el.querySelector(".b-home").onclick = () => setView(s, prog.view[0], prog.view[1], prog.view[2]);
   el.querySelector(".b-fetch").onclick = () => fetchOne(s).then((r) => show(s, r));
   el.querySelector(".b-code").onclick = () => {
     const box = el.querySelector(".sbx-code");
@@ -155,11 +155,7 @@ function makeCard(prog, i) {
   el.querySelector(".b-reset").onclick = () => {
     el.querySelector("textarea").value = prog.code;
   };
-  canvas.onclick = (ev) => zoomAt(s, ev, ev.shiftKey ? 2 : 0.5);
-  canvas.oncontextmenu = (ev) => {
-    ev.preventDefault();
-    zoomAt(s, ev, 2);
-  };
+  wireZoom(s);
   $("grid").append(el);
   boxes[i] = s;
   return s;
@@ -272,15 +268,90 @@ function show(s, r) {
 
 // ---- zoom ----------------------------------------------------------------------
 
-function zoomAt(s, ev, factor) {
-  const rect = s.canvas.getBoundingClientRect();
-  const px = ((ev.clientX - rect.left) / rect.width) * W;
-  const py = ((ev.clientY - rect.top) / rect.height) * H;
+// Past this width a double has too few bits left for the pixels' steps.
+const MIN_SCALE = 1e-13;
+
+// Pointer input on a card's picture: a click zooms in there (Shift or the
+// right button: out), the wheel zooms about the pointer, a drag with the
+// mouse pans (the picture follows the pointer, the program gets the new
+// view when the button is let go), the + / − buttons zoom about the centre.
+function wireZoom(s) {
+  const canvas = s.canvas;
+  const at = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    return [((ev.clientX - rect.left) / rect.width) * W, ((ev.clientY - rect.top) / rect.height) * H, rect.width / W];
+  };
+  let drag = null;
+  canvas.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || ev.pointerType === "touch") return;
+    drag = { x: ev.clientX, y: ev.clientY, moved: false };
+    canvas.setPointerCapture(ev.pointerId);
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    canvas.classList.add("dragging");
+    canvas.style.transform = `translate(${dx}px, ${dy}px)`;
+  });
+  const endDrag = (ev) => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    canvas.classList.remove("dragging");
+    canvas.style.transform = "";
+    if (!d.moved) return;
+    const k = at(ev)[2];
+    const v = s.view;
+    const step = v.scale / W;
+    setView(s, v.cx - ((ev.clientX - d.x) / k) * step, v.cy - ((ev.clientY - d.y) / k) * step, v.scale);
+    s.skipClick = true;
+  };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("click", (ev) => {
+    if (s.skipClick) {
+      s.skipClick = false;
+      return;
+    }
+    const [px, py] = at(ev);
+    zoomAbout(s, px, py, ev.shiftKey ? 2 : 0.5, true);
+  });
+  canvas.addEventListener("contextmenu", (ev) => {
+    ev.preventDefault();
+    const [px, py] = at(ev);
+    zoomAbout(s, px, py, 2, true);
+  });
+  canvas.addEventListener(
+    "wheel",
+    (ev) => {
+      ev.preventDefault();
+      const [px, py] = at(ev);
+      const notches = Math.max(-3, Math.min(3, ev.deltaY / (ev.deltaMode === 1 ? 3 : 100)));
+      zoomAbout(s, px, py, Math.pow(1.25, notches), false);
+    },
+    { passive: false }
+  );
+  s.el.querySelector(".z-in").onclick = () => zoomAbout(s, W / 2, H / 2, 0.5, false);
+  s.el.querySelector(".z-out").onclick = () => zoomAbout(s, W / 2, H / 2, 2, false);
+}
+
+// Zooms by `factor` (< 1: in) about canvas pixel (px, py): with `centre`
+// that point becomes the middle of the new picture, else it stays put
+// under the pointer.
+function zoomAbout(s, px, py, factor, centre) {
   const v = s.view;
+  const scale = Math.max(MIN_SCALE, Math.min(16, v.scale * factor));
+  if (scale === v.scale) return;
   const step = v.scale / W;
   const x = v.cx - v.scale / 2 + px * step;
   const y = v.cy - (step * H) / 2 + py * step;
-  setView(s, x, y, v.scale * factor, { px, py });
+  if (centre) setView(s, x, y, scale);
+  else {
+    const f = scale / v.scale;
+    setView(s, x + (v.cx - x) * f, y + (v.cy - y) * f, scale);
+  }
 }
 
 function setView(s, cx, cy, scale) {
@@ -354,6 +425,8 @@ function paint() {
 }
 
 function stats(s) {
+  const zoom = s.prog.view[2] / s.view.scale;
+  s.el.querySelector(".sbx-level").textContent = "zoom ×" + (zoom < 1e5 ? zoom.toPrecision(3) : zoom.toExponential(2)) + (s.view.scale <= MIN_SCALE ? " (precision limit)" : "");
   const el = s.el.querySelector(".sbx-stats");
   const bar = s.el.querySelector(".sbx-bar div");
   const p = s.progress.split(" ");
@@ -465,4 +538,4 @@ PROGRAMS.forEach((p, i) => {
 statusEl.textContent = "Running on " + HOST_NAMES[firstHost] + ".";
 
 // for the smoke test and the console
-window.sandboxDemo = { boxes, move, freeze, thaw, fetchAll, setView, fetchOne };
+window.sandboxDemo = { boxes, move, freeze, thaw, fetchAll, setView, zoomAbout, fetchOne };
