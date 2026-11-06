@@ -1966,11 +1966,19 @@ fn h_set_elem(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
     let ins = vm.rcode[ri as usize];
     let bp = bp as int;
     let val = *vm.rget(bp, ins.c as int);
+    // sub 1: the assignment's value also into w1, where the object was
+    let keep = ((ins.code >> 8) & 255) == 1;
     if set_elem_fast(vm, bp, ins, val) {
+        if keep {
+            vm.rset((bp + ins.a as int) as usize, val);
+        }
         return after(vm);
     }
     let fi = vm.frames.len() - 1;
     vm.r_set_elem_slow(bp, fi, pc as int, ins.a as int, ins.b as int, val);
+    if keep && !vm.throwing {
+        vm.rset((bp + ins.a as int) as usize, val);
+    }
     settle(vm, fi, pc as int)
 }
 
