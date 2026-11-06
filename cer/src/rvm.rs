@@ -662,6 +662,13 @@ impl Vm {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
+                        if c == -4 && o >= 0 && self.ob(o).class == C_ARRAY {
+                            // a site r_get_prop_slow saw reading an array's length
+                            let n = evec_at(&self.evecs, self.ob(o).elems as usize).v.len() as double;
+                            self.rset((bp + (w1 as int)) as usize, Val::Num(n));
+                            pc = (pc + 1 + ((w0 >> 16) as int));
+                            continue;
+                        }
                         if self.r_get_prop_slow(o, pi, rb, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int)) {
                             continue 'frames;
                         }
@@ -1211,6 +1218,8 @@ impl Vm {
             if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
                 let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                 self.stack[(bp + w1) as usize] = r;
+                // the next read here takes rrun's array-length path
+                self.rcode[(rb + pc) as usize].c = -4;
                 return false;
             }
         }
@@ -1500,6 +1509,21 @@ impl Vm {
     #[inline(never)]
     pub fn r_get_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let v = *self.rget(bp, w2);
+        if w3 <= -16 {
+            if let Val::Str(_) = v {
+                // a string's method: String.prototype's slot -16 - w3, its
+                // key checked as an inline cache's
+                let sp = self.string_proto;
+                let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
+                let slot = self.ic_slot(sp, atom, -16 - w3, false);
+                if slot >= 0 {
+                    let f = slot_at(self.ob(sp), slot as usize);
+                    self.rset((bp + w1) as usize, f);
+                    self.rset((bp + w1 + 1) as usize, v);
+                    return;
+                }
+            }
+        }
         if let Val::Obj(o) = v {
             if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
                 // the cache's shape: o's own data property
@@ -1569,6 +1593,16 @@ impl Vm {
             }
         }
         if !done {
+            if let Val::Str(_) = v {
+                if atom != A_LENGTH {
+                    // String.prototype's own method: r_get_method's string path next time
+                    let sp = self.string_proto;
+                    let slot = self.find(sp, atom);
+                    if slot >= 0 && slot < 65536 && (self.attr_at(sp, slot) & P_ACCESSOR) == 0 && self.is_callable(&self.objs[sp as usize].get_slot(slot as usize)) {
+                        self.rcode[(rb + pc) as usize].c = (-16 - slot) as i32;
+                    }
+                }
+            }
             f = self.get(&v, atom);
         }
         if !self.throwing && ((w0 >> 8) & 255) == 0 && !self.is_callable(&f) {
