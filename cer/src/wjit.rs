@@ -127,6 +127,11 @@ pub struct Layout {
     pub vm_number_proto: u32,
     pub vm_jit_calls_ptr: u32,
     pub vm_jit_calls_len: u32,
+    /// a string's bytes: *(*(sent + 0) + str_data) for SEnt.s (Rc<String>),
+    /// 0 when the probe did not find them so
+    pub str_data: u32,
+    /// the String's byte length there, beside str_data
+    pub str_blen: u32,
     pub vm_global: u32,
 }
 
@@ -224,6 +229,8 @@ pub fn probe() -> Layout {
         vm_number_proto: 0,
         vm_jit_calls_ptr: 0,
         vm_jit_calls_len: 0,
+        str_data: 0,
+        str_blen: 0,
         vm_global: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
@@ -382,8 +389,38 @@ pub fn probe() -> Layout {
         l.vm_number_proto = std::mem::offset_of!(crate::vm::Vm, number_proto) as u32;
         l.vm_jit_calls_ptr = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vp;
         l.vm_jit_calls_len = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vl;
+        l.str_data = str_probe(vp, vl);
+        let u = bytes_of(Val::Undef);
+        // SAFETY: written on the VM's thread before any code reads it
+        unsafe {
+            *std::ptr::addr_of_mut!(UNDEF16) = [
+                i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]),
+                i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]),
+            ];
+        }
+        l.str_blen = 8 + vl;
     }
     l
+}
+
+/// Where a string's bytes are from an Rc<String> (RcBox: strong, weak,
+/// the String, whose buffer pointer is where a Vec's is): checked on a
+/// live one, 0 when they are not there
+fn str_probe(vp: u32, vl: u32) -> u32 {
+    if std::mem::size_of::<usize>() != 4 {
+        return 0;
+    }
+    let r: std::rc::Rc<String> = std::rc::Rc::new(String::from("probe"));
+    // SAFETY: an Rc is one pointer (to its RcBox); the reads stay in it
+    let boxp: usize = unsafe { std::ptr::read_volatile(&r as *const std::rc::Rc<String> as *const usize) };
+    let off = 8 + vp;
+    let data: usize = unsafe { std::ptr::read_volatile((boxp + off as usize) as *const usize) };
+    let len: usize = unsafe { std::ptr::read_volatile((boxp + 8 + vl as usize) as *const usize) };
+    if data == r.as_ptr() as usize && len == r.len() {
+        off
+    } else {
+        0
+    }
 }
 
 // --------------------------------------------------------------- encoder
@@ -494,6 +531,7 @@ const F64_SQRT: u8 = 0x9f;
 const F64_MIN: u8 = 0xa4;
 const F64_MAX: u8 = 0xa5;
 const F64_CONVERT_I32_S: u8 = 0xb7;
+const F64_CONVERT_I32_U: u8 = 0xb8;
 
 const T_I32: u8 = 0x7f;
 const T_I64: u8 = 0x7e;
@@ -1247,6 +1285,32 @@ impl<'a> Cg<'a> {
     }
     /// dst = an array's element by a whole number in range (h_get_elem's
     /// fast path), else fail
+    /// dst = the array at register ob's length
+    fn array_len(&mut self, dst: u32, ob: u32, pc: i64) -> bool {
+        let l = self.lay;
+        self.need_obj(L_SP, ob * 16, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_ARRAY as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_elems);
+        self.i32c(l.elems_size as i64);
+        self.op(I32_MUL);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_evecs_ptr);
+        self.op(I32_ADD);
+        self.mem(I32_LOAD, 2, l.elems_vl);
+        self.op(F64_CONVERT_I32_U);
+        self.set(L_A);
+        self.store_num(dst, L_A);
+        true
+    }
     fn get_elem_fast(&mut self, dst: u32, ob: u32, key: Opnd, pc: i64) -> bool {
         let l = self.lay;
         self.need_obj(L_SP, ob * 16, pc);
@@ -2041,7 +2105,9 @@ impl<'a> Cg<'a> {
             self.op(BR);
             self.w.u(1);
         } else {
-            // undefined == null; anything else across types is the slow path's
+            // undefined or null on either side: equal when both are one
+            // of them (null == x holds only for undefined and null);
+            // anything else across types is the slow path's
             self.get(L_TAG);
             self.i32c(l.t_undef as i64);
             self.op(I32_EQ);
@@ -2049,6 +2115,7 @@ impl<'a> Cg<'a> {
             self.i32c(l.t_null as i64);
             self.op(I32_EQ);
             self.op(I32_OR);
+            self.set(L_C);
             self.get(L_T2);
             self.i32c(l.t_undef as i64);
             self.op(I32_EQ);
@@ -2056,11 +2123,16 @@ impl<'a> Cg<'a> {
             self.i32c(l.t_null as i64);
             self.op(I32_EQ);
             self.op(I32_OR);
-            self.op(I32_AND);
+            self.set(L_T3);
+            self.get(L_C);
+            self.get(L_T3);
+            self.op(I32_OR);
             self.op(IF);
             self.op(T_VOID);
             self.extra += 1;
-            self.i32c(1);
+            self.get(L_C);
+            self.get(L_T3);
+            self.op(I32_AND);
             self.op(BR);
             self.w.u(2);
             self.extra -= 1;
@@ -2121,6 +2193,98 @@ impl<'a> Cg<'a> {
             self.w.u(2);
             self.extra -= 1;
             self.op(END);
+            // two string handles: unequal lengths, or two known atoms,
+            // answer it; else the slow path compares the texts
+            let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
+            let o_len = std::mem::offset_of!(crate::vm::SEnt, len) as u32;
+            let o_atom = std::mem::offset_of!(crate::vm::SEnt, atom) as u32;
+            for (bx, ox, lt) in [(ab, ao, L_T3), (bb, bo, L_T4)] {
+                self.get(bx);
+                self.mem(I32_LOAD, 2, ox + l.off_int);
+                self.i32c(sz);
+                self.op(I32_MUL);
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.vm_srcs_ptr);
+                self.op(I32_ADD);
+                self.set(lt);
+            }
+            self.get(L_T3);
+            self.mem(I32_LOAD, 2, o_len);
+            self.get(L_T4);
+            self.mem(I32_LOAD, 2, o_len);
+            self.op(I32_NE);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.i32c(0);
+            self.op(BR);
+            self.w.u(2);
+            self.extra -= 1;
+            self.op(END);
+            self.get(L_T3);
+            self.mem(I32_LOAD, 2, o_atom);
+            self.get(L_T4);
+            self.mem(I32_LOAD, 2, o_atom);
+            self.op(I32_OR);
+            self.i32c(0);
+            self.op(I32_GE_S);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.get(L_T3);
+            self.mem(I32_LOAD, 2, o_atom);
+            self.get(L_T4);
+            self.mem(I32_LOAD, 2, o_atom);
+            self.op(I32_EQ);
+            self.op(BR);
+            self.w.u(2);
+            self.extra -= 1;
+            self.op(END);
+            let o_up = std::mem::offset_of!(crate::vm::SEnt, up) as u32;
+            if l.str_data != 0 {
+                // two whole buffers (up < 0): their bytes (rt memeq)
+                self.get(L_T3);
+                self.mem(I32_LOAD, 2, o_up);
+                self.get(L_T4);
+                self.mem(I32_LOAD, 2, o_up);
+                self.op(I32_AND);
+                self.i32c(0);
+                self.op(I32_LT_S);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                // the byte lengths (SEnt.len counts units): String.len
+                let o_s = std::mem::offset_of!(crate::vm::SEnt, s) as u32;
+                let blen = l.str_blen;
+                self.get(L_T3);
+                self.mem(I32_LOAD, 2, o_s);
+                self.mem(I32_LOAD, 2, blen);
+                self.set(L_T2);
+                self.get(L_T4);
+                self.mem(I32_LOAD, 2, o_s);
+                self.mem(I32_LOAD, 2, blen);
+                self.get(L_T2);
+                self.op(I32_NE);
+                self.op(IF);
+                self.op(T_VOID);
+                self.i32c(0);
+                self.op(BR);
+                self.w.u(3);
+                self.op(END);
+                self.get(L_T3);
+                self.mem(I32_LOAD, 2, o_s);
+                self.mem(I32_LOAD, 2, l.str_data);
+                self.get(L_T4);
+                self.mem(I32_LOAD, 2, o_s);
+                self.mem(I32_LOAD, 2, l.str_data);
+                self.get(L_T2);
+                self.op(CALL);
+                self.w.u(F_MEMEQ as u64);
+                self.op(BR);
+                self.w.u(2);
+                self.extra -= 1;
+                self.op(END);
+            }
             self.fail(pc);
             self.extra -= 1;
             self.op(END);
@@ -3490,6 +3654,10 @@ impl<'a> Cg<'a> {
                 }
                 self.with_helper(H_GET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.get_elem_fast(w1 as u32, w2 as u32, key, p))
             }
+            R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && w3 == -4 => {
+                // a site that reads an array's length (rrun's c = -4)
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.array_len(w1 as u32, w2 as u32, p))
+            }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
                 self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget(w1 as u32, L_SP, w2 as u32 * 16, a, 0, p))
@@ -4355,6 +4523,7 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     let hs = cg.hstore_body();
     let cx = cg.callx_body();
     let pg = cg.pget_body();
+    let me = memeq_body();
     let lk = look_body(lay);
     let cd = codes_body();
     let mut m = WBuf::new();
@@ -4375,7 +4544,7 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     m.section(7, &s);
     let mut s = WBuf::new();
     s.u(RT_FNS.len() as u64);
-    for b in [&lk, &cd, &hs, &cx, &pg] {
+    for b in [&lk, &cd, &hs, &cx, &pg, &me] {
         s.u(b.len() as u64);
         s.b.extend_from_slice(b);
     }
@@ -4393,9 +4562,71 @@ const F_CODES: u32 = NHELPERS + 1;
 const F_HSTORE: u32 = NHELPERS + 2;
 const F_CALLX: u32 = NHELPERS + 3;
 const F_PGET: u32 = NHELPERS + 4;
-const F_SELF: u32 = NHELPERS + 5;
+const F_MEMEQ: u32 = NHELPERS + 5;
+const F_SELF: u32 = NHELPERS + 6;
 /// rt_module's functions: (name, type)
-const RT_FNS: [(&str, u32); 5] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0), ("pget", 0)];
+const RT_FNS: [(&str, u32); 6] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0), ("pget", 0), ("memeq", 2)];
+
+/// memeq(a, b, n): 1 when the n bytes at a and b are the same
+fn memeq_body() -> Vec<u8> {
+    let mut w = WBuf::new();
+    w.u(0);
+    let get = |w: &mut WBuf, k: u32| {
+        w.byte(LOCAL_GET);
+        w.u(k as u64);
+    };
+    let set = |w: &mut WBuf, k: u32| {
+        w.byte(LOCAL_SET);
+        w.u(k as u64);
+    };
+    let k = |w: &mut WBuf, x: i64| {
+        w.byte(I32_CONST);
+        w.s(x);
+    };
+    // four bytes at a time while n >= 4, then one
+    for (step, ld) in [(4i64, (I32_LOAD, 2u64)), (1, (I32_LOAD8_U, 0))] {
+        w.byte(BLOCK);
+        w.byte(T_VOID);
+        w.byte(LOOP);
+        w.byte(T_VOID);
+        get(&mut w, 2);
+        k(&mut w, step);
+        w.byte(I32_LT_S);
+        w.byte(BR_IF);
+        w.u(1);
+        get(&mut w, 0);
+        w.byte(ld.0);
+        w.u(ld.1);
+        w.u(0);
+        get(&mut w, 1);
+        w.byte(ld.0);
+        w.u(ld.1);
+        w.u(0);
+        w.byte(I32_NE);
+        w.byte(IF);
+        w.byte(T_VOID);
+        k(&mut w, 0);
+        w.byte(RETURN);
+        w.byte(END);
+        for x in [0u32, 1] {
+            get(&mut w, x);
+            k(&mut w, step);
+            w.byte(I32_ADD);
+            set(&mut w, x);
+        }
+        get(&mut w, 2);
+        k(&mut w, step);
+        w.byte(I32_SUB);
+        set(&mut w, 2);
+        w.byte(BR);
+        w.u(0);
+        w.byte(END);
+        w.byte(END);
+    }
+    k(&mut w, 1);
+    w.byte(END);
+    w.b
+}
 
 /// codes(tag, pc, next) -> the pc a helper's code leaves at (helper_codes)
 fn codes_body() -> Vec<u8> {
@@ -4557,6 +4788,23 @@ fn look_body(l: Layout) -> Vec<u8> {
         w.byte(BR);
         w.u(0);
         w.byte(END);
+        w.byte(END);
+        // absent (SLOT_ABSENT): undefined while the last object of the
+        // chain has no prototype, else the next way
+        get(&mut w, 5);
+        ld(&mut w, 8);
+        k(&mut w, 0);
+        w.byte(I32_LT_S);
+        w.byte(IF);
+        w.byte(T_VOID);
+        get(&mut w, 6);
+        ld(&mut w, l.off_proto);
+        k(&mut w, -1);
+        w.byte(I32_NE);
+        w.byte(BR_IF);
+        w.u(1);
+        k(&mut w, unsafe { std::ptr::addr_of!(UNDEF16) } as usize as i64);
+        w.byte(RETURN);
         w.byte(END);
         // the slot's address: slot * 16 < 32 in the object, else in vals
         get(&mut w, 6);
@@ -5013,7 +5261,31 @@ fn h_get_prop(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
     if ob.class == C_ARRAY && vm.ratom(pi as usize, pc as int) == crate::vm::A_LENGTH {
         let n = vm.evecs[ob.elems as usize].v.len() as double;
         vm.rset((bp + ins.a as int) as usize, Val::Num(n));
+        if c < 65536 && vm.find(o, crate::vm::A_LENGTH) < 0 {
+            // the site reads arrays' lengths (rrun and compiled code)
+            vm.rcode[ri as usize].c = -4;
+        }
         return 0;
+    }
+    if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+        // debug: misses by class * 4 + (dictionary 1 | getter 2)
+        let ob = &vm.objs[o as usize];
+        let atom = vm.ratom(pi as usize, pc as int);
+        let f = vm.find(o, atom);
+        // 1: on the prototype chain (else absent)
+        let mut onp = 0;
+        let mut q = ob.proto;
+        let mut d = 0;
+        while q >= 0 && d < 20 {
+            if vm.find(q as int, atom) >= 0 {
+                onp = 1 + (d >= 3) as usize;
+                break;
+            }
+            q = vm.objs[q as usize].proto;
+            d += 1;
+        }
+        let k = 900 + (ob.class as usize).min(19) * 4 + if f < 0 { 2 + onp.min(1) } else { 0 } + if onp == 2 { 80 } else { 0 };
+        HCOUNT.with(|h| { let mut v = h.get(); v[k.min(1023)] += 1; h.set(v) });
     }
     let r = get_prop_slow(vm, bp, pi, pc, ri, o);
     if r == 0 || r == 2 {
@@ -5092,6 +5364,11 @@ fn goes_on(kind: int) -> bool {
     matches!(kind, R_CMP_JF | R_CMP_JT | R_LOOP | R_CASE_JT | R_CMP_JFK | R_CMP_JTK)
 }
 
+thread_local! {
+    /// debug (mask 54): helper calls by helper * 64 + op kind
+    pub static HCOUNT: std::cell::Cell<[u32; 1024]> = const { std::cell::Cell::new([0; 1024]) };
+}
+
 /// where the stack and the constants are
 fn moved_key(vm: i32) -> (usize, usize) {
     // SAFETY: as vm_of
@@ -5146,9 +5423,13 @@ fn set_cell_pc(pc: int) {
 }
 
 macro_rules! export_helper {
-    ($name:ident, $inner:ident, $leave:expr) => {
+    ($name:ident, $inner:ident, $leave:expr, $hk:expr) => {
         #[no_mangle]
         pub extern "C" fn $name(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
+            if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+                let k = unsafe { vm_of(vm) }.rcode[ri as usize].code as usize & 255;
+                HCOUNT.with(|h| { let mut v = h.get(); v[k.min(63) + 64 * ($hk as usize)] += 1; h.set(v) });
+            }
             let was = moved_key(vm);
             let r = $inner(vm, bp, pi, pc, ri);
             fill_cell(vm, bp);
@@ -5182,14 +5463,14 @@ pub extern "C" fn cerxes_jit_helper(k: i32) -> i32 {
     f as usize as i32
 }
 
-export_helper!(cerxes_jit_get_elem, h_get_elem, true);
-export_helper!(cerxes_jit_set_elem, h_set_elem, true);
-export_helper!(cerxes_jit_get_prop, h_get_prop, true);
-export_helper!(cerxes_jit_set_prop, h_set_prop, true);
-export_helper!(cerxes_jit_op, h_op, true);
-export_helper!(cerxes_jit_call, h_call, false);
-export_helper!(cerxes_jit_slow, h_slow, true);
-export_helper!(cerxes_jit_ret, h_ret, false);
+export_helper!(cerxes_jit_get_elem, h_get_elem, true, 0);
+export_helper!(cerxes_jit_set_elem, h_set_elem, true, 1);
+export_helper!(cerxes_jit_get_prop, h_get_prop, true, 2);
+export_helper!(cerxes_jit_set_prop, h_set_prop, true, 3);
+export_helper!(cerxes_jit_op, h_op, true, 4);
+export_helper!(cerxes_jit_call, h_call, false, 5);
+export_helper!(cerxes_jit_slow, h_slow, true, 6);
+export_helper!(cerxes_jit_ret, h_ret, false, 7);
 
 fn set_cell_c(r: bool) {
     // SAFETY: as fill_cell
@@ -5214,6 +5495,19 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
     let sub = (w0 >> 8) & 255;
     let kind = w0 & 255;
     let mut gc_ok = true;
+    if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+        let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK || kind == R_CMP { (w2, w3) } else { (w1, w2) };
+        if matches!(kind, R_CMP_JFK | R_CMP_JTK | R_CMP | R_CMP_JF | R_CMP_JT | R_CASE_JT) {
+            let t = |v: &Val| match v { Val::Undef => 0, Val::Null => 1, Val::Bool(_) => 2, Val::Num(_) => 3, Val::Str(_) => 4, _ => 5 };
+            let mut k = 512 + ((sub - 42).clamp(0, 13) as usize) * 36 + t(vm.rget(bp, x)) * 6 + t(vm.rget(bp, y));
+            if let (Val::Str(p), Val::Str(q)) = (vm.rget(bp, x), vm.rget(bp, y)) {
+                let (e, f) = (&vm.strs[*p as usize], &vm.strs[*q as usize]);
+                // 1000 + same len * 8 + up both <0 *4 + eq content*2 + same handle
+                k = 1000 + (e.len == f.len) as usize * 8 + (e.up < 0 && f.up < 0) as usize * 4 + (vm.sref(*p) == vm.sref(*q)) as usize * 2 + (p == q) as usize;
+            }
+            HCOUNT.with(|h| { let mut v = h.get(); v[k.min(1023)] += 1; h.set(v) });
+        }
+    }
     match kind {
         R_ADD => vm.r_add_slow(bp, fi, pc, w1, w2, w3),
         R_SUB | R_MUL | R_ARITH => {
@@ -5720,7 +6014,13 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
 // replace. In Vm.jit_caches, whose buffers do not move, by rcode index.
 
 const CACHE_WAYS: u32 = 4;
-const CACHE_DEPTH: u32 = 3;
+/// a way's slot * 16 for a property absent from the whole chain
+const SLOT_ABSENT: i32 = -16;
+
+/// undefined as a value's 16 bytes, for an absent property (look);
+/// layout() writes it
+static mut UNDEF16: [i64; 2] = [0, 0];
+const CACHE_DEPTH: u32 = 4;
 const CACHE_W: u32 = 5 + 2 * CACHE_DEPTH;
 /// the ways, then the next way to replace
 const CACHE_N: usize = (CACHE_WAYS * CACHE_W) as usize + 1;
@@ -5784,6 +6084,14 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
         let mut d: usize = 0;
         loop {
             let p = vm.objs[cur as usize].proto as int;
+            if p < 0 && plain(cls) && cls != C_NATIVE && plain(vm.objs[cur as usize].class) && (vm.rcode[ri].code & 255) as int != R_GET_GLOBAL {
+                // absent from a plain object and its plain prototypes:
+                // undefined while the chain keeps its shapes (look
+                // checks that the last one still has no prototype)
+                way[1] = d as i32;
+                way[2] = SLOT_ABSENT;
+                break;
+            }
             if p < 0 || d >= CACHE_DEPTH as usize {
                 return;
             }

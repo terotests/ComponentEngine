@@ -279,6 +279,15 @@ pub extern "C" fn cx_jit_stats() {
         let parts: Vec<String> = bn[..bn.len().min(20)].iter().map(|(b, k)| format!("[{},{}]", k, b)).collect();
         t = format!("{},\"nats\":[{}]}}", t, parts.join(","));
     }
+    let hc = cerxes::wjit::HCOUNT.with(|h| h.get());
+    let mut bh: Vec<(u32, usize)> = hc.iter().enumerate().filter(|(_, &b)| b > 0).map(|(k, &b)| (b, k)).collect();
+    if !bh.is_empty() {
+        bh.sort();
+        bh.reverse();
+        t.pop();
+        let parts: Vec<String> = bh[..bh.len().min(30)].iter().map(|(b, k)| format!("[{},{},{}]", k / 64, k % 64, b)).collect();
+        t = format!("{},\"helpers\":[{}]}}", t, parts.join(","));
+    }
     RESULT.with(|b| *b.borrow_mut() = t.into_bytes());
 }
 

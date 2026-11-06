@@ -450,3 +450,21 @@ for (var i = 0; i < 400; i++) { o.d = i * 7; var x = o.v; var y = x + i; s += y;
 s + '|' + t.join()
 ----
 638400|0,400,800,1200,1600,2000,2400,2800
+
+==== js absent properties read in hot code: undefined until the object, its prototype or the prototype chain gains them
+var proto = { p: 1 }; var o = Object.create(proto); o.a = 1; var bare = Object.create(null); bare.x = 1;
+var out = [];
+for (var i = 0; i < 400; i++) {
+  if (i == 200) proto.missing = 'p';
+  if (i == 300) o.missing = 'o';
+  if (i == 250) Object.prototype.zz = 'z';
+  if (i == 350) bare.y = 'b';
+  var v = o.missing, w = bare.y, z = o.zz, g;
+  try { g = typeof notDeclaredAnywhere; } catch (e) { g = 'err'; }
+  if (i % 50 == 0 || i == 201 || i == 251 || i == 301 || i == 351) out.push(i + ':' + v + w + z + g);
+}
+delete Object.prototype.zz;
+var t; try { for (var j = 0; j < 100; j++) t = notDeclaredAnywhere2; } catch (e) { t = e.name; }
+out.join() + '|' + t
+----
+0:undefinedundefinedundefinedundefined,50:undefinedundefinedundefinedundefined,100:undefinedundefinedundefinedundefined,150:undefinedundefinedundefinedundefined,200:pundefinedundefinedundefined,201:pundefinedundefinedundefined,250:pundefinedzundefined,251:pundefinedzundefined,300:oundefinedzundefined,301:oundefinedzundefined,350:obzundefined,351:obzundefined|ReferenceError
