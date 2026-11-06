@@ -1768,6 +1768,83 @@ impl<'a> Cg<'a> {
         self.mem(I32_STORE, 2, l.off_vals_len);
         true
     }
+    /// prop_cache through the module's pget: dst = the value at b + off
+    /// read through the cache at `a` (flags 0 a property, 1 a method that
+    /// must be a function, 2 a method)
+    fn pget(&mut self, dst: u32, b: u32, off: u32, a: u32, flags: i64, pc: i64) -> bool {
+        self.get(L_SP);
+        if dst != 0 {
+            self.i32c(dst as i64 * 16);
+            self.op(I32_ADD);
+        }
+        self.i32c(a as i64);
+        self.get(b);
+        if off != 0 {
+            self.i32c(off as i64);
+            self.op(I32_ADD);
+        }
+        self.i32c(flags);
+        self.get(L_VM);
+        self.get(L_BP);
+        self.op(CALL);
+        self.w.u(F_PGET as u64);
+        self.fail_if(pc);
+        true
+    }
+    /// The body of pget(dst address, cache, value address, flags, vm, bp):
+    /// 0 read, 1 the helper must do it
+    fn pget_body(&mut self) -> Vec<u8> {
+        let saved_w = std::mem::replace(&mut self.w, WBuf::new());
+        let (se, sx, ss) = (self.extra, self.exit_d, self.slow_at);
+        self.w.u(4);
+        self.w.u(3);
+        self.w.byte(T_I32);
+        self.w.u(2);
+        self.w.byte(T_F64);
+        self.w.u(4);
+        self.w.byte(T_I64);
+        self.w.u(7);
+        self.w.byte(T_I32);
+        self.extra = 0;
+        self.exit_d = 0;
+        for flags in 0..3 {
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.slow_at = Some(self.extra);
+            if flags < 2 {
+                self.get(3);
+                self.i32c(flags);
+                self.op(I32_NE);
+                self.op(BR_IF);
+                self.w.u(0);
+            }
+            // parameter 2 is the value's address (L_KEY's place)
+            self.prop_cache(0, 2, 0, u32::MAX, flags != 0, if flags == 1 { 0 } else { 1 }, 0);
+            self.i32c(0);
+            self.op(RETURN);
+            self.extra -= 1;
+            self.op(END);
+            if flags < 2 {
+                // a miss of this kind: 1; another kind: the next block
+                self.get(3);
+                self.i32c(flags);
+                self.op(I32_EQ);
+                self.op(IF);
+                self.op(T_VOID);
+                self.i32c(1);
+                self.op(RETURN);
+                self.op(END);
+            }
+        }
+        self.i32c(1);
+        self.op(END);
+        let out = std::mem::replace(&mut self.w, saved_w).b;
+        self.extra = se;
+        self.exit_d = sx;
+        self.slow_at = ss;
+        out
+    }
     /// A property read (R_GET_PROP, R_GET_THIS_PROP) or a method's
     /// (R_GET_METHOD: f and this into dst, dst + 1) of the object value at
     /// b + off through the site's cache at address `a`: ways of shape,
@@ -1825,7 +1902,12 @@ impl<'a> Cg<'a> {
         // look(&objs[id], cache, epoch): &value, or 0 (a miss)
         self.get(L_T5);
         self.obj_addr();
-        self.i32c(a as i64);
+        if a == u32::MAX {
+            // pget_body: the cache is its parameter 1
+            self.get(1);
+        } else {
+            self.i32c(a as i64);
+        }
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.off_epoch);
         self.op(CALL);
@@ -3020,6 +3102,11 @@ impl<'a> Cg<'a> {
         self.op(CALL);
         self.w.u(h as u64);
         self.set(L_TAG);
+        if h != H_CALL && h != H_RET && !goes_on(self.cur_kind as int) {
+            // a helper that moved the stack or the constants leaves
+            // (export_helper's code 2)
+            return;
+        }
         // the stack and the constants may have moved (a native that ran
         // JavaScript, a function compiled): their addresses again
         let cell = cell_addr() as i64;
@@ -3299,7 +3386,7 @@ impl<'a> Cg<'a> {
                 self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| {
                     cg.i32c(a as i64 + CACHE_N as i64 * 4);
                     cg.set(L_T4);
-                    cg.prop_cache(w1 as u32, L_T4, 0, a, false, 0, p)
+                    cg.pget(w1 as u32, L_T4, 0, a, 0, p)
                 })
             }
             R_GET_THIS_PROP if self.lay.obj_ok && w1 >= 0 && self.caches[pc] != 0 => {
@@ -3309,7 +3396,7 @@ impl<'a> Cg<'a> {
                     cg.i32c(cell);
                     cg.mem(I32_LOAD, 2, 20);
                     cg.set(L_T4);
-                    cg.prop_cache(w1 as u32, L_T4, 0, a, false, 0, p)
+                    cg.pget(w1 as u32, L_T4, 0, a, 0, p)
                 })
             }
             R_SET_PROP if self.lay.obj_ok && w1 >= 0 && sub == 0 && self.caches[pc] != 0 => {
@@ -3343,7 +3430,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_METHOD if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.prop_cache(w1 as u32, L_SP, w2 as u32 * 16, a, true, sub, p))
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.pget(w1 as u32, L_SP, w2 as u32 * 16, a, if sub == 0 { 1 } else { 2 }, p))
             }
             R_GET_ELEM if self.lay.obj_ok && w1 >= 0 && w2 >= 0 => {
                 let key = self.opnd(w3);
@@ -3355,7 +3442,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.prop_cache(w1 as u32, L_SP, w2 as u32 * 16, a, false, 0, p))
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget(w1 as u32, L_SP, w2 as u32 * 16, a, 0, p))
             }
             R_CMP_JF | R_CMP_JT | R_LOOP | R_CMP_JFK | R_CMP_JTK => {
                 let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w2, w3) } else { (w1, w2) };
@@ -4217,6 +4304,7 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     };
     let hs = cg.hstore_body();
     let cx = cg.callx_body();
+    let pg = cg.pget_body();
     let lk = look_body(lay);
     let cd = codes_body();
     let mut m = WBuf::new();
@@ -4237,7 +4325,7 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     m.section(7, &s);
     let mut s = WBuf::new();
     s.u(RT_FNS.len() as u64);
-    for b in [&lk, &cd, &hs, &cx] {
+    for b in [&lk, &cd, &hs, &cx, &pg] {
         s.u(b.len() as u64);
         s.b.extend_from_slice(b);
     }
@@ -4254,9 +4342,10 @@ const F_LOOK: u32 = NHELPERS;
 const F_CODES: u32 = NHELPERS + 1;
 const F_HSTORE: u32 = NHELPERS + 2;
 const F_CALLX: u32 = NHELPERS + 3;
-const F_SELF: u32 = NHELPERS + 4;
+const F_PGET: u32 = NHELPERS + 4;
+const F_SELF: u32 = NHELPERS + 5;
 /// rt_module's functions: (name, type)
-const RT_FNS: [(&str, u32); 4] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0)];
+const RT_FNS: [(&str, u32); 5] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0), ("pget", 0)];
 
 /// codes(tag, pc, next) -> the pc a helper's code leaves at (helper_codes)
 fn codes_body() -> Vec<u8> {
@@ -4932,6 +5021,20 @@ fn cell_addr() -> usize {
     unsafe { std::ptr::addr_of!(CELL) as usize }
 }
 
+/// an op whose code goes on after its helper whatever it returned 0 for
+/// (a comparison that jumps): it reloads the stack's and constants'
+/// addresses (helper_raw)
+fn goes_on(kind: int) -> bool {
+    matches!(kind, R_CMP_JF | R_CMP_JT | R_LOOP | R_CASE_JT | R_CMP_JFK | R_CMP_JTK)
+}
+
+/// where the stack and the constants are
+fn moved_key(vm: i32) -> (usize, usize) {
+    // SAFETY: as vm_of
+    let v = unsafe { vm_of(vm) };
+    (v.stack.as_ptr() as usize, v.kvals.as_ptr() as usize)
+}
+
 fn fill_cell(vm: i32, bp: i32) {
     // SAFETY: as vm_of
     fill_from(unsafe { vm_of(vm) }, bp);
@@ -4979,11 +5082,18 @@ fn set_cell_pc(pc: int) {
 }
 
 macro_rules! export_helper {
-    ($name:ident, $inner:ident) => {
+    ($name:ident, $inner:ident, $leave:expr) => {
         #[no_mangle]
         pub extern "C" fn $name(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
+            let was = moved_key(vm);
             let r = $inner(vm, bp, pi, pc, ri);
             fill_cell(vm, bp);
+            // the stack or the constants moved: the code that called (it
+            // keeps their addresses, helper_raw) goes on in the
+            // interpreter from the next op
+            if $leave && r == 0 && moved_key(vm) != was && !goes_on(unsafe { vm_of(vm) }.rcode[ri as usize].code as int & 255) {
+                return 2;
+            }
             r
         }
     };
@@ -5008,14 +5118,14 @@ pub extern "C" fn cerxes_jit_helper(k: i32) -> i32 {
     f as usize as i32
 }
 
-export_helper!(cerxes_jit_get_elem, h_get_elem);
-export_helper!(cerxes_jit_set_elem, h_set_elem);
-export_helper!(cerxes_jit_get_prop, h_get_prop);
-export_helper!(cerxes_jit_set_prop, h_set_prop);
-export_helper!(cerxes_jit_op, h_op);
-export_helper!(cerxes_jit_call, h_call);
-export_helper!(cerxes_jit_slow, h_slow);
-export_helper!(cerxes_jit_ret, h_ret);
+export_helper!(cerxes_jit_get_elem, h_get_elem, true);
+export_helper!(cerxes_jit_set_elem, h_set_elem, true);
+export_helper!(cerxes_jit_get_prop, h_get_prop, true);
+export_helper!(cerxes_jit_set_prop, h_set_prop, true);
+export_helper!(cerxes_jit_op, h_op, true);
+export_helper!(cerxes_jit_call, h_call, false);
+export_helper!(cerxes_jit_slow, h_slow, true);
+export_helper!(cerxes_jit_ret, h_ret, false);
 
 fn set_cell_c(r: bool) {
     // SAFETY: as fill_cell
