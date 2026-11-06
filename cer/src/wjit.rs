@@ -336,6 +336,7 @@ const I32_EQ: u8 = 0x46;
 const I32_NE: u8 = 0x47;
 const I32_LT_S: u8 = 0x48;
 const I32_LE_S: u8 = 0x4c;
+const I32_GT_S: u8 = 0x4a;
 const F64_EQ: u8 = 0x61;
 const F64_NE: u8 = 0x62;
 const F64_LT: u8 = 0x63;
@@ -974,9 +975,9 @@ impl<'a> Cg<'a> {
     }
     /// A property read (R_GET_PROP, R_GET_THIS_PROP) or a method's
     /// (R_GET_METHOD: f and this into dst, dst + 1) of the object value at
-    /// b + off through the site's cache at address `a` (SiteCache): ways
-    /// of shape, prototype (-1 for an own property), its shape, slot * 16,
-    /// shape epoch and class, which the helpers fill on a miss. A method
+    /// b + off through the site's cache at address `a`: ways of shape,
+    /// depth (0 own), slot * 16, shape epoch, class, then each prototype
+    /// up to the holder and its shape, which the helpers fill on a miss. A method
     /// must be a script function unless sub says it need not be callable.
     fn prop_cache(&mut self, dst: u32, b: u32, off: u32, a: u32, method: bool, sub: int, pc: i64) -> bool {
         let l = self.lay;
@@ -1012,68 +1013,52 @@ impl<'a> Cg<'a> {
                 cg.i32c(wa as i64);
                 cg.mem(I32_LOAD, 2, k * 4);
             };
-            ld(self, 0);
-            self.get(L_T3);
-            self.op(I32_EQ);
-            ld(self, 4);
-            self.get(L_OUT);
-            self.op(I32_EQ);
-            self.op(I32_AND);
-            ld(self, 5);
-            self.get(L_C);
-            self.op(I32_EQ);
-            self.op(I32_AND);
-            self.op(IF);
+            // block $way: a check that fails goes on to the next way
+            self.op(BLOCK);
             self.op(T_VOID);
             self.extra += 1;
-            ld(self, 1);
-            self.set(L_T4);
-            self.get(L_T4);
-            self.i32c(0);
-            self.op(I32_LT_S);
-            self.op(IF);
-            self.op(T_VOID);
-            self.extra += 1;
-            // own
+            for (k, lv) in [(0u32, L_T3), (3, L_OUT), (4, L_C)] {
+                ld(self, k);
+                self.get(lv);
+                self.op(I32_NE);
+                self.op(BR_IF);
+                self.w.u(0);
+            }
             self.get(L_T2);
+            self.set(L_T4);
+            // the chain to the holder: each prototype and its shape
+            for k in 0..CACHE_DEPTH {
+                ld(self, 1);
+                self.i32c(k as i64);
+                self.op(I32_GT_S);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.get(L_T4);
+                self.mem(I32_LOAD, 2, l.off_proto);
+                ld(self, 5 + 2 * k);
+                self.op(I32_NE);
+                self.op(BR_IF);
+                self.w.u(1);
+                ld(self, 5 + 2 * k);
+                self.obj_addr();
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T4 as u64);
+                self.mem(I32_LOAD, 2, l.off_shape);
+                ld(self, 6 + 2 * k);
+                self.op(I32_NE);
+                self.op(BR_IF);
+                self.w.u(1);
+                self.extra -= 1;
+                self.op(END);
+            }
+            self.get(L_T4);
             self.mem(I32_LOAD, 2, l.off_vals);
-            ld(self, 3);
-            self.op(I32_ADD);
-            self.set(L_T4);
-            self.op(BR);
-            self.w.u(2);
-            self.op(ELSE);
-            // one prototype up
-            self.get(L_T2);
-            self.mem(I32_LOAD, 2, l.off_proto);
-            self.get(L_T4);
-            self.op(I32_EQ);
-            self.op(IF);
-            self.op(T_VOID);
-            self.extra += 1;
-            self.get(L_T4);
-            self.obj_addr();
-            self.w.byte(LOCAL_TEE);
-            self.w.u(L_T4 as u64);
-            self.mem(I32_LOAD, 2, l.off_shape);
             ld(self, 2);
-            self.op(I32_EQ);
-            self.op(IF);
-            self.op(T_VOID);
-            self.extra += 1;
-            self.get(L_T4);
-            self.mem(I32_LOAD, 2, l.off_vals);
-            ld(self, 3);
             self.op(I32_ADD);
             self.set(L_T4);
             self.op(BR);
-            self.w.u(4);
-            self.extra -= 1;
-            self.op(END);
-            self.extra -= 1;
-            self.op(END);
-            self.extra -= 1;
-            self.op(END);
+            self.w.u(1);
             self.extra -= 1;
             self.op(END);
         }
@@ -1635,7 +1620,7 @@ impl<'a> Cg<'a> {
             R_GET_GLOBAL if self.lay.obj_ok && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
                 self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| {
-                    cg.i32c(a as i64 + 100);
+                    cg.i32c(a as i64 + CACHE_N as i64 * 4);
                     cg.set(L_T4);
                     cg.prop_cache(w1 as u32, L_T4, 0, a, false, 0, p)
                 })
@@ -3248,12 +3233,15 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
 //
 // A property or method site of compiled code has a cache of its own, which
 // the code reads (prop_cache) and the helpers fill on a miss: CACHE_WAYS
-// ways of CACHE_W words [shape, prototype or -1, its shape, slot * 16,
-// epoch, class], then the next way to replace. Boxed, so its address
-// stays; kept for the machine's life, by rcode index.
+// ways of CACHE_W words [shape, depth (0 own), slot * 16, epoch, class,
+// then up to CACHE_DEPTH (prototype, its shape)], then the next way to
+// replace. In Vm.jit_caches, whose buffers do not move, by rcode index.
 
 const CACHE_WAYS: u32 = 4;
-const CACHE_W: u32 = 6;
+const CACHE_DEPTH: u32 = 3;
+const CACHE_W: u32 = 5 + 2 * CACHE_DEPTH;
+/// the ways, then the next way to replace
+const CACHE_N: usize = (CACHE_WAYS * CACHE_W) as usize + 1;
 
 /// The address of site ri's cache, made empty when it has none. The
 /// caches are the Vm's (another machine's shapes are not these).
@@ -3263,9 +3251,9 @@ fn site_cache(vm: &mut crate::vm::Vm, ri: usize) -> u32 {
     }
     if vm.jit_cache_at[ri] < 0 {
         // room for a global site's value (site_caches): the buffer stays
-        let mut x: Vec<i32> = Vec::with_capacity(29);
-        x.resize(25, -1);
-        x[24] = 0;
+        let mut x: Vec<i32> = Vec::with_capacity(CACHE_N + 4);
+        x.resize(CACHE_N, -1);
+        x[CACHE_N - 1] = 0;
         vm.jit_cache_at[ri] = vm.jit_caches.len() as int;
         vm.jit_caches.push(x);
     }
@@ -3276,7 +3264,7 @@ fn site_cache(vm: &mut crate::vm::Vm, ri: usize) -> u32 {
 /// answers it, an own data property or one on o's prototype, into the
 /// site's cache (when it has one).
 fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
-    if o < 0 || atom < 0 {
+    if o < 0 || atom < 0 || ri >= vm.jit_cache_at.len() || vm.jit_cache_at[ri] < 0 {
         return;
     }
     let ob = &vm.objs[o as usize];
@@ -3284,41 +3272,56 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
     if cls != C_OBJECT && cls != C_FUNCTION && cls != C_ARRAY {
         return;
     }
-    let mut way: [i32; 6] = [ob.shape, -1, 0, 0, vm.shape_epoch as i32, cls];
+    let w = CACHE_W as usize;
+    let mut way = vec![-1i32; w];
+    way[0] = ob.shape;
+    way[1] = 0;
+    way[3] = vm.shape_epoch as i32;
+    way[4] = cls;
     let own = vm.find(o, atom);
     if own >= 0 {
         if (vm.attr_at(o, own) & P_ACCESSOR) != 0 {
             return;
         }
-        way[3] = (own * 16) as i32;
+        way[2] = (own * 16) as i32;
     } else {
-        // one prototype up only from a plain object: an array's length or
-        // a function's name may answer without being in its shape
-        let p = ob.proto as int;
-        if p < 0 || cls != C_OBJECT {
+        // up the chain only from a plain object (an array's length or a
+        // function's name may answer without being in its shape), through
+        // plain objects, to a plain object or function that has it
+        if cls != C_OBJECT {
             return;
         }
-        let pc = vm.objs[p as usize].class;
-        if pc != C_OBJECT && pc != C_FUNCTION {
-            return;
+        let mut cur = o;
+        let mut d: usize = 0;
+        loop {
+            let p = vm.objs[cur as usize].proto as int;
+            if p < 0 || d >= CACHE_DEPTH as usize {
+                return;
+            }
+            let pc = vm.objs[p as usize].class;
+            way[5 + 2 * d] = p as i32;
+            way[6 + 2 * d] = vm.objs[p as usize].shape;
+            d += 1;
+            let k = vm.find(p, atom);
+            if k >= 0 {
+                if (pc != C_OBJECT && pc != C_FUNCTION) || (vm.attr_at(p, k) & P_ACCESSOR) != 0 {
+                    return;
+                }
+                way[1] = d as i32;
+                way[2] = (k * 16) as i32;
+                break;
+            }
+            if pc != C_OBJECT {
+                return;
+            }
+            cur = p;
         }
-        let k = vm.find(p, atom);
-        if k < 0 || (vm.attr_at(p, k) & P_ACCESSOR) != 0 {
-            return;
-        }
-        way[1] = p as i32;
-        way[2] = vm.objs[p as usize].shape;
-        way[3] = (k * 16) as i32;
-    }
-    if ri >= vm.jit_cache_at.len() || vm.jit_cache_at[ri] < 0 {
-        return;
     }
     let b = &mut vm.jit_caches[vm.jit_cache_at[ri] as usize];
     let nw = CACHE_WAYS as usize;
-    let w = CACHE_W as usize;
     let mut at = nw;
     for i in 0..nw {
-        if b[i * w] == way[0] && b[i * w + 5] == way[5] {
+        if b[i * w] == way[0] && b[i * w + 4] == way[4] {
             at = i;
         }
     }
@@ -3343,7 +3346,7 @@ fn site_caches(vm: &mut crate::vm::Vm, rb: usize, n: usize) -> Vec<u32> {
             // after the cache, the value Obj(global) for prop_cache to read
             let a = site_cache(vm, rb + i);
             let at = vm.jit_cache_at[rb + i] as usize;
-            if vm.jit_caches[at].len() == 25 {
+            if vm.jit_caches[at].len() == CACHE_N {
                 let g = bytes_of(Val::Obj(vm.global));
                 for k in 0..4 {
                     vm.jit_caches[at].push(i32::from_le_bytes([g[4 * k], g[4 * k + 1], g[4 * k + 2], g[4 * k + 3]]));
