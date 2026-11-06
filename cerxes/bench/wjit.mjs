@@ -140,6 +140,45 @@ function readCases(file) {
 
 let failures = 0;
 
+if (args.includes("--octane")) {
+  // the Octane suites (cer/bench/octane.mjs --dump, which needs a Ranger
+  // checkout: RANGER_DIR or ../Ranger), JIT off and on: scores, and a
+  // failure when a suite reports an error with the JIT on
+  const dir = fs.mkdtempSync("/tmp/wjit-octane-");
+  const d = spawnSync("node", [path.join(REPO, "cer/bench/octane.mjs"), "--dump=" + dir], { stdio: "inherit" });
+  if (d.status !== 0) process.exit(1);
+  const only = opt("only", "");
+  console.log("suite\toff\ton\tspeedup");
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".js")).sort()) {
+    if (only && !only.split(",").some((o) => f.includes(o))) continue;
+    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    // off, on, off, on...: the best score of each (V8 tiers CErXes' own
+    // code up while it runs, which a single first run would charge to it)
+    const best = { false: new Map(), true: new Map() };
+    const rx = /^([A-Za-z]+): (.*)$/gm;
+    for (let i = 0; i < runs; i++) {
+      for (const on of [false, true]) {
+        const e = engine();
+        e.setJit(on, min);
+        const r = e.eval(src);
+        for (const [, k, v] of (r.output + "\n" + e.out.join("\n")).matchAll(rx)) {
+          const old = best[on].get(k);
+          if (old === undefined || !/^[0-9.]+$/.test(v) || (/^[0-9.]+$/.test(old) && Number(v) > Number(old))) best[on].set(k, v);
+        }
+      }
+    }
+    const offs = [...best[false].entries()].map(([k, v]) => [null, k, v]);
+    const ons = best[true];
+    for (const [, k, v] of offs) {
+      const w = ons.get(k) ?? "missing";
+      const ok = /^[0-9.]+$/.test(w);
+      if (!ok && /^[0-9.]+$/.test(v)) failures++;
+      console.log(`${k}\t${v}\t${w}\t${ok ? (Number(w) / Number(v)).toFixed(2) + "x" : "FAIL"}`);
+    }
+  }
+  process.exit(failures ? 1 : 0);
+}
+
 if (opt("eval", "")) {
   // --eval=file: its answer with the JIT off and on (min 0)
   const src = fs.readFileSync(opt("eval", ""), "utf8");

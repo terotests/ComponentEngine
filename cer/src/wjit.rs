@@ -2852,7 +2852,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
             return settle(vm, fi, pc);
         }
         // compiled: the caller's code calls it itself (6), and h_ret ends it
-        let f = hot_fn(vm, tp);
+        let f = if MASK.with(|m| m.get()) & (1u64 << 60) != 0 { -1 } else { hot_fn(vm, tp) };
         if f >= 0 {
             return direct(vm, nf, f);
         }
@@ -2945,8 +2945,10 @@ fn cache_fill(vm: &crate::vm::Vm, ri: usize, o: int, atom: int) {
         }
         way[3] = (own * 16) as i32;
     } else {
+        // one prototype up only from a plain object: an array's length or
+        // a function's name may answer without being in its shape
         let p = ob.proto as int;
-        if p < 0 {
+        if p < 0 || cls != C_OBJECT {
             return;
         }
         let pc = vm.objs[p as usize].class;
@@ -3009,9 +3011,11 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
         return 1;
     }
     let tp = vm.objs[fo as usize].func as usize;
-    let plain = {
+    // a base class's constructor too: its fields are set as enter_function
+    // sets them
+    let (plain, cls) = {
         let p = &vm.protos[tp];
-        !p.uses_args && p.rest < 0 && !p.class_ctor && p.constructible()
+        (!p.uses_args && p.rest < 0 && (!p.class_ctor || !p.derived) && (p.class_ctor || p.constructible()), p.class_ctor)
     };
     if !plain {
         return 1;
@@ -3035,6 +3039,15 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
     }
     vm.frames[nf].construct = true;
     vm.frames[nf].new_target = f;
+    if cls {
+        vm.run_fields(fo, &this);
+        if vm.throwing {
+            return 4;
+        }
+        if vm.frames.len() != nf + 1 {
+            return 5;
+        }
+    }
     let fc = hot_fn(vm, tp);
     if fc >= 0 {
         return direct(vm, nf, fc);
@@ -3139,6 +3152,12 @@ fn h_ret(vm: i32, bp: i32, r: i32, _pc: i32, _ri: i32) -> i32 {
         }
         let to = if fr.ret >= 0 { fr.ret as usize } else { (fr.bp - 2) as usize };
         vm.stack[to] = v;
+        // the stack as long as the caller's frame again (h_call cut it at
+        // the call's arguments)
+        if let Some(c) = vm.frames.last() {
+            let want = (c.bp + vm.protos[c.proto as usize].fsize) as usize;
+            vm.grow_stack(want);
+        }
         return after(vm);
     }
     vm.frames[top].pc = at;
