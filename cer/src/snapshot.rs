@@ -571,6 +571,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.thrower = ints[30];
     vm.callee_pair = -1;
     vm.args_shapes = vec![-1, -1];
+    vm.regex_shape = -1;
     vm.tdz_obj = ints[31];
     vm.bigint_proto = ints[32];
     vm.array_values_fn = ints[33];

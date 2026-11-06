@@ -142,6 +142,10 @@ pub struct JsObj {
     pub extensible: bool,
     pub marked: bool,
     pub free: bool,
+    /// some object has had this one as its prototype: a property added
+    /// to it while its shape is its own (a dictionary) must stale the
+    /// chain caches (Vm.shape_epoch); other dictionaries need not
+    pub is_proto: bool,
 }
 
 impl JsObj {
@@ -164,6 +168,7 @@ impl JsObj {
             extensible: true,
             marked: false,
             free: false,
+            is_proto: false,
         }
     }
 
@@ -186,6 +191,7 @@ impl JsObj {
         self.pos = 0;
         self.rc = 0;
         self.extensible = true;
+        self.is_proto = false;
     }
 
     /// Property slot `i`'s value.

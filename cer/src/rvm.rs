@@ -1334,7 +1334,9 @@ impl Vm {
         let e0 = self.rpic[si];
         // learn it: plain objects on the way, then a property or the end of
         // the chain
-        if !self.pic_plain(o, atom) || self.find(o, atom) >= 0 {
+        // a dictionary receiver gains keys without a shape change or an
+        // epoch (add_own): not cached
+        if !self.pic_plain(o, atom) || self.shapes[self.objs[o as usize].shape as usize].owned || self.find(o, atom) >= 0 {
             return -1;
         }
         let mut chain: Vec<int> = Vec::new();

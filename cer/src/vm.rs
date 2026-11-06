@@ -227,6 +227,9 @@ pub struct Vm {
     /// the shape an arguments object gets (callee, then Symbol.iterator),
     /// sloppy [0] and strict [1]; -1 until the first one is made
     pub args_shapes: Vec<int>,
+    /// the shape a regexp object gets (lastIndex, source and the flags);
+    /// -1 until the first one is made
+    pub regex_shape: int,
     /// the marker of a binding in its temporal dead zone
     pub tdz_obj: int,
     /// BigInt values by their decimal text, and BigInt.prototype
@@ -513,6 +516,7 @@ impl Vm {
             thrower: -1,
             callee_pair: -1,
             args_shapes: vec![-1, -1],
+            regex_shape: -1,
             tdz_obj: -1,
             bigints: HashMap::new(),
             bigint_proto: -1,
@@ -908,7 +912,11 @@ impl Vm {
     pub fn add_own(&mut self, o: int, atom: int, v: Val, attr: int) -> int {
         let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
-            self.shape_epoch += 1;
+            // the chain caches learn no dictionary receiver (pic_learn,
+            // wjit cache_fill): only a prototype's new key stales them
+            if self.objs[o as usize].is_proto {
+                self.shape_epoch += 1;
+            }
             self.push_val(o, v);
             self.shapes[sh as usize].nkeys += 1;
             return self.shapes[sh as usize].push(atom, attr);
@@ -1046,6 +1054,11 @@ impl Vm {
             if !self.objs[i].free {
                 if self.objs[i].class == C_PROXY {
                     self.proxy_made = true;
+                }
+                // is_proto is not in a snapshot
+                let p = self.objs[i].proto;
+                if p >= 0 {
+                    self.objs[p as usize].is_proto = true;
                 }
             }
             i += 1;
@@ -1672,6 +1685,7 @@ impl Vm {
         self.live += 1;
         if proto >= 0 {
             self.objs[proto as usize].rc += 1;
+            self.objs[proto as usize].is_proto = true;
         }
         let i = if !self.free_list.is_empty() {
             let i = self.free_list.pop().unwrap();
@@ -6260,6 +6274,9 @@ impl Vm {
 
     pub fn put_proto(&mut self, o: int, p: int) {
         self.inc_o(p);
+        if p >= 0 {
+            self.objs[p as usize].is_proto = true;
+        }
         let old = self.objs[o as usize].proto as int;
         self.objs[o as usize].proto = p as i32;
         self.dec_o(old);
@@ -7078,7 +7095,10 @@ pub fn give_args(_pool: &mut Vec<Vec<Val>>, _args: Vec<Val>) {}
 #[ranger::target(rust)]
 pub fn grow_objs(v: &mut Vec<JsObj>) {
     if v.len() == v.capacity() {
-        let n = v.len() / 8;
+        // by half: a growth copies the whole vector (in WebAssembly realloc
+        // has no mremap), so an eighth copied 8x the final size; the spare
+        // capacity is never touched natively and costs no resident memory
+        let n = v.len() / 2;
         v.reserve_exact(if n < 1024 { 1024 } else { n });
     }
 }
@@ -7089,7 +7109,10 @@ pub fn grow_objs(_v: &mut Vec<JsObj>) {}
 #[ranger::target(rust)]
 pub fn grow_evecs(v: &mut Vec<Elems>) {
     if v.len() == v.capacity() {
-        let n = v.len() / 8;
+        // by half: a growth copies the whole vector (in WebAssembly realloc
+        // has no mremap), so an eighth copied 8x the final size; the spare
+        // capacity is never touched natively and costs no resident memory
+        let n = v.len() / 2;
         v.reserve_exact(if n < 1024 { 1024 } else { n });
     }
 }
