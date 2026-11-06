@@ -3149,7 +3149,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
     let pi = vm.frames[fi].proto as usize;
     let want = (bp + vm.protos[pi].fsize) as usize;
     if (w0 & 255) as int == R_NEW {
-        return h_new(vm, bp, fo, fpos, nf, pc, w0, w2, want);
+        return h_new(vm, bp, fo, fpos, nf, pc, w0, w2, w3, want);
     }
     let tp = if fo >= 0 && vm.objs[fo as usize].class == C_FUNCTION { vm.objs[fo as usize].func as usize } else { usize::MAX };
     let plain = tp != usize::MAX && {
@@ -3367,10 +3367,10 @@ fn site_caches(vm: &mut crate::vm::Vm, rb: usize, n: usize) -> Vec<u32> {
 /// R_NEW of a plain JS constructor (rvm.rs R_NEW): this after f, the args
 /// one slot up, the frame a construct; then as h_call. Anything else is
 /// the interpreter's.
-fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int, w0: int, argc: int, want: usize) -> i32 {
+fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int, w0: int, argc: int, w3: int, want: usize) -> i32 {
     let fi = nf - 1;
     if fo < 0 || vm.objs[fo as usize].class != C_FUNCTION || vm.slicing || NEST.with(|n| n.get()) >= NEST_MAX {
-        return 1;
+        return new_win(vm, bp, fi, pc, w0, w3, want);
     }
     let tp = vm.objs[fo as usize].func as usize;
     // a base class's constructor too: its fields are set as enter_function
@@ -3380,7 +3380,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
         (!p.uses_args && p.rest < 0 && (!p.class_ctor || !p.derived) && (p.class_ctor || p.constructible()), p.class_ctor)
     };
     if !plain {
-        return 1;
+        return new_win(vm, bp, fi, pc, w0, w3, want);
     }
     let _ = bp;
     vm.frames[fi].pc = pc + 1 + (w0 >> 16);
@@ -3430,6 +3430,28 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
     after(vm)
 }
 
+/// R_NEW as the interpreter does it for anything but a plain constructor
+/// (its window op, which pushes the frame of a script function: 5).
+fn new_win(vm: &mut crate::vm::Vm, bp: int, fi: usize, pc: int, w0: int, w3: int, want: usize) -> i32 {
+    let pi = vm.frames[fi].proto as usize;
+    let next = pc + 1 + (w0 >> 16);
+    let p2 = vm.r_win(pi, bp, fi, pc, w3, want);
+    if vm.throwing {
+        if vm.frames.len() == fi + 1 {
+            vm.frames[fi].pc = pc + 1;
+        }
+        return 4;
+    }
+    if p2 < 0 || vm.frames.len() != fi + 1 {
+        return 5;
+    }
+    if p2 != next {
+        set_cell_pc(p2);
+        return 3;
+    }
+    after(vm)
+}
+
 /// The compiled callee f of the frame renter pushed (frames[nf]): the
 /// caller's code calls it (6), with its entry, table index, bp and sp in
 /// the cell.
@@ -3450,7 +3472,13 @@ fn direct(vm: &mut crate::vm::Vm, nf: usize, f: i64) -> i32 {
 
 /// Function tp's compiled code when it has some or has been called often
 /// enough to get it, else -1.
-fn hot_fn(vm: &mut crate::vm::Vm, tp: usize) -> i64 {
+/// rvm.rs jit_hot: an interpreted call enters the callee's compiled code
+/// (mask bit 58 turns it off)
+pub fn entry_hot(vm: &mut crate::vm::Vm, tp: usize) -> bool {
+    MASK.with(|m| m.get()) & (1u64 << 58) == 0 && hot_fn(vm, tp) >= 0
+}
+
+pub fn hot_fn(vm: &mut crate::vm::Vm, tp: usize) -> i64 {
     let f = if tp < vm.jit_fn.len() { vm.jit_fn[tp] } else { -1 };
     if f >= 0 || f == -2 {
         if f >= 0 {
