@@ -6831,7 +6831,18 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             }
         }
         R_STEP_PUSH => vm.r_step_push(pi, bp, fi, pc, w1),
-        R_STEP_K => vm.r_step_k(pi, bp, fi, pc, w0, w1, w2, w3),
+        R_STEP_K => {
+            if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+                // debug: HCOUNT[1300 + the stack op]
+                let k = (vm.protos[pi].code[pc as usize].code as usize).min(700);
+                HCOUNT.with(|h| {
+                    let mut t = h.get();
+                    t[1300 + k] += 1;
+                    h.set(t)
+                });
+            }
+            vm.r_step_k(pi, bp, fi, pc, w0, w1, w2, w3)
+        }
         R_STEP0 => {
             let op = vm.protos[pi].code[pc as usize];
             let mut p2 = pc + 1;
