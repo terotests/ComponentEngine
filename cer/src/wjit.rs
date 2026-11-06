@@ -59,6 +59,18 @@ pub struct Layout {
     pub off_class: u32,
     /// Vm.shape_epoch's low word, from the Vm's address
     pub off_epoch: u32,
+    /// from the Vm's address: its stack's buffer and length words, the
+    /// constants' buffer, the frames' buffer and length, the handlers'
+    /// length, gc_flag; a Frame's size and where its this_val is
+    pub vm_stack_ptr: u32,
+    pub vm_stack_len: u32,
+    pub vm_kvals_ptr: u32,
+    pub vm_frames_ptr: u32,
+    pub vm_frames_len: u32,
+    pub vm_handlers_len: u32,
+    pub vm_gc_flag: u32,
+    pub frame_size: u32,
+    pub frame_this: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -102,6 +114,15 @@ pub fn probe() -> Layout {
         off_proto: 0,
         off_class: 0,
         off_epoch: 0,
+        vm_stack_ptr: 0,
+        vm_stack_len: 0,
+        vm_kvals_ptr: 0,
+        vm_frames_ptr: 0,
+        vm_frames_len: 0,
+        vm_handlers_len: 0,
+        vm_gc_flag: 0,
+        frame_size: 0,
+        frame_this: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -166,8 +187,12 @@ pub fn probe() -> Layout {
     l.off_int = oi as u32;
     l.ok = true;
     // the buffer pointer of a Vec<Val>: the word of the Vec that holds it
-    let v: Vec<Val> = Vec::with_capacity(7);
+    let mut v: Vec<Val> = Vec::with_capacity(7);
+    v.push(Val::Undef);
+    v.push(Val::Undef);
+    v.push(Val::Undef);
     let ptr = v.as_ptr() as usize;
+    let mut vl: i32 = -1;
     let vs = std::mem::size_of::<Vec<Val>>();
     let ws = std::mem::size_of::<usize>();
     let mut vp: i32 = -1;
@@ -180,14 +205,17 @@ pub fn probe() -> Layout {
                 let b = unsafe { std::ptr::read_volatile((&v as *const Vec<Val> as *const u8).add(k + i)) };
                 w |= (b as usize) << (8 * i);
             }
-            if w == ptr && ptr != 7 && ptr != 0 {
+            if w == ptr && ptr != 7 && ptr != 3 && ptr != 0 {
                 vp = k as i32;
+            }
+            if w == 3 {
+                vl = k as i32;
             }
             k += ws;
         }
     }
     drop(v);
-    if vp >= 0 {
+    if vp >= 0 && vl >= 0 && vl != vp {
         l.obj_ok = true;
         l.obj_size = std::mem::size_of::<JsObj>() as u32;
         l.off_shape = std::mem::offset_of!(JsObj, shape) as u32;
@@ -195,6 +223,16 @@ pub fn probe() -> Layout {
         l.off_proto = std::mem::offset_of!(JsObj, proto) as u32;
         l.off_class = std::mem::offset_of!(JsObj, class) as u32;
         l.off_epoch = std::mem::offset_of!(crate::vm::Vm, shape_epoch) as u32;
+        let (vp, vl) = (vp as u32, vl as u32);
+        l.vm_stack_ptr = std::mem::offset_of!(crate::vm::Vm, stack) as u32 + vp;
+        l.vm_stack_len = std::mem::offset_of!(crate::vm::Vm, stack) as u32 + vl;
+        l.vm_kvals_ptr = std::mem::offset_of!(crate::vm::Vm, kvals) as u32 + vp;
+        l.vm_frames_ptr = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vp;
+        l.vm_frames_len = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vl;
+        l.vm_handlers_len = std::mem::offset_of!(crate::vm::Vm, handlers) as u32 + vl;
+        l.vm_gc_flag = std::mem::offset_of!(crate::vm::Vm, gc_flag) as u32;
+        l.frame_size = std::mem::size_of::<Frame>() as u32;
+        l.frame_this = std::mem::offset_of!(Frame, this_val) as u32;
     }
     l
 }
@@ -339,13 +377,25 @@ const HELPERS: [&str; 8] = ["get_elem", "set_elem", "get_prop", "set_prop", "op"
 /// set) and "go on with the top frame" (frames changed)
 pub const OUT_THROW: i32 = i32::MIN + 4;
 pub const OUT_FRAMES: i32 = i32::MIN + 5;
+/// "a return op": its pc in cell[2], the value in cell[12..16] (the frame
+/// is still there)
+pub const OUT_RET: i32 = i32::MIN + 6;
 const CALL: u8 = 0x10;
 const CALL_INDIRECT: u8 = 0x11;
+const I64_CONST: u8 = 0x42;
+const I32_STORE: u8 = 0x36;
+const I32_GE_U: u8 = 0x4f;
 const I32_REM_S: u8 = 0x6f;
 const I32_ADD: u8 = 0x6a;
 const I32_MUL: u8 = 0x6c;
 
 // --------------------------------------------------------------- compiler
+
+impl Opnd {
+    fn is_k(&self) -> bool {
+        matches!(self, Opnd::K(_))
+    }
+}
 
 /// What an operand register is at compile time.
 #[derive(Clone, Copy)]
@@ -380,6 +430,8 @@ struct Cg<'a> {
     slow_at: Option<u32>,
     /// by pc: the address of a property site's cache (prop_cache), or 0
     caches: Vec<u32>,
+    /// the function's frame size (Proto.fsize)
+    fsize: u32,
 }
 
 impl<'a> Cg<'a> {
@@ -1167,15 +1219,20 @@ impl<'a> Cg<'a> {
     }
     /// R_CALL: H_CALL, and when it pushed a compiled callee's frame (6) the
     /// call of its code from here and H_RET for what it returned
-    fn call_op(&mut self, pc: i64, next: i64) {
+    fn call_op(&mut self, pc: i64, next: i64, plain: bool, dst: i32) {
         self.helper_raw(H_CALL, pc);
         let cell = cell_addr() as i64;
+        let l = self.lay;
         self.get(L_TAG);
         self.i32c(6);
         self.op(I32_EQ);
         self.op(IF);
         self.op(T_VOID);
         self.extra += 1;
+        // the handlers before the call: a return with more needs H_RET
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_handlers_len);
+        self.set(L_T3);
         // f(sp, kv, pc, budget, vm, bp) of the callee
         self.i32c(cell);
         self.mem(I32_LOAD, 2, 40);
@@ -1192,6 +1249,81 @@ impl<'a> Cg<'a> {
         self.w.u(0);
         self.w.u(0);
         self.set(L_T2);
+        if plain && dst >= 0 {
+            // a return op, no handler left, the stack as long as this
+            // frame, no collection due: the frame popped here
+            self.get(L_T2);
+            self.i32c(OUT_RET as i64);
+            self.op(I32_EQ);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_handlers_len);
+            self.get(L_T3);
+            self.op(I32_EQ);
+            self.op(I32_AND);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_stack_len);
+            self.get(L_BP);
+            self.i32c(self.fsize as i64);
+            self.op(I32_ADD);
+            self.op(I32_GE_U);
+            self.op(I32_AND);
+            self.get(L_VM);
+            self.mem(I32_LOAD8_U, 0, l.vm_gc_flag);
+            self.op(I32_EQZ);
+            self.op(I32_AND);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            // frames.len -= 1; depth -= 1
+            self.get(L_VM);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_frames_len);
+            self.i32c(1);
+            self.op(I32_SUB);
+            self.mem(I32_STORE, 2, l.vm_frames_len);
+            self.i32c(cell);
+            self.i32c(cell);
+            self.mem(I32_LOAD, 2, 36);
+            self.i32c(1);
+            self.op(I32_SUB);
+            self.mem(I32_STORE, 2, 36);
+            // this frame's registers, the constants, its this (cell[5])
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_stack_ptr);
+            self.get(L_BP);
+            self.i32c(16);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.set(L_SP);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_kvals_ptr);
+            self.set(L_KV);
+            self.i32c(cell);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_frames_ptr);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_frames_len);
+            self.i32c(1);
+            self.op(I32_SUB);
+            self.i32c(l.frame_size as i64);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.i32c(l.frame_this as i64);
+            self.op(I32_ADD);
+            self.mem(I32_STORE, 2, 20);
+            // the value
+            self.get(L_SP);
+            self.i32c(cell);
+            self.mem(I64_LOAD, 3, 48);
+            self.mem(I64_STORE, 3, dst as u32 * 16);
+            self.get(L_SP);
+            self.i32c(cell);
+            self.mem(I64_LOAD, 3, 56);
+            self.mem(I64_STORE, 3, dst as u32 * 16 + 8);
+            self.i32c(0);
+            self.set(L_TAG);
+            self.op(ELSE);
+        }
         self.get(L_VM);
         self.get(L_BP);
         self.get(L_T2);
@@ -1202,6 +1334,10 @@ impl<'a> Cg<'a> {
         self.w.u(H_RET as u64);
         self.set(L_TAG);
         self.reload();
+        if plain && dst >= 0 {
+            self.extra -= 1;
+            self.op(END);
+        }
         self.extra -= 1;
         self.op(END);
         self.helper_codes(pc, next);
@@ -1499,7 +1635,39 @@ impl<'a> Cg<'a> {
             }
             R_CALL | R_NEW => {
                 let next = p + 1 + ((w0 >> 16) as i64);
-                self.call_op(p, next);
+                self.call_op(p, next, kind == R_CALL, if w3 > 0 { w3 - 1 } else { w1 });
+                true
+            }
+            R_RET | R_RET_UNDEF if self.lay.obj_ok && (kind == R_RET_UNDEF || w1 >= 0 || self.raw(w1).is_k()) => {
+                // the value into the cell, OUT_RET: a compiled caller
+                // pops the frame (call_op), anyone else runs the op
+                let cell = cell_addr() as i64;
+                if kind == R_RET {
+                    let o = self.raw(w1);
+                    let (b, off) = self.place(o);
+                    self.i32c(cell);
+                    self.get(b);
+                    self.mem(I64_LOAD, 3, off);
+                    self.mem(I64_STORE, 3, 48);
+                    self.i32c(cell);
+                    self.get(b);
+                    self.mem(I64_LOAD, 3, off + 8);
+                    self.mem(I64_STORE, 3, 56);
+                } else {
+                    let t = self.lay.t_undef as i64;
+                    self.i32c(cell);
+                    self.w.byte(I64_CONST);
+                    self.w.s(t);
+                    self.mem(I64_STORE, 3, 48);
+                    self.i32c(cell);
+                    self.w.byte(I64_CONST);
+                    self.w.s(0);
+                    self.mem(I64_STORE, 3, 56);
+                }
+                self.i32c(cell);
+                self.i32c(p);
+                self.mem(I32_STORE, 2, 8);
+                self.exit_at(OUT_RET as i64);
                 true
             }
             R_CMP_JFK | R_CMP_JTK => {
@@ -1796,7 +1964,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32]) -> Option<Compiled> {
+pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], fsize: u32) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -1855,6 +2023,7 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry:
         rb,
         slow_at: None,
         caches: caches.to_vec(),
+        fsize,
     };
     // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c, t2, t3, t4 (i32)
     cg.w.u(4);
@@ -2120,7 +2289,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             eprintln!("{}", crate::regs::dump(p, &vm.rcode));
         }
         if rb + n <= vm.rcode.len() {
-            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, lay, pi as u32, rb as u32, p.rentry as usize, &site_caches(vm, rb, n)) {
+            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, lay, pi as u32, rb as u32, p.rentry as usize, &site_caches(vm, rb, n), p.fsize as u32) {
                 let idx = host::put(&c.bytes);
                 STATS.with(|s| {
                     let mut t = s.get();
@@ -2185,6 +2354,9 @@ fn run_at(vm: &mut crate::vm::Vm, f: i64, pi: usize, bp: i64, pc: i64, budget: i
     if r == OUT_FRAMES {
         return -3;
     }
+    // a return the compiled code reached: the interpreter does it at that
+    // pc (a compiled caller does it itself, call_op)
+    let r = if r == OUT_RET { cell_get(2) | if cell_get(2) as i64 != pc { 1 << 28 } else { 0 } } else { r };
     if r < 0 {
         // the budget ran out at -1 - r
         return -4 - (-1 - r) as i64;
@@ -2419,7 +2591,7 @@ fn h_set_prop(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
 // addresses again from a cell the helper filled in (cell[0] the frame's
 // registers, cell[1] kvals, cell[2] a pc for code 3).
 
-static mut CELL: [i32; 12] = [0; 12];
+static mut CELL: [i32; 16] = [0; 16];
 
 fn cell_addr() -> usize {
     // SAFETY: only the address is taken
@@ -2447,6 +2619,20 @@ fn top_this(v: &crate::vm::Vm) -> i32 {
     match v.frames.last() {
         Some(f) => (&f.this_val as *const Val) as usize as i32,
         None => 0,
+    }
+}
+
+fn cell_get(k: usize) -> i32 {
+    // SAFETY: as fill_cell
+    unsafe { (*std::ptr::addr_of!(CELL))[k] }
+}
+
+/// cell[9]: how deep compiled code calls compiled code (call_op)
+fn depth_add(d: i32) {
+    // SAFETY: as fill_cell
+    unsafe {
+        let c = &mut *std::ptr::addr_of_mut!(CELL);
+        c[9] += d;
     }
 }
 
@@ -2852,7 +3038,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
             return settle(vm, fi, pc);
         }
         // compiled: the caller's code calls it itself (6), and h_ret ends it
-        let f = if MASK.with(|m| m.get()) & (1u64 << 60) != 0 { -1 } else { hot_fn(vm, tp) };
+        let f = if MASK.with(|m| m.get()) & (1u64 << 60) != 0 || cell_get(9) >= DEPTH_MAX { -1 } else { hot_fn(vm, tp) };
         if f >= 0 {
             return direct(vm, nf, f);
         }
@@ -3048,7 +3234,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
             return 5;
         }
     }
-    let fc = hot_fn(vm, tp);
+    let fc = if cell_get(9) >= DEPTH_MAX { -1 } else { hot_fn(vm, tp) };
     if fc >= 0 {
         return direct(vm, nf, fc);
     }
@@ -3074,7 +3260,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
 fn direct(vm: &mut crate::vm::Vm, nf: usize, f: i64) -> i32 {
     let cbp = vm.frames[nf].bp;
     let entry = vm.frames[nf].pc;
-    NEST.with(|n| n.set(n.get() + 1));
+    depth_add(1);
     // SAFETY: as fill_cell
     unsafe {
         let c = &mut *std::ptr::addr_of_mut!(CELL);
@@ -3121,7 +3307,8 @@ fn hot_fn(vm: &mut crate::vm::Vm, tp: usize) -> i64 {
 fn h_ret(vm: i32, bp: i32, r: i32, _pc: i32, _ri: i32) -> i32 {
     let vm = unsafe { vm_of(vm) };
     let _ = bp;
-    NEST.with(|n| n.set(n.get() - 1));
+    depth_add(-1);
+    let r = if r == OUT_RET { cell_get(2) } else { r };
     if r == OUT_THROW {
         return 4;
     }
@@ -3222,6 +3409,8 @@ fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool
 /// is a native rrun on the wasm stack, so past NEST_MAX the interpreter
 /// makes the call
 const NEST_MAX: u32 = 48;
+/// compiled code calling compiled code nests wasm frames too (call_op)
+const DEPTH_MAX: i32 = 400;
 
 thread_local! {
     static NEST: std::cell::Cell<u32> = std::cell::Cell::new(0);
