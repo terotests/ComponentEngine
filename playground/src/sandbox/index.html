@@ -20,7 +20,8 @@
         turn. So four endless programs share the page's own thread and the page stays responsive. The same
         engines can also run in Web Workers (their own threads) or in iframes (their own documents, the page's
         thread).</p>
-      <p class="lede">Click a picture to zoom in (Shift-click or right-click: out). <b>Freeze</b> writes the
+      <p class="lede">Click a picture to zoom in there, or scroll over it, or use its <b>+</b> / <b>−</b> buttons;
+        drag it to pan (Shift-click or right-click zooms out). <b>Freeze</b> writes the
         engine's whole state, the running loop included, as text; <b>Thaw</b> makes a new engine from it. Changing a
         card's host moves the running program that way: frozen in one place, thawed in another.</p>
     </div>
@@ -69,7 +70,15 @@
           <option value="frame">iframe</option>
         </select>
       </div>
-      <canvas class="sbx-canvas" width="320" height="240"></canvas>
+      <div class="sbx-view">
+        <canvas class="sbx-canvas" width="320" height="240" aria-label="The fractal: click or scroll to zoom, drag to pan"></canvas>
+        <div class="sbx-zoom">
+          <button class="z-in" title="Zoom in (or click the picture, or scroll)" aria-label="Zoom in">+</button>
+          <button class="z-out" title="Zoom out (or Shift-click, right-click, or scroll)" aria-label="Zoom out">−</button>
+        </div>
+        <span class="sbx-level"></span>
+        <span class="sbx-hint">click: zoom in · scroll: zoom · drag: pan</span>
+      </div>
       <div class="sbx-bar"><div></div></div>
       <div class="sbx-stats"></div>
       <div class="sbx-buttons">

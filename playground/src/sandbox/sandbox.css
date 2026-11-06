@@ -10,7 +10,15 @@
 .sbx { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px; min-width: 0; }
 .sbx-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
 .sbx-name { font-weight: 600; }
-.sbx-canvas { width: 100%; height: auto; aspect-ratio: 4 / 3; display: block; background: #000; border-radius: 4px; cursor: zoom-in; image-rendering: auto; }
+.sbx-view { position: relative; overflow: hidden; border-radius: 4px; background: #000; }
+.sbx-canvas { width: 100%; height: auto; aspect-ratio: 4 / 3; display: block; background: #000; cursor: zoom-in; image-rendering: auto; }
+.sbx-canvas.dragging { cursor: grabbing; }
+.sbx-zoom { position: absolute; top: 8px; right: 8px; display: flex; flex-direction: column; gap: 4px; }
+.sbx-zoom button { width: 34px; height: 34px; padding: 0; font-size: 20px; line-height: 1; font-weight: 600; background: rgba(0,0,0,.55); color: #fff; border: 1px solid rgba(255,255,255,.35); border-radius: 6px; }
+.sbx-zoom button:hover { background: rgba(0,0,0,.75); }
+.sbx-level { position: absolute; top: 8px; left: 8px; padding: 2px 8px; font-size: 12px; font-variant-numeric: tabular-nums; color: #fff; background: rgba(0,0,0,.55); border-radius: 4px; pointer-events: none; }
+.sbx-hint { position: absolute; bottom: 8px; left: 8px; padding: 2px 8px; font-size: 12px; color: #fff; background: rgba(0,0,0,.55); border-radius: 4px; pointer-events: none; transition: opacity .3s; }
+.sbx-view:hover .sbx-hint { opacity: 0; }
 .sbx-bar { height: 4px; background: var(--grid); border-radius: 2px; margin: 8px 0 6px; overflow: hidden; }
 .sbx-bar div { height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
 .sbx.waiting .sbx-bar div { background: var(--good); }
