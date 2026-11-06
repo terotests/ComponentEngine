@@ -255,23 +255,10 @@ pub struct Vm {
     /// when an append in place moved h's buffer on to that newer handle
     /// (h is then its first slen[h] bytes); sflag 1 pinned (constants,
     /// atoms), 2 free. collect() sweeps it (mark_strs).
-    pub strs: Vec<Rc<String>>,
-    pub sup: Vec<i32>,
-    pub slen: Vec<i32>,
-    pub sflag: Vec<i32>,
-    pub smark: Vec<bool>,
+    pub strs: Vec<SEnt>,
     pub sfree: Vec<int>,
     /// freed by the last collection, reused after the next one
     pub sfreed: Vec<int>,
-    /// the heap's references to each string handle (object slots and the
-    /// prefixes whose text lies in it), as Vm.objs[].rc is for objects:
-    /// the stack, frames and other roots are not counted
-    pub srcs: Vec<i32>,
-    /// whether a handle is in szct
-    pub sinz: Vec<bool>,
-    /// the atom a string handle's text interns to, -1 before it is asked
-    /// (to_key: a string key looked up once per string, not per use)
-    pub satom: Vec<i32>,
     /// handles whose count went to 0 (or that are new): reclaim() frees
     /// those no root holds
     pub szct: Vec<int>,
@@ -537,15 +524,8 @@ impl Vm {
             kvals: Vec::new(),
             rtab: Vec::new(),
             strs: Vec::new(),
-            sup: Vec::new(),
-            slen: Vec::new(),
-            sflag: Vec::new(),
-            smark: Vec::new(),
             sfree: Vec::new(),
             sfreed: Vec::new(),
-            srcs: Vec::new(),
-            sinz: Vec::new(),
-            satom: Vec::new(),
             szct: Vec::new(),
             szct_spare: Vec::new(),
             sfree_count: 0,
@@ -1086,34 +1066,20 @@ impl Vm {
     /// An empty string table (handle 0 is "").
     pub fn reset_strs(&mut self) {
         self.strs = Vec::new();
-        self.sup = Vec::new();
-        self.slen = Vec::new();
-        self.sflag = Vec::new();
-        self.smark = Vec::new();
         self.sfree = Vec::new();
         self.sfreed = Vec::new();
-        self.srcs = Vec::new();
-        self.sinz = Vec::new();
-        self.satom = Vec::new();
         self.szct = Vec::new();
         self.snew = 0;
         self.slimit = self.slimit_min;
         self.sbytes = 0;
         self.sbytes_limit = SBYTES_MIN;
         let e = self.sempty.clone();
-        self.strs.push(e);
-        self.sup.push(-1);
-        self.slen.push(0);
-        self.sflag.push(1);
-        self.smark.push(false);
-        self.srcs.push(0);
-        self.sinz.push(false);
-        self.satom.push(-1);
+        self.strs.push(SEnt::new(e, 1));
     }
 
     fn new_handle(&mut self, s: Rc<String>, flag: int) -> int {
         let h = self.take_handle(s.as_bytes().len() as int, flag);
-        self.strs[h as usize] = s;
+        self.strs[h as usize].s = s;
         h
     }
 
@@ -1131,27 +1097,20 @@ impl Vm {
         let h = if !self.sfree.is_empty() {
             let h = self.sfree.pop().unwrap();
             let i = h as usize;
-            self.sup[i] = -1;
-            self.slen[i] = 0;
-            self.sflag[i] = flag as i32;
-            self.srcs[i] = 0;
-            self.satom[i] = -1;
+            self.strs[i].up = -1;
+            self.strs[i].len = 0;
+            self.strs[i].flag = flag as i32;
+            self.strs[i].rc = 0;
+            self.strs[i].atom = -1;
             h
         } else {
             let e = self.sempty.clone();
-            self.strs.push(e);
-            self.sup.push(-1);
-            self.slen.push(0);
-            self.sflag.push(flag as i32);
-            self.smark.push(false);
-            self.srcs.push(0);
-            self.sinz.push(false);
-            self.satom.push(-1);
+            self.strs.push(SEnt::new(e, flag as i32));
             (self.strs.len() - 1) as int
         };
         // a new string is held by nothing counted yet: reclaim() frees it
         // unless a root or the heap has it by then
-        self.sinz[h as usize] = flag == 0;
+        self.strs[h as usize].inz = flag == 0;
         if flag == 0 {
             self.szct.push(h);
             if (self.szct.len() as int) >= self.szct_limit {
@@ -1165,7 +1124,7 @@ impl Vm {
     #[inline]
     pub fn sinc(&mut self, h: int) {
         if h > 0 {
-            self.srcs[h as usize] += 1;
+            self.strs[h as usize].rc += 1;
         }
     }
 
@@ -1174,9 +1133,9 @@ impl Vm {
     pub fn sdec(&mut self, h: int) {
         if h > 0 {
             let i = h as usize;
-            self.srcs[i] -= 1;
-            if self.srcs[i] <= 0 && !self.sinz[i] && self.sflag[i] == 0 {
-                self.sinz[i] = true;
+            self.strs[i].rc -= 1;
+            if self.strs[i].rc <= 0 && !self.strs[i].inz && self.strs[i].flag == 0 {
+                self.strs[i].inz = true;
                 self.szct.push(h);
                 if (self.szct.len() as int) >= self.szct_limit {
                     self.gc_flag = true;
@@ -1189,9 +1148,9 @@ impl Vm {
     /// the handle its text lay in (a prefix's) loses a reference.
     fn free_str(&mut self, h: int) {
         let i = h as usize;
-        let up = self.sup[i];
+        let up = self.strs[i].up;
         if up < 0 {
-            self.sbytes -= self.strs[i].as_bytes().len() as int;
+            self.sbytes -= self.strs[i].s.as_bytes().len() as int;
             if self.sbytes < 0 {
                 self.sbytes = 0;
             }
@@ -1199,11 +1158,11 @@ impl Vm {
         if self.snew > 0 {
             self.snew -= 1;
         }
-        rc_vacate(&mut self.strs[i], &self.sempty);
-        self.sup[i] = -1;
-        self.slen[i] = 0;
-        self.sflag[i] = 2;
-        self.sinz[i] = false;
+        rc_vacate(&mut self.strs[i].s, &self.sempty);
+        self.strs[i].up = -1;
+        self.strs[i].len = 0;
+        self.strs[i].flag = 2;
+        self.strs[i].inz = false;
         self.sfreed.push(h);
         self.sfree_count += 1;
         if up >= 0 {
@@ -1231,7 +1190,7 @@ impl Vm {
             return Val::Str(0);
         }
         let h = self.take_handle(s.as_bytes().len() as int, 0);
-        rc_refill(&mut self.strs[h as usize], s);
+        rc_refill(&mut self.strs[h as usize].s, s);
         Val::Str(h)
     }
 
@@ -1246,26 +1205,26 @@ impl Vm {
     /// The text of string handle `h`.
     #[inline]
     pub fn sref(&self, h: int) -> &str {
-        if self.sup[h as usize] < 0 {
-            self.strs[h as usize].as_str()
+        if self.strs[h as usize].up < 0 {
+            self.strs[h as usize].s.as_str()
         } else {
             self.sref_up(h)
         }
     }
 
     fn sref_up(&self, h: int) -> &str {
-        let mut x = self.sup[h as usize];
-        while self.sup[x as usize] >= 0 {
-            x = self.sup[x as usize];
+        let mut x = self.strs[h as usize].up;
+        while self.strs[x as usize].up >= 0 {
+            x = self.strs[x as usize].up;
         }
-        jsstr::prefix(self.strs[x as usize].as_str(), self.slen[h as usize] as int)
+        jsstr::prefix(self.strs[x as usize].s.as_str(), self.strs[h as usize].len as int)
     }
 
     /// String handle `h` as a shared string.
     #[inline]
     pub fn sget(&self, h: int) -> Rc<String> {
-        if self.sup[h as usize] < 0 {
-            self.strs[h as usize].clone()
+        if self.strs[h as usize].up < 0 {
+            self.strs[h as usize].s.clone()
         } else {
             Rc::new(String::from(self.sref_up(h)))
         }
@@ -1276,23 +1235,23 @@ impl Vm {
     /// old text, a prefix of it), or -1 and nothing changed.
     pub fn str_append(&mut self, h: int, b: &str) -> int {
         let i = h as usize;
-        if h <= 0 || self.sup[i] >= 0 || self.sflag[i] != 0 {
+        if h <= 0 || self.strs[i].up >= 0 || self.strs[i].flag != 0 {
             return -1;
         }
-        let n = self.strs[i].as_bytes().len() as int;
-        if !rc_push(&mut self.strs[i], b) {
+        let n = self.strs[i].s.as_bytes().len() as int;
+        if !rc_push(&mut self.strs[i].s, b) {
             return -1;
         }
-        let rc = self.strs[i].clone();
+        let rc = self.strs[i].s.clone();
         let e = self.sempty.clone();
-        self.strs[i] = e;
+        self.strs[i].s = e;
         let h2 = self.new_handle(rc, 0);
         // only the appended bytes are new
         self.sbytes -= n;
-        self.sup[i] = h2 as i32;
-        self.slen[i] = n as i32;
+        self.strs[i].up = h2 as i32;
+        self.strs[i].len = n as i32;
         // h's text now lies in h2's buffer: h holds h2
-        self.srcs[h2 as usize] += 1;
+        self.strs[h2 as usize].rc += 1;
         h2
     }
 
@@ -1332,11 +1291,11 @@ impl Vm {
         let ns = self.strs.len();
         let mut old: Vec<i32> = Vec::new();
         if self.rc_check {
-            old = self.srcs.clone();
+            old = srcs_of(&self.strs);
         }
         let mut i: usize = 0;
         while i < ns {
-            self.srcs[i] = 0;
+            self.strs[i].rc = 0;
             i += 1;
         }
         let total = self.objs.len();
@@ -1374,11 +1333,11 @@ impl Vm {
         // a prefix keeps the handles its text lies in
         i = 1;
         while i < ns {
-            if self.smark[i] && self.sup[i] >= 0 {
-                let mut u = self.sup[i];
-                while u >= 0 && !self.smark[u as usize] {
-                    self.smark[u as usize] = true;
-                    u = self.sup[u as usize];
+            if self.strs[i].mark && self.strs[i].up >= 0 {
+                let mut u = self.strs[i].up;
+                while u >= 0 && !self.strs[u as usize].mark {
+                    self.strs[u as usize].mark = true;
+                    u = self.strs[u as usize].up;
                 }
             }
             i += 1;
@@ -1386,27 +1345,27 @@ impl Vm {
         // and holds a reference to the next one
         i = 1;
         while i < ns {
-            if self.smark[i] && self.sup[i] >= 0 {
-                let u = self.sup[i] as usize;
-                self.srcs[u] += 1;
+            if self.strs[i].mark && self.strs[i].up >= 0 {
+                let u = self.strs[i].up as usize;
+                self.strs[u].rc += 1;
             }
             i += 1;
         }
         if self.rc_check {
             i = 1;
             while i < ns {
-                if self.smark[i] && self.sflag[i] == 2 {
+                if self.strs[i].mark && self.strs[i].flag == 2 {
                     // a freed string is still referenced
                     self.rc_errors += 1;
                     if self.rc_errors <= 20 {
                         self.rc_log.push(format!("rc: freed string #{} referenced", i));
                     }
                 }
-                if self.smark[i] && self.sflag[i] == 0 && i < old.len() && old[i] < self.srcs[i] {
+                if self.strs[i].mark && self.strs[i].flag == 0 && i < old.len() && old[i] < self.strs[i].rc {
                     // a reference to a string was not counted
                     self.rc_errors += 1;
                     if self.rc_errors <= 20 {
-                        let nr = self.srcs[i];
+                        let nr = self.strs[i].rc;
                         let t = String::from(self.sref(i as int));
                         self.rc_log.push(format!("rc: low string count {} < {} (#{} {:?})", old[i], nr, i, t));
                     }
@@ -1427,25 +1386,25 @@ impl Vm {
         let mut bytes: int = 0;
         i = 1;
         while i < ns {
-            self.sinz[i] = false;
-            if self.sflag[i] == 0 && !self.smark[i] {
-                rc_vacate(&mut self.strs[i], &self.sempty);
-                self.sup[i] = -1;
-                self.sflag[i] = 2;
+            self.strs[i].inz = false;
+            if self.strs[i].flag == 0 && !self.strs[i].mark {
+                rc_vacate(&mut self.strs[i].s, &self.sempty);
+                self.strs[i].up = -1;
+                self.strs[i].flag = 2;
                 self.sfreed.push(i as int);
-            } else if self.sflag[i] != 2 {
+            } else if self.strs[i].flag != 2 {
                 live += 1;
-                bytes += self.strs[i].as_bytes().len() as int;
-                if self.sflag[i] == 0 {
-                    rc_trim(&mut self.strs[i]);
+                bytes += self.strs[i].s.as_bytes().len() as int;
+                if self.strs[i].flag == 0 {
+                    rc_trim(&mut self.strs[i].s);
                 }
-                if self.sflag[i] == 0 && self.srcs[i] == 0 {
+                if self.strs[i].flag == 0 && self.strs[i].rc == 0 {
                     // held by roots only
-                    self.sinz[i] = true;
+                    self.strs[i].inz = true;
                     self.szct.push(i as int);
                 }
             }
-            self.smark[i] = false;
+            self.strs[i].mark = false;
             i += 1;
         }
         self.snew = 0;
@@ -1459,9 +1418,9 @@ impl Vm {
     #[inline]
     fn smark_count(&mut self, v: Val) {
         if let Val::Str(h) = v {
-            self.smark[h as usize] = true;
+            self.strs[h as usize].mark = true;
             if h > 0 {
-                self.srcs[h as usize] += 1;
+                self.strs[h as usize].rc += 1;
             }
         }
     }
@@ -1470,8 +1429,8 @@ impl Vm {
     #[inline]
     fn smark_root(&mut self, v: Val, list: &mut Vec<int>) {
         if let Val::Str(h) = v {
-            if !self.smark[h as usize] {
-                self.smark[h as usize] = true;
+            if !self.strs[h as usize].mark {
+                self.strs[h as usize].mark = true;
                 list.push(h);
             }
         }
@@ -1558,16 +1517,16 @@ impl Vm {
                 let h = list[i];
                 i += 1;
                 let k = h as usize;
-                if !self.sinz[k] {
+                if !self.strs[k].inz {
                     continue;
                 }
-                self.sinz[k] = false;
-                if self.sflag[k] != 0 || self.srcs[k] > 0 {
+                self.strs[k].inz = false;
+                if self.strs[k].flag != 0 || self.strs[k].rc > 0 {
                     continue;
                 }
-                if self.smark[k] {
+                if self.strs[k].mark {
                     // a root holds it
-                    self.sinz[k] = true;
+                    self.strs[k].inz = true;
                     keep.push(h);
                     continue;
                 }
@@ -1580,7 +1539,7 @@ impl Vm {
         i = 0;
         while i < nm {
             let h = marked[i] as usize;
-            self.smark[h] = false;
+            self.strs[h].mark = false;
             i += 1;
         }
         self.szct_limit = self.next_szct_limit();
@@ -2158,7 +2117,7 @@ impl Vm {
             }
             Val::Str(s) => {
                 let h = *s as usize;
-                let known = self.satom[h];
+                let known = self.strs[h].atom;
                 if known >= 0 {
                     return (-1, known as int);
                 }
@@ -2168,7 +2127,7 @@ impl Vm {
                 }
                 let t = self.sget(*s);
                 let a = self.intern(t.as_str());
-                self.satom[h] = a as i32;
+                self.strs[h].atom = a as i32;
                 (-1, a)
             }
             Val::Obj(o) => {
@@ -3145,30 +3104,30 @@ impl Vm {
                 }
                 let n = self.sref(*x).as_bytes().len() + self.sref(*y).as_bytes().len();
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
+                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
                 s.push_str(self.sref(*x));
                 s.push_str(self.sref(*y));
-                rc_refill(&mut self.strs[h as usize], s);
+                rc_refill(&mut self.strs[h as usize].s, s);
                 return Val::Str(h);
             }
             (Val::Str(x), Val::Num(y)) => {
                 let t = number_to_string(*y);
                 let n = self.sref(*x).as_bytes().len() + t.as_bytes().len();
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
+                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
                 s.push_str(self.sref(*x));
                 s.push_str(t.as_str());
-                rc_refill(&mut self.strs[h as usize], s);
+                rc_refill(&mut self.strs[h as usize].s, s);
                 return Val::Str(h);
             }
             (Val::Num(x), Val::Str(y)) => {
                 let t = number_to_string(*x);
                 let n = t.as_bytes().len() + self.sref(*y).as_bytes().len();
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize], n);
+                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
                 s.push_str(t.as_str());
                 s.push_str(self.sref(*y));
-                rc_refill(&mut self.strs[h as usize], s);
+                rc_refill(&mut self.strs[h as usize].s, s);
                 return Val::Str(h);
             }
             _ => {}
@@ -6886,8 +6845,8 @@ impl Vm {
         let ns = self.strs.len();
         let mut i: usize = 0;
         while i < ns {
-            self.srcs[i] = 0;
-            self.sinz[i] = false;
+            self.strs[i].rc = 0;
+            self.strs[i].inz = false;
             i += 1;
         }
         let total = self.objs.len();
@@ -6922,17 +6881,17 @@ impl Vm {
         }
         i = 1;
         while i < ns {
-            if self.sflag[i] != 2 && self.sup[i] >= 0 {
-                let u = self.sup[i] as usize;
-                self.srcs[u] += 1;
+            if self.strs[i].flag != 2 && self.strs[i].up >= 0 {
+                let u = self.strs[i].up as usize;
+                self.strs[u].rc += 1;
             }
             i += 1;
         }
         self.szct.clear();
         i = 1;
         while i < ns {
-            if self.sflag[i] == 0 && self.srcs[i] == 0 {
-                self.sinz[i] = true;
+            if self.strs[i].flag == 0 && self.strs[i].rc == 0 {
+                self.strs[i].inz = true;
                 self.szct.push(i as int);
             }
             i += 1;
@@ -7365,3 +7324,41 @@ pub fn rc_push(_rc: &mut Rc<String>, _b: &str) -> bool {
 /// Back jumps between two reads of the clock while slices are on.
 pub const SLICE_TICKS: int = 1000;
 
+
+/// One string handle of the table (`Vm.strs`): its text and what the
+/// table knows of it, together, so a handle's checks touch one line.
+pub struct SEnt {
+    pub s: Rc<String>,
+    /// >= 0 when an append in place moved the buffer on to that newer
+    /// handle (this one is then its first `len` bytes)
+    pub up: i32,
+    pub len: i32,
+    /// 1 pinned (constants, atoms), 2 free
+    pub flag: i32,
+    /// the heap's references to the handle (object slots and the prefixes
+    /// whose text lies in it), as JsObj.rc is for objects: the stack,
+    /// frames and other roots are not counted
+    pub rc: i32,
+    /// the atom the text interns to, -1 before it is asked (to_key: a
+    /// string key looked up once per string, not per use)
+    pub atom: i32,
+    /// marked by collect() (mark_strs)
+    pub mark: bool,
+    /// in szct
+    pub inz: bool,
+}
+
+impl SEnt {
+    pub fn new(s: Rc<String>, flag: i32) -> SEnt {
+        SEnt { s: s, up: -1, len: 0, flag: flag, rc: 0, atom: -1, mark: false, inz: false }
+    }
+}
+
+/// The handles' counts (a check of them, rc_check).
+pub fn srcs_of(v: &Vec<SEnt>) -> Vec<i32> {
+    let mut out: Vec<i32> = Vec::with_capacity(v.len());
+    for e in v.iter() {
+        out.push(e.rc);
+    }
+    out
+}

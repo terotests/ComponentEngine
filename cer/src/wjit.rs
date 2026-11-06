@@ -114,7 +114,7 @@ pub struct Layout {
     pub vm_zct_len: u32,
     pub vm_zct_cap: u32,
     pub vm_zct_limit: u32,
-    /// Vm.srcs' and Vm.type_vals' buffer words
+    /// Vm.strs' and Vm.type_vals' buffer words
     pub vm_srcs_ptr: u32,
     pub vm_type_vals_ptr: u32,
     pub vm_tdz: u32,
@@ -354,7 +354,7 @@ pub fn probe() -> Layout {
         l.vm_zct_len = std::mem::offset_of!(crate::vm::Vm, zct) as u32 + vl;
         l.vm_zct_cap = std::mem::offset_of!(crate::vm::Vm, zct) as u32 + vc;
         l.vm_zct_limit = std::mem::offset_of!(crate::vm::Vm, zct_limit) as u32;
-        l.vm_srcs_ptr = std::mem::offset_of!(crate::vm::Vm, srcs) as u32 + vp;
+        l.vm_srcs_ptr = std::mem::offset_of!(crate::vm::Vm, strs) as u32 + vp;
         l.vm_type_vals_ptr = std::mem::offset_of!(crate::vm::Vm, type_vals) as u32 + vp;
         l.vm_tdz = std::mem::offset_of!(crate::vm::Vm, tdz_obj) as u32;
         l.vm_string_proto = std::mem::offset_of!(crate::vm::Vm, string_proto) as u32;
@@ -1077,14 +1077,16 @@ impl<'a> Cg<'a> {
         self.mem(I64_LOAD, 3, off + 8);
         self.mem(I64_STORE, 3, 8);
     }
-    /// &Vm.srcs[local h] on the wasm stack
+    /// &Vm.strs[local h].rc on the wasm stack
     fn srcs_addr(&mut self, h: u32) {
         let l = self.lay;
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_srcs_ptr);
         self.get(h);
-        self.i32c(4);
+        self.i32c(std::mem::size_of::<crate::vm::SEnt>() as i64);
         self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.i32c(std::mem::offset_of!(crate::vm::SEnt, rc) as i64);
         self.op(I32_ADD);
     }
     /// the string at b + off, if one (handle > 0): srcs[h] op= 1
@@ -3900,7 +3902,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                     let ov = vm.env_slot(e, w3);
                     extra = match ov {
                         Val::Obj(o) => format!("old obj rc{} zct{}/{}", vm.objs[o as usize].rc, vm.zct.len(), vm.zct.capacity()),
-                        Val::Str(h) => format!("old str rc{}", if h > 0 { vm.srcs[h as usize] } else { -9 }),
+                        Val::Str(h) => format!("old str rc{}", if h > 0 { vm.strs[h as usize].rc } else { -9 }),
                         _ => format!("old t{}", vm.type_index(&ov)),
                     };
                 }

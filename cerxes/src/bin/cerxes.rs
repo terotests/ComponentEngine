@@ -106,7 +106,7 @@ fn main() {
                 if o.free { free_cap += c; } else { *hist.entry(o.class).or_insert(0usize) += 1; }
             }
             let objs = v.objs.capacity() * std::mem::size_of::<cerxes::value::JsObj>();
-            let strs: usize = v.strs.iter().map(|s| 40 + s.capacity()).sum();
+            let strs: usize = v.strs.iter().map(|s| 40 + s.s.capacity()).sum();
             let shapes: usize = v.shapes.iter().map(|s| (s.keys.capacity() + s.attrs.capacity() + s.itab.capacity() + s.t_atom.capacity() + s.t_attr.capacity() + s.t_to.capacity()) * 8 + s.t_map.capacity() * 24 + std::mem::size_of::<cerxes::value::Shape>()).sum();
             let colds: usize = v.colds.iter().map(|c| c.index.capacity() * 24 + c.marks.capacity() * 8 + c.nums.capacity() * 8).sum();
             let code: usize = v.protos.iter().map(|p| p.code.capacity() * std::mem::size_of::<cerxes::value::Op>() + p.consts.capacity() * vs).sum::<usize>() + v.rcode.capacity() * std::mem::size_of::<cerxes::value::Op>();
@@ -117,23 +117,24 @@ fn main() {
                 let (mut fcap, mut lcap, mut llen, mut big, mut shared) = (0usize, 0usize, 0usize, 0usize, 0usize);
                 let mut seen = std::collections::HashMap::new();
                 let mut dup = 0usize;
-                for (i, s) in v.strs.iter().enumerate() {
-                    if v.sflag[i] == 2 { fcap += s.capacity(); continue; }
+                for e in v.strs.iter() {
+                    let s = &e.s;
+                    if e.flag == 2 { fcap += s.capacity(); continue; }
                     lcap += s.capacity(); llen += s.len();
                     if s.capacity() > 4096 { big += s.capacity(); }
                     if std::rc::Rc::strong_count(s) > 1 { shared += 1; }
                     let n = seen.entry(s.as_str()).or_insert(0usize); *n += 1; if *n > 1 { dup += s.len(); }
                 }
                 if std::env::var("CERXES_MEM").map(|x| x == "big").unwrap_or(false) {
-                    let mut b: Vec<(usize, usize, usize)> = v.strs.iter().enumerate().filter(|(i, s)| v.sflag[*i] != 2 && s.capacity() > 4096).map(|(i, s)| (s.capacity(), s.len(), i)).collect();
+                    let mut b: Vec<(usize, usize, usize)> = v.strs.iter().enumerate().filter(|(_, e)| e.flag != 2 && e.s.capacity() > 4096).map(|(i, e)| (e.s.capacity(), e.s.len(), i)).collect();
                     b.sort(); b.reverse();
                     for (c, l, i) in b.iter().take(25) {
-                        let t: String = v.strs[*i].chars().take(50).collect();
-                        eprintln!("  big cap {} len {} flag {} rc {} {:?}", c, l, v.sflag[*i], std::rc::Rc::strong_count(&v.strs[*i]), t);
+                        let t: String = v.strs[*i].s.chars().take(50).collect();
+                        eprintln!("  big cap {} len {} flag {} rc {} {:?}", c, l, v.strs[*i].flag, std::rc::Rc::strong_count(&v.strs[*i].s), t);
                     }
                     eprintln!("  big count {}", b.len());
                 }
-                let pre = v.sup.iter().filter(|x| **x >= 0).count();
+                let pre = v.strs.iter().filter(|x| x.up >= 0).count();
                 eprintln!("strs: live cap {:.1} MB len {:.1} MB (>4k: {:.1} MB) free-handle cap {:.1} MB; duplicate bytes {:.1} MB; shared Rc {}; prefixes {}",
                     mb(lcap), mb(llen), mb(big), mb(fcap), mb(dup), shared, pre);
             }
