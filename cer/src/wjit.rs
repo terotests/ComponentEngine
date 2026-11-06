@@ -65,6 +65,7 @@ pub struct Layout {
     /// length, gc_flag; a Frame's size and where its this_val is
     pub vm_stack_ptr: u32,
     pub vm_stack_len: u32,
+    pub vm_stack_cap: u32,
     pub vm_kvals_ptr: u32,
     pub vm_frames_ptr: u32,
     pub vm_frames_len: u32,
@@ -120,6 +121,8 @@ pub struct Layout {
     pub vm_tdz: u32,
     pub vm_string_proto: u32,
     pub vm_number_proto: u32,
+    pub vm_jit_calls_ptr: u32,
+    pub vm_jit_calls_len: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -165,6 +168,7 @@ pub fn probe() -> Layout {
         off_epoch: 0,
         vm_stack_ptr: 0,
         vm_stack_len: 0,
+        vm_stack_cap: 0,
         vm_kvals_ptr: 0,
         vm_frames_ptr: 0,
         vm_frames_len: 0,
@@ -210,6 +214,8 @@ pub fn probe() -> Layout {
         vm_tdz: 0,
         vm_string_proto: 0,
         vm_number_proto: 0,
+        vm_jit_calls_ptr: 0,
+        vm_jit_calls_len: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -336,6 +342,7 @@ pub fn probe() -> Layout {
         l.off_func = std::mem::offset_of!(JsObj, func) as u32;
         l.off_env = std::mem::offset_of!(JsObj, env) as u32;
         l.vm_frames_cap = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vc;
+        l.vm_stack_cap = std::mem::offset_of!(crate::vm::Vm, stack) as u32 + vc;
         l.vm_slicing = std::mem::offset_of!(crate::vm::Vm, slicing) as u32;
         l.fr_proto = std::mem::offset_of!(Frame, proto) as u32;
         l.fr_fobj = std::mem::offset_of!(Frame, fobj) as u32;
@@ -359,6 +366,8 @@ pub fn probe() -> Layout {
         l.vm_tdz = std::mem::offset_of!(crate::vm::Vm, tdz_obj) as u32;
         l.vm_string_proto = std::mem::offset_of!(crate::vm::Vm, string_proto) as u32;
         l.vm_number_proto = std::mem::offset_of!(crate::vm::Vm, number_proto) as u32;
+        l.vm_jit_calls_ptr = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vp;
+        l.vm_jit_calls_len = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vl;
     }
     l
 }
@@ -464,6 +473,12 @@ const F64_MUL: u8 = 0xa2;
 const F64_DIV: u8 = 0xa3;
 const I32_TRUNC_F64_S: u8 = 0xaa;
 const F64_TRUNC: u8 = 0x9d;
+const F64_ABS: u8 = 0x99;
+const F64_CEIL: u8 = 0x9b;
+const F64_FLOOR: u8 = 0x9c;
+const F64_SQRT: u8 = 0x9f;
+const F64_MIN: u8 = 0xa4;
+const F64_MAX: u8 = 0xa5;
 const F64_CONVERT_I32_S: u8 = 0xb7;
 
 const T_I32: u8 = 0x7f;
@@ -1974,7 +1989,7 @@ impl<'a> Cg<'a> {
         let cell = cell_addr() as i64;
         let l = self.lay;
         let a = self.caches.get(pc as usize).copied().unwrap_or(0);
-        if plain && a != 0 && dst >= 0 && f >= 0 && argc >= 0 && MASK.with(|m| m.get()) & (1u64 << 57) == 0 && MASK.with(|m| m.get()) & (1u64 << 56) == 0 {
+        if plain && dst >= 0 && f >= 0 && argc >= 0 && MASK.with(|m| m.get()) & (1u64 << 57) == 0 && MASK.with(|m| m.get()) & (1u64 << 56) == 0 {
             // the call in the module's callx (one copy of the frame push,
             // the callee's call and the return), its operands in CARGS
             if sub == 1 {
@@ -2193,6 +2208,153 @@ impl<'a> Cg<'a> {
             cg.i32c(2);
             cg.op(I32_ADD);
         };
+        // Math.abs, floor, ceil, round, sqrt of a number, min and max of
+        // two (builtins.rs math1; wasm's min and max order -0 and NaN as
+        // JavaScript does): the result into dst, done (0)
+        {
+            let m = crate::builtins::NF_MATH as i64;
+            let tn = l.t_num as i64;
+            let on = l.off_num;
+            self.op(BLOCK);
+            self.op(T_VOID);
+            // a native function
+            self.get(L_FB);
+            self.mem(I32_LOAD8_U, 0, 0);
+            self.i32c(l.t_obj as i64);
+            self.op(I32_NE);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_FB);
+            self.mem(I32_LOAD, 2, l.off_int);
+            self.obj_addr();
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T2 as u64);
+            self.mem(I32_LOAD, 2, l.off_class);
+            self.i32c(C_NATIVE as i64);
+            self.op(I32_NE);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_func);
+            self.i32c(m);
+            self.op(I32_SUB);
+            self.set(L_T3);
+            // the first argument a number (L_A)
+            self.get(L_ARGC);
+            self.i32c(1);
+            self.op(I32_LT_S);
+            self.get(L_FB);
+            self.mem(I32_LOAD8_U, 0, 32);
+            self.i32c(tn);
+            self.op(I32_NE);
+            self.op(I32_OR);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_FB);
+            self.mem(F64_LOAD, 3, 32 + on);
+            self.set(L_A);
+            let done = |cg: &mut Cg<'a>| {
+                // L_A into dst; 0
+                cg.set(L_A);
+                cg.get(L_DB);
+                cg.i32c(tn);
+                cg.mem(I32_STORE8, 0, 0);
+                cg.get(L_DB);
+                cg.get(L_A);
+                cg.mem(F64_STORE, 3, on);
+                cg.i32c(0);
+                cg.op(RETURN);
+            };
+            let is = |cg: &mut Cg<'a>, k: i64| {
+                cg.get(L_T3);
+                cg.i32c(k);
+                cg.op(I32_EQ);
+                cg.op(IF);
+                cg.op(T_VOID);
+            };
+            for (k, op) in [(0i64, F64_ABS), (1, F64_FLOOR), (2, F64_CEIL), (6, F64_SQRT)] {
+                is(self, k);
+                self.get(L_A);
+                self.op(op);
+                done(self);
+                self.op(END);
+            }
+            // round: x when not finite or 0, 0 / -0 within half of 0,
+            // else floor(x + 0.5)
+            is(self, 3);
+            {
+                let f = |cg: &mut Cg<'a>, x: f64| {
+                    cg.op(F64_CONST);
+                    cg.w.b.extend_from_slice(&x.to_le_bytes());
+                };
+                // x - x != 0 (inf, nan) or x == 0: x
+                self.get(L_A);
+                self.get(L_A);
+                self.op(F64_SUB);
+                f(self, 0.0);
+                self.op(F64_NE);
+                self.get(L_A);
+                f(self, 0.0);
+                self.op(F64_EQ);
+                self.op(I32_OR);
+                self.op(IF);
+                self.op(T_VOID);
+                self.get(L_A);
+                done(self);
+                self.op(END);
+                self.get(L_A);
+                f(self, 0.0);
+                self.op(F64_GT);
+                self.get(L_A);
+                f(self, 0.5);
+                self.op(F64_LT);
+                self.op(I32_AND);
+                self.op(IF);
+                self.op(T_VOID);
+                f(self, 0.0);
+                done(self);
+                self.op(END);
+                self.get(L_A);
+                f(self, 0.0);
+                self.op(F64_LT);
+                self.get(L_A);
+                f(self, -0.5);
+                self.op(F64_GE);
+                self.op(I32_AND);
+                self.op(IF);
+                self.op(T_VOID);
+                f(self, -0.0);
+                done(self);
+                self.op(END);
+                self.get(L_A);
+                f(self, 0.5);
+                self.op(F64_ADD);
+                self.op(F64_FLOOR);
+                done(self);
+            }
+            self.op(END);
+            // min, max of exactly two numbers
+            self.get(L_ARGC);
+            self.i32c(2);
+            self.op(I32_NE);
+            self.get(L_FB);
+            self.mem(I32_LOAD8_U, 0, 48);
+            self.i32c(tn);
+            self.op(I32_NE);
+            self.op(I32_OR);
+            self.op(BR_IF);
+            self.w.u(0);
+            for (k, op) in [(31i64, F64_MIN), (32, F64_MAX)] {
+                is(self, k);
+                self.get(L_A);
+                self.get(L_FB);
+                self.mem(F64_LOAD, 3, 48 + on);
+                self.op(op);
+                done(self);
+                self.op(END);
+            }
+            self.op(END);
+        }
         // block $done / block $slow
         self.op(BLOCK);
         self.op(T_VOID);
@@ -2202,7 +2364,8 @@ impl<'a> Cg<'a> {
         self.extra += 1;
         self.slow_at = Some(self.extra);
         {
-            // f: a script function of the cached proto
+            // f: a script function whose proto has compiled code it can be
+            // called with (Vm.jit_calls; L_CA its words)
             self.need_obj(L_FB, 0, 0);
             self.get(L_FB);
             self.mem(I32_LOAD, 2, l.off_int);
@@ -2212,11 +2375,27 @@ impl<'a> Cg<'a> {
             self.mem(I32_LOAD, 2, l.off_class);
             self.i32c(C_FUNCTION as i64);
             self.op(I32_NE);
+            self.fail_if(0);
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_func);
-            ld(self, 0);
-            self.op(I32_NE);
-            self.op(I32_OR);
+            self.i32c(8);
+            self.op(I32_MUL);
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_CA as u64);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_jit_calls_len);
+            self.op(I32_GE_U);
+            self.fail_if(0);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_jit_calls_ptr);
+            self.get(L_CA);
+            self.i32c(4);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.set(L_CA);
+            ld(self, 1);
+            self.i32c(0);
+            self.op(I32_LT_S);
             self.get(L_VM);
             self.mem(I32_LOAD8_U, 0, l.vm_gc_flag);
             self.op(I32_OR);
@@ -2234,8 +2413,9 @@ impl<'a> Cg<'a> {
             self.mem(I32_LOAD, 2, l.vm_frames_cap);
             self.op(I32_GE_U);
             self.op(I32_OR);
+            // the stack's room for the callee's frame (filled below)
             self.get(L_VM);
-            self.mem(I32_LOAD, 2, l.vm_stack_len);
+            self.mem(I32_LOAD, 2, l.vm_stack_cap);
             self.get(L_BP);
             f2(self);
             self.op(I32_ADD);
@@ -2252,6 +2432,72 @@ impl<'a> Cg<'a> {
             self.op(I32_AND);
             self.op(I32_OR);
             self.fail_if(0);
+            // a stack shorter than the callee's frame: undefined up to
+            // its end (L_T3 from, L_T4 to), as grow_stack
+            self.get(L_BP);
+            f2(self);
+            self.op(I32_ADD);
+            ld(self, 4);
+            self.op(I32_ADD);
+            self.set(L_T4);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_stack_len);
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T3 as u64);
+            self.get(L_T4);
+            self.op(I32_LT_U);
+            self.op(IF);
+            self.op(T_VOID);
+            {
+                let u = bytes_of(Val::Undef);
+                let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
+                let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
+                // L_T5 = &stack[len], L_T6 = &stack[need]
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.vm_stack_ptr);
+                self.set(L_T6);
+                self.get(L_T6);
+                self.get(L_T3);
+                self.i32c(16);
+                self.op(I32_MUL);
+                self.op(I32_ADD);
+                self.set(L_T5);
+                self.get(L_T6);
+                self.get(L_T4);
+                self.i32c(16);
+                self.op(I32_MUL);
+                self.op(I32_ADD);
+                self.set(L_T6);
+                self.op(BLOCK);
+                self.op(T_VOID);
+                self.op(LOOP);
+                self.op(T_VOID);
+                self.get(L_T5);
+                self.get(L_T6);
+                self.op(I32_GE_U);
+                self.op(BR_IF);
+                self.w.u(1);
+                self.get(L_T5);
+                self.w.byte(I64_CONST);
+                self.w.s(lo);
+                self.mem(I64_STORE, 3, 0);
+                self.get(L_T5);
+                self.w.byte(I64_CONST);
+                self.w.s(hi);
+                self.mem(I64_STORE, 3, 8);
+                self.get(L_T5);
+                self.i32c(16);
+                self.op(I32_ADD);
+                self.set(L_T5);
+                self.op(BR);
+                self.w.u(0);
+                self.op(END);
+                self.op(END);
+                self.get(L_VM);
+                self.get(L_T4);
+                self.mem(I32_STORE, 2, l.vm_stack_len);
+            }
+            self.op(END);
             // the caller goes on after the call
             self.get(L_VM);
             self.mem(I32_LOAD, 2, l.vm_frames_ptr);
@@ -2415,6 +2661,15 @@ impl<'a> Cg<'a> {
         self.w.u(1);
         self.extra -= 1;
         self.op(END);
+        if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+            let at = std::ptr::addr_of!(OPCOUNT) as usize as i64 + 840;
+            self.i32c(at);
+            self.i32c(at);
+            self.mem(I32_LOAD, 2, 0);
+            self.i32c(1);
+            self.op(I32_ADD);
+            self.mem(I32_STORE, 2, 0);
+        }
         // H_CALL(vm, bp, pi, pc, ri)
         self.get(L_VM);
         self.get(L_BP);
@@ -2544,6 +2799,22 @@ impl<'a> Cg<'a> {
         self.set(L_TAG);
         self.op(END);
         self.op(END);
+        if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+            // debug: OPCOUNT[200 + the code callx returns]
+            let at = std::ptr::addr_of!(OPCOUNT) as usize as i64 + 800;
+            self.get(L_TAG);
+            self.i32c(4);
+            self.op(I32_MUL);
+            self.i32c(at);
+            self.op(I32_ADD);
+            self.set(L_T2);
+            self.get(L_T2);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, 0);
+            self.i32c(1);
+            self.op(I32_ADD);
+            self.mem(I32_STORE, 2, 0);
+        }
         self.get(L_TAG);
         self.op(END);
         let out = std::mem::replace(&mut self.w, saved_w).b;
@@ -3426,6 +3697,17 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry:
         while pc < stop {
             let ins = code[pc];
             let b0 = cg.w.b.len();
+            if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+                // debug: count the op's runs (OPCOUNT)
+                let k = (ins.code & 255) as i64;
+                let at = std::ptr::addr_of!(OPCOUNT) as usize as i64 + k * 4;
+                cg.i32c(at);
+                cg.i32c(at);
+                cg.mem(I32_LOAD, 2, 0);
+                cg.i32c(1);
+                cg.op(I32_ADD);
+                cg.mem(I32_STORE, 2, 0);
+            }
             let wrote = cg.one(pc, ins);
             if MASK.with(|m| m.get()) & (1u64 << 59) != 0 {
                 let k = (ins.code & 255) as usize;
@@ -3930,6 +4212,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             }
         }
         vm.jit_fn[pi] = f;
+        calls_fill(vm, pi, f);
     }
     f
 }
@@ -4203,6 +4486,12 @@ fn h_set_prop(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
 // registers, cell[1] kvals, cell[2] a pc for code 3).
 
 static mut CELL: [i32; 16] = [0; 16];
+thread_local! {
+    /// debug (mask bit 54): native calls through H_CALL by native id
+    pub static NATS: std::cell::Cell<Vec<u32>> = const { std::cell::Cell::new(Vec::new()) };
+}
+/// debug (mask bit 54): runs of compiled ops by register op kind
+pub static mut OPCOUNT: [u32; 256] = [0; 256];
 /// A plain call's operands for the module's callx (call_op writes them):
 /// f, dst, argc, next, pc, rcode index, call cache address
 static mut CARGS: [i32; 8] = [0; 8];
@@ -4675,6 +4964,49 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
         let p = &vm.protos[tp];
         !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
     };
+    if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+        // debug: OPCOUNT 220 native/other, 221 plain compiled, 222 plain
+        // not compiled, 223 not plain
+        let k = if tp == usize::MAX {
+            if fo >= 0 && vm.objs[fo as usize].class == C_NATIVE {
+                let nf = vm.objs[fo as usize].func as usize;
+                if nf < 40 {
+                    // SAFETY: on the VM's thread
+                    unsafe {
+                        (*std::ptr::addr_of_mut!(OPCOUNT))[230 + nf % 26] += 0;
+                    }
+                }
+                NATS.with(|t| {
+                    let mut v = t.take();
+                    if v.len() <= nf {
+                        v.resize(nf + 1, 0);
+                    }
+                    v[nf] += 1;
+                    t.set(v);
+                });
+            }
+            220
+        } else if !plain {
+            223
+        } else if tp < vm.jit_fn.len() && vm.jit_fn[tp] >= 0 {
+            let p = &vm.protos[tp];
+            if p.arrow {
+                224
+            } else if p.env_size > 0 {
+                225
+            } else if (vm.stack.len() as int) < bp + w1 + 2 + p.fsize {
+                226
+            } else {
+                221
+            }
+        } else {
+            222
+        };
+        // SAFETY: on the VM's thread
+        unsafe {
+            (*std::ptr::addr_of_mut!(OPCOUNT))[k] += 1;
+        }
+    }
     if plain {
         // a plain function runs here, nested, and the compiled code goes
         // on after it; a generator, an async function, one that uses
@@ -5015,6 +5347,20 @@ fn set_cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
 /// A plain call at site ri went to compiled function f of proto tp: its
 /// call cache (call_push) names it, unless renter would do more than
 /// call_push does (an arrow's this, a scope to make).
+/// Vm.jit_calls for proto tp, compiled as table index f (callx)
+fn calls_fill(vm: &mut crate::vm::Vm, tp: usize, f: i64) {
+    let n = vm.protos.len().max(tp + 1) * 8;
+    if vm.jit_calls.len() < n {
+        vm.jit_calls.resize(n, -1);
+    }
+    let p = &vm.protos[tp];
+    let ok = f >= 0 && !p.arrow && p.env_size == 0 && !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async;
+    let w = [tp as i32, if ok { f as i32 } else { -1 }, p.nparams as i32, p.nslots as i32, p.fsize as i32, p.rentry as i32, if p.strict { 1 } else { 0 }, 0];
+    for k in 0..8 {
+        vm.jit_calls[tp * 8 + k] = w[k];
+    }
+}
+
 fn call_fill(vm: &mut crate::vm::Vm, ri: usize, tp: usize, f: i64) {
     if ri >= vm.jit_cache_at.len() || vm.jit_cache_at[ri] < 0 {
         return;
