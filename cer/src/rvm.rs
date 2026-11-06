@@ -25,6 +25,9 @@ pub const PIC_W: int = 5 + 2 * PIC_DEPTH + 1;
 /// entries per site, filled in turn
 pub const PIC_WAYS: int = 4;
 
+/// R_GET_METHOD's c at or below this: an mcache entry (MC_BASE - c)
+pub const MC_BASE: int = -100000;
+
 impl Vm {
     /// Register x of the frame at bp: a slot, or a constant when negative.
     #[inline(always)]
@@ -1581,7 +1584,25 @@ impl Vm {
     #[inline(never)]
     pub fn r_get_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let v = *self.rget(bp, w2);
-        if w3 <= -16 {
+        if w3 <= MC_BASE {
+            if let Val::Obj(o) = v {
+                // a method one prototype up: the site's entry in mcache
+                let k = ((MC_BASE - w3) * 5) as usize;
+                if k + 4 < self.mcache.len() && self.mcache[k] == self.ob(o).shape && self.mcache[k + 1] == (self.shape_epoch as i32) && self.ob(o).proto == self.mcache[k + 2] {
+                    let p = self.mcache[k + 2] as int;
+                    if self.ob(p).shape == self.mcache[k + 3] {
+                        let f = slot_at(self.ob(p), self.mcache[k + 4] as usize);
+                        if let Val::Obj(fo) = f {
+                            if self.ob(fo).class == C_FUNCTION {
+                                self.rset((bp + w1) as usize, f);
+                                self.rset((bp + w1 + 1) as usize, v);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        } else if w3 <= -16 {
             if let Val::Str(_) = v {
                 // a string's method: String.prototype's slot -16 - w3, its
                 // key checked as an inline cache's
@@ -1639,6 +1660,28 @@ impl Vm {
         self.r_get_method_slow(bp, rb, fi, pc, w0, w1, v, w3);
     }
 
+    /// Keeps a method found one prototype up (holder h, slot) in the
+    /// site's mcache entry, taking a new entry the first time.
+    fn mc_learn(&mut self, site: int, o: int, h: int, slot: i32, w3: int, f: &Val) {
+        let fun = if let Val::Obj(fo) = f { self.ob(*fo).class == C_FUNCTION } else { false };
+        if !fun || slot < 0 {
+            return;
+        }
+        let k = if w3 <= MC_BASE { (MC_BASE - w3) as usize } else { self.mcache.len() / 5 };
+        if k >= 100000000 {
+            return;
+        }
+        while self.mcache.len() < k * 5 + 5 {
+            self.mcache.push(-1);
+        }
+        self.mcache[k * 5] = self.ob(o).shape;
+        self.mcache[k * 5 + 1] = self.shape_epoch as i32;
+        self.mcache[k * 5 + 2] = h as i32;
+        self.mcache[k * 5 + 3] = self.ob(h).shape;
+        self.mcache[k * 5 + 4] = slot;
+        self.rcode[site as usize].c = (MC_BASE - k as int) as i32;
+    }
+
     #[inline(never)]
     fn r_get_method_slow(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, v: Val, w3: int) {
         self.frames[fi].pc = pc + 1;
@@ -1661,6 +1704,9 @@ impl Vm {
                 if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
                     f = if h >= 0 { self.objs[h as usize].get_slot(self.pic[(self.pic_way + 3) as usize] as usize) } else { Val::Undef };
                     done = true;
+                    if h >= 0 && (w3 == 0 || w3 <= MC_BASE) && self.ob(o).proto == h as i32 {
+                        self.mc_learn(rb + pc, o, h, self.pic[(self.pic_way + 3) as usize], w3, &f);
+                    }
                 }
             }
         }
@@ -1896,7 +1942,13 @@ impl Vm {
             self.colds[c].prim
         } else {
             let t = self.stack[(bp - 1) as usize];
-            if strict || is_obj(&t) { t } else { self.sloppy_this(t) }
+            if strict || is_obj(&t) {
+                t
+            } else if let Val::Undef = t {
+                Val::Obj(self.global)
+            } else {
+                self.sloppy_this(t)
+            }
         };
         let mut env = self.ob(fo).env as int;
         if env_size > 0 {
