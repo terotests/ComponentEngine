@@ -800,16 +800,6 @@ impl Vm {
                                 if self.slicing && self.frame_brk() {
                                     return;
                                 }
-                                if self.jit_on && !co && jit_hot(self, pi) {
-                                    // its compiled code from the entry
-                                    pc = self.jit_go(pi, bp, fi, pc, false);
-                                    if pc < 0 {
-                                        if pc == -1 || (pc == -2 && !self.unwind(base)) {
-                                            return;
-                                        }
-                                        continue 'frames;
-                                    }
-                                }
                                 continue;
                             }
                         }
@@ -2107,18 +2097,6 @@ pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bo
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _head: bool) -> int {
     pc
-}
-
-/// Whether function pi has compiled code to run from its entry (wjit.rs
-/// hot_fn counts its calls and compiles it when it is called often).
-#[ranger::target(rust)]
-pub fn jit_hot(vm: &mut Vm, pi: usize) -> bool {
-    crate::wjit::entry_hot(vm, pi)
-}
-
-#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn jit_hot(_vm: &mut Vm, _pi: usize) -> bool {
-    false
 }
 
 /// A loop head whose compiled code went back to the interpreter before a
