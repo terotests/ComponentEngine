@@ -468,3 +468,132 @@ var t; try { for (var j = 0; j < 100; j++) t = notDeclaredAnywhere2; } catch (e)
 out.join() + '|' + t
 ----
 0:undefinedundefinedundefinedundefined,50:undefinedundefinedundefinedundefined,100:undefinedundefinedundefinedundefined,150:undefinedundefinedundefinedundefined,200:pundefinedundefinedundefined,201:pundefinedundefinedundefined,250:pundefinedzundefined,251:pundefinedzundefined,300:oundefinedzundefined,301:oundefinedzundefined,350:obzundefined,351:obzundefined|ReferenceError
+
+==== js for-in in hot code: keys in order, hidden and symbol keys skipped, a key deleted or added in the loop, inherited keys, numeric keys
+function keys(o) { var r = []; for (var k in o) { r.push(k); if (k === 'b' && o.del) delete o.c; if (k === 'a' && o.add) o.z = 1; } return r.join(''); }
+var P = { inh: 1 }; var out = [];
+for (var i = 0; i < 300; i++) {
+  var o = { a: 1, b: 2, c: 3 };
+  if (i % 3 == 1) o.del = true;
+  if (i % 5 == 2) o.add = true;
+  var s = Symbol('s'); o[s] = 1;
+  Object.defineProperty(o, 'h', { value: 1, enumerable: false });
+  var q = Object.create(P); q.x = 1; q[2] = 1; q[10] = 1;
+  if (i > 290) out.push(keys(o) + '/' + keys(q));
+}
+out.join()
+----
+abc/210xinh,abdeladd/210xinh,abc/210xinh,abc/210xinh,abdel/210xinh,abc/210xinh,abcadd/210xinh,abdel/210xinh,abc/210xinh
+
+==== js for-of over arrays in hot code: holes, an array that grows and shrinks in the loop, arguments
+function sum(a) { var s = 0, n = 0; for (var v of a) { s += v === undefined ? 100 : v; if (n++ == 1 && a.grow) a.push(5); if (n == 1 && a.cut) a.length = 2; } return s; }
+function args() { var s = ''; for (var v of arguments) s += v; return s; }
+var out = [];
+for (var i = 0; i < 300; i++) {
+  var a = [1, 2, , 4]; if (i % 3 == 1) a.grow = true; if (i % 4 == 2) a.cut = true;
+  var r = sum(a) + ':' + args('x', i % 2);
+  if (i > 292) out.push(r);
+}
+out.join()
+----
+107:x1,3:x0,112:x1,107:x0,107:x1,8:x0,107:x1
+
+==== js hot natives in compiled code: hasOwnProperty (own, inherited, absent, numeric and new string keys, arrays, functions, call and direct), Array.isArray, RegExp methods
+var hop = Object.prototype.hasOwnProperty;
+var P = { inh: 1 }; var out = [];
+function f() {}
+for (var i = 0; i < 300; i++) {
+  var o = Object.create(P); o.a = 1; o['k' + (i % 3)] = 2; o[3] = 1;
+  var key = 'k' + (i % 2);
+  var r = [hop.call(o, 'a'), hop.call(o, 'inh'), o.hasOwnProperty('zz'), hop.call(o, key), hop.call(o, 3), hop.call(o, '3'),
+    hop.call([1, 2], 'length'), hop.call([1, 2], 1), hop.call(f, 'name'), hop.call('abc', 'length'),
+    Array.isArray([]), Array.isArray(o), Array.isArray(i), /a/.test('xa'), 'a-b'.split(/-/).length].map(function (b) { return b === true ? 1 : b === false ? 0 : b; }).join('');
+  if (i > 294) out.push(r);
+}
+var thrown; try { hop.call(null, 'a'); } catch (e) { thrown = e.constructor.name; }
+out.join() + thrown
+----
+100111111110012,100011111110012,100011111110012,100011111110012,100011111110012TypeError
+
+==== js Array push in hot code: numbers, strings, objects kept alive, a frozen array, an array with a far element, a new array without elements, push of two values
+var out = []; var keep = [];
+for (var i = 0; i < 300; i++) {
+  var a = []; var b = [1]; b[1000] = 2; var e = new Array(0);
+  for (var j = 0; j < 20; j++) { a.push(j); a.push('s' + j); a.push({ v: j }); }
+  b.push(3); e.push(7, 8);
+  var fz = Object.freeze([1]); var t = ''; try { fz.push(2); } catch (x) { t = x.constructor.name; }
+  if (i % 50 == 0) keep.push(a);
+  if (i > 296) out.push(a.length + ':' + a[1] + a[59].v + ':' + b.length + b[1001] + ':' + e.join('') + t);
+}
+for (var i = 0; i < 2000; i++) { var junk = { j: i, s: 'x' + i }; }
+out.join() + '|' + keep.map(function (a) { return a[2].v + a[58] + a[59].v; }).join()
+----
+60:s019:10023:78TypeError,60:s019:10023:78TypeError,60:s019:10023:78TypeError|0s1919,0s1919,0s1919,0s1919,0s1919,0s1919
+
+==== js obj[key] with string keys in hot code: own, inherited, absent, getters, a long shape, null prototype, keys made at run time, arrays and functions
+var P = { inh: 'i' }; Object.defineProperty(P, 'g', { get: function () { return 'G' + this.a; } });
+var big = {}; for (var k = 0; k < 80; k++) big['b' + k] = k;
+var bare = Object.create(null); bare.x = 'X';
+var out = [];
+function f() {}
+for (var i = 0; i < 300; i++) {
+  var o = Object.create(P); o.a = i; o.k0 = 'w'; o['k' + (i % 2)] = 'v';
+  var keys = ['a', 'inh', 'g', 'zz', 'k' + (i % 3), 'toString'];
+  var r = '';
+  for (var j = 0; j < keys.length; j++) { var v = o[keys[j]]; r += typeof v == 'function' ? 'F' : v; }
+  r += big['b' + (i % 80)] + bare['x'] + bare['y'] + [5, 6]['length'] + f['name'] + 'abc'['length'];
+  if (i > 295) out.push(r);
+}
+out.join()
+----
+296iG296undefinedundefinedF56Xundefined2f3,297iG297undefinedwF57Xundefined2f3,298iG298undefinedundefinedF58Xundefined2f3,299iG299undefinedundefinedF59Xundefined2f3
+
+==== js arrow functions called from hot compiled code: lexical this, arguments of the outer function, new.target, nested arrows
+function Box(v) { this.v = v; this.get = () => this.v; this.add = (d) => { this.v += d; return this; }; }
+function outer() { var f = () => arguments[0] + (new.target ? 'N' : 'C'); return f(); }
+var out = [];
+for (var i = 0; i < 300; i++) {
+  var b = new Box(i); var r = 0;
+  for (var j = 0; j < 3; j++) r += b.add(1).get();
+  var g = (x) => (y) => x * y;
+  var s = r + ':' + g(i)(2) + ':' + outer('o' + (i % 3)) + ':' + new outer('p').constructor.name;
+  if (i > 296) out.push(s);
+}
+out.join()
+----
+897:594:o0C:outer,900:596:o1C:outer,903:598:o2C:outer
+
+==== js number and string natives from hot compiled code: Math one and two argument functions, String(), isFinite, toString, non-number operands
+var out = [];
+var o = { valueOf: function () { return 4; }, toString: function () { return 'obj'; } };
+for (var i = 0; i < 300; i++) {
+  var x = i / 7 - 20;
+  var r = [Math.sin(x).toFixed(6), Math.cos(x).toFixed(6), Math.trunc(x), Math.sign(x), Math.atan2(x, 3).toFixed(6), Math.pow(2, i % 10), Math.imul(i, 3),
+    String(x), String('s' + i), String(o), String(), isFinite(x), isFinite(1 / 0), isFinite('5'), (i * 1.5).toString(), Math.sin(o).toFixed(4), Math.sqrt(-1)].join(' ');
+  if (i > 296) out.push(r);
+}
+out.join('|')
+----
+-0.423606 -0.905846 22 1 1.437828 128 891 22.42857142857143 s297 obj  true false true 445.5 -0.7568 NaN|-0.548258 -0.836309 22 1 1.438659 256 894 22.57142857142857 s298 obj  true false true 447 -0.7568 NaN|-0.661740 -0.749733 22 1 1.439481 512 897 22.714285714285715 s299 obj  true false true 448.5 -0.7568 NaN
+
+==== js proxy get traps run from register and compiled code: own handler trap, element keys, receiver, nested proxies, throwing trap, fixed-property invariant, no trap, trap behind a getter
+var log = [];
+var base = { a: 1, b: 2 };
+Object.defineProperty(base, 'fixed', { value: 7, writable: false, configurable: false });
+var h = { get: function (t, k, r) { log.push(typeof k === 'string' ? k : 'sym'); if (k === 'boom') throw new Error('trap ' + k); if (k === 'self') return r === px; return k in t ? t[k] * 10 : 'no:' + k; } };
+var px = new Proxy(base, h);
+var inner = new Proxy({ x: 5 }, { get: (t, k) => k === 'deep' ? px.a + px['b'] : t[k] });
+var outer = new Proxy(inner, { get: function (t, k, r) { return 'o' + t[k]; } });
+var plain = new Proxy({ q: 3 }, {});
+var getterH = new Proxy({ z: 1 }, { get get() { return function (t, k) { return 'G' + k; }; } });
+var out = [];
+for (var i = 0; i < 300; i++) {
+  var key = i % 2 ? 'a' : 'b';
+  var r = [px.a, px[key], px['m' + (i % 3)], px.self, outer.deep, outer.x, plain.q, plain['q'], getterH.z, getterH['w' + (i % 2)]];
+  try { px.boom; } catch (e) { r.push(e.message); }
+  try { r.push(px.fixed); } catch (e) { r.push('E:' + e.constructor.name); }
+  if (i > 297) out.push(r.join(' '));
+}
+out.join('|') + '#' + log.length + '#' + log.slice(0, 8).join(',')
+----
+10 20 no:m1 true o30 o5 3 3 Gz Gw0 trap boom E:TypeError|10 10 no:m2 true o30 o5 3 3 Gz Gw1 trap boom E:TypeError#2400#a,b,m0,self,a,b,boom,fixed

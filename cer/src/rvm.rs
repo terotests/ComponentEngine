@@ -733,6 +733,15 @@ impl Vm {
                         let v = self.rget(bp, (w2 as int)).clone();
                         let kv = self.rget(bp, (w3 as int)).clone();
                         self.frames[fi].pc = pc + 1;
+                        if let (Val::Obj(po), Val::Str(kh)) = (v, kv) {
+                            if self.objs[po as usize].class == C_PROXY && self.strs[kh as usize].atom >= 0 {
+                                let a = self.strs[kh as usize].atom as int;
+                                let fpos = bp + self.protos[pi].fsize;
+                                if self.r_proxy_get(po, a, v, fpos, bp + (w1 as int)) {
+                                    continue 'frames;
+                                }
+                            }
+                        }
                         let r = self.get_elem(&v, &kv);
                         if !self.throwing {
                             self.rset((bp + (w1 as int)) as usize, r);
@@ -1299,11 +1308,61 @@ impl Vm {
         }
         let v = if (w0 & 255) == R_GET_PROP { self.rget(bp, w2).clone() } else { self.frames[fi].this_val.clone() };
         self.frames[fi].pc = pc + 1;
+        if o >= 0 && self.objs[o as usize].class == C_PROXY {
+            let fpos = bp + self.protos[pi].fsize;
+            if self.r_proxy_get(o, atom, v, fpos, bp + w1) {
+                return true;
+            }
+        }
         let r = self.get(&v, atom);
         if !self.throwing {
             self.stack[(bp + w1) as usize] = r;
         }
         false
+    }
+
+    /// `p[atom]` (receiver `recv`) for a proxy of a plain object whose
+    /// handler has its own `get`, a plain JS function: the trap runs as a
+    /// call in this loop, not in a nested run, and its result goes to
+    /// `dst`. False when that does not apply: then nothing was done and
+    /// the caller takes the ordinary way (proxy_get_atom). The invariant
+    /// for a non-configurable own property of the target is checked
+    /// before the call (a trap that makes one on its own target as it runs
+    /// is not checked against it).
+    pub fn r_proxy_get(&mut self, p: int, atom: int, recv: Val, fpos: int, dst: int) -> bool {
+        let target = self.objs[p as usize].env as int;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT || self.objs[handler as usize].class != C_OBJECT {
+            return false;
+        }
+        let hs = self.find(handler, A_GET);
+        if hs < 0 || (self.attr_at(handler, hs) & P_ACCESSOR) != 0 {
+            return false;
+        }
+        let trap = self.objs[handler as usize].get_slot(hs as usize);
+        let go = obj_of(&trap);
+        if go < 0 || self.objs[go as usize].class != C_FUNCTION {
+            return false;
+        }
+        let plain = {
+            let q = &self.protos[self.objs[go as usize].func as usize];
+            !q.uses_args && q.rest < 0 && !q.class_ctor && !q.generator && !q.is_async
+        };
+        if !plain {
+            return false;
+        }
+        let ts = self.find(target, atom);
+        if ts >= 0 && (self.attr_at(target, ts) & P_FIXED) != 0 {
+            return false;
+        }
+        let k = self.key_val(atom);
+        self.grow_stack((fpos + 5) as usize);
+        self.stack[fpos as usize] = trap;
+        self.stack[(fpos + 1) as usize] = Val::Obj(handler);
+        self.stack[(fpos + 2) as usize] = Val::Obj(target);
+        self.stack[(fpos + 3) as usize] = k;
+        self.stack[(fpos + 4) as usize] = recv;
+        self.renter(go, fpos, 3, dst)
     }
 
     /// The stack at least `want` long, undefined past its end.

@@ -6637,7 +6637,10 @@ impl Vm {
 
     /// Empties slot `o` (garbage): its shape and Cold go back.
     fn release(&mut self, o: int) {
-        self.free_shape(o);
+        // shape 0 (arrays, scopes, most functions) is never owned
+        if self.objs[o as usize].shape != 0 {
+            self.free_shape(o);
+        }
         self.free_cold(o);
         let e = self.objs[o as usize].elems as usize;
         if e > 0 {
