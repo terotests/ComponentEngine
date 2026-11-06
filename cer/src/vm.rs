@@ -2966,6 +2966,82 @@ impl Vm {
         out
     }
 
+    /// A for-in over `o` can walk its shape in place: a plain object with
+    /// no elements on a shared shape with no index-like keys, whose
+    /// prototypes add no keys (for_in_own_only).
+    pub fn for_in_fast(&mut self, o: int) -> bool {
+        let ob = &self.objs[o as usize];
+        if ob.class != C_OBJECT || (ob.elems != 0 && !self.evecs[ob.elems as usize].v.is_empty()) {
+            return false;
+        }
+        let sh = ob.shape as int;
+        if self.shapes[sh as usize].owned {
+            return false;
+        }
+        let mut f = self.shapes[sh as usize].for_in;
+        if f == 0 {
+            // a shared shape never changes: whether it has an index-like
+            // key (which for-in visits first, in order) is asked once
+            f = 1;
+            let nk = self.shapes[sh as usize].nkeys as usize;
+            let hk = self.holder(sh);
+            let mut k: usize = 0;
+            while k < nk {
+                let a = self.shapes[hk].keys[k];
+                if self.atom_kind(a) == 2 {
+                    f = 2;
+                    break;
+                }
+                k += 1;
+            }
+            self.shapes[sh as usize].for_in = f;
+        }
+        f == 1 && self.for_in_own_only(o)
+    }
+
+    /// The iterator of a for-in that walks `o`'s shape: env the object,
+    /// func the next key's index, pos 3 | shape << 2.
+    pub fn for_in_iter(&mut self, o: int) -> int {
+        let ip = self.iter_proto;
+        let it = self.alloc(C_ITER, ip);
+        self.put_env(it, o);
+        let sh = self.objs[o as usize].shape;
+        let ob = &mut self.objs[it as usize];
+        ob.func = 0;
+        ob.pos = 3 | (sh << 2);
+        it
+    }
+
+    /// The next key of a shape-walking for-in (for_in_iter) from index `i`
+    /// of shape `sh`: hidden keys, symbols and private names are skipped,
+    /// and once the object's shape is another, keys it no longer has.
+    fn for_in_next(&mut self, it: int, src: int, i: int, sh: int) -> Option<Val> {
+        let nk = self.shapes[sh as usize].nkeys;
+        let hk = self.holder(sh);
+        let mut k = i;
+        while k < nk {
+            let a = self.shapes[hk].keys[k as usize];
+            let attr = self.shapes[hk].attrs[k as usize];
+            k += 1;
+            if (attr & P_HIDDEN) != 0 {
+                continue;
+            }
+            let kind = self.atom_kind(a);
+            if kind == 3 || kind == 4 {
+                continue;
+            }
+            let v = self.atom_val(a);
+            if self.objs[src as usize].shape as int != sh && !self.has_property(src, &v) {
+                // deleted since the loop began
+                continue;
+            }
+            self.objs[it as usize].func = k as i32;
+            return Some(v);
+        }
+        self.put_env(it, -1);
+        None
+    }
+
     /// No object on o's prototype chain (o itself aside) is a proxy or
     /// has an index or an enumerable string key.
     fn for_in_own_only(&self, o: int) -> bool {
@@ -3728,6 +3804,9 @@ impl Vm {
             let kind = self.objs[o as usize].pos as int;
             if src < 0 {
                 return None;
+            }
+            if (kind & 3) == 3 {
+                return self.for_in_next(o, src, i, kind >> 2);
             }
             let len = self.evecs[self.objs[src as usize].elems as usize].v.len() as int;
             if i >= len {
@@ -5660,6 +5739,14 @@ impl Vm {
             }
             OP_ITER_KEYS => {
                 let v = self.pop();
+                if let Val::Obj(o) = v {
+                    if self.for_in_fast(o) {
+                        // no key list: the iterator walks the object's shape
+                        let it = self.for_in_iter(o);
+                        self.stack.push(Val::Obj(it));
+                        return false;
+                    }
+                }
                 let keys = match &v {
                     Val::Obj(o) => self.for_in_keys(*o),
                     Val::Str(s) => {
