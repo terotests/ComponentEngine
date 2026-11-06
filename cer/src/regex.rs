@@ -87,6 +87,10 @@ pub struct Regex {
     nregs: int,
     /// the first unit every match starts with, -1 when not one
     first: int,
+    /// fset[u]: an ASCII unit u can start a match (empty: any unit can)
+    fset: Vec<bool>,
+    /// a unit past ASCII can start a match (with fset)
+    fhi: bool,
 }
 
 struct RParser {
@@ -1187,6 +1191,8 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
         error: String::new(),
         nregs: 0,
         first: -1,
+        fset: Vec::new(),
+        fhi: false,
     };
     for c in flags.chars() {
         let dup = match c {
@@ -1278,10 +1284,86 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
     re.ngroups = p.ngroups;
     re.names = p.names;
     re.name_index = p.name_index;
+    if re.first < 0 && !re.sticky {
+        re.start_set();
+    }
     re
 }
 
 impl Regex {
+    /// fset and fhi: the units a match can start with, from the code's
+    /// first consuming instructions; left empty when a match may start
+    /// with anything or be empty.
+    fn start_set(&mut self) {
+        let mut set: Vec<bool> = Vec::new();
+        let mut k: int = 0;
+        while k < 128 {
+            set.push(false);
+            k += 1;
+        }
+        let mut hi = false;
+        let mut seen: Vec<bool> = Vec::new();
+        let mut j: usize = 0;
+        while j < self.code.len() {
+            seen.push(false);
+            j += 1;
+        }
+        let mut work: Vec<int> = Vec::new();
+        work.push(1);
+        while !work.is_empty() {
+            let pc = work.pop().unwrap();
+            if pc < 0 || pc as usize >= self.code.len() || seen[pc as usize] {
+                continue;
+            }
+            seen[pc as usize] = true;
+            let ins = self.code[pc as usize];
+            if ins.op == I_CHAR {
+                let c = ins.a;
+                if c >= 128 {
+                    if ins.b != 0 {
+                        // a case fold may reach ASCII
+                        return;
+                    }
+                    hi = true;
+                } else {
+                    set[c as usize] = true;
+                    if ins.b != 0 {
+                        hi = true;
+                        let mut u: int = 0;
+                        while u < 128 {
+                            if self.eq(u, c, true) {
+                                set[u as usize] = true;
+                            }
+                            u += 1;
+                        }
+                    }
+                }
+            } else if ins.op == I_CLASS {
+                let mut u: int = 0;
+                while u < 128 {
+                    if self.class_has(ins.a, u, ins.b != 0) {
+                        set[u as usize] = true;
+                    }
+                    u += 1;
+                }
+                hi = true;
+            } else if ins.op == I_SPLIT {
+                work.push(ins.a);
+                work.push(ins.b);
+            } else if ins.op == I_JMP {
+                work.push(ins.a);
+            } else if ins.op == I_SAVE || ins.op == I_SETPOS || ins.op == I_CHKPOS || ins.op == I_BOL || ins.op == I_EOL || ins.op == I_WORDB || ins.op == I_NWORDB {
+                // nothing consumed: what follows starts the match
+                work.push(pc + 1);
+            } else {
+                // any unit, a back reference, a lookaround or an empty match
+                return;
+            }
+        }
+        self.fset = set;
+        self.fhi = hi;
+    }
+
     fn class_has(&self, ci: int, c: int, ic: bool) -> bool {
         let cl = &self.classes[ci as usize];
         let mut hit = in_ranges(&cl.ranges, c);
@@ -1585,6 +1667,18 @@ impl Regex {
         while s <= n {
             if self.first >= 0 && !self.sticky {
                 while s < n && input[s as usize] != self.first {
+                    s += 1;
+                }
+                if s >= n {
+                    return Vec::new();
+                }
+            } else if !self.fset.is_empty() {
+                // every match takes a unit first, one of fset's
+                while s < n {
+                    let u = input[s as usize];
+                    if if u < 128 { self.fset[u as usize] } else { self.fhi } {
+                        break;
+                    }
                     s += 1;
                 }
                 if s >= n {
