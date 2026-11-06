@@ -311,9 +311,40 @@ fn upper_special(c: char) -> String {
     String::new()
 }
 
+/// An ASCII `s` in upper (or lower) case; "" when `s` is not ASCII.
+#[ranger::target(rust)]
+fn ascii_case(s: &str, upper: bool) -> String {
+    if !s.is_ascii() {
+        return String::new();
+    }
+    if upper {
+        s.to_ascii_uppercase()
+    } else {
+        s.to_ascii_lowercase()
+    }
+}
+
+/// The other targets map every letter.
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn ascii_case(s: &str, upper: bool) -> String {
+    String::new()
+}
+
+/// Whether `s` is ASCII with no capital letter (its own lower case).
+#[ranger::target(rust)]
+pub fn ascii_lower(s: &str) -> bool {
+    s.is_ascii() && !s.bytes().any(|b| b.is_ascii_uppercase())
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn ascii_lower(s: &str) -> bool {
+    false
+}
+
 pub fn to_upper(s: &str) -> String {
-    if s.is_ascii() {
-        return s.to_ascii_uppercase();
+    let a = ascii_case(s, true);
+    if !a.is_empty() {
+        return a;
     }
     let mut out = String::new();
     for c in s.chars() {
@@ -330,9 +361,10 @@ pub fn to_upper(s: &str) -> String {
 }
 
 pub fn to_lower(s: &str) -> String {
-    if s.is_ascii() {
-        // no final sigma or dotted capital I to care about
-        return s.to_ascii_lowercase();
+    // ASCII: no final sigma or dotted capital I to care about
+    let a = ascii_case(s, false);
+    if !a.is_empty() {
+        return a;
     }
     let mut out = String::new();
     let cs = s.chars().collect::<Vec<char>>();

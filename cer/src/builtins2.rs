@@ -782,7 +782,7 @@ impl Vm {
                 let s = self.this_str(&this);
                 if let Val::Str(_) = this {
                     // already lower case: the same string, nothing made
-                    if s.is_ascii() && !s.bytes().any(|b| b.is_ascii_uppercase()) {
+                    if jsstr::ascii_lower(s.as_str()) {
                         return this;
                     }
                 }
