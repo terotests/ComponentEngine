@@ -28,6 +28,29 @@
 //!                                defined before it runs (the JSX runtime,
 //!                                defineModule)
 //!
+//! Time slices, for the sandbox demo (a script that never ends shares the
+//! page with others):
+//!
+//!   cx_set_slice(engine, ms)     scripts stop where `ms` milliseconds ran
+//!                                out (at a branch, call or return); 0: no
+//!                                slices
+//!   cx_start(engine, ptr, n)     as cx_eval; 2 when the slice ran out
+//!   cx_resume(engine)            another slice; 0 done, 1 threw, 2 the
+//!                                slice ran out again
+//!   cx_set_global(engine, name, nlen, val, vlen)
+//!                                sets the global `name` to a string, also
+//!                                while a script is suspended (no code runs)
+//!   cx_get_global(engine, name, nlen)
+//!                                the result is the global's value as text
+//!                                (a string as itself)
+//!   cx_snapshot(engine)          the result is the engine's whole state as
+//!                                text, a suspended script included; 0 ok,
+//!                                1 not now (a script is running)
+//!   cx_from_snapshot(ptr, n) -> engine
+//!                                an engine from that text (0 when it is not
+//!                                a snapshot); cx_resume goes on with the
+//!                                script where it stopped
+//!
 //! A frame of the page is a `cx_call`, not an `eval`: an eval compiles its
 //! script into the engine for good, a call only runs what is there.
 
@@ -192,4 +215,83 @@ pub unsafe extern "C" fn cx_emit_module(p: *const u8, n: usize, pp: *const u8, p
 pub extern "C" fn cx_runtime() {
     OUTPUT.with(|b| b.borrow_mut().clear());
     RESULT.with(|b| *b.borrow_mut() = cerxes::emit::runtime().into_bytes());
+}
+
+/// 0 done, 1 threw or a syntax error, 2 suspended (the slice ran out).
+fn slice_status(engine: &mut Engine, value: String) -> i32 {
+    if engine.is_suspended() {
+        let out = engine.output();
+        engine.clear_output();
+        OUTPUT.with(|b| *b.borrow_mut() = out.into_bytes());
+        RESULT.with(|b| b.borrow_mut().clear());
+        return 2;
+    }
+    finish(engine, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_set_slice(e: *mut Engine, ms: f64) {
+    (*e).set_slice(ms);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_start(e: *mut Engine, p: *const u8, n: usize) -> i32 {
+    let engine = &mut *e;
+    let src = text(p, n);
+    let r = engine.eval(src.as_str());
+    slice_status(engine, r)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_resume(e: *mut Engine) -> i32 {
+    let engine = &mut *e;
+    engine.error = String::new();
+    let r = engine.resume();
+    slice_status(engine, r)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_set_global(e: *mut Engine, np: *const u8, nn: usize, vp: *const u8, vn: usize) {
+    let engine = &mut *e;
+    let name = text(np, nn);
+    let a = engine.vm.intern(name.as_str());
+    let v = engine.vm.string_val(text(vp, vn));
+    let g = engine.vm.global;
+    engine.vm.set_obj(g, a, v);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_get_global(e: *mut Engine, np: *const u8, nn: usize) {
+    let engine = &mut *e;
+    let name = text(np, nn);
+    let a = engine.vm.intern(name.as_str());
+    let g = engine.vm.global;
+    let v = engine.vm.get_obj(g, a, &Val::Obj(g));
+    let s = match &v {
+        Val::Str(s) => engine.vm.sref(*s).to_string(),
+        _ => engine.vm.display(&v),
+    };
+    RESULT.with(|b| *b.borrow_mut() = s.into_bytes());
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_snapshot(e: *mut Engine) -> i32 {
+    let s = (*e).snapshot();
+    let failed = s.is_empty();
+    RESULT.with(|b| *b.borrow_mut() = s.into_bytes());
+    if failed {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cx_from_snapshot(p: *const u8, n: usize) -> *mut Engine {
+    let mut e = Engine::from_snapshot(text(p, n).as_str());
+    if !e.error.is_empty() {
+        return std::ptr::null_mut();
+    }
+    e.vm.regs = true;
+    Box::into_raw(Box::new(e))
 }

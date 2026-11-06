@@ -45,6 +45,7 @@ jobs:
           node playground/smoke.mjs --shot=playground-smoke.png
           node playground/smoke.mjs --zoo=conf --shot=playground-zoo.png
           node playground/smoke.mjs --evg --shot=playground-evg.png
+          node playground/smoke.mjs --sandbox --shot=playground-sandbox.png
 
       - uses: actions/upload-artifact@v4
         if: always()
