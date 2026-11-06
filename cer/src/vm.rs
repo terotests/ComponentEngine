@@ -331,6 +331,10 @@ pub struct Vm {
     pub jit_miss: Vec<int>,
     /// by rcode index: the pc after a call in compiled code (wjit.rs)
     pub jit_res: Vec<bool>,
+    /// by rcode index: the property site's cache in jit_caches, -1 none;
+    /// each cache keeps its buffer (compiled code has its address)
+    pub jit_cache_at: Vec<int>,
+    pub jit_caches: Vec<Vec<i32>>,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
     pub temp_roots: Vec<Val>,
@@ -570,6 +574,8 @@ impl Vm {
             jit_hot: Vec::new(),
             jit_miss: Vec::new(),
             jit_res: Vec::new(),
+            jit_cache_at: Vec::new(),
+            jit_caches: Vec::new(),
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
