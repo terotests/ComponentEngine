@@ -325,6 +325,10 @@ pub struct Vm {
     /// each cache keeps its buffer (compiled code has its address)
     pub jit_cache_at: Vec<int>,
     pub jit_caches: Vec<Vec<i32>>,
+    /// by proto, 8 words: what a compiled caller needs to call it directly
+    /// (wjit.rs callx: proto, table index, nparams, nslots, fsize, entry,
+    /// strict), table index -1 when it cannot be
+    pub jit_calls: Vec<i32>,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
     pub temp_roots: Vec<Val>,
@@ -560,6 +564,7 @@ impl Vm {
             jit_res: Vec::new(),
             jit_cache_at: Vec::new(),
             jit_caches: Vec::new(),
+            jit_calls: Vec::new(),
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,

@@ -216,5 +216,34 @@ pub extern "C" fn cx_jit_stats() {
         "{{\"compiled\":{},\"refused\":{},\"dropped\":{},\"bytes\":{},\"entries\":{},\"opsDone\":{},\"opsAll\":{},\"exits\":{:?}}}",
         s.compiled, s.refused, s.dropped, s.bytes, s.entries, s.ops_done, s.ops_all, s.exits
     );
+    let sz = cerxes::wjit::OPSIZE.with(|t| t.get());
+    let mut by: Vec<(u64, usize)> = sz.iter().enumerate().filter(|(_, &b)| b > 0).map(|(k, &b)| (b, k)).collect();
+    by.sort();
+    by.reverse();
+    let mut t = t;
+    if !by.is_empty() {
+        t.pop();
+        let parts: Vec<String> = by[..by.len().min(24)].iter().map(|(b, k)| format!("[{},{}]", k, b)).collect();
+        t = format!("{},\"opsize\":[{}]}}", t, parts.join(","));
+    }
+    // SAFETY: read on the VM's thread
+    let oc: [u32; 256] = unsafe { *std::ptr::addr_of!(cerxes::wjit::OPCOUNT) };
+    let mut byc: Vec<(u32, usize)> = oc.iter().enumerate().filter(|(_, &b)| b > 0).map(|(k, &b)| (b, k)).collect();
+    if !byc.is_empty() {
+        byc.sort();
+        byc.reverse();
+        t.pop();
+        let parts: Vec<String> = byc[..byc.len().min(30)].iter().map(|(b, k)| format!("[{},{}]", k, b)).collect();
+        t = format!("{},\"opcount\":[{}]}}", t, parts.join(","));
+    }
+    let nats = cerxes::wjit::NATS.with(|v| v.take());
+    if !nats.is_empty() {
+        let mut bn: Vec<(u32, usize)> = nats.iter().enumerate().filter(|(_, &b)| b > 0).map(|(k, &b)| (b, k)).collect();
+        bn.sort();
+        bn.reverse();
+        t.pop();
+        let parts: Vec<String> = bn[..bn.len().min(20)].iter().map(|(b, k)| format!("[{},{}]", k, b)).collect();
+        t = format!("{},\"nats\":[{}]}}", t, parts.join(","));
+    }
     RESULT.with(|b| *b.borrow_mut() = t.into_bytes());
 }
