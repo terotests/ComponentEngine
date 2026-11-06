@@ -70,10 +70,10 @@ function engine() {
         // from the function table: an export of a wasip1 module runs the
         // constructors and destructors around every call
         const t = x.__indirect_function_table;
-        jit.helpers = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow"].map((h, k) => t.get(x.cerxes_jit_helper(k)));
+        jit.helpers = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow", "ret"].map((h, k) => t.get(x.cerxes_jit_helper(k)));
       }
-      const env = { memory: x.memory };
-      ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow"].forEach((h, k) => (env[h] = jit.helpers[k]));
+      const env = { memory: x.memory, table: x.__indirect_function_table };
+      ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow", "ret"].forEach((h, k) => (env[h] = jit.helpers[k]));
       const inst = new WebAssembly.Instance(m, { env });
       const t = x.__indirect_function_table;
       const idx = t.grow(1);
