@@ -83,6 +83,7 @@ pub struct Layout {
     pub vm_evecs_ptr: u32,
     pub elems_size: u32,
     pub elems_vp: u32,
+    pub elems_vl: u32,
     /// JsObj.rc (the heap's references, Vm::inc/dec_o)
     pub off_rc: u32,
     /// for a property added in place (R_SET_PROP's transition): JsObj's
@@ -126,6 +127,7 @@ pub struct Layout {
     pub vm_number_proto: u32,
     pub vm_jit_calls_ptr: u32,
     pub vm_jit_calls_len: u32,
+    pub vm_global: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -186,6 +188,7 @@ pub fn probe() -> Layout {
         vm_evecs_ptr: 0,
         elems_size: 0,
         elems_vp: 0,
+        elems_vl: 0,
         off_rc: 0,
         off_ext: 0,
         off_vals_len: 0,
@@ -221,6 +224,7 @@ pub fn probe() -> Layout {
         vm_number_proto: 0,
         vm_jit_calls_ptr: 0,
         vm_jit_calls_len: 0,
+        vm_global: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -339,6 +343,7 @@ pub fn probe() -> Layout {
         l.vm_evecs_ptr = std::mem::offset_of!(crate::vm::Vm, evecs) as u32 + vp;
         l.elems_size = std::mem::size_of::<crate::value::Elems>() as u32;
         l.elems_vp = std::mem::offset_of!(crate::value::Elems, v) as u32 + vp;
+        l.elems_vl = std::mem::offset_of!(crate::value::Elems, v) as u32 + vl;
         l.off_rc = std::mem::offset_of!(JsObj, rc) as u32;
         let vc = 12 - vp - vl;
         l.off_ext = std::mem::offset_of!(JsObj, extensible) as u32;
@@ -352,6 +357,7 @@ pub fn probe() -> Layout {
         l.vm_frames_cap = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vc;
         l.vm_stack_cap = std::mem::offset_of!(crate::vm::Vm, stack) as u32 + vc;
         l.vm_slicing = std::mem::offset_of!(crate::vm::Vm, slicing) as u32;
+        l.vm_global = std::mem::offset_of!(crate::vm::Vm, global) as u32;
         l.fr_proto = std::mem::offset_of!(Frame, proto) as u32;
         l.fr_fobj = std::mem::offset_of!(Frame, fobj) as u32;
         l.fr_pc = std::mem::offset_of!(Frame, pc) as u32;
@@ -521,6 +527,9 @@ const L_RI: u32 = 27;
 const L_CA: u32 = 28;
 const L_FB: u32 = 29;
 const L_DB: u32 = 30;
+/// callx: the caller's proto and frame size (CARGS 7, 8)
+const L_CPI: u32 = 31;
+const L_CFS: u32 = 32;
 const L_A: u32 = 9; // f64
 const L_B: u32 = 10; // f64
 const L_Q0: u32 = 11; // i64 x4 (R_LOAD2)
@@ -539,6 +548,8 @@ const H_SLOW: u32 = 6;
 const SWITCH_MAX: usize = 64;
 const H_RET: u32 = 7;
 const NHELPERS: u32 = 8;
+/// the largest function body compiled (bytes)
+const MAX_BODY: usize = 96 * 1024;
 const HELPERS: [&str; 8] = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow", "ret"];
 /// what a compiled function returns for "the op threw" (the frame's pc is
 /// set) and "go on with the top frame" (frames changed)
@@ -552,6 +563,7 @@ const CALL_INDIRECT: u8 = 0x11;
 const I64_CONST: u8 = 0x42;
 const I32_STORE: u8 = 0x36;
 const I32_GE_U: u8 = 0x4f;
+const I32_LE_U: u8 = 0x4d;
 const I32_REM_S: u8 = 0x6f;
 const I32_ADD: u8 = 0x6a;
 const I32_MUL: u8 = 0x6c;
@@ -1232,6 +1244,73 @@ impl<'a> Cg<'a> {
         self.i32c(slot as i64 * 16);
         self.op(I32_ADD);
         self.set(L_T2);
+    }
+    /// dst = an array's element by a whole number in range (h_get_elem's
+    /// fast path), else fail
+    fn get_elem_fast(&mut self, dst: u32, ob: u32, key: Opnd, pc: i64) -> bool {
+        let l = self.lay;
+        self.need_obj(L_SP, ob * 16, pc);
+        self.need_num(key, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_ARRAY as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        // a whole number 0 <= k < 2^31 in L_T3
+        self.num(key);
+        self.set(L_A);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&0f64.to_le_bytes());
+        self.op(F64_GE);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&2147483647f64.to_le_bytes());
+        self.op(F64_LE);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        self.get(L_A);
+        self.op(I32_TRUNC_F64_S);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T3 as u64);
+        self.op(F64_CONVERT_I32_S);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.fail_if(pc);
+        // its Elems: k < v.len()
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_elems);
+        self.i32c(l.elems_size as i64);
+        self.op(I32_MUL);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_evecs_ptr);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T4 as u64);
+        self.mem(I32_LOAD, 2, l.elems_vl);
+        self.get(L_T3);
+        self.op(I32_LE_U);
+        self.fail_if(pc);
+        self.get(L_T4);
+        self.mem(I32_LOAD, 2, l.elems_vp);
+        self.get(L_T3);
+        self.i32c(16);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T4);
+        self.get(L_T4);
+        self.mem(I64_LOAD, 3, 0);
+        self.set(L_Q0);
+        self.get(L_T4);
+        self.mem(I64_LOAD, 3, 8);
+        self.set(L_Q0 + 1);
+        self.store_val(dst, L_Q0);
+        true
     }
     /// fail unless the value at b + off is an object
     fn need_obj(&mut self, b: u32, off: u32, pc: i64) {
@@ -2045,19 +2124,23 @@ impl<'a> Cg<'a> {
         let cell = cell_addr() as i64;
         let l = self.lay;
         let a = self.caches.get(pc as usize).copied().unwrap_or(0);
-        if plain && dst >= 0 && f >= 0 && argc >= 0 && MASK.with(|m| m.get()) & (1u64 << 57) == 0 && MASK.with(|m| m.get()) & (1u64 << 56) == 0 {
+        if plain && a != 0 && dst >= 0 && f >= 0 && argc >= 0 && MASK.with(|m| m.get()) & (1u64 << 57) == 0 && MASK.with(|m| m.get()) & (1u64 << 56) == 0 {
             // the call in the module's callx (one copy of the frame push,
             // the callee's call and the return), its operands in CARGS
             if sub == 1 {
                 self.store_undef(f as u32 + 1);
             }
+            // the operands in the site's record after its cache (call_rec),
+            // the cache's address in CARGS[6]
             let ca = cargs_addr() as i64;
             let rb = self.rb as i64;
-            for (k, v) in [f as i64, dst as i64, argc as i64, next, pc, rb + pc, a as i64].iter().enumerate() {
-                self.i32c(ca);
-                self.i32c(*v);
-                self.mem(I32_STORE, 2, k as u32 * 4);
+            for (k, v) in [f as i64, dst as i64, argc as i64, next, pc, rb + pc, a as i64, self.pi as i64, self.fsize as i64].iter().enumerate() {
+                // SAFETY: site_caches made the record CALL_REC words long
+                unsafe { *((a as usize + CACHE_N * 4 + k * 4) as *mut i32) = *v as i32 };
             }
+            self.i32c(ca);
+            self.i32c(a as i64);
+            self.mem(I32_STORE, 2, 6 * 4);
             for l in [L_SP, L_KV, L_KEY, L_BUDGET, L_VM, L_BP] {
                 self.get(l);
             }
@@ -2238,11 +2321,18 @@ impl<'a> Cg<'a> {
         self.w.byte(T_I64);
         self.w.u(7);
         self.w.byte(T_I32);
-        self.w.u(9);
+        self.w.u(11);
         self.w.byte(T_I32);
-        for (k, lc) in [L_F, L_DST, L_ARGC, L_NEXT, L_PC, L_RI, L_CA].iter().enumerate() {
-            self.i32c(ca);
-            self.mem(I32_LOAD, 2, k as u32 * 4);
+        // the site's cache from CARGS[6], the operands from its record
+        self.i32c(ca);
+        self.mem(I32_LOAD, 2, 6 * 4);
+        self.set(L_CA);
+        for (k, lc) in [L_F, L_DST, L_ARGC, L_NEXT, L_PC, L_RI, L_CA, L_CPI, L_CFS].iter().enumerate() {
+            if k == 6 {
+                continue;
+            }
+            self.get(L_CA);
+            self.mem(I32_LOAD, 2, (CACHE_N + k) as u32 * 4);
             self.set(*lc);
         }
         // fb = &f, db = &dst
@@ -2497,6 +2587,40 @@ impl<'a> Cg<'a> {
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_CA);
+            // a sloppy callee's this: undefined or null is the global object
+            // (sloppy_this), written into the this slot of the call
+            {
+                let ob = bytes_of(Val::Obj(0));
+                let lo = i64::from_le_bytes([ob[0], ob[1], ob[2], ob[3], ob[4], ob[5], ob[6], ob[7]]);
+                let hi = i64::from_le_bytes([ob[8], ob[9], ob[10], ob[11], ob[12], ob[13], ob[14], ob[15]]);
+                ld(self, 6);
+                self.op(I32_EQZ);
+                self.get(L_FB);
+                self.mem(I32_LOAD8_U, 0, 16);
+                self.i32c(l.t_undef as i64);
+                self.op(I32_EQ);
+                self.get(L_FB);
+                self.mem(I32_LOAD8_U, 0, 16);
+                self.i32c(l.t_null as i64);
+                self.op(I32_EQ);
+                self.op(I32_OR);
+                self.op(I32_AND);
+                self.op(IF);
+                self.op(T_VOID);
+                self.get(L_FB);
+                self.w.byte(I64_CONST);
+                self.w.s(lo);
+                self.mem(I64_STORE, 3, 16);
+                self.get(L_FB);
+                self.w.byte(I64_CONST);
+                self.w.s(hi);
+                self.mem(I64_STORE, 3, 24);
+                self.get(L_FB);
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.vm_global);
+                self.mem(I32_STORE, 2, 16 + l.off_int);
+                self.op(END);
+            }
             ld(self, 1);
             self.i32c(0);
             self.op(I32_LT_S);
@@ -2777,7 +2901,7 @@ impl<'a> Cg<'a> {
         // H_CALL(vm, bp, pi, pc, ri)
         self.get(L_VM);
         self.get(L_BP);
-        self.i32c(self.pi as i64);
+        self.get(L_CPI);
         self.get(L_PC);
         self.get(L_RI);
         self.op(CALL);
@@ -2823,7 +2947,7 @@ impl<'a> Cg<'a> {
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_stack_len);
         self.get(L_BP);
-        self.i32c(self.fsize as i64);
+        self.get(L_CFS);
         self.op(I32_ADD);
         self.op(I32_GE_U);
         self.op(I32_AND);
@@ -3270,6 +3394,14 @@ impl<'a> Cg<'a> {
             R_GET_METHOD if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
                 self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.prop_cache(w1 as u32, L_SP, w2 as u32 * 16, a, true, sub, p))
+            }
+            R_GET_ELEM if self.lay.obj_ok && w1 >= 0 && w2 >= 0 => {
+                let key = self.opnd(w3);
+                if key.is_k() {
+                    self.helper(H_GET_ELEM, p, next);
+                    return true;
+                }
+                self.with_helper(H_GET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.get_elem_fast(w1 as u32, w2 as u32, key, p))
             }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
@@ -3807,11 +3939,30 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
+pub fn compile(name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
     let n = code.len();
+    if MASK.with(|m| m.get()) & (1u64 << 58) != 0 {
+        // experiment: only code mostly of ops written inline without a call
+        let mut light = 0usize;
+        let mut all = 0usize;
+        for op in code.iter() {
+            let k = (op.code & 255) as int;
+            if k == R_NOP {
+                continue;
+            }
+            all += 1;
+            if matches!(k, R_MOVE | R_LOAD2 | R_ADD | R_SUB | R_MUL | R_ARITH | R_CMP | R_CMP_JF | R_CMP_JT | R_JUMP | R_JF | R_JT | R_JF_KEEP | R_JT_KEEP | R_JNN_KEEP | R_LOOP | R_CMP_JFK | R_CMP_JTK | R_GET_ENV | R_SET_ENV | R_GET_ELEM | R_INC_LOCAL | R_POSTINC | R_INC | R_ADD_LOCAL_POP | R_LOCAL_NULL_JF | R_CASE_INT_JT | R_CASE_JT | R_SWITCH | R_TYPEOF | R_THIS | R_NOT | R_TONUM | R_CHECK) {
+                light += 1;
+            }
+        }
+        let pct = MASK.with(|m| m.get()) >> 59 & 1;
+        if light * 100 < all * if pct == 1 { 70 } else { 50 } {
+            return None;
+        }
+    }
     let mut starts = vec![false; n];
     starts[0] = true;
     // where a call enters it (h_call)
@@ -3991,16 +4142,21 @@ pub fn compile(code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, r
     cg.op(UNREACHABLE);
     cg.op(END); // function
     let done = cg.done;
-    let cx = if cg.callx { Some(cg.callx_body()) } else { None };
-    let hs = cg.hstore_body();
-    Some(Compiled { bytes: module(&cg.w.b, &hs, cx.as_deref(), lay), done, ops: n as u32, exits: cg.exits })
+    if cg.w.b.len() > MAX_BODY {
+        // V8's optimizing compile grows faster than the body (a 467 KB
+        // body took 1.5 s on Chart.js, 65 KB ones 70 ms): such a function
+        // stays with the interpreter
+        return None;
+    }
+    Some(Compiled { bytes: module(&cg.w.b, name), done, ops: n as u32, exits: cg.exits })
 }
 
 /// A module of one function `f` (sp, kv, pc, budget, vm, bp) -> i32 over
 /// the imported memory env.memory and the helpers env.<name> (vm, bp, pi,
 /// pc, rcode index) -> i32; its body `body` (locals and code).
-pub fn module(body: &[u8], hstore: &[u8], callx: Option<&[u8]>, lay: Layout) -> Vec<u8> {
-    let mut m = WBuf::new();
+/// The types, imports (the helpers, and with `rt` look, codes, hstore and
+/// callx), memory and table every module of this file starts with.
+fn module_head(m: &mut WBuf, rt: bool) {
     m.b.extend_from_slice(b"\0asm");
     m.b.extend_from_slice(&[1, 0, 0, 0]);
     // types: 0 f, 1 a helper, 2 look
@@ -4017,12 +4173,20 @@ pub fn module(body: &[u8], hstore: &[u8], callx: Option<&[u8]>, lay: Layout) -> 
     }
     m.section(1, &s);
     let mut s = WBuf::new();
-    s.u(2 + NHELPERS as u64);
+    s.u(2 + NHELPERS as u64 + if rt { RT_FNS.len() as u64 } else { 0 });
     for h in HELPERS.iter() {
         s.name("env");
         s.name(h);
         s.byte(0x00);
         s.u(1);
+    }
+    if rt {
+        for (n, t) in RT_FNS.iter() {
+            s.name("rt");
+            s.name(n);
+            s.byte(0x00);
+            s.u(*t as u64);
+        }
     }
     s.name("env");
     s.name("memory");
@@ -4037,49 +4201,112 @@ pub fn module(body: &[u8], hstore: &[u8], callx: Option<&[u8]>, lay: Layout) -> 
     s.byte(0x00);
     s.u(0);
     m.section(2, &s);
-    let nfn = if callx.is_some() { 5 } else { 4 };
-    let mut s = WBuf::new();
-    s.u(nfn);
-    s.u(0);
-    s.u(2);
-    s.u(2);
-    s.u(0);
-    if callx.is_some() {
-        s.u(0);
+}
+
+fn name_section(m: &mut WBuf, list: &[(u32, String)]) {
+    let mut fnames = WBuf::new();
+    fnames.u(list.len() as u64);
+    for (i, n) in list.iter() {
+        fnames.u(*i as u64);
+        fnames.name(n);
     }
+    let mut s = WBuf::new();
+    s.name("name");
+    s.section(1, &fnames);
+    m.section(0, &s);
+}
+
+/// The module of one compiled function: f, which imports look, codes,
+/// hstore and callx from the runtime module (rt_module), so that V8
+/// compiles those once and not again for every function.
+pub fn module(body: &[u8], name: &str) -> Vec<u8> {
+    let mut m = WBuf::new();
+    module_head(&mut m, true);
+    let mut s = WBuf::new();
+    s.u(1);
+    s.u(0);
     m.section(3, &s);
     let mut s = WBuf::new();
     s.u(1);
     s.name("f");
     s.byte(0x00);
-    s.u(NHELPERS as u64);
+    s.u(F_SELF as u64);
     m.section(7, &s);
-    let lk = look_body(lay);
     let mut s = WBuf::new();
-    s.u(nfn);
+    s.u(1);
     s.u(body.len() as u64);
     s.b.extend_from_slice(body);
-    s.u(lk.len() as u64);
-    s.b.extend_from_slice(&lk);
-    let cd = codes_body();
-    s.u(cd.len() as u64);
-    s.b.extend_from_slice(&cd);
-    s.u(hstore.len() as u64);
-    s.b.extend_from_slice(hstore);
-    if let Some(cx) = callx {
-        s.u(cx.len() as u64);
-        s.b.extend_from_slice(cx);
-    }
     m.section(10, &s);
+    name_section(&mut m, &[(F_SELF, format!("js:{}", name))]);
     m.b
 }
 
-/// The module's function index of look.
-const F_LOOK: u32 = NHELPERS + 1;
-/// ... of codes, and of callx (when the code has a plain call)
-const F_CODES: u32 = NHELPERS + 2;
-const F_HSTORE: u32 = NHELPERS + 3;
-const F_CALLX: u32 = NHELPERS + 4;
+/// The runtime module: look, codes, hstore and callx, exported for the
+/// compiled functions' modules.
+pub fn rt_module(lay: Layout) -> Vec<u8> {
+    let kv: [Val; 0] = [];
+    let rt: [int; 0] = [];
+    let mut cg = Cg {
+        w: WBuf::new(),
+        lay,
+        kvals: &kv,
+        rtab: &rt,
+        exit_d: 0,
+        extra: 0,
+        backs: 0,
+        done: 0,
+        exits: [0; 64],
+        pi: 0,
+        rb: 0,
+        slow_at: None,
+        caches: Vec::new(),
+        atoms: Vec::new(),
+        fsize: 0,
+        callx: false,
+        cur_kind: 0,
+    };
+    let hs = cg.hstore_body();
+    let cx = cg.callx_body();
+    let lk = look_body(lay);
+    let cd = codes_body();
+    let mut m = WBuf::new();
+    module_head(&mut m, false);
+    let mut s = WBuf::new();
+    s.u(RT_FNS.len() as u64);
+    for (_, t) in RT_FNS.iter() {
+        s.u(*t as u64);
+    }
+    m.section(3, &s);
+    let mut s = WBuf::new();
+    s.u(RT_FNS.len() as u64);
+    for (k, (n, _)) in RT_FNS.iter().enumerate() {
+        s.name(n);
+        s.byte(0x00);
+        s.u((F_LOOK + k as u32) as u64);
+    }
+    m.section(7, &s);
+    let mut s = WBuf::new();
+    s.u(RT_FNS.len() as u64);
+    for b in [&lk, &cd, &hs, &cx] {
+        s.u(b.len() as u64);
+        s.b.extend_from_slice(b);
+    }
+    m.section(10, &s);
+    let names: Vec<(u32, String)> = RT_FNS.iter().enumerate().map(|(k, (n, _))| (F_LOOK + k as u32, format!("jit:{}", n))).collect();
+    name_section(&mut m, &names);
+    m.b
+}
+
+/// Function indices: look, codes, hstore and callx are the runtime
+/// module's own functions (rt_module) after the helpers, and imports of a
+/// compiled function's module, whose f comes after them (F_SELF)
+const F_LOOK: u32 = NHELPERS;
+const F_CODES: u32 = NHELPERS + 1;
+const F_HSTORE: u32 = NHELPERS + 2;
+const F_CALLX: u32 = NHELPERS + 3;
+const F_SELF: u32 = NHELPERS + 4;
+/// rt_module's functions: (name, type)
+const RT_FNS: [(&str, u32); 4] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0)];
 
 /// codes(tag, pc, next) -> the pc a helper's code leaves at (helper_codes)
 fn codes_body() -> Vec<u8> {
@@ -4315,6 +4542,21 @@ mod host {
     }
 }
 
+thread_local! {
+    /// 1 the runtime module is installed, -1 it could not be
+    static RT: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// The runtime module (rt_module) installed with the host before the
+/// first compiled function, whose module imports from it.
+fn rt_ready(lay: Layout) -> bool {
+    if RT.with(|r| r.get()) == 0 {
+        let ok = host::put(&rt_module(lay)) >= 0;
+        RT.with(|r| r.set(if ok { 1 } else { -1 }));
+    }
+    RT.with(|r| r.get()) == 1
+}
+
 /// Whether this build can run compiled code.
 pub fn available() -> bool {
     cfg!(all(target_arch = "wasm32", feature = "wjit")) && probe().ok
@@ -4406,8 +4648,8 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             eprintln!("{}", crate::regs::dump(p, &vm.rcode));
         }
         if rb + n <= vm.rcode.len() {
-            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
-                let idx = host::put(&c.bytes);
+            if let Some(c) = compile(&format!("{}#{}", p.name, pi), &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
+                let idx = if rt_ready(lay) { host::put(&c.bytes) } else { -1 };
                 STATS.with(|s| {
                     let mut t = s.get();
                     if idx >= 0 {
@@ -4742,7 +4984,7 @@ thread_local! {
 pub static mut OPCOUNT: [u32; 256] = [0; 256];
 /// A plain call's operands for the module's callx (call_op writes them):
 /// f, dst, argc, next, pc, rcode index, call cache address
-static mut CARGS: [i32; 8] = [0; 8];
+static mut CARGS: [i32; 16] = [0; 16];
 
 fn cargs_addr() -> usize {
     // SAFETY: only the address is taken
@@ -5372,6 +5614,8 @@ const CACHE_DEPTH: u32 = 3;
 const CACHE_W: u32 = 5 + 2 * CACHE_DEPTH;
 /// the ways, then the next way to replace
 const CACHE_N: usize = (CACHE_WAYS * CACHE_W) as usize + 1;
+/// words after a cache: a global site's value (4), a call's operands (9)
+const CALL_REC: usize = 9;
 
 /// The address of site ri's cache, made empty when it has none. The
 /// caches are the Vm's (another machine's shapes are not these).
@@ -5381,7 +5625,7 @@ fn site_cache(vm: &mut crate::vm::Vm, ri: usize) -> u32 {
     }
     if vm.jit_cache_at[ri] < 0 {
         // room for a global site's value (site_caches): the buffer stays
-        let mut x: Vec<i32> = Vec::with_capacity(CACHE_N + 4);
+        let mut x: Vec<i32> = Vec::with_capacity(CACHE_N + CALL_REC);
         x.resize(CACHE_N, -1);
         x[CACHE_N - 1] = 0;
         vm.jit_cache_at[ri] = vm.jit_caches.len() as int;
@@ -5493,7 +5737,15 @@ fn site_caches(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<u3
     for i in 0..n {
         let k = (vm.rcode[rb + i].code & 255) as int;
         let _ = pi;
-        if k == R_GET_PROP || k == R_GET_THIS_PROP || k == R_GET_METHOD || k == R_CALL || k == R_SET_PROP {
+        if k == R_CALL {
+            // the cache, then the call's record (call_op writes it)
+            site_cache(vm, rb + i);
+            let at = vm.jit_cache_at[rb + i] as usize;
+            if vm.jit_caches[at].len() == CACHE_N {
+                vm.jit_caches[at].resize(CACHE_N + CALL_REC, 0);
+            }
+            out[i] = vm.jit_caches[at].as_ptr() as usize as u32;
+        } else if k == R_GET_PROP || k == R_GET_THIS_PROP || k == R_GET_METHOD || k == R_SET_PROP {
             out[i] = site_cache(vm, rb + i);
         } else if k == R_GET_GLOBAL {
             // after the cache, the value Obj(global) for prop_cache to read
