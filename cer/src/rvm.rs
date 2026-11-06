@@ -662,6 +662,19 @@ impl Vm {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
+                        if o >= 0 && c >= 65536 && ((rb + pc) as usize) < self.ic2.len() {
+                            // the site's second shape (ic2): the two swap
+                            let site = (rb + pc) as usize;
+                            let c2 = self.ic2[site];
+                            if c2 >= 65536 && ((c2 >> 16) as int) == self.ob(o).shape as int {
+                                self.rcode[site].c = c2;
+                                self.ic2[site] = c as i32;
+                                let r = slot_at(self.ob(o), (c2 & 65535) as usize);
+                                self.rset((bp + (w1 as int)) as usize, r);
+                                pc = (pc + 1 + ((w0 >> 16) as int));
+                                continue;
+                            }
+                        }
                         if c == -4 && o >= 0 && self.ob(o).class == C_ARRAY {
                             // a site r_get_prop_slow saw reading an array's length
                             let n = evec_at(&self.evecs, self.ob(o).elems as usize).v.len() as double;
@@ -680,6 +693,18 @@ impl Vm {
                             self.put_slot(o, ((w3 & 65535) as int), val);
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
+                        }
+                        if o >= 0 && w3 >= 65536 && ((w0 >> 8) & 255) == 0 && ((rb + pc) as usize) < self.ic2.len() {
+                            let site = (rb + pc) as usize;
+                            let c2 = self.ic2[site];
+                            if c2 >= 65536 && ((c2 >> 16) as int) == self.ob(o).shape as int {
+                                self.rcode[site].c = c2;
+                                self.ic2[site] = w3 as i32;
+                                let val = self.rget(bp, (w2 as int)).clone();
+                                self.put_slot(o, ((c2 & 65535) as int), val);
+                                pc = (pc + 1 + ((w0 >> 16) as int));
+                                continue;
+                            }
                         }
                         self.r_set_prop_slow(o, pi, rb, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
                     }
@@ -1216,9 +1241,21 @@ impl Vm {
             }
         }
         if o >= 0 && h0 == -1 {
-            let c = self.rcode[(rb + pc) as usize].c;
+            let site = (rb + pc) as usize;
+            let c = self.rcode[site].c;
+            let c2 = self.ic2_hit(site, o);
+            if c2 >= 0 {
+                self.rcode[site].c = c2;
+                self.ic2[site] = c;
+                let r = self.objs[o as usize].get_slot((c2 & 65535) as usize);
+                self.stack[(bp + w1) as usize] = r;
+                return false;
+            }
             let slot = self.ic_get(o, atom, (c as int), pi, pc + 1);
-            self.rcode[(rb + pc) as usize].c = self.protos[pi].code[pc as usize].c;
+            self.rcode[site].c = self.protos[pi].code[pc as usize].c;
+            if slot >= 0 && c >= 65536 {
+                self.ic2_keep(site, c);
+            }
             if slot >= 0 {
                 let r = self.objs[o as usize].get_slot(slot as usize).clone();
                 self.stack[(bp + w1) as usize] = r;
@@ -1507,10 +1544,21 @@ impl Vm {
             let slot = if w3 >= 65536 && (w3 >> 16) == self.objs[o as usize].shape as int {
                 w3 & 65535
             } else {
-                let atom = self.ratom(pi, pc);
-                let s = self.ic_set(o, atom, w3, pi, pc + 1);
-                self.rcode[(rb + pc) as usize].c = self.protos[pi].code[pc as usize].c;
-                s
+                let site = (rb + pc) as usize;
+                let c2 = self.ic2_hit(site, o);
+                if c2 >= 0 {
+                    self.rcode[site].c = c2;
+                    self.ic2[site] = w3 as i32;
+                    (c2 & 65535) as int
+                } else {
+                    let atom = self.ratom(pi, pc);
+                    let s = self.ic_set(o, atom, w3, pi, pc + 1);
+                    self.rcode[site].c = self.protos[pi].code[pc as usize].c;
+                    if s >= 0 && w3 >= 65536 {
+                        self.ic2_keep(site, w3 as i32);
+                    }
+                    s
+                }
             };
             if slot >= 0 {
                 self.put_slot(o, slot, val.clone());
@@ -1541,6 +1589,30 @@ impl Vm {
         if ((w0 >> 8) & 255) == 1 && !self.throwing {
             self.stack[(bp + w1) as usize] = val;
         }
+    }
+
+    /// The second cache of register site `site` when it holds `o`'s shape
+    /// (shape * 65536 + slot), else -1.
+    #[inline]
+    fn ic2_hit(&self, site: usize, o: int) -> i32 {
+        if site < self.ic2.len() {
+            let c2 = self.ic2[site];
+            if c2 >= 65536 && (c2 >> 16) == self.objs[o as usize].shape {
+                return c2;
+            }
+        }
+        -1
+    }
+
+    /// Keeps `c` (a cache the site's c held before a miss) as its second.
+    fn ic2_keep(&mut self, site: usize, c: i32) {
+        if site >= self.ic2.len() {
+            let n = if self.rcode.len() > site { self.rcode.len() } else { site + 1 };
+            while self.ic2.len() < n {
+                self.ic2.push(-1);
+            }
+        }
+        self.ic2[site] = c;
     }
 
     /// Whether an add of the property of the set op at pc to `o` may skip
@@ -1752,7 +1824,9 @@ impl Vm {
         let mut i = from;
         while i < from + n {
             let v = self.stack[i as usize];
-            self.push_elem(a, v);
+            // push_elem without looking up the vector each time
+            self.inc(&v);
+            self.evecs[e].v.push(v);
             i += 1;
         }
         self.rset(from as usize, Val::Obj(a));

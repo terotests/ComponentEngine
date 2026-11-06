@@ -286,6 +286,10 @@ pub struct Vm {
     /// an entry holds while shape_epoch, which every change of an owned
     /// shape moves, stays
     pub rpic: Vec<i32>,
+    /// per register site (rbase + pc): a second own-slot inline cache
+    /// (shape * 65536 + slot) for a property read or write that sees two
+    /// shapes; the site's c and this swap on a hit
+    pub ic2: Vec<i32>,
     pub pic: Vec<i32>,
     pub shape_epoch: int,
     /// a collection or reclaim is due at the next safe point (gc_due)
@@ -546,6 +550,7 @@ impl Vm {
             sbytes_limit: SBYTES_MIN,
             sempty: Rc::new(String::new()),
             rpic: Vec::new(),
+            ic2: Vec::new(),
             pic: Vec::new(),
             shape_epoch: 0,
             gc_flag: false,
@@ -6745,10 +6750,11 @@ impl Vm {
             }
             j += 1;
         }
-        let ne = self.evecs[self.objs[x as usize].elems as usize].v.len();
+        let xe = self.objs[x as usize].elems as usize;
+        let ne = self.evecs[xe].v.len();
         j = 0;
         while j < ne {
-            match self.evecs[self.objs[x as usize].elems as usize].v[j] {
+            match self.evecs[xe].v[j] {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
