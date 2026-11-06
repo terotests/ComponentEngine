@@ -528,6 +528,10 @@ pub fn radix_string(x: double, radix: int) -> String {
     if !is_finite(x) {
         return if x < 0.0 { String::from("-Infinity") } else { String::from("Infinity") };
     }
+    let quick = quick_radix(x, radix);
+    if !quick.is_empty() {
+        return quick;
+    }
     let neg = x < 0.0;
     let mut v = if neg { -x } else { x };
     let digits = "0123456789abcdefghijklmnopqrstuvwxyz".chars().collect::<Vec<char>>();
@@ -567,6 +571,56 @@ pub fn radix_string(x: double, radix: int) -> String {
     v = 0.0;
     let _ = v;
     out
+}
+
+/// Rust: radix_string's digits written as bytes into one string, no
+/// char vectors (the same digits as its own way). Empty on the other
+/// targets.
+#[ranger::target(rust)]
+fn quick_radix(x: double, radix: int) -> String {
+    const DIG: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let neg = x < 0.0;
+    let v = if neg { -x } else { x };
+    let mut ip = v.floor();
+    let mut fp = v - ip;
+    let r = radix as f64;
+    let mut buf = [0u8; 1100];
+    let mut p = buf.len();
+    if ip == 0.0 {
+        p -= 1;
+        buf[p] = b'0';
+    }
+    while ip > 0.0 {
+        let q = (ip / r).floor();
+        let d = (ip - q * r) as usize;
+        p -= 1;
+        buf[p] = DIG[d];
+        ip = q;
+    }
+    let mut out = String::with_capacity(buf.len() - p + 56);
+    if neg {
+        out.push('-');
+    }
+    for b in &buf[p..] {
+        out.push(*b as char);
+    }
+    if fp > 0.0 {
+        out.push('.');
+        let mut count = 0;
+        while fp > 0.0 && count < 52 {
+            fp *= r;
+            let d = fp.floor();
+            out.push(DIG[d as usize] as char);
+            fp -= d;
+            count += 1;
+        }
+    }
+    out
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn quick_radix(_x: double, _radix: int) -> String {
+    String::new()
 }
 
 /// Number.prototype.toFixed
@@ -636,7 +690,7 @@ fn few_decimals(x: double, a: double) -> String {
         if x < 0.0 {
             s.push('-');
         }
-        s.push_str(int_to_string(a as i64).as_str());
+        push_int(&mut s, a as i64);
         return s;
     }
     let mut k: i64 = 1;
@@ -661,15 +715,20 @@ fn few_decimals(x: double, a: double) -> String {
             if x < 0.0 {
                 s.push('-');
             }
-            s.push_str(int_to_string(whole).as_str());
+            push_int(&mut s, whole);
             s.push('.');
-            let f = int_to_string(frac);
-            let mut z = k - f.as_bytes().len() as i64;
+            let mut nd: i64 = 1;
+            let mut t = frac / 10;
+            while t > 0 {
+                nd += 1;
+                t /= 10;
+            }
+            let mut z = k - nd;
             while z > 0 {
                 s.push('0');
                 z -= 1;
             }
-            s.push_str(f.as_str());
+            push_int(&mut s, frac);
             return s;
         }
         k += 1;
@@ -677,6 +736,25 @@ fn few_decimals(x: double, a: double) -> String {
         pi *= 10;
     }
     String::new()
+}
+
+/// The decimal digits of `n` (>= 0) appended to `s`, no temporary string.
+#[ranger::target(rust)]
+fn push_int(s: &mut String, n: i64) {
+    let mut buf = [0u8; 20];
+    let mut v = n as u64;
+    let mut p = buf.len();
+    loop {
+        p -= 1;
+        buf[p] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for b in &buf[p..] {
+        s.push(*b as char);
+    }
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
