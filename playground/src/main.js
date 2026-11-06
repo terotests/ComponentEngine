@@ -3,7 +3,7 @@
 // The page: which engines were built (engines.json, written by build.mjs),
 // one worker per engine, the benchmark and the editor.
 
-import { WORKLOADS, SAMPLE, wrap } from "./workloads.js";
+import { WORKLOADS, SAMPLE, SAMPLES, wrap } from "./workloads.js";
 import { setupZoo } from "./zoo.js";
 
 const $ = (id) => document.getElementById(id);
@@ -367,7 +367,7 @@ async function runEditor() {
     let t = m.times && m.times.length ? fmtMs(median(m.times)) + " ms" : m.timeout ? "timeout" : "error";
     if (m.loadMs > 1) t += ` · loaded in ${fmtMs(m.loadMs)} ms`;
     card.querySelector(".time").textContent = t;
-    if (e.id === "native") reference = text;
+    if (e.id === "native") reference = m.error ? null : text;
     else if (reference !== null && !m.error) {
       const same = text === reference;
       const tag = document.createElement("span");
@@ -439,8 +439,14 @@ async function main() {
     o.textContent = w.name;
     sample.append(o);
   }
+  for (const w of SAMPLES) {
+    const o = document.createElement("option");
+    o.value = w.id;
+    o.textContent = w.name;
+    sample.append(o);
+  }
   sample.onchange = () => {
-    const w = WORKLOADS.find((x) => x.id === sample.value);
+    const w = WORKLOADS.find((x) => x.id === sample.value) || SAMPLES.find((x) => x.id === sample.value);
     if (w) code.value = w.code.replace(/\bSCALE\b/g, "1");
     sample.value = "";
   };

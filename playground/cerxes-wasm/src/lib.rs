@@ -4,6 +4,7 @@
 //!   cx_alloc(n) -> ptr           a buffer the page writes text into
 //!   cx_free(ptr, n)
 //!   cx_new() -> engine           a fresh engine (built-ins, prelude, JSX runtime)
+//!   cx_new_with(flags) -> engine as cx_new; flags bit 0: the stack machine
 //!   cx_eval(engine, ptr, n)      runs a TSX script; 0 ok, 1 uncaught / parse error
 //!   cx_call(engine, name, nlen, arg, alen)
 //!                                calls the global function `name` with one
@@ -74,6 +75,16 @@ pub extern "C" fn cx_new() -> *mut Engine {
     // on the register machine (rvm.rs), as the cerxes CLI with CER_REGS=1
     let mut e = Engine::new();
     e.vm.regs = true;
+    Box::into_raw(Box::new(e))
+}
+
+/// `cx_new` with a choice of machine, for the playground's variants:
+/// `flags` bit 0 runs the engine on the stack machine (vm.rs) instead of the
+/// register machine.
+#[no_mangle]
+pub extern "C" fn cx_new_with(flags: i32) -> *mut Engine {
+    let mut e = Engine::new();
+    e.vm.regs = flags & 1 == 0;
     Box::into_raw(Box::new(e))
 }
 
