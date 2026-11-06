@@ -405,3 +405,48 @@ function f(o) { var back = o.d === 'b'; var at = back ? 1 : 2; var fw = o.d !== 
 f({ d: 'b' }) + ';' + f({ d: 'x' })
 ----
 true,1,false,4;false,2,true,3
+
+==== js switch: string cases, a table of numbers, default and fall-through in a hot callee
+function s(t) { switch (t) { case 'a': return 1; case 'b': case 'c': return 2; case 3: return 3; default: return 9; } }
+function n(x) { var r = 0; switch (x) { case 0: r += 1; case 1: r += 2; break; case 2: r = 5; break; case 3: r = 7; break; case 5: r = 8; break; default: r = -1; } return r; }
+var out = [];
+for (var i = 0; i < 300; i++) { out.push(s(['a', 'b', 'c', 3, '3', 'a' + 'b'.slice(1)][i % 6]) + ':' + n([0, 1, 2, 3, 4, 5, 6, 2.5, -1, '1', null][i % 11])); }
+out.slice(0, 11).join() + '|' + out.slice(289).join()
+----
+1:3,2:2,2:5,3:7,9:-1,1:8,1:-1,2:-1,2:-1,3:-1,9:-1|2:7,2:-1,3:8,9:-1,1:-1,1:-1,2:-1,2:-1,3:3,9:2,1:5
+
+==== js Math calls from a compiled callee of compiled code keep the callee's registers
+function f(a, b) { return [Math.abs(a), Math.sqrt(b), Math.round(a), Math.min(a, b), Math.max(a, b), Math.floor(b), Math.ceil(a)]; }
+var out = [];
+for (var r = 0; r < 300; r++) out.push(f(r - 50.5, r * 0.5).join(':'));
+out[0] + '|' + out[299]
+----
+50.5:0:-50:-50.5:0:0:-50|248.5:12.227019260637483:249:149.5:248.5:149:249
+
+==== js array elements by index in hot code: in range, out of range, fractions, negative, holes, strings and objects
+function g(a, i) { return a[i]; }
+var arr = [1, 'x', { v: 3 }, null, undefined, , 7.5]; var out = [];
+for (var r = 0; r < 300; r++) { var i = [0, 1, 2, 3, 4, 5, 6, 7, -1, 1.5, '2', 2 ** 32][r % 12]; var v = g(r % 25 == 24 ? 'str' : arr, i); out.push(typeof v == 'object' && v ? v.v : v); }
+out.slice(0, 12).join() + '|' + out.slice(288).join()
+----
+1,x,3,,,,7.5,,,,3,|1,x,3,,,,7.5,,,,3,
+
+==== js a hot sloppy callee called plainly sees the global object as this, a strict one undefined
+var g = this;
+function s1() { return this === g; }
+function s2() { 'use strict'; return this === undefined; }
+var o = { m: s1 };
+var n = 0;
+for (var i = 0; i < 300; i++) { if (s1()) n++; if (s2()) n++; if (s1.call(null)) n++; if (o.m()) n += 10; }
+n
+----
+900
+
+==== js a getter that recurses deep (the stack grows and moves) inside hot code; the code goes on right
+function deep(n) { var a = n, b = a + 1, c = b + 1; return n == 0 ? 0 : 1 + deep(n - 1) + (c - b - 1); }
+var o = { get v() { return deep(this.d); } };
+var s = 0, t = [];
+for (var i = 0; i < 400; i++) { o.d = i * 7; var x = o.v; var y = x + i; s += y; if (i % 50 == 0) t.push(y); }
+s + '|' + t.join()
+----
+638400|0,400,800,1200,1600,2000,2400,2800

@@ -58,6 +58,14 @@ use cerxes::value::*;
 use cerxes::Engine;
 use std::cell::RefCell;
 
+// small blocks from size-class free lists (dlmalloc costs about a tenth of
+// a React update in wasm)
+#[path = "../../../cerxes/salloc/salloc.rs"]
+mod salloc;
+
+#[global_allocator]
+static GLOBAL: salloc::SmallAlloc = salloc::SmallAlloc;
+
 thread_local! {
     static RESULT: RefCell<Vec<u8>> = RefCell::new(Vec::new());
     static OUTPUT: RefCell<Vec<u8>> = RefCell::new(Vec::new());
@@ -215,6 +223,63 @@ pub unsafe extern "C" fn cx_emit_module(p: *const u8, n: usize, pp: *const u8, p
 pub extern "C" fn cx_runtime() {
     OUTPUT.with(|b| b.borrow_mut().clear());
     RESULT.with(|b| *b.borrow_mut() = cerxes::emit::runtime().into_bytes());
+}
+
+/// The baseline JIT (cerxes::wjit): `on` 1 turns it on for this engine,
+/// a function is compiled after `min` back edges. The host must give the
+/// import cerxes_jit.install (a build with the `wjit` feature); 1 when this
+/// build can run compiled code.
+#[no_mangle]
+pub unsafe extern "C" fn cx_jit(e: *mut Engine, on: i32, min: i32) -> i32 {
+    let engine = &mut *e;
+    let ok = cerxes::wjit::available();
+    engine.vm.jit_on = on != 0 && ok;
+    engine.vm.jit_min = min as i64;
+    if ok {
+        1
+    } else {
+        0
+    }
+}
+
+/// The JIT's counters as the result text (cx_result_ptr / _len).
+#[no_mangle]
+pub extern "C" fn cx_jit_stats() {
+    let s = cerxes::wjit::stats();
+    let t = format!(
+        "{{\"compiled\":{},\"refused\":{},\"dropped\":{},\"bytes\":{},\"entries\":{},\"opsDone\":{},\"opsAll\":{},\"exits\":{:?}}}",
+        s.compiled, s.refused, s.dropped, s.bytes, s.entries, s.ops_done, s.ops_all, s.exits
+    );
+    let sz = cerxes::wjit::OPSIZE.with(|t| t.get());
+    let mut by: Vec<(u64, usize)> = sz.iter().enumerate().filter(|(_, &b)| b > 0).map(|(k, &b)| (b, k)).collect();
+    by.sort();
+    by.reverse();
+    let mut t = t;
+    if !by.is_empty() {
+        t.pop();
+        let parts: Vec<String> = by[..by.len().min(24)].iter().map(|(b, k)| format!("[{},{}]", k, b)).collect();
+        t = format!("{},\"opsize\":[{}]}}", t, parts.join(","));
+    }
+    // SAFETY: read on the VM's thread
+    let oc: [u32; 256] = unsafe { *std::ptr::addr_of!(cerxes::wjit::OPCOUNT) };
+    let mut byc: Vec<(u32, usize)> = oc.iter().enumerate().filter(|(_, &b)| b > 0).map(|(k, &b)| (b, k)).collect();
+    if !byc.is_empty() {
+        byc.sort();
+        byc.reverse();
+        t.pop();
+        let parts: Vec<String> = byc.iter().enumerate().filter(|(i, (_, k))| *i < 30 || *k >= 100).map(|(_, x)| x).map(|(b, k)| format!("[{},{}]", k, b)).collect();
+        t = format!("{},\"opcount\":[{}]}}", t, parts.join(","));
+    }
+    let nats = cerxes::wjit::NATS.with(|v| v.take());
+    if !nats.is_empty() {
+        let mut bn: Vec<(u32, usize)> = nats.iter().enumerate().filter(|(_, &b)| b > 0).map(|(k, &b)| (b, k)).collect();
+        bn.sort();
+        bn.reverse();
+        t.pop();
+        let parts: Vec<String> = bn[..bn.len().min(20)].iter().map(|(b, k)| format!("[{},{}]", k, b)).collect();
+        t = format!("{},\"nats\":[{}]}}", t, parts.join(","));
+    }
+    RESULT.with(|b| *b.borrow_mut() = t.into_bytes());
 }
 
 /// 0 done, 1 threw or a syntax error, 2 suspended (the slice ran out).
