@@ -52,6 +52,40 @@ material and its licences are in `zoo/`.
 CEr's WASM build calls the few WASI functions it needs (clock, random,
 stdout) through `src/wasi.js`; there are no files and no network.
 
+## CErXes sandbox demo
+
+**Live:** <https://terotests.github.io/ComponentEngine/sandbox/>
+
+Four CErXes engines, each running a program that never ends: a fractal
+(Mandelbrot, a Julia set, Burning Ship, z³ + c) drawn in passes of finer
+blocks and then ever more iterations. CErXes stops a script by itself when
+its time slice runs out (`Engine::set_slice`, at a branch, call or return,
+inside `while (true)` too) and goes on with `resume`, so all four share one
+thread and the page stays responsive. Each card picks its host:
+
+| Host | What runs where |
+| --- | --- |
+| page | one `cerxes.wasm` instance on the page, one engine per card, the cards' slices in turn between the page's tasks |
+| Worker | a Web Worker per card: a thread of its own; the slices let the worker take messages (zoom, freeze) while it computes |
+| iframe | a hidden same-origin iframe per card: a document and instance of its own, on the page's thread |
+
+Clicking a picture zooms in (Shift-click or right-click: out); the program
+sees the new `view` at its next row and starts the new picture. **Freeze**
+writes the engine's whole state, the suspended loop included, as text
+(`cx_snapshot`, ~300 KB); **Thaw** makes a new engine from it. Changing a
+card's host moves the running program that way. **Fetch results** reads each
+program's `result` global between two slices without running any code. Each
+card's **Code** button opens its program for editing.
+
+| Part | What |
+| --- | --- |
+| `cerxes-wasm/src/lib.rs` | `cx_set_slice`, `cx_start`, `cx_resume` (0 done, 1 threw, 2 slice ran out), `cx_set_global` / `cx_get_global`, `cx_snapshot` / `cx_from_snapshot` |
+| `src/sandbox/core.js` | the engine side, the same in every host: one engine per sandbox, a round of slices, then a yield |
+| `src/sandbox/programs.js` | the four programs and their protocol (`view`, `progress`, `result`, `row` lines) |
+| `src/sandbox/main.js`, `worker.js`, `frame.js` | the page, the Worker host, the iframe host |
+
+`node playground/smoke.mjs --sandbox` checks it in Chromium.
+
 ## CErXes + EVG game demo
 
 **Live:** <https://terotests.github.io/ComponentEngine/evg/>
