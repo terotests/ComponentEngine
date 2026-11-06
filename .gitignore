@@ -6,6 +6,7 @@ test/vendor/
 playground/dist/
 playground/cer-wasm/target/
 playground/cerxes-wasm/target/
+playground/cerxes-wasm/target-jit/
 playground/cerxes-wasm/target-small/
 playground/ce-wasm/build/
 playground/src/stubs/

@@ -26,3 +26,6 @@ debug = false
 panic = "abort"
 
 [workspace]
+
+[features]
+wjit = ["cerxes/wjit"]

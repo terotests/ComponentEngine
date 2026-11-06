@@ -308,6 +308,27 @@ pub struct Vm {
     /// slices are on for this run: set by Engine::run / resume only, so a
     /// host call (call_top, jobs) never stops half way
     pub slicing: bool,
+    /// the baseline JIT (wjit.rs) runs hot loops: a host that can run its
+    /// code sets it
+    pub jit_on: bool,
+    /// back edges a function takes before it is compiled
+    pub jit_min: int,
+    /// by proto: the compiled function (a table index), -1 not yet, -2 none
+    pub jit_fn: Vec<int>,
+    /// by proto: back edges taken while not compiled
+    pub jit_hot: Vec<int>,
+    /// by rcode index of a loop head: entries that left at once (wjit.rs)
+    pub jit_miss: Vec<int>,
+    /// by rcode index: the pc after a call in compiled code (wjit.rs)
+    pub jit_res: Vec<bool>,
+    /// by rcode index: the property site's cache in jit_caches, -1 none;
+    /// each cache keeps its buffer (compiled code has its address)
+    pub jit_cache_at: Vec<int>,
+    pub jit_caches: Vec<Vec<i32>>,
+    /// by proto, 8 words: what a compiled caller needs to call it directly
+    /// (wjit.rs callx: proto, table index, nparams, nslots, fsize, entry,
+    /// strict), table index -1 when it cannot be
+    pub jit_calls: Vec<i32>,
     /// functions compiled from the prelude (protos below this) are built-ins
     pub prelude_protos: int,
     pub temp_roots: Vec<Val>,
@@ -535,6 +556,15 @@ impl Vm {
             ticks: SLICE_TICKS,
             suspended: false,
             slicing: false,
+            jit_on: false,
+            jit_min: 64,
+            jit_fn: Vec::new(),
+            jit_hot: Vec::new(),
+            jit_miss: Vec::new(),
+            jit_res: Vec::new(),
+            jit_cache_at: Vec::new(),
+            jit_caches: Vec::new(),
+            jit_calls: Vec::new(),
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,

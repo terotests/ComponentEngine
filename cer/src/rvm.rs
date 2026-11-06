@@ -67,6 +67,47 @@ impl Vm {
         val_put(&mut self.stack, i, v);
     }
 
+    /// A back edge to pc with the JIT on: once the function is hot its
+    /// compiled code (wjit.rs) runs from pc; the pc the interpreter goes on
+    /// at, or -1 when the time slice ended there (the frame is stopped).
+    pub fn jit_run(&mut self, pi: usize, rb: int, bp: int, fi: usize, pc: int) -> int {
+        let ri = (rb + pc) as usize;
+        while self.jit_miss.len() <= ri {
+            self.jit_miss.push(0);
+        }
+        if self.jit_miss[ri] > JIT_MISS_MAX {
+            return pc;
+        }
+        while self.jit_hot.len() <= pi {
+            self.jit_hot.push(0);
+        }
+        if self.jit_hot[pi] < self.jit_min {
+            self.jit_hot[pi] += 1;
+            return pc;
+        }
+        self.jit_go(pi, bp, fi, pc, true)
+    }
+
+    /// Runs the compiled code of function pi from pc: the pc to go on at,
+    /// -1 the time slice ended (the frame is stopped), -2 an op threw (the
+    /// frame's pc is set), -3 frames changed (go on with the top one).
+    pub fn jit_go(&mut self, pi: usize, bp: int, fi: usize, pc: int, head: bool) -> int {
+        let budget = if self.slicing { SLICE_TICKS } else { 1073741824 };
+        let r = jit_enter(self, pi, bp, pc, budget, head);
+        if r >= 0 || r == -2 || r == -3 {
+            return r;
+        }
+        // the budget ran out: read the clock at this back edge
+        let at = -4 - r;
+        if self.slicing {
+            self.ticks = 1;
+            if self.brk(fi, at) {
+                return -1;
+            }
+        }
+        at
+    }
+
     /// The atom of the property op at pc (its stack op's operand).
     pub fn ratom(&self, pi: usize, pc: int) -> int {
         let op = self.protos[pi].code[pc as usize];
@@ -117,7 +158,7 @@ impl Vm {
     /// `x += v` on a closure variable (R_ADD_ENV): w1 the old value, w2
     /// what is added, w3 the env index, the depth in w0's sub byte.
     #[inline(never)]
-    fn r_add_env(&mut self, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+    pub fn r_add_env(&mut self, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let depth = (w0 >> 8) & 255;
         if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, w1), self.rget(bp, w2)) {
             let r = *x + *y;
@@ -133,7 +174,7 @@ impl Vm {
 
     /// `o[k]` as a method (R_GET_METHOD_ELEM): f to dst, o to dst + 1.
     #[inline(never)]
-    fn r_get_method_elem(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+    pub fn r_get_method_elem(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
         self.frames[fi].pc = pc + 1;
         let v = self.rget(bp, w2).clone();
         let k = self.rget(bp, w3).clone();
@@ -161,7 +202,7 @@ impl Vm {
     /// R_TONUM / R_INC on a value that is not a number: kind 0 ToNumeric,
     /// 1 minus, 2 + 1, 3 - 1.
     #[inline(never)]
-    fn r_unary_slow(&mut self, bp: int, fi: usize, pc: int, kind: int, w1: int, w2: int) {
+    pub fn r_unary_slow(&mut self, bp: int, fi: usize, pc: int, kind: int, w1: int, w2: int) {
         self.frames[fi].pc = pc + 1;
         let v = self.rget(bp, w2).clone();
         let r = if kind == 0 {
@@ -179,7 +220,7 @@ impl Vm {
     /// R_CHECK's error: a let/const read too early (kind 0, `name` its
     /// constant) or destructuring null / undefined.
     #[inline(never)]
-    fn r_check_fail(&mut self, pi: usize, kind: int, name: int) {
+    pub fn r_check_fail(&mut self, pi: usize, kind: int, name: int) {
         if kind == 0 {
             let n = self.protos[pi].consts[name as usize].clone();
             let ns = self.to_string(&n);
@@ -400,20 +441,40 @@ impl Vm {
                             self.frames[fi].pc = (t as int);
                             self.rgc(want);
                         }
+                        let back = (t as int) <= pc;
                         pc = (t as int);
                         if self.slicing && self.brk(fi, pc) {
                             return;
                         }
+                        if back && self.jit_on {
+                            pc = self.jit_run(pi, rb, bp, fi, pc);
+                            if pc < 0 {
+                                if pc == -1 || (pc == -2 && !self.unwind(base)) {
+                                    return;
+                                }
+                                continue 'frames;
+                            }
+                        }
                         continue;
                     }
                     R_JUMP => {
-                        if (w1 as int) <= pc && self.gc_due() {
+                        let back = (w1 as int) <= pc;
+                        if back && self.gc_due() {
                             self.frames[fi].pc = (w1 as int);
                             self.rgc(want);
                         }
                         pc = (w1 as int);
                         if self.slicing && self.brk(fi, pc) {
                             return;
+                        }
+                        if back && self.jit_on {
+                            pc = self.jit_run(pi, rb, bp, fi, pc);
+                            if pc < 0 {
+                                if pc == -1 || (pc == -2 && !self.unwind(base)) {
+                                    return;
+                                }
+                                continue 'frames;
+                            }
                         }
                         continue;
                     }
@@ -843,6 +904,16 @@ impl Vm {
                             if self.slicing && self.frame_brk() {
                                 return;
                             }
+                            if self.jit_on && ((rb + pc) as usize) < self.jit_res.len() && self.jit_res[(rb + pc) as usize] {
+                                // after a call out of compiled code: back in
+                                pc = self.jit_go(pi, bp, fi, pc, false);
+                                if pc < 0 {
+                                    if pc == -1 || (pc == -2 && !self.unwind(base)) {
+                                        return;
+                                    }
+                                    continue 'frames;
+                                }
+                            }
                             continue;
                         } else {
                             self.stack.truncate(fpos);
@@ -1088,7 +1159,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn r_add_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+    pub fn r_add_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
         let a = self.rget(bp, w2).clone();
         let b = self.rget(bp, w3).clone();
         self.frames[fi].pc = pc + 1;
@@ -1099,7 +1170,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn r_arith_slow(&mut self, code: int, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+    pub fn r_arith_slow(&mut self, code: int, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
         let a = self.rget(bp, w2).clone();
         let b = self.rget(bp, w3).clone();
         self.frames[fi].pc = pc + 1;
@@ -1111,7 +1182,7 @@ impl Vm {
 
     /// R_GET_PROP / R_GET_THIS_PROP past its inline cache.
     #[inline(never)]
-    fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
+    pub fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
         let atom = self.ratom(pi, pc);
         let mut h0: int = -1;
         if o >= 0 && self.rcode[(rb + pc) as usize].c == -3 {
@@ -1342,7 +1413,7 @@ impl Vm {
 
     /// R_SET_PROP past its inline cache, or one that keeps its value.
     #[inline(never)]
-    fn r_set_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+    pub fn r_set_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let val = self.rget(bp, w2).clone();
         let mut done = false;
         if o >= 0 && w3 <= -2 {
@@ -1415,7 +1486,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn r_set_elem_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, val: Val) {
+    pub fn r_set_elem_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, val: Val) {
         let target = self.rget(bp, w1).clone();
         let kv = self.rget(bp, w2).clone();
         self.frames[fi].pc = pc + 1;
@@ -1425,7 +1496,7 @@ impl Vm {
     /// R_GET_METHOD: the method and its receiver into w1, w1 + 1; the
     /// chain cache answers here, the rest goes to r_get_method_slow.
     #[inline(never)]
-    fn r_get_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+    pub fn r_get_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let v = *self.rget(bp, w2);
         if let Val::Obj(o) = v {
             if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
@@ -1510,7 +1581,7 @@ impl Vm {
     /// changed (the caller goes on through 'frames); else the result is in
     /// its slot and the stack is the frame's again.
     #[inline(never)]
-    fn r_call_slow(&mut self, fo: int, fpos: int, argc: int, bp: int, w3: int, want: usize) -> bool {
+    pub fn r_call_slow(&mut self, fo: int, fpos: int, argc: int, bp: int, w3: int, want: usize) -> bool {
         let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
         let nf = self.frames.len();
         self.stack.truncate((fpos + argc + 2) as usize);
@@ -1593,7 +1664,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn r_step_push(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int) {
+    pub fn r_step_push(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int) {
         let op = self.protos[pi].code[pc as usize];
         let mut p2 = pc + 1;
         self.frames[fi].pc = p2;
@@ -1605,7 +1676,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn r_step_k(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+    pub fn r_step_k(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let k = (w0 >> 8) & 255;
         if k >= 1 {
             let x = self.rget(bp, w2).clone();
@@ -1628,7 +1699,7 @@ impl Vm {
     /// The next value of the iterator in slot w1 into slot w3; false when
     /// it is done (or threw).
     #[inline(never)]
-    fn r_iter_next(&mut self, bp: int, fi: usize, pc: int, w1: int, w3: int) -> bool {
+    pub fn r_iter_next(&mut self, bp: int, fi: usize, pc: int, w1: int, w3: int) -> bool {
         let it = self.stack[(bp + w1) as usize].clone();
         let o = obj_of(&it);
         let src_obj = if o >= 0 { self.colds[self.objs[o as usize].cold as usize].home } else { -1 };
@@ -1655,7 +1726,7 @@ impl Vm {
     /// A stack op on the frame's window: where to go on, -1 when the
     /// frames changed.
     #[inline(never)]
-    fn r_win(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int, want: usize) -> int {
+    pub fn r_win(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int, want: usize) -> int {
         self.stack.truncate((bp + w1) as usize);
         let op = self.protos[pi].code[pc as usize];
         let mut p2 = pc + 1;
@@ -2028,3 +2099,21 @@ pub fn unknown_op() {
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn unknown_op() {}
+
+/// Runs the function's compiled code from pc (wjit.rs); the pc to go on at,
+/// or -1 - pc when its budget ran out. Only Rust compiles; elsewhere the
+/// interpreter goes on at pc.
+#[ranger::target(rust)]
+pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bool) -> int {
+    crate::wjit::enter(vm, pi, bp, pc, budget as i32, head)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _head: bool) -> int {
+    pc
+}
+
+/// A loop head whose compiled code went back to the interpreter before a
+/// back edge this often (4 per such entry, 1 back per good one) is no
+/// longer entered.
+pub const JIT_MISS_MAX: int = 1024;
