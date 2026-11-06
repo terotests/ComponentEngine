@@ -2314,6 +2314,62 @@ impl<'a> Cg<'a> {
         }
         self.pget_call(dst, b, off, a, flags, pc)
     }
+    /// pget of a plain property whose site the interpreter's inline cache
+    /// `ic` (shape * 65536 + slot, rrun's R_GET_PROP) saw monomorphic when
+    /// this was compiled: that shape's slot read here, any other through
+    /// pget
+    fn pget_ic(&mut self, dst: u32, b: u32, off: u32, a: u32, ic: i32, pc: i64) -> bool {
+        if ic < 65536 || MASK.with(|m| m.get()) & (1u64 << 46) != 0 {
+            return self.pget(dst, b, off, a, 0, pc);
+        }
+        let l = self.lay;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(b);
+        self.mem(I32_LOAD8_U, 0, off);
+        self.i32c(l.t_obj as i64);
+        self.op(I32_NE);
+        self.op(BR_IF);
+        self.w.u(0);
+        self.get(b);
+        self.mem(I32_LOAD, 2, off + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_shape);
+        self.i32c((ic >> 16) as i64);
+        self.op(I32_NE);
+        self.op(BR_IF);
+        self.w.u(0);
+        let slot = (ic & 65535) as u32;
+        let at = if slot < 2 {
+            l.off_inl0 + slot * 16
+        } else {
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_vals);
+            self.set(L_T2);
+            (slot - 2) * 16
+        };
+        self.get(L_T2);
+        self.mem(I64_LOAD, 3, at);
+        self.set(L_Q0);
+        self.get(L_T2);
+        self.mem(I64_LOAD, 3, at + 8);
+        self.set(L_Q0 + 1);
+        self.store_val(dst, L_Q0);
+        self.op(BR);
+        self.w.u(1);
+        self.extra -= 1;
+        self.op(END);
+        self.pget(dst, b, off, a, 0, pc);
+        self.extra -= 1;
+        self.op(END);
+        true
+    }
     fn pget_call(&mut self, dst: u32, b: u32, off: u32, a: u32, flags: i64, pc: i64) -> bool {
         self.get(L_SP);
         if dst != 0 {
@@ -4406,7 +4462,7 @@ impl<'a> Cg<'a> {
                     cg.i32c(cell);
                     cg.mem(I32_LOAD, 2, 20);
                     cg.set(L_T4);
-                    cg.pget(w1 as u32, L_T4, 0, a, 0, p)
+                    cg.pget_ic(w1 as u32, L_T4, 0, a, w3, p)
                 })
             }
             R_SET_PROP if self.lay.obj_ok && w1 >= 0 && sub == 0 && self.caches[pc] != 0 => {
@@ -4456,7 +4512,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget(w1 as u32, L_SP, w2 as u32 * 16, a, 0, p))
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_ic(w1 as u32, L_SP, w2 as u32 * 16, a, w3, p))
             }
             R_CMP_JF | R_CMP_JT | R_LOOP | R_CMP_JFK | R_CMP_JTK => {
                 let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w2, w3) } else { (w1, w2) };
