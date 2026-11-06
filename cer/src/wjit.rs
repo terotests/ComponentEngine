@@ -147,6 +147,9 @@ pub struct Layout {
     pub vm_akinds_len: u32,
     pub vm_avals_ptr: u32,
     pub vm_avals_len: u32,
+    /// Elems.v's capacity word, Cold.elems2's length word (Array push)
+    pub elems_vc: u32,
+    pub cold_e2_len: u32,
     pub vm_global: u32,
 }
 
@@ -261,6 +264,8 @@ pub fn probe() -> Layout {
         vm_akinds_len: 0,
         vm_avals_ptr: 0,
         vm_avals_len: 0,
+        elems_vc: 0,
+        cold_e2_len: 0,
         vm_global: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
@@ -444,6 +449,8 @@ pub fn probe() -> Layout {
         l.vm_akinds_len = std::mem::offset_of!(crate::vm::Vm, atom_kinds) as u32 + vl;
         l.vm_avals_ptr = std::mem::offset_of!(crate::vm::Vm, atom_vals) as u32 + vp;
         l.vm_avals_len = std::mem::offset_of!(crate::vm::Vm, atom_vals) as u32 + vl;
+        l.elems_vc = std::mem::offset_of!(crate::value::Elems, v) as u32 + (12 - vp - vl);
+        l.cold_e2_len = std::mem::offset_of!(crate::value::Cold, elems2) as u32 + vl;
     }
     l
 }
@@ -3153,6 +3160,321 @@ impl<'a> Cg<'a> {
             }
             self.op(END);
         }
+        // __isRegExp, Array.isArray of one argument and hasOwnProperty of a
+        // plain object and a string whose atom is known (builtins.rs,
+        // proxy.rs, Vm::has_own): a boolean into dst, done (0)
+        if MASK.with(|m| m.get()) & (1u64 << 51) == 0 {
+            let to = l.t_obj as i64;
+            let done = |cg: &mut Cg<'a>| {
+                cg.set(L_TAG);
+                cg.i32c(cell);
+                cg.get(L_SP);
+                cg.mem(I32_STORE, 2, 0);
+                cg.get(L_DB);
+                cg.i32c(l.t_bool as i64);
+                cg.mem(I32_STORE8, 0, 0);
+                cg.get(L_DB);
+                cg.get(L_TAG);
+                cg.mem(I32_STORE8, 0, l.off_bool);
+                cg.i32c(0);
+                cg.op(RETURN);
+            };
+            // slot k of the call (0 f, 1 this, 2 the first argument) not an
+            // object: br_if out of the innermost block
+            let not_obj = |cg: &mut Cg<'a>, k: u32| {
+                cg.get(L_FB);
+                cg.mem(I32_LOAD8_U, 0, k * 16);
+                cg.i32c(to);
+                cg.op(I32_NE);
+            };
+            self.op(BLOCK);
+            self.op(T_VOID);
+            // a native function, one argument or more: its id in L_T3
+            not_obj(self, 0);
+            self.get(L_ARGC);
+            self.i32c(1);
+            self.op(I32_LT_S);
+            self.op(I32_OR);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_FB);
+            self.mem(I32_LOAD, 2, l.off_int);
+            self.obj_addr();
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T2 as u64);
+            self.mem(I32_LOAD, 2, l.off_class);
+            self.i32c(C_NATIVE as i64);
+            self.op(I32_NE);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_func);
+            self.set(L_T3);
+            for (id, class) in [(crate::proxy::NF_IS_REGEXP, C_REGEXP), (crate::builtins::NF_A_ISARRAY, C_ARRAY)] {
+                self.get(L_T3);
+                self.i32c(id as i64);
+                self.op(I32_EQ);
+                self.op(IF);
+                self.op(T_VOID);
+                not_obj(self, 2);
+                self.op(IF);
+                self.op(T_VOID);
+                self.i32c(0);
+                done(self);
+                self.op(END);
+                self.get(L_FB);
+                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.obj_addr();
+                self.mem(I32_LOAD, 2, l.off_class);
+                self.i32c(class as i64);
+                self.op(I32_EQ);
+                done(self);
+                self.op(END);
+            }
+            // Array push of one value onto an extensible array with room in
+            // its elements and no others (Vm::push_elem): the new length
+            {
+                self.op(BLOCK);
+                self.op(T_VOID);
+                self.get(L_T3);
+                self.i32c(crate::builtins::NF_AP_PUSH as i64);
+                self.op(I32_NE);
+                self.get(L_ARGC);
+                self.i32c(1);
+                self.op(I32_NE);
+                self.op(I32_OR);
+                not_obj(self, 1);
+                self.op(I32_OR);
+                self.op(BR_IF);
+                self.w.u(0);
+                self.get(L_FB);
+                self.mem(I32_LOAD, 2, 16 + l.off_int);
+                self.obj_addr();
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T2 as u64);
+                self.mem(I32_LOAD, 2, l.off_class);
+                self.i32c(C_ARRAY as i64);
+                self.op(I32_NE);
+                self.get(L_T2);
+                self.mem(I32_LOAD8_U, 0, l.off_ext);
+                self.op(I32_EQZ);
+                self.op(I32_OR);
+                self.get(L_T2);
+                self.mem(I32_LOAD, 2, l.off_elems);
+                self.op(I32_EQZ);
+                self.op(I32_OR);
+                // colds[cold].elems2 empty
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+                self.get(L_T2);
+                self.mem(I32_LOAD, 2, l.off_cold);
+                self.i32c(l.cold_size as i64);
+                self.op(I32_MUL);
+                self.op(I32_ADD);
+                self.mem(I32_LOAD, 2, l.cold_e2_len);
+                self.op(I32_OR);
+                self.op(BR_IF);
+                self.w.u(0);
+                // L_T5 = &evecs[elems], L_T6 = its length < its capacity
+                self.get(L_T2);
+                self.mem(I32_LOAD, 2, l.off_elems);
+                self.i32c(l.elems_size as i64);
+                self.op(I32_MUL);
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.vm_evecs_ptr);
+                self.op(I32_ADD);
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T5 as u64);
+                self.mem(I32_LOAD, 2, l.elems_vl);
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T6 as u64);
+                self.get(L_T5);
+                self.mem(I32_LOAD, 2, l.elems_vc);
+                self.op(I32_GE_U);
+                self.op(BR_IF);
+                self.w.u(0);
+                // the value's reference (Vm::inc): an object's rc, a
+                // string handle's (> 0) rc
+                self.get(L_FB);
+                self.mem(I32_LOAD8_U, 0, 32);
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_TAG as u64);
+                self.i32c(to);
+                self.op(I32_EQ);
+                self.op(IF);
+                self.op(T_VOID);
+                self.get(L_FB);
+                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.obj_addr();
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T4 as u64);
+                self.get(L_T4);
+                self.mem(I32_LOAD, 2, l.off_rc);
+                self.i32c(1);
+                self.op(I32_ADD);
+                self.mem(I32_STORE, 2, l.off_rc);
+                self.op(END);
+                let o_src = std::mem::offset_of!(crate::vm::SEnt, rc) as u32;
+                let ssz = std::mem::size_of::<crate::vm::SEnt>() as i64;
+                self.get(L_TAG);
+                self.i32c(l.t_str as i64);
+                self.op(I32_EQ);
+                self.get(L_FB);
+                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.i32c(0);
+                self.op(I32_GT_S);
+                self.op(I32_AND);
+                self.op(IF);
+                self.op(T_VOID);
+                self.get(L_FB);
+                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.i32c(ssz);
+                self.op(I32_MUL);
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.vm_srcs_ptr);
+                self.op(I32_ADD);
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T4 as u64);
+                self.get(L_T4);
+                self.mem(I32_LOAD, 2, o_src);
+                self.i32c(1);
+                self.op(I32_ADD);
+                self.mem(I32_STORE, 2, o_src);
+                self.op(END);
+                // v[len] = the value, len + 1
+                self.get(L_T5);
+                self.mem(I32_LOAD, 2, l.elems_vp);
+                self.get(L_T6);
+                self.i32c(16);
+                self.op(I32_MUL);
+                self.op(I32_ADD);
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T4 as u64);
+                self.get(L_FB);
+                self.mem(I64_LOAD, 3, 32);
+                self.mem(I64_STORE, 3, 0);
+                self.get(L_T4);
+                self.get(L_FB);
+                self.mem(I64_LOAD, 3, 40);
+                self.mem(I64_STORE, 3, 8);
+                self.get(L_T6);
+                self.i32c(1);
+                self.op(I32_ADD);
+                self.set(L_T6);
+                self.get(L_T5);
+                self.get(L_T6);
+                self.mem(I32_STORE, 2, l.elems_vl);
+                // the length into dst
+                self.i32c(cell);
+                self.get(L_SP);
+                self.mem(I32_STORE, 2, 0);
+                self.get(L_DB);
+                self.i32c(l.t_num as i64);
+                self.mem(I32_STORE8, 0, 0);
+                self.get(L_DB);
+                self.get(L_T6);
+                self.op(F64_CONVERT_I32_S);
+                self.mem(F64_STORE, 3, l.off_num);
+                self.i32c(0);
+                self.op(RETURN);
+                self.op(END);
+            }
+            // hasOwnProperty: this a C_OBJECT, the key a string with its atom
+            self.get(L_T3);
+            self.i32c(crate::builtins::NF_OP_HASOWN as i64);
+            self.op(I32_NE);
+            not_obj(self, 1);
+            self.op(I32_OR);
+            self.get(L_FB);
+            self.mem(I32_LOAD8_U, 0, 32);
+            self.i32c(l.t_str as i64);
+            self.op(I32_NE);
+            self.op(I32_OR);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_FB);
+            self.mem(I32_LOAD, 2, 16 + l.off_int);
+            self.obj_addr();
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T2 as u64);
+            self.mem(I32_LOAD, 2, l.off_class);
+            self.i32c(C_OBJECT as i64);
+            self.op(I32_NE);
+            self.op(BR_IF);
+            self.w.u(0);
+            // L_T4 = the atom (SEnt.atom, -1 not known: the slow path)
+            let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
+            let o_atom = std::mem::offset_of!(crate::vm::SEnt, atom) as u32;
+            self.get(L_FB);
+            self.mem(I32_LOAD, 2, 32 + l.off_int);
+            self.i32c(sz);
+            self.op(I32_MUL);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_srcs_ptr);
+            self.op(I32_ADD);
+            self.mem(I32_LOAD, 2, o_atom);
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T4 as u64);
+            self.i32c(0);
+            self.op(I32_LT_S);
+            self.op(BR_IF);
+            self.w.u(0);
+            // L_C = the shape's nkeys, L_T5 = the holder's keys (Vm::find)
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_shapes_ptr);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_shape);
+            self.i32c(l.shape_size as i64);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T5 as u64);
+            self.mem(I32_LOAD, 2, l.sh_nkeys);
+            self.set(L_C);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_shapes_ptr);
+            self.get(L_T5);
+            self.mem(I32_LOAD, 2, l.sh_kref);
+            self.i32c(l.shape_size as i64);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.mem(I32_LOAD, 2, l.sh_keys_p);
+            self.set(L_T5);
+            self.i32c(0);
+            self.set(L_T6);
+            self.op(LOOP);
+            self.op(T_VOID);
+            self.get(L_T6);
+            self.get(L_C);
+            self.op(I32_GE_S);
+            self.op(IF);
+            self.op(T_VOID);
+            self.i32c(0);
+            done(self);
+            self.op(END);
+            // keys[i] (an int, its low word) == the atom
+            self.get(L_T5);
+            self.get(L_T6);
+            self.i32c(8);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.mem(I32_LOAD, 2, 0);
+            self.get(L_T4);
+            self.op(I32_EQ);
+            self.op(IF);
+            self.op(T_VOID);
+            self.i32c(1);
+            done(self);
+            self.op(END);
+            self.get(L_T6);
+            self.i32c(1);
+            self.op(I32_ADD);
+            self.set(L_T6);
+            self.op(BR);
+            self.w.u(0);
+            self.op(END);
+            self.op(END);
+        }
         // block $done / block $slow
         self.op(BLOCK);
         self.op(T_VOID);
@@ -5451,7 +5773,9 @@ fn run_at(vm: &mut crate::vm::Vm, f: i64, pi: usize, bp: i64, pc: i64, budget: i
     }
     // a return the compiled code reached: the interpreter does it at that
     // pc (a compiled caller does it itself, call_op)
-    let r = if r == OUT_RET { cell_get(2) | if cell_get(2) as i64 != pc { 1 << 28 } else { 0 } } else { r };
+    // a return from a loop head entry ran the function to its end: as
+    // good as a back edge for jit_miss
+    let r = if r == OUT_RET { cell_get(2) | if cell_get(2) as i64 != pc { 1 << 28 } else { 0 } | if head { 1 << 29 } else { 0 } } else { r };
     if r < 0 {
         // the budget ran out at -1 - r
         return -4 - (-1 - r) as i64;

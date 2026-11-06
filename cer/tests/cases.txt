@@ -497,3 +497,35 @@ for (var i = 0; i < 300; i++) {
 out.join()
 ----
 107:x1,3:x0,112:x1,107:x0,107:x1,8:x0,107:x1
+
+==== js hot natives in compiled code: hasOwnProperty (own, inherited, absent, numeric and new string keys, arrays, functions, call and direct), Array.isArray, RegExp methods
+var hop = Object.prototype.hasOwnProperty;
+var P = { inh: 1 }; var out = [];
+function f() {}
+for (var i = 0; i < 300; i++) {
+  var o = Object.create(P); o.a = 1; o['k' + (i % 3)] = 2; o[3] = 1;
+  var key = 'k' + (i % 2);
+  var r = [hop.call(o, 'a'), hop.call(o, 'inh'), o.hasOwnProperty('zz'), hop.call(o, key), hop.call(o, 3), hop.call(o, '3'),
+    hop.call([1, 2], 'length'), hop.call([1, 2], 1), hop.call(f, 'name'), hop.call('abc', 'length'),
+    Array.isArray([]), Array.isArray(o), Array.isArray(i), /a/.test('xa'), 'a-b'.split(/-/).length].map(function (b) { return b === true ? 1 : b === false ? 0 : b; }).join('');
+  if (i > 294) out.push(r);
+}
+var thrown; try { hop.call(null, 'a'); } catch (e) { thrown = e.constructor.name; }
+out.join() + thrown
+----
+100111111110012,100011111110012,100011111110012,100011111110012,100011111110012TypeError
+
+==== js Array push in hot code: numbers, strings, objects kept alive, a frozen array, an array with a far element, a new array without elements, push of two values
+var out = []; var keep = [];
+for (var i = 0; i < 300; i++) {
+  var a = []; var b = [1]; b[1000] = 2; var e = new Array(0);
+  for (var j = 0; j < 20; j++) { a.push(j); a.push('s' + j); a.push({ v: j }); }
+  b.push(3); e.push(7, 8);
+  var fz = Object.freeze([1]); var t = ''; try { fz.push(2); } catch (x) { t = x.constructor.name; }
+  if (i % 50 == 0) keep.push(a);
+  if (i > 296) out.push(a.length + ':' + a[1] + a[59].v + ':' + b.length + b[1001] + ':' + e.join('') + t);
+}
+for (var i = 0; i < 2000; i++) { var junk = { j: i, s: 'x' + i }; }
+out.join() + '|' + keep.map(function (a) { return a[2].v + a[58] + a[59].v; }).join()
+----
+60:s019:10023:78TypeError,60:s019:10023:78TypeError,60:s019:10023:78TypeError|0s1919,0s1919,0s1919,0s1919,0s1919,0s1919
