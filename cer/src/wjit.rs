@@ -3033,12 +3033,17 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
             vm.stack[(fpos + 1) as usize] = Val::Undef;
         }
         let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
-        vm.stack.truncate((fpos + w2 + 2) as usize);
+        // compiled: the caller's code calls it itself (6), and h_ret ends
+        // it; the stack past the arguments stays (renter clears the
+        // callee's locals). Run here, its return leaves the value at the
+        // stack's end, so the stack ends after the arguments.
+        let f = if MASK.with(|m| m.get()) & (1u64 << 60) != 0 || cell_get(9) >= DEPTH_MAX || vm.protos[tp].rstate == 0 { -1 } else { hot_fn(vm, tp) };
+        if f < 0 {
+            vm.stack.truncate((fpos + w2 + 2) as usize);
+        }
         if !vm.renter(fo, fpos, w2, dst) {
             return settle(vm, fi, pc);
         }
-        // compiled: the caller's code calls it itself (6), and h_ret ends it
-        let f = if MASK.with(|m| m.get()) & (1u64 << 60) != 0 || cell_get(9) >= DEPTH_MAX { -1 } else { hot_fn(vm, tp) };
         if f >= 0 {
             return direct(vm, nf, f);
         }
