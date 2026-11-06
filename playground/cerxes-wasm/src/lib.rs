@@ -34,6 +34,14 @@ use cerxes::value::*;
 use cerxes::Engine;
 use std::cell::RefCell;
 
+// small blocks from size-class free lists (dlmalloc costs about a tenth of
+// a React update in wasm)
+#[path = "../../../cerxes/salloc/salloc.rs"]
+mod salloc;
+
+#[global_allocator]
+static GLOBAL: salloc::SmallAlloc = salloc::SmallAlloc;
+
 thread_local! {
     static RESULT: RefCell<Vec<u8>> = RefCell::new(Vec::new());
     static OUTPUT: RefCell<Vec<u8>> = RefCell::new(Vec::new());
