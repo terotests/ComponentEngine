@@ -12,8 +12,14 @@ your own script in all of them.
 | --- | --- |
 | Browser JS | the page's own engine (V8, SpiderMonkey, JavaScriptCore), through `new Function`: the reference |
 | CEr · Rust → WASM | `cer/` compiled by cargo for `wasm32-wasip1` (`cer-wasm/`, a C ABI) |
+| CErXes · register VM | `cerxes/` (CEr's VM with a TypeScript + JSX front end) by cargo for `wasm32-wasip1` (`cerxes-wasm/`), on the register machine |
+| CErXes · stack VM | the same `cerxes.wasm` on the older stack machine, to compare the two interpreters |
+| CErXes · small build | `cerxes-wasm/` at `opt-level = "s"`: a smaller download for some speed |
 | QuickJS · C → WASM | Fabrice Bellard's QuickJS, from `quickjs-emscripten` (MIT) |
 | CEr · Rust → Ranger → JS | a curiosity: the same `cer/src/lib.rs` read by the Ranger compiler as a strict Rust module and written out as JavaScript |
+
+The CErXes engines also run TypeScript and JSX in the editor (the other
+engines answer those with a syntax error).
 
 Each engine runs in a Web Worker of its own, one engine at a time, so no two
 compete for the CPU; a run past the time limit ends its worker. Times are

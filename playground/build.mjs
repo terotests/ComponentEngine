@@ -4,6 +4,9 @@
 // Builds the playground into playground/dist:
 //
 //   wasm/cer.wasm      CEr (cer/) by cargo, --target wasm32-wasip1
+//   wasm/cerxes.wasm   CErXes (cerxes/: TypeScript + JSX on CEr's VM) the same
+//                      way; the register-VM and stack-VM engines share it
+//   wasm/cerxes-small.wasm  the same crate at opt-level s
 //   workers/<id>.js    one worker per engine (esbuild): the browser's own
 //                      engine, CEr, QuickJS, and CEr compiled by rgrc to
 //                      JavaScript (cer/bin/Cer.cjs) as a curiosity
@@ -32,7 +35,11 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "quickjs", "cer-js"];
+const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "quickjs", "cer-js"];
+// the WebAssembly file each engine loads, for its size; the CErXes variants
+// stand on the step that builds their file
+const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm" };
+const STEP = { "cerxes-stack": "cerxes-wasm" };
 const status = {}; // id -> { available, reason, size }
 
 function log(s) {
@@ -100,6 +107,17 @@ step("cerxes-wasm", () => {
   const crate = path.join(HERE, "cerxes-wasm");
   run("cargo", ["build", "--release", "--quiet", "--target", "wasm32-wasip1", "--manifest-path", path.join(crate, "Cargo.toml")]);
   fs.copyFileSync(path.join(crate, "target/wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(EVG_DIST, "cerxes.wasm"));
+  fs.copyFileSync(path.join(crate, "target/wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(DIST, "wasm/cerxes.wasm"));
+});
+
+// The same crate built for size, in a target directory of its own.
+step("cerxes-small", () => {
+  const crate = path.join(HERE, "cerxes-wasm");
+  const target = path.join(crate, "target-small");
+  run("cargo", ["build", "--release", "--quiet", "--target", "wasm32-wasip1", "--manifest-path", path.join(crate, "Cargo.toml"), "--target-dir", target], {
+    env: { ...process.env, CARGO_PROFILE_RELEASE_OPT_LEVEL: "s" },
+  });
+  fs.copyFileSync(path.join(target, "wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(DIST, "wasm/cerxes-small.wasm"));
 });
 
 step("evg-host", () => {
@@ -143,6 +161,7 @@ fs.mkdirSync(path.dirname(stub), { recursive: true });
 fs.writeFileSync(stub, "// The Node modules the JS builds mention; nothing calls them in a page.\nexport default {};\n");
 
 for (const id of ENGINES) {
+  if (STEP[id] && status[STEP[id]]) status[id] = status[STEP[id]];
   if (status[id] && !status[id].available) continue;
   step("bundle " + id, () => {
     const r = esbuild.buildSync({
@@ -217,7 +236,7 @@ for (const id of ENGINES) {
 }
 const sizeOf = (id) => {
   let n = 0;
-  for (const f of [`workers/${id}.js`, id === "cer-wasm" ? "wasm/cer.wasm" : ""]) {
+  for (const f of [`workers/${id}.js`, WASM[id] ? "wasm/" + WASM[id] : ""]) {
     if (f && fs.existsSync(path.join(DIST, f))) n += fs.statSync(path.join(DIST, f)).size;
   }
   return n;

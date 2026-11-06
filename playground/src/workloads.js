@@ -104,3 +104,34 @@ function primes(limit) {
 var p = primes(20000);
 print(p.length, p[p.length - 1]);
 `;
+
+/** Editor samples that are not benchmark workloads: TypeScript and JSX,
+ * which only the CErXes engines read. */
+export const SAMPLES = [
+  {
+    id: "typescript",
+    name: "TypeScript (CErXes)",
+    code:
+      "interface Point { x: number; y: number }\n" +
+      "enum Dir { Up = 1, Down }\n" +
+      "class Path<T extends Point> {\n" +
+      "  private pts: T[] = [];\n" +
+      "  add(p: T): this { this.pts.push(p); return this; }\n" +
+      "  get length(): number {\n" +
+      "    let d = 0;\n" +
+      "    for (let i = 1; i < this.pts.length; i++) d += Math.hypot(this.pts[i].x - this.pts[i - 1].x, this.pts[i].y - this.pts[i - 1].y);\n" +
+      "    return d;\n" +
+      "  }\n" +
+      "}\n" +
+      "const p = new Path<Point>().add({ x: 0, y: 0 }).add({ x: 3, y: 4 }) as Path<Point>;\n" +
+      "print(p.length, Dir.Down);",
+  },
+  {
+    id: "jsx",
+    name: "JSX (CErXes)",
+    code:
+      "function Item(props: { label: string }) { return <li class=\"item\">{props.label}</li>; }\n" +
+      "const list = <ul>{[\"a\", \"b\"].map((l) => <Item label={l} />)}</ul>;\n" +
+      "print(JSON.stringify(list));",
+  },
+];
