@@ -7,6 +7,7 @@
 //   wasm/cerxes.wasm   CErXes (cerxes/: TypeScript + JSX on CEr's VM) the same
 //                      way; the register-VM and stack-VM engines share it
 //   wasm/cerxes-small.wasm  the same crate at opt-level s
+//   wasm/cerxes-jit.wasm    the same crate with the baseline JIT (--features wjit)
 //   workers/<id>.js    one worker per engine (esbuild): the browser's own
 //                      engine, CEr, QuickJS, and CEr compiled by rgrc to
 //                      JavaScript (cer/bin/Cer.cjs) as a curiosity
@@ -35,10 +36,10 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "quickjs", "cer-js"];
+const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "quickjs", "cer-js"];
 // the WebAssembly file each engine loads, for its size; the CErXes variants
 // stand on the step that builds their file
-const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm" };
+const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm" };
 const STEP = { "cerxes-stack": "cerxes-wasm" };
 const status = {}; // id -> { available, reason, size }
 
@@ -118,6 +119,18 @@ step("cerxes-small", () => {
     env: { ...process.env, CARGO_PROFILE_RELEASE_OPT_LEVEL: "s" },
   });
   fs.copyFileSync(path.join(target, "wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(DIST, "wasm/cerxes-small.wasm"));
+});
+
+// With the baseline JIT (cerxes::wjit): the compiled modules call back into
+// the engine through its function table, which has to be exported and
+// growable (see cerxes/bench/wjit.mjs, which builds the same into target-jit).
+step("cerxes-jit", () => {
+  const crate = path.join(HERE, "cerxes-wasm");
+  const target = path.join(crate, "target-jit");
+  run("cargo", ["build", "--release", "--quiet", "--target", "wasm32-wasip1", "--features", "wjit", "--manifest-path", path.join(crate, "Cargo.toml"), "--target-dir", target], {
+    env: { ...process.env, RUSTFLAGS: "-Awarnings -C link-arg=--export-table -C link-arg=--growable-table" },
+  });
+  fs.copyFileSync(path.join(target, "wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(DIST, "wasm/cerxes-jit.wasm"));
 });
 
 step("evg-host", () => {
@@ -232,7 +245,7 @@ const about = {};
 for (const id of ENGINES) {
   const text = fs.readFileSync(path.join(SRC, "engines", id + ".js"), "utf8");
   const field = (k) => (new RegExp(k + ':\\s*"([^"]*)"').exec(text) || [])[1] || "";
-  about[id] = { name: field("name") || id, about: field("about") };
+  about[id] = { name: field("name") || id, about: field("about"), optional: /optional:\s*true/.test(text) };
 }
 const sizeOf = (id) => {
   let n = 0;
