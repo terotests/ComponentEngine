@@ -2304,8 +2304,12 @@ impl<'a> Cg<'a> {
             self.mem(F64_LOAD, 3, 32 + on);
             self.set(L_A);
             let done = |cg: &mut Cg<'a>| {
-                // L_A into dst; 0
+                // L_A into dst; 0 (the caller reloads its registers' address
+                // from cell[0], which a callee's code may have moved on)
                 cg.set(L_A);
+                cg.i32c(cell);
+                cg.get(L_SP);
+                cg.mem(I32_STORE, 2, 0);
                 cg.get(L_DB);
                 cg.i32c(tn);
                 cg.mem(I32_STORE8, 0, 0);
