@@ -80,6 +80,7 @@ pub struct Layout {
     pub vm_evecs_ptr: u32,
     pub elems_size: u32,
     pub elems_vp: u32,
+    pub elems_vl: u32,
     /// JsObj.rc (the heap's references, Vm::inc/dec_o)
     pub off_rc: u32,
     /// for a property added in place (R_SET_PROP's transition): JsObj's
@@ -123,6 +124,7 @@ pub struct Layout {
     pub vm_number_proto: u32,
     pub vm_jit_calls_ptr: u32,
     pub vm_jit_calls_len: u32,
+    pub vm_global: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -181,6 +183,7 @@ pub fn probe() -> Layout {
         vm_evecs_ptr: 0,
         elems_size: 0,
         elems_vp: 0,
+        elems_vl: 0,
         off_rc: 0,
         off_ext: 0,
         off_vals_len: 0,
@@ -216,6 +219,7 @@ pub fn probe() -> Layout {
         vm_number_proto: 0,
         vm_jit_calls_ptr: 0,
         vm_jit_calls_len: 0,
+        vm_global: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -331,6 +335,7 @@ pub fn probe() -> Layout {
         l.vm_evecs_ptr = std::mem::offset_of!(crate::vm::Vm, evecs) as u32 + vp;
         l.elems_size = std::mem::size_of::<crate::value::Elems>() as u32;
         l.elems_vp = std::mem::offset_of!(crate::value::Elems, v) as u32 + vp;
+        l.elems_vl = std::mem::offset_of!(crate::value::Elems, v) as u32 + vl;
         l.off_rc = std::mem::offset_of!(JsObj, rc) as u32;
         let vc = 12 - vp - vl;
         l.off_ext = std::mem::offset_of!(JsObj, extensible) as u32;
@@ -344,6 +349,7 @@ pub fn probe() -> Layout {
         l.vm_frames_cap = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vc;
         l.vm_stack_cap = std::mem::offset_of!(crate::vm::Vm, stack) as u32 + vc;
         l.vm_slicing = std::mem::offset_of!(crate::vm::Vm, slicing) as u32;
+        l.vm_global = std::mem::offset_of!(crate::vm::Vm, global) as u32;
         l.fr_proto = std::mem::offset_of!(Frame, proto) as u32;
         l.fr_fobj = std::mem::offset_of!(Frame, fobj) as u32;
         l.fr_pc = std::mem::offset_of!(Frame, pc) as u32;
@@ -544,6 +550,7 @@ const CALL_INDIRECT: u8 = 0x11;
 const I64_CONST: u8 = 0x42;
 const I32_STORE: u8 = 0x36;
 const I32_GE_U: u8 = 0x4f;
+const I32_LE_U: u8 = 0x4d;
 const I32_REM_S: u8 = 0x6f;
 const I32_ADD: u8 = 0x6a;
 const I32_MUL: u8 = 0x6c;
@@ -1222,6 +1229,73 @@ impl<'a> Cg<'a> {
         self.i32c(slot as i64 * 16);
         self.op(I32_ADD);
         self.set(L_T2);
+    }
+    /// dst = an array's element by a whole number in range (h_get_elem's
+    /// fast path), else fail
+    fn get_elem_fast(&mut self, dst: u32, ob: u32, key: Opnd, pc: i64) -> bool {
+        let l = self.lay;
+        self.need_obj(L_SP, ob * 16, pc);
+        self.need_num(key, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_ARRAY as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        // a whole number 0 <= k < 2^31 in L_T3
+        self.num(key);
+        self.set(L_A);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&0f64.to_le_bytes());
+        self.op(F64_GE);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&2147483647f64.to_le_bytes());
+        self.op(F64_LE);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        self.get(L_A);
+        self.op(I32_TRUNC_F64_S);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T3 as u64);
+        self.op(F64_CONVERT_I32_S);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.fail_if(pc);
+        // its Elems: k < v.len()
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_elems);
+        self.i32c(l.elems_size as i64);
+        self.op(I32_MUL);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_evecs_ptr);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T4 as u64);
+        self.mem(I32_LOAD, 2, l.elems_vl);
+        self.get(L_T3);
+        self.op(I32_LE_U);
+        self.fail_if(pc);
+        self.get(L_T4);
+        self.mem(I32_LOAD, 2, l.elems_vp);
+        self.get(L_T3);
+        self.i32c(16);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T4);
+        self.get(L_T4);
+        self.mem(I64_LOAD, 3, 0);
+        self.set(L_Q0);
+        self.get(L_T4);
+        self.mem(I64_LOAD, 3, 8);
+        self.set(L_Q0 + 1);
+        self.store_val(dst, L_Q0);
+        true
     }
     /// fail unless the value at b + off is an object
     fn need_obj(&mut self, b: u32, off: u32, pc: i64) {
@@ -2447,6 +2521,40 @@ impl<'a> Cg<'a> {
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_CA);
+            // a sloppy callee's this: undefined or null is the global object
+            // (sloppy_this), written into the this slot of the call
+            {
+                let ob = bytes_of(Val::Obj(0));
+                let lo = i64::from_le_bytes([ob[0], ob[1], ob[2], ob[3], ob[4], ob[5], ob[6], ob[7]]);
+                let hi = i64::from_le_bytes([ob[8], ob[9], ob[10], ob[11], ob[12], ob[13], ob[14], ob[15]]);
+                ld(self, 6);
+                self.op(I32_EQZ);
+                self.get(L_FB);
+                self.mem(I32_LOAD8_U, 0, 16);
+                self.i32c(l.t_undef as i64);
+                self.op(I32_EQ);
+                self.get(L_FB);
+                self.mem(I32_LOAD8_U, 0, 16);
+                self.i32c(l.t_null as i64);
+                self.op(I32_EQ);
+                self.op(I32_OR);
+                self.op(I32_AND);
+                self.op(IF);
+                self.op(T_VOID);
+                self.get(L_FB);
+                self.w.byte(I64_CONST);
+                self.w.s(lo);
+                self.mem(I64_STORE, 3, 16);
+                self.get(L_FB);
+                self.w.byte(I64_CONST);
+                self.w.s(hi);
+                self.mem(I64_STORE, 3, 24);
+                self.get(L_FB);
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.vm_global);
+                self.mem(I32_STORE, 2, 16 + l.off_int);
+                self.op(END);
+            }
             ld(self, 1);
             self.i32c(0);
             self.op(I32_LT_S);
@@ -3221,6 +3329,14 @@ impl<'a> Cg<'a> {
                 let a = self.caches[pc];
                 self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.prop_cache(w1 as u32, L_SP, w2 as u32 * 16, a, true, sub, p))
             }
+            R_GET_ELEM if self.lay.obj_ok && w1 >= 0 && w2 >= 0 => {
+                let key = self.opnd(w3);
+                if key.is_k() {
+                    self.helper(H_GET_ELEM, p, next);
+                    return true;
+                }
+                self.with_helper(H_GET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.get_elem_fast(w1 as u32, w2 as u32, key, p))
+            }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
                 self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.prop_cache(w1 as u32, L_SP, w2 as u32 * 16, a, false, 0, p))
@@ -3757,7 +3873,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
+pub fn compile(name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -3943,13 +4059,13 @@ pub fn compile(code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, r
     let done = cg.done;
     let cx = if cg.callx { Some(cg.callx_body()) } else { None };
     let hs = cg.hstore_body();
-    Some(Compiled { bytes: module(&cg.w.b, &hs, cx.as_deref(), lay), done, ops: n as u32, exits: cg.exits })
+    Some(Compiled { bytes: module(&cg.w.b, &hs, cx.as_deref(), lay, name), done, ops: n as u32, exits: cg.exits })
 }
 
 /// A module of one function `f` (sp, kv, pc, budget, vm, bp) -> i32 over
 /// the imported memory env.memory and the helpers env.<name> (vm, bp, pi,
 /// pc, rcode index) -> i32; its body `body` (locals and code).
-pub fn module(body: &[u8], hstore: &[u8], callx: Option<&[u8]>, lay: Layout) -> Vec<u8> {
+pub fn module(body: &[u8], hstore: &[u8], callx: Option<&[u8]>, lay: Layout, name: &str) -> Vec<u8> {
     let mut m = WBuf::new();
     m.b.extend_from_slice(b"\0asm");
     m.b.extend_from_slice(&[1, 0, 0, 0]);
@@ -4021,6 +4137,21 @@ pub fn module(body: &[u8], hstore: &[u8], callx: Option<&[u8]>, lay: Layout) -> 
         s.b.extend_from_slice(cx);
     }
     m.section(10, &s);
+    // names for profiles: f as the JavaScript function
+    let mut fnames = WBuf::new();
+    let mut list: Vec<(u32, String)> = vec![(NHELPERS, format!("js:{}", name)), (F_LOOK, String::from("jit:look")), (F_CODES, String::from("jit:codes")), (F_HSTORE, String::from("jit:hstore"))];
+    if callx.is_some() {
+        list.push((F_CALLX, String::from("jit:callx")));
+    }
+    fnames.u(list.len() as u64);
+    for (i, n) in list.iter() {
+        fnames.u(*i as u64);
+        fnames.name(n);
+    }
+    let mut s = WBuf::new();
+    s.name("name");
+    s.section(1, &fnames);
+    m.section(0, &s);
     m.b
 }
 
@@ -4342,7 +4473,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             eprintln!("{}", crate::regs::dump(p, &vm.rcode));
         }
         if rb + n <= vm.rcode.len() {
-            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
+            if let Some(c) = compile(&format!("{}#{}", p.name, pi), &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
                 let idx = host::put(&c.bytes);
                 STATS.with(|s| {
                     let mut t = s.get();
