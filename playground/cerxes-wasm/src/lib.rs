@@ -233,7 +233,7 @@ pub extern "C" fn cx_jit_stats() {
         byc.sort();
         byc.reverse();
         t.pop();
-        let parts: Vec<String> = byc[..byc.len().min(30)].iter().map(|(b, k)| format!("[{},{}]", k, b)).collect();
+        let parts: Vec<String> = byc.iter().enumerate().filter(|(i, (_, k))| *i < 30 || *k >= 100).map(|(_, x)| x).map(|(b, k)| format!("[{},{}]", k, b)).collect();
         t = format!("{},\"opcount\":[{}]}}", t, parts.join(","));
     }
     let nats = cerxes::wjit::NATS.with(|v| v.take());

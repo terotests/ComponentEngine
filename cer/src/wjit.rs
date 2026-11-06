@@ -527,6 +527,8 @@ const H_SET_PROP: u32 = 3;
 const H_OP: u32 = 4;
 const H_CALL: u32 = 5;
 const H_SLOW: u32 = 6;
+/// R_SWITCH tables up to this size are written as a chain of selects
+const SWITCH_MAX: usize = 64;
 const H_RET: u32 = 7;
 const NHELPERS: u32 = 8;
 const HELPERS: [&str; 8] = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow", "ret"];
@@ -569,6 +571,8 @@ struct Cg<'a> {
     w: WBuf,
     lay: Layout,
     kvals: &'a [Val],
+    /// Vm.rtab (R_SWITCH's tables)
+    rtab: &'a [int],
     /// enclosing labels above the current block's code: depth to the exit
     /// block is `exit_d + extra`, to the dispatch loop one more
     exit_d: u32,
@@ -594,6 +598,8 @@ struct Cg<'a> {
     atoms: Vec<i32>,
     /// a plain call went through callx: the module has it
     callx: bool,
+    /// debug: the kind of the op being written
+    cur_kind: u32,
 }
 
 impl<'a> Cg<'a> {
@@ -2903,6 +2909,22 @@ impl<'a> Cg<'a> {
         self.op(IF);
         self.op(T_VOID);
         self.extra += 1;
+        if MASK.with(|m| m.get()) & (1u64 << 54) != 0 && self.cur_kind < 60 {
+            // debug: OPCOUNT[100 + kind] for a frames exit (5)
+            let at = std::ptr::addr_of!(OPCOUNT) as usize as i64 + (100 + self.cur_kind as i64) * 4;
+            self.get(L_TAG);
+            self.i32c(5);
+            self.op(I32_EQ);
+            self.op(IF);
+            self.op(T_VOID);
+            self.i32c(at);
+            self.i32c(at);
+            self.mem(I32_LOAD, 2, 0);
+            self.i32c(1);
+            self.op(I32_ADD);
+            self.mem(I32_STORE, 2, 0);
+            self.op(END);
+        }
         self.get(L_TAG);
         self.i32c(pc);
         self.i32c(next);
@@ -3250,6 +3272,22 @@ impl<'a> Cg<'a> {
                 }
                 true
             }
+            R_CASE_JT => {
+                // x === y, the interpreter's rcmp when the fast path fails
+                self.with_slow(p, next, true, &|cg: &mut Cg<'a>| {
+                    cg.cmp(OP_SEQ as i32, w1, w2, p);
+                    cg.set(L_C);
+                    true
+                });
+                self.get(L_C);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.jump(w3 as i64, (w3 as i64) <= p);
+                self.extra -= 1;
+                self.op(END);
+                true
+            }
             _ => self.fast_op(pc, ins),
         }
     }
@@ -3416,6 +3454,77 @@ impl<'a> Cg<'a> {
                 self.jump(w3 as i64, (w3 as i64) <= p);
                 self.extra -= 1;
                 self.op(END);
+                true
+            }
+            R_SWITCH => {
+                let at = w2 as usize;
+                if at >= self.rtab.len() {
+                    return false;
+                }
+                let size = self.rtab[at] as usize;
+                if size > SWITCH_MAX || at + 1 + size >= self.rtab.len() {
+                    return false;
+                }
+                let tab: Vec<i64> = (0..=size).map(|i| self.rtab[at + 1 + i] as i64).collect();
+                if tab.iter().any(|t| *t <= p) {
+                    return false;
+                }
+                let o = self.opnd(w1);
+                if let Opnd::K(_) = o {
+                    return false;
+                }
+                // L_C: the index in the table, or -1 (the default)
+                self.i32c(-1);
+                self.set(L_C);
+                self.tag(o);
+                self.i32c(self.lay.t_num as i64);
+                self.op(I32_EQ);
+                self.op(IF);
+                self.op(T_VOID);
+                self.num(o);
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&(w3 as f64).to_le_bytes());
+                self.op(F64_SUB);
+                self.set(L_A);
+                self.get(L_A);
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&0f64.to_le_bytes());
+                self.op(F64_GE);
+                self.get(L_A);
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&(size as f64).to_le_bytes());
+                self.op(F64_LT);
+                self.op(I32_AND);
+                self.get(L_A);
+                self.op(F64_FLOOR);
+                self.get(L_A);
+                self.op(F64_EQ);
+                self.op(I32_AND);
+                self.op(IF);
+                self.op(T_VOID);
+                self.get(L_A);
+                self.op(I32_TRUNC_F64_S);
+                self.set(L_C);
+                self.op(END);
+                self.op(END);
+                // the target pc by a chain of selects, then a jump to it
+                self.i32c(tab[size]);
+                for i in 0..size {
+                    if tab[i] == tab[size] {
+                        continue;
+                    }
+                    self.set(L_T2);
+                    self.i32c(tab[i]);
+                    self.get(L_T2);
+                    self.get(L_C);
+                    self.i32c(i as i64);
+                    self.op(I32_EQ);
+                    self.op(SELECT);
+                }
+                self.set(L_KEY);
+                let d = self.exit_depth() + 1;
+                self.op(BR);
+                self.w.u(d as u64);
                 true
             }
             R_CASE_INT_JT => {
@@ -3603,7 +3712,7 @@ impl<'a> Cg<'a> {
 }
 
 /// The jump targets of an op this file writes.
-fn targets(ins: Op, pc: usize, out: &mut Vec<usize>) {
+fn targets(ins: Op, pc: usize, rtab: &[int], out: &mut Vec<usize>) {
     let w0 = ins.code;
     let kind = (w0 & 255) as int;
     match kind {
@@ -3615,7 +3724,18 @@ fn targets(ins: Op, pc: usize, out: &mut Vec<usize>) {
         R_JUMP => out.push(ins.a as usize),
         R_JF | R_JT | R_JF_KEEP | R_JT_KEEP | R_JNN_KEEP => out.push(ins.b as usize),
         R_CMP_JFK | R_CMP_JTK => out.push((ins.a >> 16) as usize),
-        R_LOCAL_NULL_JF | R_CASE_INT_JT => out.push(ins.c as usize),
+        R_LOCAL_NULL_JF | R_CASE_INT_JT | R_CASE_JT => out.push(ins.c as usize),
+        R_SWITCH => {
+            let at = ins.b as usize;
+            if at < rtab.len() {
+                let size = rtab[at] as usize;
+                if size <= SWITCH_MAX && at + 1 + size < rtab.len() {
+                    for i in 0..=size {
+                        out.push(rtab[at + 1 + i] as usize);
+                    }
+                }
+            }
+        }
         R_ITER_NEXT => out.push(ins.b as usize),
         _ => {}
     }
@@ -3633,7 +3753,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
+pub fn compile(code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -3646,7 +3766,7 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry:
     }
     let mut ts = Vec::new();
     for (i, op) in code.iter().enumerate() {
-        targets(*op, i, &mut ts);
+        targets(*op, i, rtab, &mut ts);
     }
     for t in ts {
         if t < n {
@@ -3683,6 +3803,7 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry:
         w: WBuf::new(),
         lay,
         kvals,
+        rtab,
         exit_d: 0,
         extra: 0,
         backs: 0,
@@ -3695,6 +3816,7 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry:
         atoms: atoms.to_vec(),
         fsize,
         callx: false,
+        cur_kind: 0,
     };
     // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c, t2..t6 (i32)
     cg.w.u(4);
@@ -3752,6 +3874,7 @@ pub fn compile(code: &[Op], kvals: &[Val], lay: Layout, pi: u32, rb: u32, entry:
                 cg.op(I32_ADD);
                 cg.mem(I32_STORE, 2, 0);
             }
+            cg.cur_kind = (ins.code & 255) as u32;
             let wrote = cg.one(pc, ins);
             if MASK.with(|m| m.get()) & (1u64 << 59) != 0 {
                 let k = (ins.code & 255) as usize;
@@ -4215,7 +4338,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             eprintln!("{}", crate::regs::dump(p, &vm.rcode));
         }
         if rb + n <= vm.rcode.len() {
-            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
+            if let Some(c) = compile(&vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
                 let idx = host::put(&c.bytes);
                 STATS.with(|s| {
                     let mut t = s.get();
@@ -4284,6 +4407,19 @@ fn run_at(vm: &mut crate::vm::Vm, f: i64, pi: usize, bp: i64, pc: i64, budget: i
         return -2;
     }
     if r == OUT_FRAMES {
+        if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+            // debug: OPCOUNT[150 + the op kind the top frame is at]
+            if let Some(t) = vm.frames.last() {
+                let ri = (vm.protos[t.proto as usize].rbase + t.pc) as usize;
+                if ri < vm.rcode.len() {
+                    let k = (vm.rcode[ri].code & 255) as usize;
+                    // SAFETY: on the VM's thread
+                    unsafe {
+                        (*std::ptr::addr_of_mut!(OPCOUNT))[150 + k.min(49)] += 1;
+                    }
+                }
+            }
+        }
         return -3;
     }
     // a return the compiled code reached: the interpreter does it at that
@@ -4707,6 +4843,11 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             let r = vm.rcmp(sub, pi, bp, w1, w2, fi, pc);
             set_cell_c(r);
         }
+        R_CASE_JT => {
+            gc_ok = false;
+            let r = vm.rcmp(OP_SEQ, pi, bp, w1, w2, fi, pc);
+            set_cell_c(r);
+        }
         R_CMP_JFK | R_CMP_JTK => {
             gc_ok = false;
             let r = vm.rcmp(sub, pi, bp, w2, w3, fi, pc);
@@ -5038,6 +5179,10 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
                 224
             } else if p.env_size > 0 {
                 225
+            } else if tp * 8 + 1 < vm.jit_calls.len() && vm.jit_calls[tp * 8 + 1] < 0 {
+                227
+            } else if (vm.stack.capacity() as int) < bp + w1 + 2 + p.fsize {
+                228
             } else if (vm.stack.len() as int) < bp + w1 + 2 + p.fsize {
                 226
             } else {
@@ -5543,8 +5688,19 @@ fn h_ret(vm: i32, bp: i32, r: i32, _pc: i32, _ri: i32) -> i32 {
         vm.jit_miss.push(0);
     }
     vm.jit_miss[ri] += 4;
+    if vm.jit_miss[ri] > crate::rvm::JIT_MISS_MAX && tp * 8 + 1 < vm.jit_calls.len() {
+        // callx calls it no more either
+        vm.jit_calls[tp * 8 + 1] = -1;
+    }
+    if MASK.with(|m| m.get()) & (1u64 << 54) != 0 && k < 100 {
+        // debug: OPCOUNT[150 + the op kind a callee left at]
+        // SAFETY: on the VM's thread
+        unsafe {
+            (*std::ptr::addr_of_mut!(OPCOUNT))[(150 + k.min(105)) as usize] += 1;
+        }
+    }
     if MASK.with(|m| m.get()) & (1u64 << 62) != 0 && vm.jit_miss[ri] == crate::rvm::JIT_MISS_MAX + 4 {
-        eprintln!("callee {} {} left at pc {} r {}", tp, vm.protos[tp].name, at, r);
+        eprintln!("callee {} {} left at pc {} r {} op {} sub {} stack op {}", tp, vm.protos[tp].name, at, r, k, (ins.code >> 8) & 255, vm.protos[tp].code[at as usize].code);
     }
     5
 }
