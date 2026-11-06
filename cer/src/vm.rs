@@ -7078,7 +7078,10 @@ pub fn give_args(_pool: &mut Vec<Vec<Val>>, _args: Vec<Val>) {}
 #[ranger::target(rust)]
 pub fn grow_objs(v: &mut Vec<JsObj>) {
     if v.len() == v.capacity() {
-        let n = v.len() / 8;
+        // by half: a growth copies the whole vector (in WebAssembly realloc
+        // has no mremap), so an eighth copied 8x the final size; the spare
+        // capacity is never touched natively and costs no resident memory
+        let n = v.len() / 2;
         v.reserve_exact(if n < 1024 { 1024 } else { n });
     }
 }
@@ -7089,7 +7092,10 @@ pub fn grow_objs(_v: &mut Vec<JsObj>) {}
 #[ranger::target(rust)]
 pub fn grow_evecs(v: &mut Vec<Elems>) {
     if v.len() == v.capacity() {
-        let n = v.len() / 8;
+        // by half: a growth copies the whole vector (in WebAssembly realloc
+        // has no mremap), so an eighth copied 8x the final size; the spare
+        // capacity is never touched natively and costs no resident memory
+        let n = v.len() / 2;
         v.reserve_exact(if n < 1024 { 1024 } else { n });
     }
 }
