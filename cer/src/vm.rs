@@ -224,6 +224,9 @@ pub struct Vm {
     /// the getter/setter pair (both %ThrowTypeError%) every strict
     /// arguments object's `callee` shares, made on first use; -1 before
     pub callee_pair: int,
+    /// the shape an arguments object gets (callee, then Symbol.iterator),
+    /// sloppy [0] and strict [1]; -1 until the first one is made
+    pub args_shapes: Vec<int>,
     /// the marker of a binding in its temporal dead zone
     pub tdz_obj: int,
     /// BigInt values by their decimal text, and BigInt.prototype
@@ -518,6 +521,7 @@ impl Vm {
             proxy_hooks: -1,
             thrower: -1,
             callee_pair: -1,
+            args_shapes: vec![-1, -1],
             tdz_obj: -1,
             bigints: HashMap::new(),
             bigint_proto: -1,
@@ -3489,6 +3493,57 @@ impl Vm {
         Val::Obj(o)
     }
 
+    /// The arguments object of a call of `fo` whose argc arguments lie
+    /// from stack slot bp on.
+    pub fn make_args(&mut self, fo: int, bp: int, argc: int, strict: bool) -> int {
+        let mut items: Vec<Val> = Vec::new();
+        reserve_vals(&mut items, argc as usize);
+        let mut i = 0;
+        while i < argc {
+            items.push(self.stack[(bp + i) as usize].clone());
+            i += 1;
+        }
+        let p = self.object_proto;
+        let args_obj = self.alloc(C_ARGUMENTS, p);
+        self.put_elems(args_obj, items);
+        let si = if strict { 1 } else { 0 };
+        let known = self.args_shapes[si];
+        if known >= 0 {
+            // the shape the first one got: no transitions looked up
+            let callee = if strict { Val::Obj(self.callee_pair) } else { Val::Obj(fo) };
+            let values = self.array_values_fn;
+            reserve_vals(&mut self.objs[args_obj as usize].vals, 2);
+            self.objs[args_obj as usize].shape = known as i32;
+            self.push_val(args_obj, callee);
+            self.push_val(args_obj, Val::Obj(values));
+        } else if strict {
+            // a strict function's arguments.callee throws
+            // non-configurable, so the shared pair never changes
+            if self.callee_pair < 0 {
+                let th = self.thrower;
+                let pair = self.alloc(C_ACCESSOR, -1);
+                self.put_elems(pair, vec![Val::Obj(th), Val::Obj(th)]);
+                self.roots.push(pair);
+                self.callee_pair = pair;
+                self.any_setter = true;
+                self.mark_setter(A_CALLEE);
+            }
+            let pair = self.callee_pair;
+            self.add_own(args_obj, A_CALLEE, Val::Obj(pair), P_ACCESSOR | P_HIDDEN | P_FIXED);
+        } else {
+            self.add_own(args_obj, A_CALLEE, Val::Obj(fo), P_HIDDEN);
+        }
+        if known < 0 {
+            let values = self.array_values_fn;
+            self.add_own(args_obj, A_ITERATOR, Val::Obj(values), P_HIDDEN);
+            let sh = self.objs[args_obj as usize].shape as int;
+            if !self.shapes[sh as usize].owned {
+                self.args_shapes[si] = sh;
+            }
+        }
+        args_obj
+    }
+
     /// Sets up a frame for the JS function `fo`; the stack holds
     /// [f, this, args…]. For a constructor call `this` is the new object.
     pub fn enter_function(&mut self, fo: int, argc: int, construct: bool, new_target: Val) -> bool {
@@ -3508,35 +3563,7 @@ impl Vm {
         }
         let mut args_obj: int = -1;
         if uses_args {
-            let mut items: Vec<Val> = Vec::new();
-            reserve_vals(&mut items, argc as usize);
-            let mut i = 0;
-            while i < argc {
-                items.push(self.stack[(bp + i) as usize].clone());
-                i += 1;
-            }
-            let p = self.object_proto;
-            args_obj = self.alloc(C_ARGUMENTS, p);
-            self.put_elems(args_obj, items);
-            if strict {
-                // a strict function's arguments.callee throws
-                // non-configurable, so the shared pair never changes
-                if self.callee_pair < 0 {
-                    let th = self.thrower;
-                    let pair = self.alloc(C_ACCESSOR, -1);
-                    self.put_elems(pair, vec![Val::Obj(th), Val::Obj(th)]);
-                    self.roots.push(pair);
-                    self.callee_pair = pair;
-                    self.any_setter = true;
-                    self.mark_setter(A_CALLEE);
-                }
-                let pair = self.callee_pair;
-                self.add_own(args_obj, A_CALLEE, Val::Obj(pair), P_ACCESSOR | P_HIDDEN | P_FIXED);
-            } else {
-                self.add_own(args_obj, A_CALLEE, Val::Obj(fo), P_HIDDEN);
-            }
-            let values = self.array_values_fn;
-            self.add_own(args_obj, A_ITERATOR, Val::Obj(values), P_HIDDEN);
+            args_obj = self.make_args(fo, bp, argc, strict);
         }
         if rest >= 0 {
             let mut items: Vec<Val> = Vec::new();
