@@ -182,7 +182,7 @@ if (args.includes("--octane")) {
 if (opt("eval", "")) {
   // --eval=file: its answer with the JIT off and on (min 0)
   const src = fs.readFileSync(opt("eval", ""), "utf8");
-  for (const on of opt("only-on", "") ? [true] : [false, true]) {
+  for (const on of opt("only-on", "") ? [true] : opt("only-off", "") ? [false] : [false, true]) {
     const e = engine();
     e.setJit(on, on ? Number(opt("min", "0")) : 0);
     const r = e.eval(src);

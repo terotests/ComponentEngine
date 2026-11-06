@@ -80,6 +80,32 @@ pub struct Layout {
     pub elems_vp: u32,
     /// JsObj.rc (the heap's references, Vm::inc/dec_o)
     pub off_rc: u32,
+    /// for a property added in place (R_SET_PROP's transition): JsObj's
+    /// extensible byte and its vals' length and capacity words, Vm's
+    /// proxy_made byte and setter_atoms' buffer and length words
+    pub off_ext: u32,
+    pub off_vals_len: u32,
+    pub off_vals_cap: u32,
+    pub vm_proxy_made: u32,
+    pub vm_setters_ptr: u32,
+    pub vm_setters_len: u32,
+    /// a frame pushed by compiled code (call_push): JsObj's func and env,
+    /// Vm's frames capacity word and slicing byte, Frame's fields
+    pub off_func: u32,
+    pub off_env: u32,
+    pub vm_frames_cap: u32,
+    pub vm_slicing: u32,
+    pub fr_proto: u32,
+    pub fr_fobj: u32,
+    pub fr_pc: u32,
+    pub fr_bp: u32,
+    pub fr_new_target: u32,
+    pub fr_args_obj: u32,
+    pub fr_construct: u32,
+    pub fr_gen: u32,
+    pub fr_ret: u32,
+    pub fr_mv_from: u32,
+    pub fr_mv_to: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -138,6 +164,27 @@ pub fn probe() -> Layout {
         elems_size: 0,
         elems_vp: 0,
         off_rc: 0,
+        off_ext: 0,
+        off_vals_len: 0,
+        off_vals_cap: 0,
+        vm_proxy_made: 0,
+        vm_setters_ptr: 0,
+        vm_setters_len: 0,
+        off_func: 0,
+        off_env: 0,
+        vm_frames_cap: 0,
+        vm_slicing: 0,
+        fr_proto: 0,
+        fr_fobj: 0,
+        fr_pc: 0,
+        fr_bp: 0,
+        fr_new_target: 0,
+        fr_args_obj: 0,
+        fr_construct: 0,
+        fr_gen: 0,
+        fr_ret: 0,
+        fr_mv_from: 0,
+        fr_mv_to: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -254,6 +301,28 @@ pub fn probe() -> Layout {
         l.elems_size = std::mem::size_of::<crate::value::Elems>() as u32;
         l.elems_vp = std::mem::offset_of!(crate::value::Elems, v) as u32 + vp;
         l.off_rc = std::mem::offset_of!(JsObj, rc) as u32;
+        let vc = 12 - vp - vl;
+        l.off_ext = std::mem::offset_of!(JsObj, extensible) as u32;
+        l.off_vals_len = (std::mem::offset_of!(JsObj, vals)) as u32 + vl;
+        l.off_vals_cap = (std::mem::offset_of!(JsObj, vals)) as u32 + vc;
+        l.vm_proxy_made = std::mem::offset_of!(crate::vm::Vm, proxy_made) as u32;
+        l.vm_setters_ptr = std::mem::offset_of!(crate::vm::Vm, setter_atoms) as u32 + vp;
+        l.vm_setters_len = std::mem::offset_of!(crate::vm::Vm, setter_atoms) as u32 + vl;
+        l.off_func = std::mem::offset_of!(JsObj, func) as u32;
+        l.off_env = std::mem::offset_of!(JsObj, env) as u32;
+        l.vm_frames_cap = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vc;
+        l.vm_slicing = std::mem::offset_of!(crate::vm::Vm, slicing) as u32;
+        l.fr_proto = std::mem::offset_of!(Frame, proto) as u32;
+        l.fr_fobj = std::mem::offset_of!(Frame, fobj) as u32;
+        l.fr_pc = std::mem::offset_of!(Frame, pc) as u32;
+        l.fr_bp = std::mem::offset_of!(Frame, bp) as u32;
+        l.fr_new_target = std::mem::offset_of!(Frame, new_target) as u32;
+        l.fr_args_obj = std::mem::offset_of!(Frame, args_obj) as u32;
+        l.fr_construct = std::mem::offset_of!(Frame, construct) as u32;
+        l.fr_gen = std::mem::offset_of!(Frame, gen) as u32;
+        l.fr_ret = std::mem::offset_of!(Frame, ret) as u32;
+        l.fr_mv_from = std::mem::offset_of!(Frame, mv_from) as u32;
+        l.fr_mv_to = std::mem::offset_of!(Frame, mv_to) as u32;
     }
     l
 }
@@ -329,6 +398,9 @@ const I32_LOAD8_U: u8 = 0x2d;
 const I64_STORE: u8 = 0x37;
 const F64_STORE: u8 = 0x39;
 const I32_STORE8: u8 = 0x3a;
+const I32_GE_S: u8 = 0x4e;
+const I32_LT_U: u8 = 0x49;
+const I64_EXTEND_I32_S: u8 = 0xac;
 const I32_CONST: u8 = 0x41;
 const F64_CONST: u8 = 0x44;
 const I32_EQZ: u8 = 0x45;
@@ -973,6 +1045,360 @@ impl<'a> Cg<'a> {
         self.heap_store(vb, voff, pc);
         true
     }
+    /// slot r = undefined
+    fn store_undef(&mut self, r: u32) {
+        let u = bytes_of(Val::Undef);
+        let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
+        let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
+        self.get(L_SP);
+        self.w.byte(I64_CONST);
+        self.w.s(lo);
+        self.mem(I64_STORE, 3, r * 16);
+        self.get(L_SP);
+        self.w.byte(I64_CONST);
+        self.w.s(hi);
+        self.mem(I64_STORE, 3, r * 16 + 8);
+    }
+    /// A plain call's frame pushed as renter pushes it, for the callee the
+    /// site's call cache at `a` names (h_call fills it: proto, table
+    /// index, nparams, nslots, fsize, entry, strict), then the cell as
+    /// direct() sets it; any other case fails to H_CALL.
+    fn call_push(&mut self, a: u32, next: i64, dst: i32, f: i32, argc: i32, pc: i64) {
+        let l = self.lay;
+        let cell = cell_addr() as i64;
+        let ld = |cg: &mut Cg<'a>, k: u32| {
+            cg.i32c(a as i64);
+            cg.mem(I32_LOAD, 2, k * 4);
+        };
+        let fo = f as u32 * 16;
+        // f: a script function of the cached proto
+        self.need_obj(L_SP, fo, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, fo + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_FUNCTION as i64);
+        self.op(I32_NE);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_func);
+        ld(self, 0);
+        self.op(I32_NE);
+        self.op(I32_OR);
+        // no collection due, no slices, not too deep
+        self.get(L_VM);
+        self.mem(I32_LOAD8_U, 0, l.vm_gc_flag);
+        self.op(I32_OR);
+        self.get(L_VM);
+        self.mem(I32_LOAD8_U, 0, l.vm_slicing);
+        self.op(I32_OR);
+        self.i32c(cell);
+        self.mem(I32_LOAD, 2, 36);
+        self.i32c(DEPTH_MAX as i64);
+        self.op(I32_GE_S);
+        self.op(I32_OR);
+        // room for the frame
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_frames_len);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_frames_cap);
+        self.op(I32_GE_U);
+        self.op(I32_OR);
+        // the stack as long as the callee's frame: (bp + f + 2) + fsize
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_stack_len);
+        self.get(L_BP);
+        self.i32c(f as i64 + 2);
+        self.op(I32_ADD);
+        ld(self, 4);
+        self.op(I32_ADD);
+        self.op(I32_LT_U);
+        self.op(I32_OR);
+        // a sloppy function's this must be an object already
+        ld(self, 6);
+        self.op(I32_EQZ);
+        self.get(L_SP);
+        self.mem(I32_LOAD8_U, 0, fo + 16);
+        self.i32c(l.t_obj as i64);
+        self.op(I32_NE);
+        self.op(I32_AND);
+        self.op(I32_OR);
+        self.fail_if(pc);
+        // the caller goes on after the call
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_frames_ptr);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_frames_len);
+        self.i32c(1);
+        self.op(I32_SUB);
+        self.i32c(l.frame_size as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.w.byte(I64_CONST);
+        self.w.s(next);
+        self.mem(I64_STORE, 3, l.fr_pc);
+        // the callee's locals past the arguments it got: undefined
+        // (L_T3 the slot address, L_T4 the end)
+        let keep = |cg: &mut Cg<'a>| {
+            // min(argc, nparams)
+            ld(cg, 2);
+            cg.i32c(argc as i64);
+            ld(cg, 2);
+            cg.i32c(argc as i64);
+            cg.op(I32_LT_S);
+            cg.op(SELECT);
+        };
+        let cbp = (f as u32 + 2) * 16;
+        self.get(L_SP);
+        self.i32c(cbp as i64);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_C as u64);
+        keep(self);
+        self.i32c(16);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T3);
+        self.get(L_C);
+        ld(self, 3);
+        self.i32c(16);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T4);
+        let u = bytes_of(Val::Undef);
+        let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
+        let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.op(LOOP);
+        self.op(T_VOID);
+        self.get(L_T3);
+        self.get(L_T4);
+        self.op(I32_GE_U);
+        self.op(BR_IF);
+        self.w.u(1);
+        self.get(L_T3);
+        self.w.byte(I64_CONST);
+        self.w.s(lo);
+        self.mem(I64_STORE, 3, 0);
+        self.get(L_T3);
+        self.w.byte(I64_CONST);
+        self.w.s(hi);
+        self.mem(I64_STORE, 3, 8);
+        self.get(L_T3);
+        self.i32c(16);
+        self.op(I32_ADD);
+        self.set(L_T3);
+        self.op(BR);
+        self.w.u(0);
+        self.op(END);
+        self.op(END);
+        // the frame: frames_ptr + len * size (L_T3)
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_frames_ptr);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_frames_len);
+        self.i32c(l.frame_size as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T3);
+        let st_i32 = |cg: &mut Cg<'a>, off: u32, v: &dyn Fn(&mut Cg<'a>)| {
+            cg.get(L_T3);
+            v(cg);
+            cg.op(I64_EXTEND_I32_S);
+            cg.mem(I64_STORE, 3, off);
+        };
+        let st_k = |cg: &mut Cg<'a>, off: u32, k: i64| {
+            cg.get(L_T3);
+            cg.w.byte(I64_CONST);
+            cg.w.s(k);
+            cg.mem(I64_STORE, 3, off);
+        };
+        st_i32(self, l.fr_proto, &|cg| ld(cg, 0));
+        st_i32(self, l.fr_fobj, &|cg| {
+            cg.get(L_SP);
+            cg.mem(I32_LOAD, 2, fo + l.off_int);
+        });
+        st_i32(self, l.fr_pc, &|cg| ld(cg, 5));
+        // bp = this frame's bp + f + 2
+        st_i32(self, l.fr_bp, &|cg| {
+            cg.get(L_BP);
+            cg.i32c(f as i64 + 2);
+            cg.op(I32_ADD);
+        });
+        st_i32(self, l.frame_env, &|cg| {
+            cg.get(L_T2);
+            cg.mem(I32_LOAD, 2, l.off_env);
+        });
+        // this_val = the slot after f
+        self.get(L_T3);
+        self.get(L_SP);
+        self.mem(I64_LOAD, 3, fo + 16);
+        self.mem(I64_STORE, 3, l.frame_this);
+        self.get(L_T3);
+        self.get(L_SP);
+        self.mem(I64_LOAD, 3, fo + 24);
+        self.mem(I64_STORE, 3, l.frame_this + 8);
+        st_k(self, l.fr_new_target, lo);
+        st_k(self, l.fr_new_target + 8, hi);
+        st_k(self, l.fr_args_obj, -1);
+        self.get(L_T3);
+        self.i32c(0);
+        self.mem(I32_STORE8, 0, l.fr_construct);
+        st_k(self, l.fr_gen, -1);
+        st_i32(self, l.fr_ret, &|cg| {
+            cg.get(L_BP);
+            cg.i32c(dst as i64);
+            cg.op(I32_ADD);
+        });
+        st_k(self, l.fr_mv_from, -1);
+        st_k(self, l.fr_mv_to, -1);
+        // frames.len + 1
+        self.get(L_VM);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_frames_len);
+        self.i32c(1);
+        self.op(I32_ADD);
+        self.mem(I32_STORE, 2, l.vm_frames_len);
+        // the cell as direct() and fill_from leave it: the callee's sp and
+        // this; entry, table index, bp, sp; depth + 1
+        self.i32c(cell);
+        self.get(L_C);
+        self.mem(I32_STORE, 2, 0);
+        self.i32c(cell);
+        self.get(L_T3);
+        self.i32c(l.frame_this as i64);
+        self.op(I32_ADD);
+        self.mem(I32_STORE, 2, 20);
+        self.i32c(cell);
+        ld(self, 5);
+        self.mem(I32_STORE, 2, 8);
+        self.i32c(cell);
+        ld(self, 1);
+        self.mem(I32_STORE, 2, 28);
+        self.i32c(cell);
+        self.get(L_BP);
+        self.i32c(f as i64 + 2);
+        self.op(I32_ADD);
+        self.mem(I32_STORE, 2, 32);
+        self.i32c(cell);
+        self.get(L_C);
+        self.mem(I32_STORE, 2, 40);
+        self.i32c(cell);
+        self.i32c(cell);
+        self.mem(I32_LOAD, 2, 36);
+        self.i32c(1);
+        self.op(I32_ADD);
+        self.mem(I32_STORE, 2, 36);
+    }
+    /// R_SET_PROP adding property `atom` in place, as the cached transition
+    /// t = before * 65536 + after says (rvm.rs r_set_prop_slow): a plain
+    /// extensible object of shape before, no proxy made, no setter for the
+    /// atom, room in its vals; else the helper.
+    fn set_prop_add(&mut self, obj: u32, v: i32, t: i32, atom: i32, pc: i64) -> bool {
+        let l = self.lay;
+        let vo = self.raw(v);
+        if let Opnd::K(k) = vo {
+            match self.kvals.get(k as usize) {
+                Some(Val::Str(_)) | Some(Val::Obj(_)) | None => return false,
+                _ => {}
+            }
+        }
+        let (vb, voff) = self.place(vo);
+        // the value: no string (Vm::inc's other case)
+        self.get(vb);
+        self.mem(I32_LOAD8_U, 0, voff);
+        self.i32c(l.t_str as i64);
+        self.op(I32_EQ);
+        self.fail_if(pc);
+        self.get(L_VM);
+        self.mem(I32_LOAD8_U, 0, l.vm_proxy_made);
+        self.fail_if(pc);
+        // setter_atoms[atom]
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_setters_len);
+        self.i32c(atom as i64);
+        self.op(I32_GT_S);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_setters_ptr);
+        self.mem(I32_LOAD8_U, 0, atom as u32);
+        self.fail_if(pc);
+        self.extra -= 1;
+        self.op(END);
+        self.need_obj(L_SP, obj * 16, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_shape);
+        self.i32c((t >> 16) as i64);
+        self.op(I32_NE);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_OBJECT as i64);
+        self.op(I32_NE);
+        self.op(I32_OR);
+        self.get(L_T2);
+        self.mem(I32_LOAD8_U, 0, l.off_ext);
+        self.op(I32_EQZ);
+        self.op(I32_OR);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_vals_len);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_vals_cap);
+        self.op(I32_GE_U);
+        self.op(I32_OR);
+        self.fail_if(pc);
+        // shape = after; vals[len] = v (counted); len + 1
+        self.get(L_T2);
+        self.i32c((t & 65535) as i64);
+        self.mem(I32_STORE, 2, l.off_shape);
+        self.get(vb);
+        self.mem(I32_LOAD8_U, 0, voff);
+        self.i32c(l.t_obj as i64);
+        self.op(I32_EQ);
+        self.op(IF);
+        self.op(T_VOID);
+        self.get(vb);
+        self.mem(I32_LOAD, 2, voff + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T4 as u64);
+        self.get(L_T4);
+        self.mem(I32_LOAD, 2, l.off_rc);
+        self.i32c(1);
+        self.op(I32_ADD);
+        self.mem(I32_STORE, 2, l.off_rc);
+        self.op(END);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_vals);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_vals_len);
+        self.i32c(16);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T3);
+        self.get(L_T3);
+        self.get(vb);
+        self.mem(I64_LOAD, 3, voff);
+        self.mem(I64_STORE, 3, 0);
+        self.get(L_T3);
+        self.get(vb);
+        self.mem(I64_LOAD, 3, voff + 8);
+        self.mem(I64_STORE, 3, 8);
+        self.get(L_T2);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_vals_len);
+        self.i32c(1);
+        self.op(I32_ADD);
+        self.mem(I32_STORE, 2, l.off_vals_len);
+        true
+    }
     /// A property read (R_GET_PROP, R_GET_THIS_PROP) or a method's
     /// (R_GET_METHOD: f and this into dst, dst + 1) of the object value at
     /// b + off through the site's cache at address `a`: ways of shape,
@@ -1301,10 +1727,37 @@ impl<'a> Cg<'a> {
     }
     /// R_CALL: H_CALL, and when it pushed a compiled callee's frame (6) the
     /// call of its code from here and H_RET for what it returned
-    fn call_op(&mut self, pc: i64, next: i64, plain: bool, dst: i32) {
-        self.helper_raw(H_CALL, pc);
+    fn call_op(&mut self, pc: i64, next: i64, plain: bool, dst: i32, f: i32, argc: i32, sub: int) {
         let cell = cell_addr() as i64;
         let l = self.lay;
+        let a = self.caches.get(pc as usize).copied().unwrap_or(0);
+        if plain && a != 0 && dst >= 0 && f >= 0 && argc >= 0 && MASK.with(|m| m.get()) & (1u64 << 57) == 0 {
+            if sub == 1 {
+                self.store_undef(f as u32 + 1);
+            }
+            // block $done: the frame pushed here (L_TAG 6) or by H_CALL
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.extra += 1;
+            let saved = self.slow_at;
+            self.slow_at = Some(self.extra);
+            self.call_push(a, next, dst, f, argc, pc);
+            self.slow_at = saved;
+            self.i32c(6);
+            self.set(L_TAG);
+            self.op(BR);
+            self.w.u(1);
+            self.extra -= 1;
+            self.op(END);
+            self.helper_raw(H_CALL, pc);
+            self.extra -= 1;
+            self.op(END);
+        } else {
+            self.helper_raw(H_CALL, pc);
+        }
         self.get(L_TAG);
         self.i32c(6);
         self.op(I32_EQ);
@@ -1647,6 +2100,12 @@ impl<'a> Cg<'a> {
                     true
                 }
             }
+            R_SET_PROP if self.lay.obj_ok && w3 <= -2 && w1 >= 0 && sub == 0 && self.caches[pc] != 0 && ((-2 - w3) & 65535) != 0 => {
+                // the transition cached when this was compiled
+                let t = -2 - w3;
+                let atom = self.caches[pc] as i32 - 1;
+                self.with_helper(H_SET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.set_prop_add(w1 as u32, w2, t, atom, p))
+            }
             R_GET_METHOD if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
                 self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.prop_cache(w1 as u32, L_SP, w2 as u32 * 16, a, true, sub, p))
@@ -1759,7 +2218,7 @@ impl<'a> Cg<'a> {
             }
             R_CALL | R_NEW => {
                 let next = p + 1 + ((w0 >> 16) as i64);
-                self.call_op(p, next, kind == R_CALL, if w3 > 0 { w3 - 1 } else { w1 });
+                self.call_op(p, next, kind == R_CALL, if w3 > 0 { w3 - 1 } else { w1 }, w1, w2, sub);
                 true
             }
             R_RET | R_RET_UNDEF if self.lay.obj_ok && (kind == R_RET_UNDEF || w1 >= 0 || self.raw(w1).is_k()) => {
@@ -2405,7 +2864,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
     if f == -1 {
         let rb = vm.protos[pi].rbase as usize;
         let n = vm.protos[pi].code.len();
-        let caches = if rb + n <= vm.rcode.len() { site_caches(vm, rb, n) } else { Vec::new() };
+        let caches = if rb + n <= vm.rcode.len() { site_caches(vm, pi, rb, n) } else { Vec::new() };
         let p = &vm.protos[pi];
         let lay = LAYOUT.with(|l| *l);
         f = -2;
@@ -3183,6 +3642,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
             return settle(vm, fi, pc);
         }
         if f >= 0 {
+            call_fill(vm, ri as usize, tp, f);
             return direct(vm, nf, f);
         }
         if deep {
@@ -3336,11 +3796,19 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
 
 /// By pc of a function's code (from rb, n ops): the cache of each property
 /// and method site prop_cache reads, 0 for none.
-fn site_caches(vm: &mut crate::vm::Vm, rb: usize, n: usize) -> Vec<u32> {
+fn site_caches(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<u32> {
     let mut out = vec![0u32; n];
     for i in 0..n {
         let k = (vm.rcode[rb + i].code & 255) as int;
-        if k == R_GET_PROP || k == R_GET_THIS_PROP || k == R_GET_METHOD {
+        if k == R_SET_PROP {
+            // no cache: the property's atom + 1, for an add (set_prop_add)
+            let a = vm.ratom(pi, i as int);
+            if a >= 0 {
+                out[i] = a as u32 + 1;
+            }
+            continue;
+        }
+        if k == R_GET_PROP || k == R_GET_THIS_PROP || k == R_GET_METHOD || k == R_CALL {
             out[i] = site_cache(vm, rb + i);
         } else if k == R_GET_GLOBAL {
             // after the cache, the value Obj(global) for prop_cache to read
@@ -3428,6 +3896,24 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
     vm.grow_stack(want);
     vm.stack[fpos as usize] = v;
     after(vm)
+}
+
+/// A plain call at site ri went to compiled function f of proto tp: its
+/// call cache (call_push) names it, unless renter would do more than
+/// call_push does (an arrow's this, a scope to make).
+fn call_fill(vm: &mut crate::vm::Vm, ri: usize, tp: usize, f: i64) {
+    if ri >= vm.jit_cache_at.len() || vm.jit_cache_at[ri] < 0 {
+        return;
+    }
+    let p = &vm.protos[tp];
+    if p.arrow || p.env_size > 0 {
+        return;
+    }
+    let w = [tp as i32, f as i32, p.nparams as i32, p.nslots as i32, p.fsize as i32, p.rentry as i32, if p.strict { 1 } else { 0 }];
+    let b = &mut vm.jit_caches[vm.jit_cache_at[ri] as usize];
+    for k in 0..7 {
+        b[k] = w[k];
+    }
 }
 
 /// R_NEW as the interpreter does it for anything but a plain constructor
