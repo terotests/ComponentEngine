@@ -2208,6 +2208,50 @@ impl<'a> Cg<'a> {
             cg.i32c(2);
             cg.op(I32_ADD);
         };
+        // f.call(this, a...): [call, f, this, a...] is f's call one slot
+        // on (r_call_slow); H_CALL still reads the op as it is
+        {
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.get(L_FB);
+            self.mem(I32_LOAD8_U, 0, 0);
+            self.i32c(l.t_obj as i64);
+            self.op(I32_NE);
+            self.get(L_ARGC);
+            self.i32c(1);
+            self.op(I32_LT_S);
+            self.op(I32_OR);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_FB);
+            self.mem(I32_LOAD, 2, l.off_int);
+            self.obj_addr();
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T2 as u64);
+            self.mem(I32_LOAD, 2, l.off_class);
+            self.i32c(C_NATIVE as i64);
+            self.op(I32_NE);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_func);
+            self.i32c(crate::builtins::NF_CALL as i64);
+            self.op(I32_NE);
+            self.op(I32_OR);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_F);
+            self.i32c(1);
+            self.op(I32_ADD);
+            self.set(L_F);
+            self.get(L_ARGC);
+            self.i32c(1);
+            self.op(I32_SUB);
+            self.set(L_ARGC);
+            self.get(L_FB);
+            self.i32c(16);
+            self.op(I32_ADD);
+            self.set(L_FB);
+            self.op(END);
+        }
         // Math.abs, floor, ceil, round, sqrt of a number, min and max of
         // two (builtins.rs math1; wasm's min and max order -0 and NaN as
         // JavaScript does): the result into dst, done (0)
