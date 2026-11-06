@@ -975,6 +975,20 @@ impl Vm {
         self.put_prim(o, src);
         let re = &self.regexes[idx as usize];
         let (g, ic, m, sa, u, y) = (re.global, re.ignore_case, re.multiline, re.dot_all, re.unicode && !re.unicode_sets, re.sticky);
+        if self.regex_shape >= 0 {
+            // the shape the first one got: no transitions looked up
+            self.objs[o as usize].shape = self.regex_shape as i32;
+            self.push_val(o, Val::Num(0.0));
+            self.push_val(o, shown);
+            slot_room(&mut self.objs[o as usize], 8);
+            self.push_val(o, Val::Bool(g));
+            self.push_val(o, Val::Bool(ic));
+            self.push_val(o, Val::Bool(m));
+            self.push_val(o, Val::Bool(sa));
+            self.push_val(o, Val::Bool(u));
+            self.push_val(o, Val::Bool(y));
+            return Val::Obj(o);
+        }
         self.add_own(o, A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
         let ro = P_HIDDEN | P_READONLY;
         self.add_own(o, A_SOURCE, shown, ro);
@@ -984,6 +998,10 @@ impl Vm {
         self.add_own(o, A_DOTALL, Val::Bool(sa), ro);
         self.add_own(o, A_UNICODE, Val::Bool(u), ro);
         self.add_own(o, A_STICKY, Val::Bool(y), ro);
+        let sh = self.objs[o as usize].shape as int;
+        if !self.shapes[sh as usize].owned {
+            self.regex_shape = sh;
+        }
         Val::Obj(o)
     }
 

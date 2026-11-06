@@ -5776,7 +5776,8 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
         }
         way[2] = (own * 16) as i32;
     } else {
-        if !plain(cls) && !sp {
+        // a dictionary receiver gains keys without an epoch (add_own)
+        if (!plain(cls) && !sp) || vm.shapes[ob.shape as usize].owned {
             return;
         }
         let mut cur = o;
