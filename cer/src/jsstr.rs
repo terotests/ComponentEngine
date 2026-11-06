@@ -312,6 +312,9 @@ fn upper_special(c: char) -> String {
 }
 
 pub fn to_upper(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_ascii_uppercase();
+    }
     let mut out = String::new();
     for c in s.chars() {
         // SpecialCasing's unconditional mappings to more than one letter,
@@ -327,6 +330,10 @@ pub fn to_upper(s: &str) -> String {
 }
 
 pub fn to_lower(s: &str) -> String {
+    if s.is_ascii() {
+        // no final sigma or dotted capital I to care about
+        return s.to_ascii_lowercase();
+    }
     let mut out = String::new();
     let cs = s.chars().collect::<Vec<char>>();
     let n = cs.len();

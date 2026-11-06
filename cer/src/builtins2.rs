@@ -780,6 +780,12 @@ impl Vm {
             }
             NF_SP_LOWER => {
                 let s = self.this_str(&this);
+                if let Val::Str(_) = this {
+                    // already lower case: the same string, nothing made
+                    if s.is_ascii() && !s.bytes().any(|b| b.is_ascii_uppercase()) {
+                        return this;
+                    }
+                }
                 self.string_val(jsstr::to_lower(s.as_str()))
             }
             NF_SP_TRIM => {
