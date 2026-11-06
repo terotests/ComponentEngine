@@ -74,7 +74,14 @@ function engine() {
       }
       const env = { memory: x.memory, table: x.__indirect_function_table };
       ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow", "ret"].forEach((h, k) => (env[h] = jit.helpers[k]));
-      const inst = new WebAssembly.Instance(m, { env });
+      // the runtime module (look, codes, hstore, callx): kept for the
+      // compiled functions' modules, which import it as "rt"
+      const inst = new WebAssembly.Instance(m, jit.rt ? { env, rt: jit.rt } : { env });
+      if (inst.exports.look) {
+        jit.rt = inst.exports;
+        jit.compileMs += performance.now() - t0;
+        return 0;
+      }
       const t = x.__indirect_function_table;
       const idx = t.grow(1);
       t.set(idx, inst.exports.f);
