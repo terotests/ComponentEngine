@@ -19,7 +19,8 @@
 //
 // --sandbox opens the sandbox demo (sandbox/): the four programs have to draw
 // on this page in time slices, keep drawing when moved mid-run to a Worker and
-// to an iframe (freeze there, thaw here), start a new picture on a zoom, go on
+// to an iframe (freeze there, thaw here), start a new picture on a zoom (click,
+// wheel, + button) and a drag, go on
 // after a freeze and a thaw, and answer "Fetch results".
 
 import fs from "node:fs";
@@ -236,6 +237,17 @@ async function runSandbox() {
   // card 2 zooms in at its centre; card 3 is frozen and thawed
   const box = await page.locator(".sbx-canvas").nth(2).boundingBox();
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  // card 1 zooms with the wheel, card 0 is dragged (pan) and zoomed with its + button
+  const b1 = await page.locator(".sbx-canvas").nth(1).boundingBox();
+  await page.mouse.move(b1.x + b1.width * 0.3, b1.y + b1.height * 0.4);
+  await page.mouse.wheel(0, -300);
+  const b0 = await page.locator(".sbx-canvas").nth(0).boundingBox();
+  await page.mouse.move(b0.x + b0.width / 2, b0.y + b0.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b0.x + b0.width / 2 + 60, b0.y + b0.height / 2 + 20, { steps: 5 });
+  await page.mouse.up();
+  await page.locator(".z-in").nth(0).click();
+  const views = await page.evaluate(() => Object.values(window.sandboxDemo.boxes).map((s) => ({ ...s.view, home: s.prog.view })));
   const frozen = await page.evaluate(async () => {
     const s = window.sandboxDemo.boxes[3];
     const r = await window.sandboxDemo.freeze(s);
@@ -260,6 +272,9 @@ async function runSandbox() {
   for (let i = 0; i < 4; i++) if (!ahead(before[i], after[i])) problems.push(`card ${i} did not go on: ${before[i]} -> ${after[i]}`);
   if (+after[2].split(" ")[0] !== gens[2] || gens[2] < 3) problems.push("the zoom did not start a new picture: " + after[2] + " gen " + gens[2]);
   if (!frozen) problems.push("freeze gave no snapshot");
+  if (!(views[1].scale < views[1].home[2])) problems.push("the wheel did not zoom card 1: " + JSON.stringify(views[1]));
+  if (!(views[0].scale < views[0].home[2]) || views[0].cx === views[0].home[0]) problems.push("the drag / + button did not pan and zoom card 0: " + JSON.stringify(views[0]));
+  if (+after[0].split(" ")[0] !== gens[0] || +after[1].split(" ")[0] !== gens[1]) problems.push("cards 0 and 1 are not drawing their new view: " + after.slice(0, 2) + " gens " + gens.slice(0, 2));
   if (results.some((r) => !r.result || !r.result.program)) problems.push("a card answered no result");
   const bad = [...errors, ...problems];
   if (bad.length) console.log("errors:\n" + bad.join("\n"));
