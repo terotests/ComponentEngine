@@ -96,7 +96,7 @@ impl Vm {
             let attr = self.attr_at(target, slot);
             if (attr & P_FIXED) != 0 {
                 if (attr & P_ACCESSOR) != 0 {
-                    let pair = obj_of(&self.objs[target as usize].vals[slot as usize]);
+                    let pair = obj_of(&self.objs[target as usize].get_slot(slot as usize));
                     let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
                     if matches!(g, Val::Undef) && !matches!(v, Val::Undef) {
                         let n = self.atom_str(atom);
@@ -104,7 +104,7 @@ impl Vm {
                         return Val::Undef;
                     }
                 } else if (attr & P_READONLY) != 0 {
-                    let cur = self.objs[target as usize].vals[slot as usize].clone();
+                    let cur = self.objs[target as usize].get_slot(slot as usize).clone();
                     if !self.same_value(&v, &cur) {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("'get' on proxy: property '{}' is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value", n).as_str());
@@ -148,7 +148,7 @@ impl Vm {
             let attr = self.attr_at(target, slot);
             if (attr & P_FIXED) != 0 {
                 if (attr & P_ACCESSOR) != 0 {
-                    let pair = obj_of(&self.objs[target as usize].vals[slot as usize]);
+                    let pair = obj_of(&self.objs[target as usize].get_slot(slot as usize));
                     let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                     if matches!(s, Val::Undef) {
                         let n = self.atom_str(atom);
@@ -156,7 +156,7 @@ impl Vm {
                         return false;
                     }
                 } else if (attr & P_READONLY) != 0 {
-                    let cur = self.objs[target as usize].vals[slot as usize].clone();
+                    let cur = self.objs[target as usize].get_slot(slot as usize).clone();
                     if !self.same_value(&v, &cur) {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("'set' on proxy: trap returned truish for property '{}' which exists in the proxy target as a non-configurable and non-writable data property with a different value", n).as_str());

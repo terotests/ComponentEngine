@@ -596,7 +596,7 @@ impl Vm {
                         if o >= 0 && c >= 65536 && ((c >> 16) as int) == self.ob(o).shape as int {
                             // the cache's shape: the slot without a call
                             // the shape matched, so its slot exists
-                            let r = *val_at(&self.ob(o).vals, (c & 65535) as usize);
+                            let r = slot_at(self.ob(o), (c & 65535) as usize);
                             self.rset((bp + (w1 as int)) as usize, r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
@@ -878,7 +878,7 @@ impl Vm {
                         let c = self.protos[pi].code[pc as usize].c;
                         let slot = self.ic_slot(g, (w3 as int), (c as int), false);
                         if slot >= 0 {
-                            let v = self.objs[g as usize].vals[slot as usize].clone();
+                            let v = self.objs[g as usize].get_slot(slot as usize).clone();
                             self.rset((bp + (w1 as int)) as usize, v);
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
@@ -968,10 +968,8 @@ impl Vm {
                         let c = self.protos[pi].code[pc as usize].c;
                         if c >= 0 && ((c >> 16) as int) == sh {
                             self.objs[o as usize].shape = c & 65535;
-                            if vals_full(&self.objs[o as usize].vals) {
-                                let most = self.shapes[self.holder((c & 65535) as int)].keys.len();
-                                grow_vals(&mut self.objs[o as usize].vals, most);
-                            }
+                            let most = self.shapes[self.holder((c & 65535) as int)].keys.len();
+                            slot_room(&mut self.objs[o as usize], most);
                             self.push_val(o, v);
                         } else {
                             self.frames[fi].pc = pc + 1;
@@ -1123,7 +1121,7 @@ impl Vm {
             if h0 != -1 {
                 let way = self.pic_way as usize;
                 if h0 < 0 || self.pic[way + 4] == 0 {
-                    let r = if h0 >= 0 { self.objs[h0 as usize].vals[self.pic[way + 3] as usize] } else { Val::Undef };
+                    let r = if h0 >= 0 { self.objs[h0 as usize].get_slot(self.pic[way + 3] as usize) } else { Val::Undef };
                     self.stack[(bp + w1) as usize] = r;
                     return false;
                 }
@@ -1135,7 +1133,7 @@ impl Vm {
             let slot = self.ic_get(o, atom, (c as int), pi, pc + 1);
             self.rcode[(rb + pc) as usize].c = self.protos[pi].code[pc as usize].c;
             if slot >= 0 {
-                let r = self.objs[o as usize].vals[slot as usize].clone();
+                let r = self.objs[o as usize].get_slot(slot as usize).clone();
                 self.stack[(bp + w1) as usize] = r;
                 return false;
             }
@@ -1149,7 +1147,7 @@ impl Vm {
             let h = if h0 != -1 { h0 } else { self.pic_get(rb + pc, o, atom) };
             if h != -1 {
                 let way = self.pic_way as usize;
-                let r = if h >= 0 { self.objs[h as usize].vals[self.pic[way + 3] as usize] } else { Val::Undef };
+                let r = if h >= 0 { self.objs[h as usize].get_slot(self.pic[way + 3] as usize) } else { Val::Undef };
                 if h < 0 || self.pic[way + 4] == 0 {
                     self.stack[(bp + w1) as usize] = r;
                     self.rcode[(rb + pc) as usize].c = -3;
@@ -1355,10 +1353,8 @@ impl Vm {
             if (t >> 16) == sh && self.add_cached(o, pi, pc) {
                 let after = (t & 65535) as int;
                 self.objs[o as usize].shape = after as i32;
-                if vals_full(&self.objs[o as usize].vals) {
-                    let most = self.shapes[self.holder(after)].keys.len();
-                    grow_vals(&mut self.objs[o as usize].vals, most);
-                }
+                let most = self.shapes[self.holder(after)].keys.len();
+                slot_room(&mut self.objs[o as usize], most);
                 self.push_val(o, val);
                 if ((w0 >> 8) & 255) == 1 {
                     self.stack[(bp + w1) as usize] = val;
@@ -1434,7 +1430,7 @@ impl Vm {
         if let Val::Obj(o) = v {
             if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
                 // the cache's shape: o's own data property
-                let f = *val_at(&self.ob(o).vals, (w3 & 65535) as usize);
+                let f = slot_at(self.ob(o), (w3 & 65535) as usize);
                 if ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
                     self.rset((bp + w1) as usize, f);
                     self.rset((bp + w1 + 1) as usize, v);
@@ -1449,7 +1445,7 @@ impl Vm {
                 if b + 6 < self.pic.len() && self.pic[b] == self.ob(o).shape && self.pic[b + 1] == (self.shape_epoch as i32) && self.pic[b + 2] == 1 && self.pic[b + 3] >= 0 && self.pic[b + 4] == 0 {
                     let p = self.pic[b + 5];
                     if self.ob(o).proto == p && self.ob(p as int).shape == self.pic[b + 6] {
-                        let f = *val_at(&self.ob(p as int).vals, self.pic[b + 3] as usize);
+                        let f = slot_at(self.ob(p as int), self.pic[b + 3] as usize);
                         let fun = if let Val::Obj(fo) = f { self.ob(fo).class == C_FUNCTION } else { false };
                         if fun || ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
                             self.rset((bp + w1) as usize, f);
@@ -1462,7 +1458,7 @@ impl Vm {
                 // without the property of its own
                 let h = self.pic_probe(site, o);
                 if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
-                    let f = if h >= 0 { self.objs[h as usize].vals[self.pic[(self.pic_way + 3) as usize] as usize] } else { Val::Undef };
+                    let f = if h >= 0 { self.objs[h as usize].get_slot(self.pic[(self.pic_way + 3) as usize] as usize) } else { Val::Undef };
                     if ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
                         self.rset((bp + w1) as usize, f);
                         self.rset((bp + w1 + 1) as usize, v);
@@ -1485,7 +1481,7 @@ impl Vm {
             let o = *o;
             let slot = self.find(o, atom);
             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
-                f = self.objs[o as usize].vals[slot as usize].clone();
+                f = self.objs[o as usize].get_slot(slot as usize).clone();
                 done = true;
                 let nc = self.ic_of(o, slot);
                 if nc >= 65536 {
@@ -1494,7 +1490,7 @@ impl Vm {
             } else if slot < 0 {
                 let h = self.pic_get(rb + pc, o, atom);
                 if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
-                    f = if h >= 0 { self.objs[h as usize].vals[self.pic[(self.pic_way + 3) as usize] as usize] } else { Val::Undef };
+                    f = if h >= 0 { self.objs[h as usize].get_slot(self.pic[(self.pic_way + 3) as usize] as usize) } else { Val::Undef };
                     done = true;
                 }
             }
@@ -1905,6 +1901,24 @@ impl Vm {
 // range, debug builds check them. The other targets index as usual.
 
 /// `v[i]`.
+/// Property slot `i` of `o` (an inline cache's slot: in range).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn slot_at(o: &JsObj, i: usize) -> Val {
+    if i == 0 {
+        o.inl0
+    } else if i == 1 {
+        o.inl1
+    } else {
+        *val_at(&o.vals, i - 2)
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn slot_at(o: &JsObj, i: usize) -> Val {
+    o.get_slot(i)
+}
+
 #[ranger::target(rust)]
 #[inline(always)]
 pub fn val_at(v: &Vec<Val>, i: usize) -> &Val {
