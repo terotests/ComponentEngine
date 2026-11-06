@@ -575,3 +575,25 @@ for (var i = 0; i < 300; i++) {
 out.join('|')
 ----
 -0.423606 -0.905846 22 1 1.437828 128 891 22.42857142857143 s297 obj  true false true 445.5 -0.7568 NaN|-0.548258 -0.836309 22 1 1.438659 256 894 22.57142857142857 s298 obj  true false true 447 -0.7568 NaN|-0.661740 -0.749733 22 1 1.439481 512 897 22.714285714285715 s299 obj  true false true 448.5 -0.7568 NaN
+
+==== js proxy get traps run from register and compiled code: own handler trap, element keys, receiver, nested proxies, throwing trap, fixed-property invariant, no trap, trap behind a getter
+var log = [];
+var base = { a: 1, b: 2 };
+Object.defineProperty(base, 'fixed', { value: 7, writable: false, configurable: false });
+var h = { get: function (t, k, r) { log.push(typeof k === 'string' ? k : 'sym'); if (k === 'boom') throw new Error('trap ' + k); if (k === 'self') return r === px; return k in t ? t[k] * 10 : 'no:' + k; } };
+var px = new Proxy(base, h);
+var inner = new Proxy({ x: 5 }, { get: (t, k) => k === 'deep' ? px.a + px['b'] : t[k] });
+var outer = new Proxy(inner, { get: function (t, k, r) { return 'o' + t[k]; } });
+var plain = new Proxy({ q: 3 }, {});
+var getterH = new Proxy({ z: 1 }, { get get() { return function (t, k) { return 'G' + k; }; } });
+var out = [];
+for (var i = 0; i < 300; i++) {
+  var key = i % 2 ? 'a' : 'b';
+  var r = [px.a, px[key], px['m' + (i % 3)], px.self, outer.deep, outer.x, plain.q, plain['q'], getterH.z, getterH['w' + (i % 2)]];
+  try { px.boom; } catch (e) { r.push(e.message); }
+  try { r.push(px.fixed); } catch (e) { r.push('E:' + e.constructor.name); }
+  if (i > 297) out.push(r.join(' '));
+}
+out.join('|') + '#' + log.length + '#' + log.slice(0, 8).join(',')
+----
+10 20 no:m1 true o30 o5 3 3 Gz Gw0 trap boom E:TypeError|10 10 no:m2 true o30 o5 3 3 Gz Gw1 trap boom E:TypeError#2400#a,b,m0,self,a,b,boom,fixed

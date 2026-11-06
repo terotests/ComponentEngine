@@ -6236,6 +6236,15 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         }
         let fi = vm.frames.len() - 1;
         vm.frames[fi].pc = _pc as int + 1;
+        if let (Val::Obj(po), Val::Str(kh)) = (v, k) {
+            if vm.objs[po as usize].class == C_PROXY && vm.strs[kh as usize].atom >= 0 {
+                let a = vm.strs[kh as usize].atom as int;
+                let fpos = bp + vm.protos[_pi as usize].fsize;
+                if vm.r_proxy_get(po, a, v, fpos, bp + ins.a as int) {
+                    return 5;
+                }
+            }
+        }
         let r = vm.get_elem(&v, &k);
         if !vm.throwing {
             vm.rset((bp + ins.a as int) as usize, r);
