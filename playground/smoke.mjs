@@ -16,6 +16,11 @@
 // compile, paint frames and answer its input (Breakout: a key press and a
 // click on its HUD button; Scaffold Scramble: start, walk, climb), and log
 // no error.
+//
+// --sandbox opens the sandbox demo (sandbox/): the four programs have to draw
+// on this page in time slices, keep drawing when moved mid-run to a Worker and
+// to an iframe (freeze there, thaw here), start a new picture on a zoom, go on
+// after a freeze and a thaw, and answer "Fetch results".
 
 import fs from "node:fs";
 import http from "node:http";
@@ -27,6 +32,7 @@ const shot = (process.argv.find((a) => a.startsWith("--shot=")) || "").slice(7);
 const EXPECTED_GAPS = {};
 const zoo = (process.argv.find((a) => a.startsWith("--zoo=")) || "").slice(6);
 const evgDemo = process.argv.includes("--evg");
+const sandboxDemo = process.argv.includes("--sandbox");
 
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
 const server = http.createServer((req, res) => {
@@ -53,6 +59,7 @@ page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 
 if (evgDemo) await runEvg();
+if (sandboxDemo) await runSandbox();
 await page.goto(url);
 await page.waitForSelector(".engine");
 if (zoo) await runZoo();
@@ -210,4 +217,53 @@ async function runScaffold() {
     console.log("scaffold failed:", consoleErrors.join("\n") || "the game did not start");
     process.exitCode = 1;
   }
+}
+
+async function runSandbox() {
+  await page.goto(url + "sandbox/");
+  const progress = () => page.evaluate(() => Object.values(window.sandboxDemo.boxes).map((s) => s.progress));
+  const problems = [];
+  // every program draws rows on this page
+  await page.waitForFunction(() => window.sandboxDemo && Object.values(window.sandboxDemo.boxes).every((s) => / 1 /.test(s.progress)), null, { timeout: 60000 });
+  const before = await progress();
+  // card 0 to a Worker, card 1 to an iframe, mid-run
+  const moved = await page.evaluate(async () => {
+    const b = window.sandboxDemo.boxes;
+    await window.sandboxDemo.move(b[0], "worker");
+    await window.sandboxDemo.move(b[1], "frame");
+    return [b[0].kind, b[1].kind, b[0].el.querySelector(".sbx-out").textContent];
+  });
+  // card 2 zooms in at its centre; card 3 is frozen and thawed
+  const box = await page.locator(".sbx-canvas").nth(2).boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  const frozen = await page.evaluate(async () => {
+    const s = window.sandboxDemo.boxes[3];
+    const r = await window.sandboxDemo.freeze(s);
+    await window.sandboxDemo.thaw(s);
+    return r ? r.snapshot.length : 0;
+  });
+  await page.waitForTimeout(4000);
+  const after = await progress();
+  const gens = await page.evaluate(() => Object.values(window.sandboxDemo.boxes).map((s) => s.view.gen));
+  const results = await page.evaluate(() => window.sandboxDemo.fetchAll());
+  if (shot) await page.screenshot({ path: shot.replace(/(\.png)?$/, "-sandbox.png"), fullPage: true });
+  console.log("sandbox demo: before", JSON.stringify(before), "after", JSON.stringify(after));
+  console.log("moved:", moved.join(" | "), "| snapshot", frozen, "chars");
+  console.log("results:", results.map((r) => r.program + " " + (r.result ? r.result.maxIter + " iterations" : "-")).join(", "));
+  // a card went on when its rows or its pass moved on in the same picture
+  const ahead = (a, b) => {
+    const [ga, pa, ra] = a.split(" ").map(Number);
+    const [gb, pb, rb] = b.split(" ").map(Number);
+    return gb > ga || (gb === ga && (pb > pa || (pb === pa && rb > ra)));
+  };
+  if (moved[0] !== "worker" || moved[1] !== "frame") problems.push("a move did not take: " + moved.join(", "));
+  for (let i = 0; i < 4; i++) if (!ahead(before[i], after[i])) problems.push(`card ${i} did not go on: ${before[i]} -> ${after[i]}`);
+  if (+after[2].split(" ")[0] !== gens[2] || gens[2] < 3) problems.push("the zoom did not start a new picture: " + after[2] + " gen " + gens[2]);
+  if (!frozen) problems.push("freeze gave no snapshot");
+  if (results.some((r) => !r.result || !r.result.program)) problems.push("a card answered no result");
+  const bad = [...errors, ...problems];
+  if (bad.length) console.log("errors:\n" + bad.join("\n"));
+  await browser.close();
+  server.close();
+  process.exit(bad.length ? 1 : 0);
 }

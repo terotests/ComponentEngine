@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CErXes sandboxes</title>
+  <meta name="description" content="Four CErXes engines, each drawing a fractal that never ends, run at the same time in time slices: on the page, in Web Workers or in iframes; zoom them, freeze them, move them and fetch their results.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1' width='6' height='6' rx='1' fill='%232a78d6'/%3E%3Crect x='9' y='1' width='6' height='6' rx='1' fill='%230a7a2f'/%3E%3Crect x='1' y='9' width='6' height='6' rx='1' fill='%23c03434'/%3E%3Crect x='9' y='9' width='6' height='6' rx='1' fill='%239a6400'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="sandbox.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <p class="crumbs"><a href="../">← ComponentEngine Playground</a></p>
+      <h1>CErXes sandboxes: four computations that never end</h1>
+      <p class="lede">Each card is a CErXes engine (WebAssembly) running its own program, a fractal drawn in passes
+        that get finer and deeper forever. The interpreter stops by itself when its <b>time slice</b> runs out, at
+        any branch, call or return, even inside <code>while (true)</code>, and goes on from there at the next
+        turn. So four endless programs share the page's own thread and the page stays responsive. The same
+        engines can also run in Web Workers (their own threads) or in iframes (their own documents, the page's
+        thread).</p>
+      <p class="lede">Click a picture to zoom in (Shift-click or right-click: out). <b>Freeze</b> writes the
+        engine's whole state, the running loop included, as text; <b>Thaw</b> makes a new engine from it. Changing a
+        card's host moves the running program that way: frozen in one place, thawed in another.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="controls">
+      <label>Run all on <select id="all-host">
+        <option value="main">this page (time slices)</option>
+        <option value="worker">Web Workers</option>
+        <option value="frame">iframes</option>
+      </select></label>
+      <label>Time slice <input id="slice" type="range" min="1" max="60" value="4"> <output id="slice-out">4 ms</output></label>
+      <button id="start" class="primary">Restart all</button>
+      <button id="pause-all">Pause all</button>
+      <button id="fetch-all">Fetch results</button>
+      <span id="status" class="status" aria-live="polite">Loading…</span>
+    </div>
+
+    <div class="pulse" aria-label="How the page's own thread is doing">
+      <canvas id="pulse" width="240" height="24"></canvas>
+      <span id="fps" class="fps"></span>
+      <span class="note">The bar moves on every animation frame of this page: when the page's thread is busy it
+        stutters.</span>
+    </div>
+
+    <div id="grid" class="sbx-grid"></div>
+
+    <section id="results-panel" hidden>
+      <h2>Results</h2>
+      <p class="note">What each program had in its <code>result</code> global when asked: read between two slices,
+        no code run.</p>
+      <div class="table-wrap"><table class="results" id="results"></table></div>
+    </section>
+
+    <div id="frames" hidden></div>
+  </main>
+
+  <template id="card">
+    <article class="sbx">
+      <div class="sbx-head">
+        <span class="sbx-name"></span>
+        <select class="sbx-host" aria-label="Where this sandbox runs">
+          <option value="main">page</option>
+          <option value="worker">Worker</option>
+          <option value="frame">iframe</option>
+        </select>
+      </div>
+      <canvas class="sbx-canvas" width="320" height="240"></canvas>
+      <div class="sbx-bar"><div></div></div>
+      <div class="sbx-stats"></div>
+      <div class="sbx-buttons">
+        <button class="b-pause">Pause</button>
+        <button class="b-freeze">Freeze</button>
+        <button class="b-home">Reset view</button>
+        <button class="b-fetch">Fetch</button>
+        <button class="b-code">Code</button>
+      </div>
+      <pre class="sbx-out" hidden></pre>
+      <div class="sbx-code" hidden>
+        <textarea spellcheck="false" aria-label="The sandbox's program"></textarea>
+        <div class="sbx-buttons"><button class="b-run primary">Run this code</button> <button class="b-reset">Original code</button></div>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

@@ -16,6 +16,9 @@
 //                      wasm32-wasip1 (evg/cerxes.wasm), EvgGameHost.rgr (EVG's
 //                      layout engine) by rgrc to JavaScript, EVG's SVG painter
 //                      and text measurer, the page and its worker
+//   sandbox/           the sandbox demo: four CErXes engines (wasm/cerxes.wasm)
+//                      running endless programs in time slices on the page,
+//                      in Web Workers or in iframes
 //
 // A step whose toolchain is missing is skipped and its engine marked
 // unavailable, unless --strict (CI) makes that a failure.
@@ -231,6 +234,33 @@ if (!status["cerxes-wasm"] && !status["evg-host"]) {
   });
 } else {
   log("-- evg demo: not built (" + (status["cerxes-wasm"] || status["evg-host"]).reason + ")");
+}
+
+// The sandbox demo (sandbox/): four CErXes engines in time slices on the page,
+// in Web Workers or in iframes; it loads wasm/cerxes.wasm.
+if (!status["cerxes-wasm"]) {
+  step("bundle sandbox", () => {
+    const SBX_SRC = path.join(SRC, "sandbox");
+    const SBX_DIST = path.join(DIST, "sandbox");
+    fs.mkdirSync(SBX_DIST, { recursive: true });
+    for (const entry of ["main.js", "worker.js", "frame.js"]) {
+      const r = esbuild.buildSync({
+        entryPoints: [path.join(SBX_SRC, entry)],
+        bundle: true,
+        format: "esm",
+        platform: "browser",
+        target: "es2022",
+        minify: true,
+        legalComments: "eof",
+        outfile: path.join(SBX_DIST, entry),
+        logLevel: "silent",
+      });
+      if (r.errors.length) throw new Error(r.errors.map((e) => e.text).join("\n"));
+    }
+    for (const f of ["index.html", "frame.html", "sandbox.css"]) fs.copyFileSync(path.join(SBX_SRC, f), path.join(SBX_DIST, f));
+  });
+} else {
+  log("-- sandbox demo: not built (" + status["cerxes-wasm"].reason + ")");
 }
 
 // The zoo ranking's material (zoo/update.mjs refreshes it): Octane suites,
