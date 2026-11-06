@@ -468,3 +468,32 @@ var t; try { for (var j = 0; j < 100; j++) t = notDeclaredAnywhere2; } catch (e)
 out.join() + '|' + t
 ----
 0:undefinedundefinedundefinedundefined,50:undefinedundefinedundefinedundefined,100:undefinedundefinedundefinedundefined,150:undefinedundefinedundefinedundefined,200:pundefinedundefinedundefined,201:pundefinedundefinedundefined,250:pundefinedzundefined,251:pundefinedzundefined,300:oundefinedzundefined,301:oundefinedzundefined,350:obzundefined,351:obzundefined|ReferenceError
+
+==== js for-in in hot code: keys in order, hidden and symbol keys skipped, a key deleted or added in the loop, inherited keys, numeric keys
+function keys(o) { var r = []; for (var k in o) { r.push(k); if (k === 'b' && o.del) delete o.c; if (k === 'a' && o.add) o.z = 1; } return r.join(''); }
+var P = { inh: 1 }; var out = [];
+for (var i = 0; i < 300; i++) {
+  var o = { a: 1, b: 2, c: 3 };
+  if (i % 3 == 1) o.del = true;
+  if (i % 5 == 2) o.add = true;
+  var s = Symbol('s'); o[s] = 1;
+  Object.defineProperty(o, 'h', { value: 1, enumerable: false });
+  var q = Object.create(P); q.x = 1; q[2] = 1; q[10] = 1;
+  if (i > 290) out.push(keys(o) + '/' + keys(q));
+}
+out.join()
+----
+abc/210xinh,abdeladd/210xinh,abc/210xinh,abc/210xinh,abdel/210xinh,abc/210xinh,abcadd/210xinh,abdel/210xinh,abc/210xinh
+
+==== js for-of over arrays in hot code: holes, an array that grows and shrinks in the loop, arguments
+function sum(a) { var s = 0, n = 0; for (var v of a) { s += v === undefined ? 100 : v; if (n++ == 1 && a.grow) a.push(5); if (n == 1 && a.cut) a.length = 2; } return s; }
+function args() { var s = ''; for (var v of arguments) s += v; return s; }
+var out = [];
+for (var i = 0; i < 300; i++) {
+  var a = [1, 2, , 4]; if (i % 3 == 1) a.grow = true; if (i % 4 == 2) a.cut = true;
+  var r = sum(a) + ':' + args('x', i % 2);
+  if (i > 292) out.push(r);
+}
+out.join()
+----
+107:x1,3:x0,112:x1,107:x0,107:x1,8:x0,107:x1
