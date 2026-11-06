@@ -529,3 +529,21 @@ for (var i = 0; i < 2000; i++) { var junk = { j: i, s: 'x' + i }; }
 out.join() + '|' + keep.map(function (a) { return a[2].v + a[58] + a[59].v; }).join()
 ----
 60:s019:10023:78TypeError,60:s019:10023:78TypeError,60:s019:10023:78TypeError|0s1919,0s1919,0s1919,0s1919,0s1919,0s1919
+
+==== js obj[key] with string keys in hot code: own, inherited, absent, getters, a long shape, null prototype, keys made at run time, arrays and functions
+var P = { inh: 'i' }; Object.defineProperty(P, 'g', { get: function () { return 'G' + this.a; } });
+var big = {}; for (var k = 0; k < 80; k++) big['b' + k] = k;
+var bare = Object.create(null); bare.x = 'X';
+var out = [];
+function f() {}
+for (var i = 0; i < 300; i++) {
+  var o = Object.create(P); o.a = i; o.k0 = 'w'; o['k' + (i % 2)] = 'v';
+  var keys = ['a', 'inh', 'g', 'zz', 'k' + (i % 3), 'toString'];
+  var r = '';
+  for (var j = 0; j < keys.length; j++) { var v = o[keys[j]]; r += typeof v == 'function' ? 'F' : v; }
+  r += big['b' + (i % 80)] + bare['x'] + bare['y'] + [5, 6]['length'] + f['name'] + 'abc'['length'];
+  if (i > 295) out.push(r);
+}
+out.join()
+----
+296iG296undefinedundefinedF56Xundefined2f3,297iG297undefinedwF57Xundefined2f3,298iG298undefinedundefinedF58Xundefined2f3,299iG299undefinedundefinedF59Xundefined2f3
