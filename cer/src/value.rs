@@ -210,6 +210,9 @@ pub struct Shape {
     pub t_to: Vec<int>,
     pub t_map: HashMap<int, int>,
     pub owned: bool,
+    /// for-in (Vm::for_in_fast): 0 not asked yet, 1 the keys can be
+    /// walked in place, 2 an index-like key comes first
+    pub for_in: i32,
 }
 
 impl Shape {
@@ -225,6 +228,7 @@ impl Shape {
             t_to: Vec::new(),
             t_map: HashMap::new(),
             owned: false,
+            for_in: 0,
         }
     }
 
