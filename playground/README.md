@@ -15,6 +15,7 @@ your own script in all of them.
 | CErXes · register VM | `cerxes/` (CEr's VM with a TypeScript + JSX front end) by cargo for `wasm32-wasip1` (`cerxes-wasm/`), on the register machine |
 | CErXes · stack VM | the same `cerxes.wasm` on the older stack machine, to compare the two interpreters |
 | CErXes · small build | `cerxes-wasm/` at `opt-level = "s"`: a smaller download for some speed |
+| CErXes · JIT | `cerxes-wasm/` with the `wjit` feature: hot register code (64 runs) is compiled to WebAssembly modules the page instantiates; the engine falls back to the interpreter wherever the JIT exits |
 | QuickJS · C → WASM | Fabrice Bellard's QuickJS, from `quickjs-emscripten` (MIT) |
 | CEr · Rust → Ranger → JS | a curiosity: the same `cer/src/lib.rs` read by the Ranger compiler as a strict Rust module and written out as JavaScript |
 

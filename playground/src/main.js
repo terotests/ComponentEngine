@@ -412,7 +412,8 @@ async function main() {
   const manifest = await (await fetch("engines.json")).json();
   ENGINES = manifest.engines;
   $("build-rev").textContent = manifest.rev || "a local build";
-  if (!store.get("engines", null)) for (const e of ENGINES) if (e.available) enabled.add(e.id);
+  // an optional engine (the JIT) is left for the reader to tick
+  if (!store.get("engines", null)) for (const e of ENGINES) if (e.available && !e.optional) enabled.add(e.id);
   renderEngines();
   renderWorkloadList();
   renderAbout();

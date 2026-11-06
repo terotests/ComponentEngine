@@ -63,6 +63,8 @@ if (sandboxDemo) await runSandbox();
 await page.goto(url);
 await page.waitForSelector(".engine");
 if (zoo) await runZoo();
+// every engine in the build, the optional ones too
+for (const box of await page.$$(".engine input")) if (!(await box.isDisabled())) await box.setChecked(true);
 await page.selectOption("#scale", process.env.SCALE || "1");
 await page.selectOption("#reps", "1");
 await page.click("#run-bench");
