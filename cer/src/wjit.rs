@@ -390,6 +390,14 @@ pub fn probe() -> Layout {
         l.vm_jit_calls_ptr = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vp;
         l.vm_jit_calls_len = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vl;
         l.str_data = str_probe(vp, vl);
+        let u = bytes_of(Val::Undef);
+        // SAFETY: written on the VM's thread before any code reads it
+        unsafe {
+            *std::ptr::addr_of_mut!(UNDEF16) = [
+                i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]),
+                i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]),
+            ];
+        }
         l.str_blen = 8 + vl;
     }
     l
@@ -4781,6 +4789,23 @@ fn look_body(l: Layout) -> Vec<u8> {
         w.u(0);
         w.byte(END);
         w.byte(END);
+        // absent (SLOT_ABSENT): undefined while the last object of the
+        // chain has no prototype, else the next way
+        get(&mut w, 5);
+        ld(&mut w, 8);
+        k(&mut w, 0);
+        w.byte(I32_LT_S);
+        w.byte(IF);
+        w.byte(T_VOID);
+        get(&mut w, 6);
+        ld(&mut w, l.off_proto);
+        k(&mut w, -1);
+        w.byte(I32_NE);
+        w.byte(BR_IF);
+        w.u(1);
+        k(&mut w, unsafe { std::ptr::addr_of!(UNDEF16) } as usize as i64);
+        w.byte(RETURN);
+        w.byte(END);
         // the slot's address: slot * 16 < 32 in the object, else in vals
         get(&mut w, 6);
         k(&mut w, l.off_inl0 as i64);
@@ -5241,6 +5266,26 @@ fn h_get_prop(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             vm.rcode[ri as usize].c = -4;
         }
         return 0;
+    }
+    if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
+        // debug: misses by class * 4 + (dictionary 1 | getter 2)
+        let ob = &vm.objs[o as usize];
+        let atom = vm.ratom(pi as usize, pc as int);
+        let f = vm.find(o, atom);
+        // 1: on the prototype chain (else absent)
+        let mut onp = 0;
+        let mut q = ob.proto;
+        let mut d = 0;
+        while q >= 0 && d < 20 {
+            if vm.find(q as int, atom) >= 0 {
+                onp = 1 + (d >= 3) as usize;
+                break;
+            }
+            q = vm.objs[q as usize].proto;
+            d += 1;
+        }
+        let k = 900 + (ob.class as usize).min(19) * 4 + if f < 0 { 2 + onp.min(1) } else { 0 } + if onp == 2 { 80 } else { 0 };
+        HCOUNT.with(|h| { let mut v = h.get(); v[k.min(1023)] += 1; h.set(v) });
     }
     let r = get_prop_slow(vm, bp, pi, pc, ri, o);
     if r == 0 || r == 2 {
@@ -5969,7 +6014,13 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
 // replace. In Vm.jit_caches, whose buffers do not move, by rcode index.
 
 const CACHE_WAYS: u32 = 4;
-const CACHE_DEPTH: u32 = 3;
+/// a way's slot * 16 for a property absent from the whole chain
+const SLOT_ABSENT: i32 = -16;
+
+/// undefined as a value's 16 bytes, for an absent property (look);
+/// layout() writes it
+static mut UNDEF16: [i64; 2] = [0, 0];
+const CACHE_DEPTH: u32 = 4;
 const CACHE_W: u32 = 5 + 2 * CACHE_DEPTH;
 /// the ways, then the next way to replace
 const CACHE_N: usize = (CACHE_WAYS * CACHE_W) as usize + 1;
@@ -6033,6 +6084,14 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
         let mut d: usize = 0;
         loop {
             let p = vm.objs[cur as usize].proto as int;
+            if p < 0 && plain(cls) && cls != C_NATIVE && plain(vm.objs[cur as usize].class) && (vm.rcode[ri].code & 255) as int != R_GET_GLOBAL {
+                // absent from a plain object and its plain prototypes:
+                // undefined while the chain keeps its shapes (look
+                // checks that the last one still has no prototype)
+                way[1] = d as i32;
+                way[2] = SLOT_ABSENT;
+                break;
+            }
             if p < 0 || d >= CACHE_DEPTH as usize {
                 return;
             }
