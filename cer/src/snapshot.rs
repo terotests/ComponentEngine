@@ -222,7 +222,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, o.class as int);
         put_num(&mut b, o.proto as int);
         put_ints(&mut b, &vm.shape_keys(o.shape as int));
-        put_vals(&mut b, &mut st, vm, &o.vals);
+        put_vals(&mut b, &mut st, vm, &o.slots());
         put_ints(&mut b, &vm.shape_attrs(o.shape as int));
         put_vals(&mut b, &mut st, vm, &vm.evecs[o.elems as usize].v);
         let cold = &vm.colds[o.cold as usize];
@@ -527,7 +527,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
                 // the value straight in: the objects it names may come
                 // later, and recount() counts them at the end
                 let slot = vm.add_own(oi, keys[j], Val::Undef, attrs[j]);
-                vm.objs[oi as usize].vals[slot as usize] = vals[j].clone();
+                vm.objs[oi as usize].set_slot(slot as usize, vals[j].clone());
                 j += 1;
             }
         }
@@ -725,7 +725,7 @@ fn valid_heap(vm: &Vm) -> bool {
                 return false;
             }
         }
-        for v in o.vals.iter() {
+        for v in o.slots().iter() {
             if !in_objs(v, no) {
                 return false;
             }

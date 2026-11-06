@@ -971,7 +971,7 @@ impl Vm {
         // the chain's holder has as many keys as the most an object on the
         // chain has got: the values get room for that many at once
         let most = self.shapes[self.holder(next)].keys.len();
-        grow_vals(&mut self.objs[o as usize].vals, most);
+        slot_room(&mut self.objs[o as usize], most);
         self.push_val(o, v);
         slot
     }
@@ -1309,10 +1309,10 @@ impl Vm {
             if self.objs[i].marked {
                 let p = self.colds[self.objs[i].cold as usize].prim;
                 self.smark_count(p);
-                let nv = self.objs[i].vals.len();
+                let nv = self.objs[i].nv as usize;
                 let mut j: usize = 0;
                 while j < nv {
-                    let v = self.objs[i].vals[j];
+                    let v = self.objs[i].get_slot(j);
                     self.smark_count(v);
                     j += 1;
                 }
@@ -2245,14 +2245,14 @@ impl Vm {
             if slot >= 0 {
                 let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
-                    let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
+                    let pair = obj_of(&self.objs[cur as usize].get_slot(slot as usize));
                     let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
                     if self.is_callable(&g) {
                         return self.call_fixed(g, receiver.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                     }
                     return Val::Undef;
                 }
-                return self.objs[cur as usize].vals[slot as usize].clone();
+                return self.objs[cur as usize].get_slot(slot as usize).clone();
             }
             let class = self.objs[cur as usize].class;
             if class != C_OBJECT {
@@ -2406,7 +2406,7 @@ impl Vm {
             if slot >= 0 {
                 let attr = self.attr_at(cur, slot);
                 if (attr & P_ACCESSOR) != 0 {
-                    let pair = obj_of(&self.objs[cur as usize].vals[slot as usize]);
+                    let pair = obj_of(&self.objs[cur as usize].get_slot(slot as usize));
                     let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                     if self.is_callable(&s) {
                         self.call_fixed(s, receiver.clone(), 1, v.clone(), Val::Undef, Val::Undef);
@@ -2447,7 +2447,7 @@ impl Vm {
                 return;
             }
             if (attr & P_ACCESSOR) != 0 {
-                let pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
+                let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
                 let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                 if self.is_callable(&s) {
                     self.call_fixed(s, Val::Obj(o), 1, v, Val::Undef, Val::Undef);
@@ -2651,7 +2651,7 @@ impl Vm {
         let slot = self.find(o, atom);
         let mut pair: int = -1;
         if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) != 0 {
-            pair = obj_of(&self.objs[o as usize].vals[slot as usize]);
+            pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
         }
         if pair < 0 {
             pair = self.alloc(C_ACCESSOR, -1);
@@ -3476,7 +3476,6 @@ impl Vm {
             // the shape the first one got: no transitions looked up
             let callee = if strict { Val::Obj(self.callee_pair) } else { Val::Obj(fo) };
             let values = self.array_values_fn;
-            reserve_vals(&mut self.objs[args_obj as usize].vals, 2);
             self.objs[args_obj as usize].shape = known as i32;
             self.push_val(args_obj, callee);
             self.push_val(args_obj, Val::Obj(values));
@@ -4242,7 +4241,7 @@ impl Vm {
                             let o = *o;
                             let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
-                                let r = self.objs[o as usize].vals[slot as usize].clone();
+                                let r = self.objs[o as usize].get_slot(slot as usize).clone();
                                 self.stack.push(r);
                                 done = true;
                             } else if (atom as int) == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, (atom as int)) < 0 {
@@ -4266,7 +4265,7 @@ impl Vm {
                             let o = *o;
                             let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
-                                let r = self.objs[o as usize].vals[slot as usize].clone();
+                                let r = self.objs[o as usize].get_slot(slot as usize).clone();
                                 self.stack.push(r);
                                 done = true;
                             } else if (atom as int) == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, (atom as int)) < 0 {
@@ -4290,7 +4289,7 @@ impl Vm {
                             let o = *o;
                             let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
-                                let r = self.objs[o as usize].vals[slot as usize].clone();
+                                let r = self.objs[o as usize].get_slot(slot as usize).clone();
                                 self.stack.push(r);
                                 done = true;
                             } else if (atom as int) == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, (atom as int)) < 0 {
@@ -4414,7 +4413,7 @@ impl Vm {
                             let o = *o;
                             let slot = self.find(o, (atom as int));
                             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
-                                f = self.objs[o as usize].vals[slot as usize].clone();
+                                f = self.objs[o as usize].get_slot(slot as usize).clone();
                                 done = true;
                             }
                         }
@@ -5017,14 +5016,14 @@ impl Vm {
             if o >= 0 {
                 let slot = self.find(o, (atom as int));
                 if slot >= 0 && self.attr_at(o, slot) == 0 {
-                    let cur = self.objs[o as usize].vals[slot as usize];
+                    let cur = self.objs[o as usize].get_slot(slot as usize);
                     if let (Val::Str(x), Val::Str(y)) = (self.stack[n - 1], cur) {
                         if x == y {
                             let h = self.append_val(cur, b);
                             if h >= 0 {
                                 self.stack.pop();
                                 self.stack.pop();
-                                self.objs[o as usize].vals[slot as usize] = Val::Str(h);
+                                self.objs[o as usize].set_slot(slot as usize, Val::Str(h));
                                 self.sinc(h);
                                 self.sdec(x);
                                 done = true;
@@ -5053,7 +5052,7 @@ impl Vm {
             let g = self.global;
             let slot = self.ic_slot(g, (op.a as int), (op.c as int), false);
             if slot >= 0 {
-                let v = self.objs[g as usize].vals[slot as usize].clone();
+                let v = self.objs[g as usize].get_slot(slot as usize).clone();
                 self.stack.push(v);
                 done = true;
             }
@@ -5232,7 +5231,7 @@ impl Vm {
                 let g = self.global;
                 let slot = self.ic_get(g, (op.a as int), (op.c as int), pi, *pc);
                 if slot >= 0 {
-                    let v = self.objs[g as usize].vals[slot as usize].clone();
+                    let v = self.objs[g as usize].get_slot(slot as usize).clone();
                     self.stack.push(v);
                 } else if self.has_atom(g, (op.a as int)) {
                     let v = self.get_obj(g, (op.a as int), &Val::Obj(g));
@@ -5508,7 +5507,7 @@ impl Vm {
                     // the native made its own object: give it this one's fields
                     if let (Val::Obj(t), Val::Obj(n)) = (&this, &r) {
                         let keys = self.keys_of(*t);
-                        let vals = self.objs[*t as usize].vals.clone();
+                        let vals = self.objs[*t as usize].slots();
                         let mut i: usize = 0;
                         while i < keys.len() {
                             self.add_own(*n, keys[i], vals[i].clone(), 0);
@@ -6095,8 +6094,8 @@ impl Vm {
     #[inline]
     pub fn put_slot(&mut self, o: int, slot: int, v: Val) {
         self.inc(&v);
-        let old = self.objs[o as usize].vals[slot as usize];
-        self.objs[o as usize].vals[slot as usize] = v;
+        let old = self.objs[o as usize].get_slot(slot as usize);
+        self.objs[o as usize].set_slot(slot as usize, v);
         self.dec(&old);
     }
 
@@ -6112,11 +6111,11 @@ impl Vm {
     #[inline]
     pub fn push_val(&mut self, o: int, v: Val) {
         self.inc(&v);
-        self.objs[o as usize].vals.push(v);
+        self.objs[o as usize].push_slot(v);
     }
 
     pub fn remove_val(&mut self, o: int, slot: int) {
-        let v = self.objs[o as usize].vals.remove(slot as usize);
+        let v = self.objs[o as usize].remove_slot(slot as usize);
         self.dec(&v);
     }
 
@@ -6460,10 +6459,10 @@ impl Vm {
             self.trace_ref(env as int, count, work);
             self.trace_ref(home, count, work);
             self.trace_ref(prim, count, work);
-            let nv = self.objs[o as usize].vals.len();
+            let nv = self.objs[o as usize].nv as usize;
             let mut j: usize = 0;
             while j < nv {
-                if let Val::Obj(x) = self.objs[o as usize].vals[j] {
+                if let Val::Obj(x) = self.objs[o as usize].get_slot(j) {
                     if count {
                         self.objs[x as usize].rc += 1;
                     }
@@ -6712,10 +6711,10 @@ impl Vm {
         self.drop_ref(env as int, work);
         self.drop_ref(home, work);
         self.drop_ref(prim, work);
-        let nv = self.objs[x as usize].vals.len();
+        let nv = self.objs[x as usize].nv as usize;
         let mut j: usize = 0;
         while j < nv {
-            match self.objs[x as usize].vals[j] {
+            match self.objs[x as usize].get_slot(j) {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -6860,10 +6859,10 @@ impl Vm {
             if !self.objs[i].free {
                 let p = self.colds[self.objs[i].cold as usize].prim;
                 self.sinc(str_of(&p));
-                let nv = self.objs[i].vals.len();
+                let nv = self.objs[i].nv as usize;
                 let mut j: usize = 0;
                 while j < nv {
-                    let h = str_of(&self.objs[i].vals[j]);
+                    let h = str_of(&self.objs[i].get_slot(j));
                     self.sinc(h);
                     j += 1;
                 }
@@ -6914,10 +6913,10 @@ impl Vm {
         self.inc_o(env as int);
         self.inc_o(home);
         self.inc_o(prim);
-        let nv = self.objs[o as usize].vals.len();
+        let nv = self.objs[o as usize].nv as usize;
         let mut j: usize = 0;
         while j < nv {
-            if let Val::Obj(c) = self.objs[o as usize].vals[j] {
+            if let Val::Obj(c) = self.objs[o as usize].get_slot(j) {
                 self.objs[c as usize].rc += 1;
             }
             j += 1;
@@ -7366,4 +7365,12 @@ pub fn srcs_of(v: &Vec<SEnt>) -> Vec<i32> {
         out.push(e.rc);
     }
     out
+}
+
+/// Room for one more property value in `ob` (slots 2 on are in vals),
+/// for a chain whose objects get `most` properties.
+pub fn slot_room(ob: &mut JsObj, most: usize) {
+    if ob.nv >= 2 && crate::rvm::vals_full(&ob.vals) {
+        grow_vals(&mut ob.vals, if most > 2 { most - 2 } else { 0 });
+    }
 }

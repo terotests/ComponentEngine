@@ -56,6 +56,9 @@ pub struct Layout {
     pub obj_size: u32,
     pub off_shape: u32,
     pub off_vals: u32,
+    /// JsObj.inl0 (slot 0; inl1 follows at + 16) and JsObj.nv
+    pub off_inl0: u32,
+    pub off_nv: u32,
     pub off_proto: u32,
     pub off_class: u32,
     /// Vm.shape_epoch's low word, from the Vm's address
@@ -163,6 +166,8 @@ pub fn probe() -> Layout {
         obj_size: 0,
         off_shape: 0,
         off_vals: 0,
+        off_inl0: 0,
+        off_nv: 0,
         off_proto: 0,
         off_class: 0,
         off_epoch: 0,
@@ -313,6 +318,9 @@ pub fn probe() -> Layout {
         l.obj_size = std::mem::size_of::<JsObj>() as u32;
         l.off_shape = std::mem::offset_of!(JsObj, shape) as u32;
         l.off_vals = (std::mem::offset_of!(JsObj, vals) + vp as usize) as u32;
+        l.off_inl0 = std::mem::offset_of!(JsObj, inl0) as u32;
+        l.off_nv = std::mem::offset_of!(JsObj, nv) as u32;
+        assert!(std::mem::offset_of!(JsObj, inl1) == std::mem::offset_of!(JsObj, inl0) + 16);
         l.off_proto = std::mem::offset_of!(JsObj, proto) as u32;
         l.off_class = std::mem::offset_of!(JsObj, class) as u32;
         l.off_epoch = std::mem::offset_of!(crate::vm::Vm, shape_epoch) as u32;
@@ -1241,15 +1249,21 @@ impl<'a> Cg<'a> {
         self.i32c((c >> 16) as i64);
         self.op(I32_NE);
         self.fail_if(pc);
-        self.get(L_T2);
-        self.mem(I32_LOAD, 2, l.off_vals);
-        self.set(L_T2);
         let slot = (c & 65535) as u32;
+        // slots 0 and 1 in the object, the rest in vals
+        let at = if slot < 2 {
+            l.off_inl0 + slot * 16
+        } else {
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_vals);
+            self.set(L_T2);
+            (slot - 2) * 16
+        };
         self.get(L_T2);
-        self.mem(I64_LOAD, 3, slot * 16);
+        self.mem(I64_LOAD, 3, at);
         self.set(L_Q0);
         self.get(L_T2);
-        self.mem(I64_LOAD, 3, slot * 16 + 8);
+        self.mem(I64_LOAD, 3, at + 8);
         self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         true
@@ -1276,10 +1290,15 @@ impl<'a> Cg<'a> {
         self.i32c((c >> 16) as i64);
         self.op(I32_NE);
         self.fail_if(pc);
-        // &vals[slot]
+        // &slot: in the object for slots 0 and 1, else in vals
+        let slot = (c & 65535) as u32;
         self.get(L_T2);
-        self.mem(I32_LOAD, 2, l.off_vals);
-        self.i32c(((c & 65535) * 16) as i64);
+        if slot < 2 {
+            self.i32c((l.off_inl0 + slot * 16) as i64);
+        } else {
+            self.mem(I32_LOAD, 2, l.off_vals);
+            self.i32c(((slot - 2) * 16) as i64);
+        }
         self.op(I32_ADD);
         self.set(L_T2);
         self.heap_store(vb, voff, pc);
@@ -1638,9 +1657,15 @@ impl<'a> Cg<'a> {
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_vals_cap);
         self.op(I32_GE_U);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_nv);
+        self.i32c(2);
+        self.op(I32_GE_S);
+        self.op(I32_AND);
         self.op(I32_OR);
         self.fail_if(pc);
-        // shape = after; vals[len] = v (counted); len + 1
+        // shape = after; slot nv = v (counted): inl0/inl1 while nv < 2,
+        // else vals[len] and len + 1; nv + 1
         self.get(L_T2);
         self.i32c((t & 65535) as i64);
         self.mem(I32_STORE, 2, l.off_shape);
@@ -1661,6 +1686,22 @@ impl<'a> Cg<'a> {
         self.op(I32_ADD);
         self.mem(I32_STORE, 2, l.off_rc);
         self.op(END);
+        // L_T3 = &inl[nv] when nv < 2, else &vals[len] (and len + 1)
+        self.get(L_T2);
+        self.i32c(l.off_inl0 as i64);
+        self.op(I32_ADD);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_nv);
+        self.i32c(16);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T3);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_nv);
+        self.i32c(2);
+        self.op(I32_GE_S);
+        self.op(IF);
+        self.op(T_VOID);
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_vals);
         self.get(L_T2);
@@ -1669,6 +1710,13 @@ impl<'a> Cg<'a> {
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
+        self.get(L_T2);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_vals_len);
+        self.i32c(1);
+        self.op(I32_ADD);
+        self.mem(I32_STORE, 2, l.off_vals_len);
+        self.op(END);
         self.get(L_T3);
         self.get(vb);
         self.mem(I64_LOAD, 3, voff);
@@ -1679,10 +1727,10 @@ impl<'a> Cg<'a> {
         self.mem(I64_STORE, 3, 8);
         self.get(L_T2);
         self.get(L_T2);
-        self.mem(I32_LOAD, 2, l.off_vals_len);
+        self.mem(I32_LOAD, 2, l.off_nv);
         self.i32c(1);
         self.op(I32_ADD);
-        self.mem(I32_STORE, 2, l.off_vals_len);
+        self.mem(I32_STORE, 2, l.off_nv);
         true
     }
     /// A property read (R_GET_PROP, R_GET_THIS_PROP) or a method's
@@ -4067,11 +4115,25 @@ fn look_body(l: Layout) -> Vec<u8> {
         w.u(0);
         w.byte(END);
         w.byte(END);
+        // the slot's address: slot * 16 < 32 in the object, else in vals
+        get(&mut w, 6);
+        k(&mut w, l.off_inl0 as i64);
+        w.byte(I32_ADD);
+        get(&mut w, 5);
+        ld(&mut w, 8);
+        w.byte(I32_ADD);
         get(&mut w, 6);
         ld(&mut w, l.off_vals);
         get(&mut w, 5);
         ld(&mut w, 8);
         w.byte(I32_ADD);
+        k(&mut w, 32);
+        w.byte(I32_SUB);
+        get(&mut w, 5);
+        ld(&mut w, 8);
+        k(&mut w, 32);
+        w.byte(I32_LT_U);
+        w.byte(SELECT);
         w.byte(RETURN);
         w.byte(END);
     }
@@ -4471,7 +4533,7 @@ fn h_get_prop(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
     let c = ins.c;
     let ob = &vm.objs[o as usize];
     if c >= 65536 && (c >> 16) == ob.shape {
-        let r = ob.vals[(c & 65535) as usize];
+        let r = ob.get_slot((c & 65535) as usize);
         vm.rset((bp + ins.a as int) as usize, r);
         let atom = vm.ratom(pi as usize, pc as int);
         cache_fill(vm, ri as usize, o, atom);
@@ -4835,7 +4897,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             let c = vm.protos[pi].code[pc as usize].c;
             let slot = vm.ic_slot(g, w3, c as int, false);
             if slot >= 0 {
-                let v = vm.objs[g as usize].vals[slot as usize];
+                let v = vm.objs[g as usize].get_slot(slot as usize);
                 vm.rset((bp + w1) as usize, v);
                 cache_fill(vm, ri as usize, g, w3);
             } else {
@@ -4919,10 +4981,8 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             let c = vm.protos[pi].code[pc as usize].c;
             if c >= 0 && ((c >> 16) as int) == sh {
                 vm.objs[o as usize].shape = c & 65535;
-                if crate::rvm::vals_full(&vm.objs[o as usize].vals) {
-                    let most = vm.shapes[vm.holder((c & 65535) as int)].keys.len();
-                    crate::vm::grow_vals(&mut vm.objs[o as usize].vals, most);
-                }
+                let most = vm.shapes[vm.holder((c & 65535) as int)].keys.len();
+                crate::vm::slot_room(&mut vm.objs[o as usize], most);
                 vm.push_val(o, v);
             } else {
                 vm.frames[fi].pc = pc + 1;
@@ -4940,7 +5000,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 _ => return 1,
             };
             if c >= 65536 && ((c >> 16) as int) == vm.objs[o as usize].shape as int {
-                let r = vm.objs[o as usize].vals[(c & 65535) as usize];
+                let r = vm.objs[o as usize].get_slot((c & 65535) as usize);
                 vm.rset((bp + w1) as usize, r);
             } else {
                 return 1;
