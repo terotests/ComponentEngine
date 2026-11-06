@@ -194,7 +194,7 @@ if (opt("eval", "")) {
     e.setJit(on, on ? Number(opt("min", "0")) : 0);
     const r = e.eval(src);
     console.log((on ? "on:  " : "off: ") + r.value + (r.output ? "\n" + r.output : ""));
-    if (on) console.log(JSON.stringify(e.stats()));
+    if (on) console.log(JSON.stringify(e.stats()) + "\ncompileMs " + e.jit.compileMs.toFixed(1) + " modules " + e.jit.modules);
     if (on && e.out.length) console.log(e.out.join("\n"));
   }
   process.exit(0);

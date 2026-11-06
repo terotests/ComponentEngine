@@ -547,3 +547,31 @@ for (var i = 0; i < 300; i++) {
 out.join()
 ----
 296iG296undefinedundefinedF56Xundefined2f3,297iG297undefinedwF57Xundefined2f3,298iG298undefinedundefinedF58Xundefined2f3,299iG299undefinedundefinedF59Xundefined2f3
+
+==== js arrow functions called from hot compiled code: lexical this, arguments of the outer function, new.target, nested arrows
+function Box(v) { this.v = v; this.get = () => this.v; this.add = (d) => { this.v += d; return this; }; }
+function outer() { var f = () => arguments[0] + (new.target ? 'N' : 'C'); return f(); }
+var out = [];
+for (var i = 0; i < 300; i++) {
+  var b = new Box(i); var r = 0;
+  for (var j = 0; j < 3; j++) r += b.add(1).get();
+  var g = (x) => (y) => x * y;
+  var s = r + ':' + g(i)(2) + ':' + outer('o' + (i % 3)) + ':' + new outer('p').constructor.name;
+  if (i > 296) out.push(s);
+}
+out.join()
+----
+897:594:o0C:outer,900:596:o1C:outer,903:598:o2C:outer
+
+==== js number and string natives from hot compiled code: Math one and two argument functions, String(), isFinite, toString, non-number operands
+var out = [];
+var o = { valueOf: function () { return 4; }, toString: function () { return 'obj'; } };
+for (var i = 0; i < 300; i++) {
+  var x = i / 7 - 20;
+  var r = [Math.sin(x).toFixed(6), Math.cos(x).toFixed(6), Math.trunc(x), Math.sign(x), Math.atan2(x, 3).toFixed(6), Math.pow(2, i % 10), Math.imul(i, 3),
+    String(x), String('s' + i), String(o), String(), isFinite(x), isFinite(1 / 0), isFinite('5'), (i * 1.5).toString(), Math.sin(o).toFixed(4), Math.sqrt(-1)].join(' ');
+  if (i > 296) out.push(r);
+}
+out.join('|')
+----
+-0.423606 -0.905846 22 1 1.437828 128 891 22.42857142857143 s297 obj  true false true 445.5 -0.7568 NaN|-0.548258 -0.836309 22 1 1.438659 256 894 22.57142857142857 s298 obj  true false true 447 -0.7568 NaN|-0.661740 -0.749733 22 1 1.439481 512 897 22.714285714285715 s299 obj  true false true 448.5 -0.7568 NaN

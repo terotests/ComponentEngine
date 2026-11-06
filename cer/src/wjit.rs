@@ -150,6 +150,8 @@ pub struct Layout {
     /// Elems.v's capacity word, Cold.elems2's length word (Array push)
     pub elems_vc: u32,
     pub cold_e2_len: u32,
+    /// Cold.prim (an arrow's this)
+    pub cold_prim: u32,
     pub vm_global: u32,
 }
 
@@ -266,6 +268,7 @@ pub fn probe() -> Layout {
         vm_avals_len: 0,
         elems_vc: 0,
         cold_e2_len: 0,
+        cold_prim: 0,
         vm_global: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
@@ -451,6 +454,7 @@ pub fn probe() -> Layout {
         l.vm_avals_len = std::mem::offset_of!(crate::vm::Vm, atom_vals) as u32 + vl;
         l.elems_vc = std::mem::offset_of!(crate::value::Elems, v) as u32 + (12 - vp - vl);
         l.cold_e2_len = std::mem::offset_of!(crate::value::Cold, elems2) as u32 + vl;
+        l.cold_prim = std::mem::offset_of!(crate::value::Cold, prim) as u32;
     }
     l
 }
@@ -3645,6 +3649,18 @@ impl<'a> Cg<'a> {
             self.op(I32_NE);
             self.op(I32_AND);
             self.op(I32_OR);
+            // an arrow with a new.target (renter: cold elems2[0])
+            ld(self, 7);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_cold);
+            self.i32c(l.cold_size as i64);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.mem(I32_LOAD, 2, l.cold_e2_len);
+            self.op(I32_AND);
+            self.op(I32_OR);
             self.fail_if(0);
             // a stack shorter than the callee's frame: undefined up to
             // its end (L_T3 from, L_T4 to), as grow_stack
@@ -3811,13 +3827,31 @@ impl<'a> Cg<'a> {
                 cg.get(L_T2);
                 cg.mem(I32_LOAD, 2, l.off_env);
             });
-            self.get(L_T3);
+            // this: the call's, an arrow's from its cold part (renter;
+            // L_T4 where from)
             self.get(L_FB);
-            self.mem(I64_LOAD, 3, 16);
+            self.i32c(16);
+            self.op(I32_ADD);
+            self.get(L_VM);
+            self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_cold);
+            self.i32c(l.cold_size as i64);
+            self.op(I32_MUL);
+            self.op(I32_ADD);
+            self.i32c(l.cold_prim as i64);
+            self.op(I32_ADD);
+            ld(self, 7);
+            self.op(I32_EQZ);
+            self.op(SELECT);
+            self.set(L_T4);
+            self.get(L_T3);
+            self.get(L_T4);
+            self.mem(I64_LOAD, 3, 0);
             self.mem(I64_STORE, 3, l.frame_this);
             self.get(L_T3);
-            self.get(L_FB);
-            self.mem(I64_LOAD, 3, 24);
+            self.get(L_T4);
+            self.mem(I64_LOAD, 3, 8);
             self.mem(I64_STORE, 3, l.frame_this + 8);
             st_k(self, l.fr_new_target, lo);
             st_k(self, l.fr_new_target + 8, hi);
@@ -6055,6 +6089,48 @@ unsafe fn vm_of<'a>(vm: i32) -> &'a mut crate::vm::Vm {
     &mut *(vm as usize as *mut crate::vm::Vm)
 }
 
+/// Native id's answer for the call at fpos with argc arguments when it is
+/// one of a number's or string's (builtins.rs math, String, isFinite,
+/// Number.prototype.toString) and its operands are numbers or strings;
+/// None for the full call.
+fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<Val> {
+    use crate::builtins::*;
+    let arg = |vm: &crate::vm::Vm, k: int| if k < argc { vm.stack[(fpos + 2 + k) as usize] } else { Val::Undef };
+    let a0 = arg(vm, 0);
+    if id >= NF_MATH && id < NF_MATH + 28 {
+        if let Val::Num(x) = a0 {
+            return Some(Val::Num(math1(id - NF_MATH, x)));
+        }
+        return None;
+    }
+    if id >= NF_MATH + 28 && id <= NF_MATH + 30 {
+        if let (Val::Num(_), Val::Num(_)) = (a0, arg(vm, 1)) {
+            let args = vec![a0, arg(vm, 1)];
+            return Some(vm.math(id - NF_MATH, &args));
+        }
+        return None;
+    }
+    if id == NF_STRING && argc >= 1 {
+        return match a0 {
+            Val::Str(_) => Some(a0),
+            Val::Num(n) => Some(vm.string_val(crate::num::number_to_string(n))),
+            _ => None,
+        };
+    }
+    if id == NF_ISFINITE {
+        if let Val::Num(n) = a0 {
+            return Some(Val::Bool(crate::num::is_finite(n)));
+        }
+        return None;
+    }
+    if id == NF_NP_TOSTRING && argc == 0 {
+        if let Val::Num(n) = vm.stack[(fpos + 1) as usize] {
+            return Some(vm.string_val(crate::num::radix_string(n, 10)));
+        }
+    }
+    None
+}
+
 fn after(vm: &crate::vm::Vm) -> i32 {
     if vm.gc_due() {
         2
@@ -6873,6 +6949,18 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
             (*std::ptr::addr_of_mut!(OPCOUNT))[k] += 1;
         }
     }
+    if tp == usize::MAX && fo >= 0 && vm.objs[fo as usize].class == C_NATIVE && MASK.with(|m| m.get()) & (1u64 << 47) == 0 {
+        // natives of numbers and strings that cannot call back or throw:
+        // answered off the stack as call_native does, without its frame
+        // and argument work
+        if let Some(v) = pure_native(vm, vm.objs[fo as usize].func as int, fpos, w2) {
+            let next = pc + 1 + (w0 >> 16);
+            vm.frames[fi].pc = next;
+            let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
+            vm.rset(dst as usize, v);
+            return after(vm);
+        }
+    }
     if plain {
         // a plain function runs here, nested, and the compiled code goes
         // on after it; a generator, an async function, one that uses
@@ -7245,8 +7333,11 @@ fn calls_fill(vm: &mut crate::vm::Vm, tp: usize, f: i64) {
         vm.jit_calls.resize(n, -1);
     }
     let p = &vm.protos[tp];
-    let ok = f >= 0 && !p.arrow && p.env_size == 0 && !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async;
-    let w = [tp as i32, if ok { f as i32 } else { -1 }, p.nparams as i32, p.nslots as i32, p.fsize as i32, p.rentry as i32, if p.strict { 1 } else { 0 }, 0];
+    let arrow = p.arrow && MASK.with(|m| m.get()) & (1u64 << 48) == 0;
+    let ok = f >= 0 && (!p.arrow || arrow) && p.env_size == 0 && !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async;
+    // word 6: the callee takes this as it comes (strict, or an arrow,
+    // whose this is its own: word 7)
+    let w = [tp as i32, if ok { f as i32 } else { -1 }, p.nparams as i32, p.nslots as i32, p.fsize as i32, p.rentry as i32, if p.strict || p.arrow { 1 } else { 0 }, if p.arrow { 1 } else { 0 }];
     for k in 0..8 {
         vm.jit_calls[tp * 8 + k] = w[k];
     }
