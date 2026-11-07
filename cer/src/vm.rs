@@ -322,6 +322,8 @@ pub struct Vm {
     pub jit_min: int,
     /// by proto: the compiled function (a table index), -1 not yet, -2 none
     pub jit_fn: Vec<int>,
+    /// the machine's key to its compiled code state (wjit.rs), 0 none yet
+    pub jit_id: int,
     /// by proto: back edges taken while not compiled
     pub jit_hot: Vec<int>,
     /// by rcode index of a loop head: entries that left at once (wjit.rs)
@@ -568,6 +570,7 @@ impl Vm {
             jit_on: false,
             jit_min: 64,
             jit_fn: Vec::new(),
+            jit_id: 0,
             jit_hot: Vec::new(),
             jit_miss: Vec::new(),
             jit_res: Vec::new(),

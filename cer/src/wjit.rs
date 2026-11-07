@@ -6014,31 +6014,16 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         vm.jit_fn.resize(pi + 1, -1);
     }
     let mut f = vm.jit_fn[pi];
-    let me = vm as *const crate::vm::Vm as usize;
     if f == PENDING {
-        // waits for its batch: flushed when its functions keep coming. A
-        // batch of another machine (or of this one before it moved) was
-        // dropped: compiled again
-        let hits = BATCH.with(|b| {
-            let mut t = b.take();
-            let h = if t.vm == me {
-                t.hits += 1;
-                t.hits
-            } else {
-                0
-            };
-            b.set(t);
-            h
+        // waits for its batch: flushed when its functions keep coming
+        let hits = with_state(vm, |st| {
+            st.batch.hits += 1;
+            st.batch.hits
         });
-        if hits == 0 {
-            vm.jit_fn[pi] = -1;
-            f = -1;
-        } else {
-            if hits >= BATCH_HITS {
-                flush(vm);
-            }
-            return vm.jit_fn[pi];
+        if hits >= BATCH_HITS {
+            flush(vm);
         }
+        return vm.jit_fn[pi];
     }
     if f == -1 {
         let rb = vm.protos[pi].rbase as usize;
@@ -6070,18 +6055,12 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             let name = format!("{}#{}", p.name, pi);
             if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
                 f = PENDING;
-                let full = BATCH.with(|b| {
-                    let mut t = b.take();
-                    if t.vm != me {
-                        t = Batch::default();
-                        t.vm = me;
-                    }
+                let full = with_state(vm, |st| {
+                    let t = &mut st.batch;
                     t.bytes += c.bytes.len();
                     t.items.push(Pending { pi, name, c });
                     // debug: mask bit 45, each function in a module of its own
-                    let full = t.items.len() >= BATCH_FNS || t.bytes >= BATCH_BYTES || MASK.with(|m| m.get()) & (1u64 << 45) != 0;
-                    b.set(t);
-                    full
+                    t.items.len() >= BATCH_FNS || t.bytes >= BATCH_BYTES || MASK.with(|m| m.get()) & (1u64 << 45) != 0
                 });
                 vm.jit_fn[pi] = f;
                 if full {
@@ -6120,8 +6099,6 @@ struct Pending {
 
 #[derive(Default)]
 struct Batch {
-    /// the machine whose functions these are (its address)
-    vm: usize,
     items: Vec<Pending>,
     bytes: usize,
     hits: u32,
@@ -6129,16 +6106,72 @@ struct Batch {
     ends: u32,
 }
 
+/// A machine's compiled code: the functions not yet given to the host and
+/// the modules it was given. The UI extension host runs many machines on
+/// one thread, each with its own.
+#[derive(Default)]
+struct VmJit {
+    id: i64,
+    batch: Batch,
+    mods: Mods,
+}
+
 thread_local! {
-    /// compiled functions not yet given to the host
-    static BATCH: std::cell::Cell<Batch> = std::cell::Cell::new(Batch::default());
+    static VMS: std::cell::RefCell<Vec<VmJit>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NEXT_ID: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// f on the machine's state (made on first use; the machine gets its id)
+fn with_state<R>(vm: &mut crate::vm::Vm, f: impl FnOnce(&mut VmJit) -> R) -> R {
+    if vm.jit_id == 0 {
+        vm.jit_id = NEXT_ID.with(|n| {
+            n.set(n.get() + 1);
+            n.get()
+        });
+    }
+    let id = vm.jit_id;
+    VMS.with(|v| {
+        let mut v = v.borrow_mut();
+        let k = match v.iter().position(|s| s.id == id) {
+            Some(k) => k,
+            None => {
+                v.push(VmJit { id, ..Default::default() });
+                v.len() - 1
+            }
+        };
+        f(&mut v[k])
+    })
+}
+
+/// A machine that goes gives its modules' table slots back to the host.
+impl Drop for crate::vm::Vm {
+    fn drop(&mut self) {
+        if self.jit_id == 0 {
+            return;
+        }
+        let id = self.jit_id;
+        let st = VMS.with(|v| {
+            let mut v = v.borrow_mut();
+            v.iter().position(|s| s.id == id).map(|k| v.swap_remove(k))
+        });
+        if let Some(st) = st {
+            for m in st.mods.list.iter() {
+                host::drop_slots(m.base as i32, m.pis.len() as i32);
+            }
+        }
+    }
+}
+
+/// debug: machines with compiled code state
+pub fn machines() -> usize {
+    VMS.with(|v| v.borrow().len())
 }
 
 /// The waiting functions as one module to the host: each gets its table
 /// slot (or -2 when the host refused the module).
 fn flush(vm: &mut crate::vm::Vm) {
-    let t = BATCH.with(|b| b.take());
-    if t.items.is_empty() || t.vm != vm as *const crate::vm::Vm as usize {
+    let t = with_state(vm, |st| std::mem::take(&mut st.batch));
+    if t.items.is_empty() {
         return;
     }
     let lay = LAYOUT.with(|l| *l);
@@ -6184,15 +6217,10 @@ fn flush(vm: &mut crate::vm::Vm) {
         calls_fill(vm, pi, f);
     }
     if base >= 0 {
-        let me = vm as *const crate::vm::Vm as usize;
         let cap = if MASK.with(|m| m.get()) & (1u64 << 44) != 0 { 64 * 1024 } else { CODE_MAX };
         let mut gone: Vec<Module> = Vec::new();
-        MODS.with(|c| {
-            let mut ms = c.take();
-            if ms.vm != me {
-                ms = Mods::default();
-                ms.vm = me;
-            }
+        let mut counts = with_state(vm, |st| {
+            let ms = &mut st.mods;
             ms.bytes += t.bytes;
             ms.list.push(Module { base: base as i64, pis: t.items.iter().map(|q| q.pi).collect(), bytes: t.bytes });
             // the oldest modules go while the code is over its cap (never
@@ -6202,22 +6230,12 @@ fn flush(vm: &mut crate::vm::Vm) {
                 ms.bytes -= m.bytes;
                 gone.push(m);
             }
-            c.set(ms);
+            std::mem::take(&mut ms.evictions)
         });
         for m in gone.iter() {
-            let mut counts = MODS.with(|c| {
-                let mut ms = c.take();
-                let e = std::mem::take(&mut ms.evictions);
-                c.set(ms);
-                e
-            });
             evict(vm, m, &mut counts);
-            MODS.with(|c| {
-                let mut ms = c.take();
-                ms.evictions = counts;
-                c.set(ms);
-            });
         }
+        with_state(vm, |st| st.mods.evictions = counts);
     }
 }
 
@@ -6233,7 +6251,6 @@ struct Module {
 
 #[derive(Default)]
 struct Mods {
-    vm: usize,
     list: Vec<Module>,
     bytes: usize,
     /// by function: how often it was evicted
@@ -6246,8 +6263,6 @@ struct Mods {
 const EVICT_MAX: u8 = 2;
 
 thread_local! {
-    /// the modules given to the host, oldest first
-    static MODS: std::cell::Cell<Mods> = std::cell::Cell::new(Mods::default());
     /// debug counter: functions evicted
     pub static EVICTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -6296,14 +6311,15 @@ fn evict(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>) {
 /// BATCH_ENDS such ends (a host that runs the machine once per event, as
 /// the UI extension host does, would otherwise send a module per event).
 pub fn flush_pending(vm: &mut crate::vm::Vm) {
-    if BATCH.with(|b| {
-        let mut t = b.take();
+    if vm.jit_id == 0 {
+        return;
+    }
+    if with_state(vm, |st| {
+        let t = &mut st.batch;
         if !t.items.is_empty() {
             t.ends += 1;
         }
-        let due = t.ends >= BATCH_ENDS;
-        b.set(t);
-        due
+        t.ends >= BATCH_ENDS
     }) {
         flush(vm);
     }
