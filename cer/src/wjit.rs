@@ -6104,11 +6104,13 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
 
 /// jit_fn's mark for a function compiled and waiting for its batch
 const PENDING: i64 = -3;
-/// a batch goes to the host at this many functions or body bytes, or
-/// when its functions have been asked for this many times since
+/// a batch goes to the host at this many functions or body bytes, when
+/// its functions have been asked for this many times since, or after this
+/// many ends of the machine's run
 const BATCH_FNS: usize = 16;
 const BATCH_BYTES: usize = 256 * 1024;
 const BATCH_HITS: u32 = 64;
+const BATCH_ENDS: u32 = 8;
 
 struct Pending {
     pi: usize,
@@ -6123,6 +6125,8 @@ struct Batch {
     items: Vec<Pending>,
     bytes: usize,
     hits: u32,
+    /// the machine's ends (runs to no frames) since the batch began
+    ends: u32,
 }
 
 thread_local! {
@@ -6288,13 +6292,18 @@ fn evict(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>) {
     }
 }
 
-/// flush() when anything waits (the machine ran to its end).
+/// The machine ran to its end: flush() when a batch has waited through
+/// BATCH_ENDS such ends (a host that runs the machine once per event, as
+/// the UI extension host does, would otherwise send a module per event).
 pub fn flush_pending(vm: &mut crate::vm::Vm) {
     if BATCH.with(|b| {
-        let t = b.take();
-        let any = !t.items.is_empty();
+        let mut t = b.take();
+        if !t.items.is_empty() {
+            t.ends += 1;
+        }
+        let due = t.ends >= BATCH_ENDS;
         b.set(t);
-        any
+        due
     }) {
         flush(vm);
     }
