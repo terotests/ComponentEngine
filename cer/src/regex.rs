@@ -1188,8 +1188,8 @@ fn count_groups(src: &Vec<int>) -> int {
 
 /// The flags and the pattern read (no code yet): `re` keeps the flags and
 /// any error; the parser the pattern's nodes.
-fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParser, int) {
-    let mut re = Regex {
+fn new_regex() -> Regex {
+    Regex {
         code: Vec::new(),
         classes: Vec::new(),
         ngroups: 0,
@@ -1208,7 +1208,12 @@ fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParse
         first: -1,
         fset: Vec::new(),
         fhi: false,
-    };
+    }
+}
+
+/// Reads the flags into `re` and the pattern into `p`; returns the root
+/// node (an error goes to re.error).
+fn parse_pattern(re: &mut Regex, p: &mut RParser, pattern: &str, flags: &str, check_only: bool) -> int {
     for c in flags.chars() {
         let dup = match c {
             'g' => re.global,
@@ -1221,12 +1226,12 @@ fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParse
             'v' => re.unicode,
             _ => {
                 re.error = format!("Invalid regular expression flags '{}'", flags);
-                return (re, empty_parser(), -1);
+                return -1;
             }
         };
         if dup {
             re.error = format!("Invalid regular expression flags '{}'", flags);
-            return (re, empty_parser(), -1);
+            return -1;
         }
         match c {
             'g' => re.global = true,
@@ -1243,22 +1248,11 @@ fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParse
             _ => {}
         }
     }
-    let mut p = RParser {
-        src: crate::jsstr::units(pattern),
-        pos: 0,
-        nodes: Vec::new(),
-        classes: Vec::new(),
-        ngroups: 0,
-        names: Vec::new(),
-        name_index: Vec::new(),
-        error: String::new(),
-        unicode: re.unicode,
-        total_groups: 0,
-        ignore_case: re.ignore_case,
-        vmode: crate::jsstr::index_of(flags, "v", 0) >= 0,
-        v_pending: Vec::new(),
-        check_only: check_only,
-    };
+    p.src = crate::jsstr::units(pattern);
+    p.unicode = re.unicode;
+    p.ignore_case = re.ignore_case;
+    p.vmode = crate::jsstr::index_of(flags, "v", 0) >= 0;
+    p.check_only = check_only;
     p.total_groups = count_groups(&p.src);
     let root = p.disjunction();
     if p.error.is_empty() && p.cur() >= 0 {
@@ -1266,7 +1260,7 @@ fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParse
     }
     if !p.error.is_empty() {
         re.error = p.error.clone();
-        return (re, p, root);
+        return root;
     }
     // back references past the group count are octal escapes (Annex B)
     let ng = p.ngroups;
@@ -1275,7 +1269,7 @@ fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParse
         if p.nodes[i].kind == R_BACKREF && p.nodes[i].c > ng {
             if re.unicode {
                 re.error = String::from("Invalid regular expression: invalid escape");
-                return (re, p, root);
+                return root;
             }
             let v = p.nodes[i].c;
             // \8 and \9 are the digits themselves
@@ -1284,7 +1278,7 @@ fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParse
         }
         i += 1;
     }
-    (re, p, root)
+    root
 }
 
 fn empty_parser() -> RParser {
@@ -1475,7 +1469,9 @@ pub fn check(pattern: &str, flags: &str) -> String {
 }
 
 fn check_full(pattern: &str, flags: &str) -> String {
-    let (re, _p, _root) = parse_pattern(pattern, flags, true);
+    let mut re = new_regex();
+    let mut p = empty_parser();
+    parse_pattern(&mut re, &mut p, pattern, flags, true);
     re.error
 }
 
@@ -1508,7 +1504,9 @@ fn check_memo(pattern: &str, flags: &str) -> String {
 }
 
 pub fn compile(pattern: &str, flags: &str) -> Regex {
-    let (mut re, p, root) = parse_pattern(pattern, flags, false);
+    let mut re = new_regex();
+    let mut p = empty_parser();
+    let root = parse_pattern(&mut re, &mut p, pattern, flags, false);
     if !re.error.is_empty() {
         return re;
     }
