@@ -397,7 +397,7 @@ impl Vm {
         if self.throwing {
             return 0;
         }
-        if truthy(&done) {
+        if self.truthy_v(&done) {
             let v = self.get(&r, A_VALUE);
             if mode == GM_RETURN {
                 self.stack.push(v);
@@ -466,7 +466,7 @@ impl Vm {
         if self.throwing {
             return 0;
         }
-        if truthy(&done) {
+        if self.truthy_v(&done) {
             if mode == GM_RETURN {
                 self.stack.push(v);
                 return 2;
@@ -628,7 +628,7 @@ impl Vm {
             let req = self.new_array(vec![Val::Num(mode as double), a0, Val::Obj(p)]);
             let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             self.push_elem(q, Val::Obj(req));
-            let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !truthy(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
+            let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !self.truthy_v(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
             if idle && self.evecs[self.objs[q as usize].elems as usize].v.len() == 1 {
                 self.agen_run(g, GM_NEXT, Val::Undef, false);
             }

@@ -868,10 +868,10 @@ function copyAndDetach(o, newLength, keep, what) {
 hide(ArrayBuffer.prototype, 'transfer', function transfer(newLength) { return copyAndDetach(this, newLength, true, 'ArrayBuffer.prototype.transfer'); });
 hide(ArrayBuffer.prototype, 'transferToFixedLength', function transferToFixedLength(newLength) { return copyAndDetach(this, newLength, false, 'ArrayBuffer.prototype.transferToFixedLength'); });
 
-var KINDS = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
-var SIZES = [1, 1, 1, 2, 2, 4, 4, 4, 8, 8, 8];
+var KINDS = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array', 'Float16Array'];
+var SIZES = [1, 1, 1, 2, 2, 4, 4, 4, 8, 8, 8, 2];
 /** The element conversion of a kind: ToBigInt for the 64-bit ones. */
-function elemOf(kind) { return kind >= 9 ? BigInt : Number; }
+function elemOf(kind) { return kind === 9 || kind === 10 ? BigInt : Number; }
 var CTORS = [];
 function TypedArray() { throw new TypeError('Abstract class TypedArray not directly constructable'); }
 var TAP = TypedArray.prototype;
@@ -949,6 +949,9 @@ defineTA(7, function Float32Array(a, b, c) { if (new.target === undefined) throw
 defineTA(8, function Float64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float64Array requires 'new'"); return construct(8, new.target, a, b, c); });
 defineTA(9, function BigInt64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigInt64Array requires 'new'"); return construct(9, new.target, a, b, c); });
 defineTA(10, function BigUint64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigUint64Array requires 'new'"); return construct(10, new.target, a, b, c); });
+defineTA(11, function Float16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float16Array requires 'new'"); return construct(11, new.target, a, b, c); });
+var f16cell = new Float16Array(1);
+hide(Math, 'f16round', function f16round(x) { f16cell[0] = x; return f16cell[0]; });
 getter(TypedArray, Symbol.species, speciesSelf);
 
 /** A new typed array from `exemplar`'s species, checked. */
@@ -1192,7 +1195,7 @@ getter(DVP, 'buffer', function () { return dv(this, 'DataView.prototype.buffer')
 getter(DVP, 'byteLength', function () { var d = dv(this, 'DataView.prototype.byteLength'), n = dvLength(d); if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.byteLength on a detached ArrayBuffer' : 'DataView is out of bounds'); return n; });
 getter(DVP, 'byteOffset', function () { var d = dv(this, 'DataView.prototype.byteOffset'); if (dvLength(d) < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.byteOffset on a detached ArrayBuffer' : 'DataView is out of bounds'); return d[1]; });
 tag(DVP, 'DataView');
-['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64', 'BigInt64', 'BigUint64'].forEach(function (name, kind) {
+['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64', 'BigInt64', 'BigUint64', 'Float16'].forEach(function (name, kind) {
   if (!name) return;
   hide(DVP, 'get' + name, function (index, little) {
     var d = dv(this, 'DataView.prototype.get' + name); var i = toIndex(index, 'offset');
@@ -1213,11 +1216,232 @@ tag(DVP, 'DataView');
 });
 hide(globalThis, 'DataView', DataView);
 
+// ---- ES2026: Error.isError, Math.sumPrecise, Uint8Array base64 / hex
+var isErrorObj = globalThis.__isError; delete globalThis.__isError;
+(function () {
+  'use strict';
+  hide(Error, 'isError', function isError(v) { return isErrorObj(v); });
+
+  // the exact sum of doubles: each one an integer count of 2^-1074
+  var sumCell = new DataView(new ArrayBuffer(8));
+  function exactOf(x) {
+    sumCell.setFloat64(0, x);
+    var bits = sumCell.getBigUint64(0);
+    var exp = Number((bits >> 52n) & 0x7ffn), mant = bits & 0xfffffffffffffn;
+    var v = exp === 0 ? mant : (mant | 0x10000000000000n) << BigInt(exp - 1);
+    return (bits >> 63n) ? -v : v;
+  }
+  function pow2(e) {
+    // 2^e as a double, for -1074 <= e <= 1023
+    var r = 1;
+    while (e > 0) { var k = e > 1000 ? 1000 : e; r *= Math.pow(2, k); e -= k; }
+    while (e < 0) { var j = e < -1000 ? -1000 : e; r *= Math.pow(2, j); e -= j; }
+    return r;
+  }
+  function roundExact(s) {
+    if (s === 0n) return 0;
+    var neg = s < 0n, a = neg ? -s : s;
+    var L = a.toString(2).length, r;
+    if (L <= 53) r = Number(a) * pow2(-1074);
+    else {
+      var shift = L - 53, q = a >> BigInt(shift), rem = a - (q << BigInt(shift)), half = 1n << BigInt(shift - 1);
+      if (rem > half || (rem === half && (q & 1n) === 1n)) q += 1n;
+      var e = shift - 1074;
+      r = e > 1023 ? Infinity : Number(q) * pow2(e);
+    }
+    return neg ? -r : r;
+  }
+  hide(Math, 'sumPrecise', function sumPrecise(items) {
+    if (items === undefined || items === null) throw new TypeError('Math.sumPrecise called on null or undefined');
+    var m = items[Symbol.iterator];
+    if (!isCallable(m)) throw new TypeError('items is not iterable');
+    var it = m.call(items);
+    if (!isObject(it)) throw new TypeError('Result of the Symbol.iterator method is not an object');
+    var next = it.next, state = 0, sum = 0n; // 0 minus-zero, 1 finite, 2 +inf, 3 -inf, 4 NaN
+    for (;;) {
+      var r = next.call(it);
+      if (!isObject(r)) throw new TypeError('Iterator result is not an object');
+      if (r.done) break;
+      var n = r.value;
+      if (typeof n !== 'number') {
+        try { var ret = it.return; if (ret !== undefined && ret !== null) ret.call(it); } catch (e) {}
+        throw new TypeError('Math.sumPrecise: ' + String(typeof n) + ' is not a number');
+      }
+      if (state === 4) continue;
+      if (n !== n) state = 4;
+      else if (n === Infinity) state = state === 3 ? 4 : 2;
+      else if (n === -Infinity) state = state === 2 ? 4 : 3;
+      else if (!(n === 0 && 1 / n < 0) && (state === 0 || state === 1)) { state = 1; sum += exactOf(n); }
+    }
+    if (state === 4) return NaN;
+    if (state === 2) return Infinity;
+    if (state === 3) return -Infinity;
+    if (state === 0) return -0;
+    return roundExact(sum);
+  });
+
+  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  var B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  var U8 = Uint8Array;
+  function u8Of(o, what) {
+    var i = taInfo(o);
+    if (i === undefined || i[0] !== 1) throw new TypeError(what + ': this is not a Uint8Array');
+    return i;
+  }
+  function u8Bytes(o, what) {
+    var i = taInfo(o);
+    if (bufInfo(i[1]) === -2 || i[4]) throw new TypeError('Cannot perform ' + what + ' on a detached or out of bounds Uint8Array');
+    var out = [];
+    for (var k = 0; k < i[3]; k++) out.push(o[k]);
+    return out;
+  }
+  function optionsOf(o) {
+    if (o === undefined) return create(null);
+    if (!isObject(o)) throw new TypeError('options must be an object');
+    return o;
+  }
+  function alphabetOf(opts) {
+    var a = opts.alphabet;
+    if (a === undefined) return 'base64';
+    if (a !== 'base64' && a !== 'base64url') throw new TypeError('expected alphabet to be either "base64" or "base64url"');
+    return a;
+  }
+  function lastChunkOf(opts) {
+    var l = opts.lastChunkHandling;
+    if (l === undefined) return 'loose';
+    if (l !== 'loose' && l !== 'strict' && l !== 'stop-before-partial') throw new TypeError('expected lastChunkHandling to be "loose", "strict" or "stop-before-partial"');
+    return l;
+  }
+  function isWs(c) { return c === 9 || c === 10 || c === 12 || c === 13 || c === 32; }
+  function skipWs(s, i) { while (i < s.length && isWs(s.charCodeAt(i))) i++; return i; }
+  function decodeChunk(chunk, strict, out) {
+    var n = chunk.length;
+    if (n === 2) chunk += 'AA'; else if (n === 3) chunk += 'A';
+    var v = 0;
+    for (var k = 0; k < 4; k++) v = v * 64 + B64.indexOf(chunk[k]);
+    var b0 = (v >> 16) & 255, b1 = (v >> 8) & 255, b2 = v & 255;
+    if (n === 2) { if (strict && b1 !== 0) return false; out.push(b0); return true; }
+    if (n === 3) { if (strict && b2 !== 0) return false; out.push(b0, b1); return true; }
+    out.push(b0, b1, b2); return true;
+  }
+  function fromBase64(s, alphabet, last, max) {
+    var bytes = [], read = 0, chunk = '', i = 0, len = s.length;
+    function fail() { return { read: read, bytes: bytes, error: true }; }
+    if (max === 0) return { read: 0, bytes: bytes, error: false };
+    for (;;) {
+      i = skipWs(s, i);
+      if (i === len) {
+        if (chunk.length > 0) {
+          if (last === 'stop-before-partial') return { read: read, bytes: bytes, error: false };
+          if (last === 'loose') { if (chunk.length === 1) return fail(); decodeChunk(chunk, false, bytes); }
+          else return fail();
+        }
+        return { read: len, bytes: bytes, error: false };
+      }
+      var c = s[i]; i++;
+      if (c === '=') {
+        if (chunk.length < 2) return fail();
+        i = skipWs(s, i);
+        if (chunk.length === 2) {
+          if (i === len) { if (last === 'stop-before-partial') return { read: read, bytes: bytes, error: false }; return fail(); }
+          if (s[i] === '=') i = skipWs(s, i + 1);
+        }
+        if (i < len) return fail();
+        if (!decodeChunk(chunk, last === 'strict', bytes)) return fail();
+        return { read: len, bytes: bytes, error: false };
+      }
+      if (alphabet === 'base64url') {
+        if (c === '+' || c === '/') return fail();
+        if (c === '-') c = '+'; else if (c === '_') c = '/';
+      }
+      if (B64.indexOf(c) < 0 || c.length !== 1) return fail();
+      var remaining = max - bytes.length;
+      if ((remaining === 1 && chunk.length === 2) || (remaining === 2 && chunk.length === 3)) return { read: read, bytes: bytes, error: false };
+      chunk += c;
+      if (chunk.length === 4) {
+        decodeChunk(chunk, false, bytes); chunk = ''; read = i;
+        if (bytes.length === max) return { read: read, bytes: bytes, error: false };
+      }
+    }
+  }
+  function hexVal(c) {
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 65 && c <= 70) return c - 55;
+    if (c >= 97 && c <= 102) return c - 87;
+    return -1;
+  }
+  function fromHex(s, max) {
+    var bytes = [], read = 0, len = s.length;
+    if (len % 2 !== 0) return { read: 0, bytes: bytes, error: true };
+    while (read < len && bytes.length < max) {
+      var h = hexVal(s.charCodeAt(read)), l = hexVal(s.charCodeAt(read + 1));
+      if (h < 0 || l < 0) return { read: read, bytes: bytes, error: true };
+      read += 2; bytes.push(h * 16 + l);
+    }
+    return { read: read, bytes: bytes, error: false };
+  }
+  function newU8(bytes) { var a = new U8(bytes.length); for (var k = 0; k < bytes.length; k++) a[k] = bytes[k]; return a; }
+  hide(U8, 'fromBase64', function fromBase64_(string) {
+    if (typeof string !== 'string') throw new TypeError('expected input to be a string');
+    var opts = optionsOf(arguments[1]), alphabet = alphabetOf(opts), last = lastChunkOf(opts);
+    var r = fromBase64(string, alphabet, last, 9007199254740991);
+    if (r.error) throw new SyntaxError('Invalid base64 string');
+    return newU8(r.bytes);
+  });
+  defineProperty(U8.fromBase64, 'name', { value: 'fromBase64', writable: false, enumerable: false, configurable: true });
+  hide(U8, 'fromHex', function fromHex_(string) {
+    if (typeof string !== 'string') throw new TypeError('expected input to be a string');
+    var r = fromHex(string, 9007199254740991);
+    if (r.error) throw new SyntaxError('Invalid hex string');
+    return newU8(r.bytes);
+  });
+  defineProperty(U8.fromHex, 'name', { value: 'fromHex', writable: false, enumerable: false, configurable: true });
+  var U8P = U8.prototype;
+  hide(U8P, 'toBase64', function toBase64() {
+    u8Of(this, 'Uint8Array.prototype.toBase64');
+    var opts = optionsOf(arguments[0]), alphabet = alphabetOf(opts), omit = !!opts.omitPadding;
+    var b = u8Bytes(this, 'Uint8Array.prototype.toBase64'), A = alphabet === 'base64url' ? B64URL : B64, out = '';
+    for (var k = 0; k < b.length; k += 3) {
+      var n = b.length - k, v = (b[k] << 16) | ((n > 1 ? b[k + 1] : 0) << 8) | (n > 2 ? b[k + 2] : 0);
+      out += A[(v >> 18) & 63] + A[(v >> 12) & 63];
+      out += n > 1 ? A[(v >> 6) & 63] : (omit ? '' : '=');
+      out += n > 2 ? A[v & 63] : (omit ? '' : '=');
+    }
+    return out;
+  });
+  hide(U8P, 'toHex', function toHex() {
+    u8Of(this, 'Uint8Array.prototype.toHex');
+    var b = u8Bytes(this, 'Uint8Array.prototype.toHex'), out = '';
+    for (var k = 0; k < b.length; k++) out += (b[k] < 16 ? '0' : '') + b[k].toString(16);
+    return out;
+  });
+  function setInto(o, r, what) {
+    for (var k = 0; k < r.bytes.length; k++) o[k] = r.bytes[k];
+    if (r.error) throw new SyntaxError(what);
+    var res = {}; res.read = r.read; res.written = r.bytes.length; return res;
+  }
+  hide(U8P, 'setFromBase64', function setFromBase64(string) {
+    u8Of(this, 'Uint8Array.prototype.setFromBase64');
+    if (typeof string !== 'string') throw new TypeError('expected input to be a string');
+    var opts = optionsOf(arguments[1]), alphabet = alphabetOf(opts), last = lastChunkOf(opts);
+    var i = taInfo(this);
+    if (bufInfo(i[1]) === -2 || i[4]) throw new TypeError('Cannot perform Uint8Array.prototype.setFromBase64 on a detached or out of bounds Uint8Array');
+    return setInto(this, fromBase64(string, alphabet, last, i[3]), 'Invalid base64 string');
+  });
+  hide(U8P, 'setFromHex', function setFromHex(string) {
+    u8Of(this, 'Uint8Array.prototype.setFromHex');
+    if (typeof string !== 'string') throw new TypeError('expected input to be a string');
+    var i = taInfo(this);
+    if (bufInfo(i[1]) === -2 || i[4]) throw new TypeError('Cannot perform Uint8Array.prototype.setFromHex on a detached or out of bounds Uint8Array');
+    return setInto(this, fromHex(string, i[3]), 'Invalid hex string');
+  });
+})();
+
 // Atomics: one thread, so plain reads and writes on an integer typed array
 var Atomics = {};
 function intTA(ta, what) {
   var i = live(ta, 'Atomics.' + what);
-  if (i[0] === 2 || (i[0] > 6 && i[0] < 9)) throw new TypeError('Atomics.' + what + ': not an integer typed array');
+  if (i[0] === 2 || (i[0] > 6 && i[0] < 9) || i[0] === 11) throw new TypeError('Atomics.' + what + ': not an integer typed array');
   return i;
 }
 function atomicIndex(i, index) {

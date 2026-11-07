@@ -350,6 +350,8 @@ pub struct Vm {
     /// an element or index property was put on Array.prototype or
     /// Object.prototype: holes and reads past an array's end look there
     pub idx_protos: bool,
+    /// the BigInt 0n (interned), the one falsy object; -1 until made
+    pub big_zero: int,
     /// the atoms some object has as a setter or a read-only property (by
     /// atom), and whether a proxy was made: a write that adds a property
     /// looks along the chain only for these
@@ -456,6 +458,15 @@ pub fn truthy(v: &Val) -> bool {
 }
 
 impl Vm {
+    /// ToBoolean: `truthy`, with 0n false.
+    #[inline]
+    pub fn truthy_v(&self, v: &Val) -> bool {
+        match v {
+            Val::Obj(o) => *o != self.big_zero,
+            _ => truthy(v),
+        }
+    }
+
     pub fn new() -> Vm {
         let mut vm = Vm {
             objs: Vec::new(),
@@ -588,6 +599,7 @@ impl Vm {
             temp_roots: Vec::new(),
             any_setter: false,
             idx_protos: false,
+            big_zero: -1,
             setter_atoms: Vec::new(),
             proxy_made: false,
             rng: 42,
@@ -3213,7 +3225,7 @@ impl Vm {
         let hi = self.get_obj(fo, A_HASINSTANCE, f);
         if self.is_callable(&hi) && self.objs[obj_of(&hi) as usize].class != C_NATIVE {
             let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef, Val::Undef);
-            return truthy(&r);
+            return self.truthy_v(&r);
         }
         if !self.is_callable(f) {
             self.throw_type("Right-hand side of 'instanceof' is not callable");
@@ -4023,7 +4035,7 @@ impl Vm {
             return None;
         }
         let done = self.get(&r, A_DONE);
-        if truthy(&done) {
+        if self.truthy_v(&done) {
             return None;
         }
         Some(self.get(&r, A_VALUE))
@@ -4185,7 +4197,7 @@ impl Vm {
                     }
                     OP_NOT => {
                         let v = self.pop();
-                        self.stack.push(Val::Bool(!truthy(&v)));
+                        self.stack.push(Val::Bool(!self.truthy_v(&v)));
                     }
                     OP_NEW_OBJECT => {
                         let o = self.new_object();
@@ -4336,7 +4348,7 @@ impl Vm {
                     }
                     OP_JF => {
                         let v = self.pop();
-                        if !truthy(&v) {
+                        if !self.truthy_v(&v) {
                             if self.slicing && self.brk(fi, (op.a as int)) {
                                 return;
                             }
@@ -4345,7 +4357,7 @@ impl Vm {
                     }
                     OP_JT => {
                         let v = self.pop();
-                        if truthy(&v) {
+                        if self.truthy_v(&v) {
                             if self.slicing && self.brk(fi, (op.a as int)) {
                                 return;
                             }
@@ -5622,7 +5634,7 @@ impl Vm {
             }
             OP_NOT => {
                 let v = self.pop();
-                self.stack.push(Val::Bool(!truthy(&v)));
+                self.stack.push(Val::Bool(!self.truthy_v(&v)));
             }
             OP_BNOT => {
                 let v = self.pop();
@@ -5676,14 +5688,14 @@ impl Vm {
                 }
             }
             OP_JF_KEEP => {
-                if !truthy(self.top()) {
+                if !self.truthy_v(self.top()) {
                     *pc = (op.a as int);
                 } else {
                     self.stack.pop();
                 }
             }
             OP_JT_KEEP => {
-                if truthy(self.top()) {
+                if self.truthy_v(self.top()) {
                     *pc = (op.a as int);
                 } else {
                     self.stack.pop();

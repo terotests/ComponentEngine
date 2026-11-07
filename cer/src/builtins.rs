@@ -1586,7 +1586,7 @@ impl Vm {
     pub fn desc_flag(&mut self, d: int, desc: &Val, name: int, bit: int, existing_attr: int) -> int {
         if self.has_atom(d, name) {
             let v = self.get_obj(d, name, desc);
-            if truthy(&v) {
+            if self.truthy_v(&v) {
                 0
             } else {
                 bit
@@ -1625,6 +1625,27 @@ impl Vm {
         let has_writable = self.has_atom(d, A_WRITABLE);
         if (has_get || has_set) && (has_value || has_writable) {
             self.throw_type("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
+            return;
+        }
+        if i >= 0 && self.objs[o as usize].class == C_TYPED {
+            // a typed array's element (TypedArray [[DefineOwnProperty]])
+            let bad_flag = |vm: &mut Vm, a: int| -> bool {
+                if vm.has_atom(d, a) {
+                    let f = vm.get_obj(d, a, desc);
+                    return !vm.truthy_v(&f);
+                }
+                false
+            };
+            let nc = bad_flag(self, A_CONFIGURABLE);
+            let ne = bad_flag(self, A_ENUMERABLE);
+            let nw = bad_flag(self, A_WRITABLE);
+            if i >= self.ta_length(o) || nc || ne || nw || has_get || has_set {
+                self.throw_type("Cannot redefine property: typed array element");
+                return;
+            }
+            if has_value {
+                self.ta_set(o, i, &value);
+            }
             return;
         }
         let slot = self.find(o, atom);
@@ -1667,7 +1688,7 @@ impl Vm {
             }
             if (existing_attr & P_READONLY) != 0 {
                 let wv = self.get_obj(d, A_WRITABLE, desc);
-                if has_writable && truthy(&wv) {
+                if has_writable && self.truthy_v(&wv) {
                     self.throw_type(msg.as_str());
                     return;
                 }
@@ -3271,7 +3292,7 @@ impl Vm {
                 Val::Num(n)
             }
             NF_BOOLEAN => {
-                let b = truthy(&a0);
+                let b = self.truthy_v(&a0);
                 if construct {
                     let proto = self.proto_from(&new_target, self.boolean_proto);
                     let o = self.alloc(C_BOOLEAN, proto);

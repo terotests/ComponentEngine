@@ -31,6 +31,12 @@ pub const TK_FLOAT32: int = 7;
 pub const TK_FLOAT64: int = 8;
 pub const TK_BIGINT64: int = 9;
 pub const TK_BIGUINT64: int = 10;
+pub const TK_FLOAT16: int = 11;
+
+/// A BigInt64 / BigUint64 kind.
+pub fn is_big(kind: int) -> bool {
+    kind == TK_BIGINT64 || kind == TK_BIGUINT64
+}
 
 pub const NF_BUF_NEW: int = 920;
 pub const NF_BUF_INFO: int = 921;
@@ -44,6 +50,9 @@ pub const NF_BUF_MAX: int = 928;
 pub const NF_BUF_RESIZE: int = 929;
 
 pub fn kind_size(kind: int) -> int {
+    if kind == TK_FLOAT16 {
+        return 2;
+    }
     if kind <= TK_UINT8C {
         1
     } else if kind <= TK_UINT16 {
@@ -153,6 +162,12 @@ pub fn fround(x: double) -> double {
     r
 }
 
+/// Math.f16round: `x` rounded to the nearest float16.
+pub fn f16round(x: double) -> double {
+    let (sign, exp, mant) = float_parts(x, 5, 10);
+    float_from_parts(sign, exp, mant, 5, 10)
+}
+
 fn fround_parts(x: double) -> double {
     let (sign, exp, mant) = float_parts(x, 8, 23);
     float_from_parts(sign, exp, mant, 8, 23)
@@ -165,6 +180,9 @@ fn element_value(kind: int, x: double) -> double {
     }
     if kind == TK_FLOAT32 {
         return fround(x);
+    }
+    if kind == TK_FLOAT16 {
+        return f16round(x);
     }
     // an integer the kind holds as it is (the common case): no modulo
     if x == floor(x) {
@@ -257,7 +275,12 @@ fn int_bits(kind: int, x: double) -> double {
 fn encode(kind: int, x: double) -> Vec<int> {
     let size = kind_size(kind);
     let mut bytes: Vec<int> = Vec::new();
-    if kind == TK_FLOAT32 {
+    if kind == TK_FLOAT16 {
+        let (sign, exp, mant) = float_parts(x, 5, 10);
+        let m = mant as int;
+        bytes.push((sign << 7) | (exp << 2) | ((m >> 8) & 3));
+        bytes.push(m & 255);
+    } else if kind == TK_FLOAT32 {
         let (sign, exp, mant) = float_parts(x, 8, 23);
         let m = mant as int;
         bytes.push((sign << 7) | (exp >> 1));
@@ -451,6 +474,12 @@ impl Vm {
             bytes.push(self.byte(b, idx));
             k += 1;
         }
+        if kind == TK_FLOAT16 {
+            let sign = bytes[0] >> 7;
+            let exp = (bytes[0] >> 2) & 31;
+            let mant = (((bytes[0] & 3) * 256) + bytes[1]) as double;
+            return float_from_parts(sign, exp, mant, 5, 10);
+        }
         if kind == TK_FLOAT32 {
             let sign = bytes[0] >> 7;
             let exp = ((bytes[0] & 127) << 1) | (bytes[1] >> 7);
@@ -510,7 +539,7 @@ impl Vm {
         if mode < 0 && kind == TK_UINT8 {
             return Val::Num(self.colds[self.objs[b as usize].cold as usize].nums[at as usize]);
         }
-        if kind >= TK_BIGINT64 {
+        if is_big(kind) {
             return self.buf_read_big(b, at as int, kind, true);
         }
         Val::Num(self.buf_read(b, at as int, kind, true))
@@ -518,7 +547,7 @@ impl Vm {
 
     /// `ta[i] = v`: the value is converted even when `i` is outside.
     pub fn ta_set(&mut self, o: int, i: int, v: &Val) {
-        if self.objs[o as usize].pos >= TK_BIGINT64 as i32 {
+        if is_big(self.objs[o as usize].pos as int) {
             let big = self.to_bigint(v);
             if self.throwing || i < 0 || i >= self.ta_length(o) {
                 return;
@@ -664,7 +693,7 @@ impl Vm {
                 self.throw_range("Offset is outside the bounds of the DataView");
                 return Val::Undef;
             }
-            if kind >= TK_BIGINT64 {
+            if is_big(kind) {
                 return self.buf_read_big(b, at, kind, truthy(&a[3]));
             }
             return Val::Num(self.buf_read(b, at, kind, truthy(&a[3])));
@@ -681,7 +710,7 @@ impl Vm {
                 self.throw_range("Offset is outside the bounds of the DataView");
                 return Val::Undef;
             }
-            if kind >= TK_BIGINT64 {
+            if is_big(kind) {
                 let v = a[3].clone();
                 self.buf_write_big(b, at, &v, truthy(&a[4]));
                 return Val::Undef;
@@ -779,7 +808,7 @@ impl Vm {
             let len = num(&a[3]) as int;
             let tracking = matches!(a[3], Val::Undef);
             // the first view over all of a new buffer: it holds this kind
-            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && kind < TK_BIGINT64 && off == 0 && len * kind_size(kind) == self.buf_size(b) {
+            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
                 let mut z: Vec<double> = Vec::new();
                 let mut j = 0;
                 while j < len {

@@ -594,6 +594,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     while i < nb && !r.bad {
         let k = get_str(&mut r, &texts);
         let v = r.num();
+        if k == "0" {
+            vm.big_zero = v;
+        }
         vm.bigints.insert(k, v);
         i += 1;
     }

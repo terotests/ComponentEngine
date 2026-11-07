@@ -446,27 +446,27 @@ impl Vm {
                             out.push(r);
                         }
                         NF_AP_FILTER => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 out.push(v);
                             }
                         }
                         NF_AP_SOME => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 return Val::Bool(true);
                             }
                         }
                         NF_AP_EVERY => {
-                            if !truthy(&r) {
+                            if !self.truthy_v(&r) {
                                 return Val::Bool(false);
                             }
                         }
                         NF_AP_FIND | NF_AP_FINDLAST => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 return v;
                             }
                         }
                         NF_AP_FINDINDEX | NF_AP_FINDLASTINDEX => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 return Val::Num(i as double);
                             }
                         }
@@ -1128,7 +1128,7 @@ impl Vm {
             NF_BP_TOSTRING | NF_BP_VALUEOF => {
                 let b = match &this {
                     Val::Bool(b) => *b,
-                    Val::Obj(o) if self.objs[*o as usize].class == C_BOOLEAN => truthy(&self.colds[self.objs[*o as usize].cold as usize].prim.clone()),
+                    Val::Obj(o) if self.objs[*o as usize].class == C_BOOLEAN => self.truthy_v(&self.colds[self.objs[*o as usize].cold as usize].prim.clone()),
                     _ => {
                         self.throw_type("Boolean.prototype method called on incompatible receiver");
                         return Val::Undef;
@@ -1207,7 +1207,7 @@ impl Vm {
                     if self.throwing {
                         return Val::Undef;
                     }
-                    is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { truthy(&m) };
+                    is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
                 }
                 if !construct && is_re && matches!(a1, Val::Undef) {
                     let pc = self.get(&a0, A_CONSTRUCTOR);

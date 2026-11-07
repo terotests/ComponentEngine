@@ -35,6 +35,7 @@ pub const NF_IS_PROMISE: int = 935;
 pub const NF_AS_METHOD: int = 936;
 pub const NF_IS_CTOR: int = 937;
 pub const NF_ARRAY_GENERIC: int = 938;
+pub const NF_IS_ERROR: int = 939;
 
 impl Vm {
     pub fn is_proxy(&self, o: int) -> bool {
@@ -53,6 +54,7 @@ impl Vm {
         self.method(g, "__asMethod", NF_AS_METHOD, 1);
         self.method(g, "__isConstructor", NF_IS_CTOR, 1);
         self.method(g, "__setArrayGeneric", NF_ARRAY_GENERIC, 1);
+        self.method(g, "__isError", NF_IS_ERROR, 1);
     }
 
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
@@ -146,7 +148,7 @@ impl Vm {
         }
         let k = self.key_val(atom);
         let ok = self.call_value(trap, Val::Obj(handler), vec![Val::Obj(target), k, v.clone(), r]);
-        if self.throwing || !truthy(&ok) {
+        if self.throwing || !self.truthy_v(&ok) {
             return false;
         }
         let slot = self.find(target, atom);
@@ -176,7 +178,7 @@ impl Vm {
 
     pub fn proxy_bool(&mut self, p: int, which: int, args: Vec<Val>) -> bool {
         let r = self.proxy_call(p, which, args);
-        !self.throwing && truthy(&r)
+        !self.throwing && self.truthy_v(&r)
     }
 
     /// The keys a proxy reports; `enumerable_only` keeps those whose
@@ -202,7 +204,7 @@ impl Vm {
                     continue;
                 }
                 let e = self.get(&d, A_ENUMERABLE);
-                if !truthy(&e) {
+                if !self.truthy_v(&e) {
                     continue;
                 }
             }
@@ -282,6 +284,10 @@ impl Vm {
         }
         if id == NF_IS_CTOR {
             return Val::Bool(self.is_constructor(&a0));
+        }
+        if id == NF_IS_ERROR {
+            let o = obj_of(&a0);
+            return Val::Bool(o >= 0 && self.objs[o as usize].class == C_ERROR);
         }
         if id == NF_ARRAY_GENERIC {
             // the prelude's generic Array.prototype methods, by native id
@@ -391,7 +397,7 @@ impl Vm {
                     return Some(Val::Bool(false));
                 }
                 let e = self.get(&d, A_ENUMERABLE);
-                return Some(Val::Bool(truthy(&e)));
+                return Some(Val::Bool(self.truthy_v(&e)));
             }
             return Some(Val::Bool(is_obj(&d)));
         }
