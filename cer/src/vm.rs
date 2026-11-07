@@ -5671,7 +5671,7 @@ impl Vm {
             OP_DECL_GLOBAL => {
                 let g = self.global;
                 if self.find(g, (op.a as int)) < 0 {
-                    self.add_own(g, (op.a as int), Val::Undef, P_FIXED);
+                    self.add_own(g, (op.a as int), Val::Undef, if op.b == 1 { 0 } else { P_FIXED });
                 }
             }
             OP_TYPEOF_GLOBAL => {
@@ -5746,6 +5746,43 @@ impl Vm {
                 self.priv_set(&v, op.a as int, op.b as int, op.c as int, val.clone());
                 if !self.throwing {
                     self.stack.push(val);
+                }
+            }
+            OP_CALL_EVAL => {
+                let argc = op.a as usize;
+                let fo = obj_of(&self.stack[self.stack.len() - argc - 2]);
+                let direct = fo >= 0 && self.objs[fo as usize].class == C_NATIVE && (self.objs[fo as usize].func as int) == crate::dynamic::NF_EVAL;
+                if !direct {
+                    // any other callee: as OP_CALL
+                    return self.call_op(argc as int);
+                }
+                let at = self.stack.len() - argc;
+                let mut args: Vec<Val> = Vec::new();
+                let mut ai = at;
+                while ai < self.stack.len() {
+                    args.push(self.stack[ai].clone());
+                    ai += 1;
+                }
+                self.stack.truncate(at);
+                self.pop();
+                self.pop();
+                let r = {
+                    if args.is_empty() {
+                        Val::Undef
+                    } else if let Val::Str(s) = &args[0] {
+                        let src = self.sget(s.clone()).as_ref().clone();
+                        let dv = self.protos[pi].consts[op.b as usize].clone();
+                        let desc = match &dv {
+                            Val::Str(d) => self.sget(d.clone()).as_ref().clone(),
+                            _ => String::new(),
+                        };
+                        self.direct_eval(src.as_str(), desc.as_str())
+                    } else {
+                        args[0].clone()
+                    }
+                };
+                if !self.throwing {
+                    self.stack.push(r);
                 }
             }
             OP_HAS_PRIVATE => {
