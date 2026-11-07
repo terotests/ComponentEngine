@@ -1038,7 +1038,7 @@ impl Vm {
                         let c = op_at(&proto_at(&self.protos, pi).code, pc as usize).c;
                         let slot = self.global_ic(g, (w3 as int), (c as int));
                         if slot >= 0 {
-                            let v = slot_of(self.ob(g), slot as usize);
+                            let v = slot_at(self.ob(g), slot as usize);
                             self.rset((bp + (w1 as int)) as usize, v);
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
@@ -2362,24 +2362,6 @@ pub fn int_at(v: &Vec<int>, i: usize) -> &int {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn int_at(v: &Vec<int>, i: usize) -> &int {
     &v[i]
-}
-
-/// Property slot `i` of `o` (JsObj::get_slot without the bounds check).
-#[ranger::target(rust)]
-#[inline(always)]
-pub fn slot_of(o: &JsObj, i: usize) -> Val {
-    if i == 0 {
-        o.inl0
-    } else if i == 1 {
-        o.inl1
-    } else {
-        *val_at(&o.vals, i - 2)
-    }
-}
-
-#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn slot_of(o: &JsObj, i: usize) -> Val {
-    o.get_slot(i)
 }
 
 /// `v[i]` of the objects.
