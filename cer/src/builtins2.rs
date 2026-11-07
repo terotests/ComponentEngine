@@ -1390,7 +1390,7 @@ impl Vm {
                         return Val::Undef;
                     }
                     let ao = obj_of(&adder);
-                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET as i32 || self.objs[ao as usize].func == NF_SETP_ADD as i32);
+                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET as i32 || self.objs[ao as usize].func == NF_SETP_ADD as i32 || self.objs[ao as usize].func == NF_WM_SET as i32 || self.objs[ao as usize].func == NF_WS_ADD as i32);
                     let plain = self.class_of(&a0) == C_ARRAY && obj_of(&self.get(&a0, A_ITERATOR)) == self.array_values_fn;
                     if !native_adder || !plain {
                         self.temp_roots.push(Val::Obj(m));
@@ -1415,13 +1415,13 @@ impl Vm {
                             }
                             let k = self.get_index(&it, 0);
                             let v = self.get_index(&it, 1);
-                            if id == NF_WEAKMAP && !is_obj(&k) {
+                            if id == NF_WEAKMAP && !self.held_weakly(&k) {
                                 self.throw_type("Invalid value used as weak map key");
                                 return Val::Undef;
                             }
                             self.map_set(m, k, v);
                         } else {
-                            if id == NF_WEAKSET && !is_obj(&it) {
+                            if id == NF_WEAKSET && !self.held_weakly(&it) {
                                 self.throw_type("Invalid value used in weak set");
                                 return Val::Undef;
                             }
@@ -1431,13 +1431,49 @@ impl Vm {
                 }
                 Val::Obj(m)
             }
-            NF_MP_GET | NF_MP_SET | NF_MP_HAS | NF_MP_DELETE | NF_MP_CLEAR | NF_MP_SIZE | NF_MP_FOREACH | NF_MP_KEYS | NF_MP_VALUES | NF_MP_ENTRIES | NF_SETP_ADD => {
+            NF_MP_GET | NF_MP_SET | NF_MP_HAS | NF_MP_DELETE | NF_MP_CLEAR | NF_MP_SIZE | NF_MP_FOREACH | NF_MP_KEYS | NF_MP_VALUES | NF_MP_ENTRIES | NF_SETP_ADD | NF_SP_HAS | NF_SP_DELETE | NF_SP_CLEAR | NF_SP_FOREACH | NF_SP_SIZE | NF_SP_KEYS | NF_SP_ENTRIES | NF_WM_GET | NF_WM_SET | NF_WM_HAS | NF_WM_DELETE | NF_WS_ADD | NF_WS_HAS | NF_WS_DELETE | NF_MP_GETORINSERT | NF_MP_GETORINSERTC | NF_WM_GETORINSERT | NF_WM_GETORINSERTC => {
                 let o = obj_of(&this);
-                if o < 0 || (self.objs[o as usize].class != C_MAP && self.objs[o as usize].class != C_SET) {
+                // brand check: a Map method takes only a Map, a WeakSet
+                // method only a WeakSet...
+                let want_set = id == NF_SETP_ADD || id == NF_WS_ADD || id == NF_WS_HAS || id == NF_WS_DELETE || (id >= NF_SP_HAS && id <= NF_SP_ENTRIES);
+                let want_weak = (id >= NF_WM_GET && id <= NF_WM_SET) || (id >= NF_WM_HAS && id <= NF_WS_DELETE) || id == NF_WM_GETORINSERT || id == NF_WM_GETORINSERTC;
+                if o < 0 || self.objs[o as usize].class != (if want_set { C_SET } else { C_MAP }) || (self.objs[o as usize].func == 1) != want_weak {
                     self.throw_type("Map/Set method called on incompatible receiver");
                     return Val::Undef;
                 }
+                let id = Vm::coll_base(id);
+                if want_weak && (id == NF_MP_SET || id == NF_SETP_ADD || id == NF_MP_GETORINSERT || id == NF_MP_GETORINSERTC) && !self.held_weakly(&a0) {
+                    self.throw_type("Invalid value used as weak collection key");
+                    return Val::Undef;
+                }
                 match id {
+                    NF_MP_GETORINSERT | NF_MP_GETORINSERTC => {
+                        if id == NF_MP_GETORINSERTC && !self.callback(&a1, "callbackfn") {
+                            return Val::Undef;
+                        }
+                        // canonical key: -0 is +0
+                        let mut k = a0.clone();
+                        if let Val::Num(n) = k {
+                            if n == 0.0 {
+                                k = Val::Num(0.0);
+                            }
+                        }
+                        let i = self.map_find(o, &k);
+                        if i >= 0 {
+                            return self.colds[self.objs[o as usize].cold as usize].elems2[i as usize].clone();
+                        }
+                        let v = if id == NF_MP_GETORINSERTC {
+                            let r = self.call_fixed(a1.clone(), Val::Undef, 1, k.clone(), Val::Undef, Val::Undef);
+                            if self.throwing {
+                                return Val::Undef;
+                            }
+                            r
+                        } else {
+                            a1.clone()
+                        };
+                        self.map_set(o, k, v.clone());
+                        v
+                    }
                     NF_MP_GET => {
                         let i = self.map_find(o, &a0);
                         if i < 0 {

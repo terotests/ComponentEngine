@@ -207,6 +207,26 @@ pub const NF_MP_KEYS: int = 337;
 pub const NF_MP_VALUES: int = 338;
 pub const NF_MP_ENTRIES: int = 339;
 pub const NF_SETP_ADD: int = 340;
+// Set / WeakMap / WeakSet methods: own ids so each checks its receiver's
+// brand, then runs as the NF_MP_* method it maps to (coll_base)
+pub const NF_SP_HAS: int = 341;
+pub const NF_SP_DELETE: int = 342;
+pub const NF_SP_CLEAR: int = 343;
+pub const NF_SP_FOREACH: int = 344;
+pub const NF_SP_SIZE: int = 345;
+pub const NF_SP_KEYS: int = 346;
+pub const NF_SP_ENTRIES: int = 347;
+pub const NF_WM_GET: int = 348;
+pub const NF_WM_SET: int = 349;
+pub const NF_WM_HAS: int = 359;
+pub const NF_WM_DELETE: int = 360;
+pub const NF_WS_ADD: int = 361;
+pub const NF_WS_HAS: int = 362;
+pub const NF_WS_DELETE: int = 363;
+pub const NF_MP_GETORINSERT: int = 364;
+pub const NF_MP_GETORINSERTC: int = 365;
+pub const NF_WM_GETORINSERT: int = 366;
+pub const NF_WM_GETORINSERTC: int = 367;
 // Promise
 pub const NF_PR_THEN: int = 350;
 pub const NF_PR_CATCH: int = 351;
@@ -317,7 +337,13 @@ impl Vm {
     }
 
     pub fn getter(&mut self, o: int, name: &str, id: int) {
-        let f = self.native_fn(name, id, 0);
+        // the function's own name is "get size", "get [Symbol.species]"
+        let fname = if name.starts_with("@@") {
+            format!("get [Symbol.{}]", String::from(&name[2..name.as_bytes().len()]))
+        } else {
+            format!("get {}", name)
+        };
+        let f = self.native_fn(fname.as_str(), id, 0);
         let a = self.intern(name);
         self.define_accessor(o, a, Val::Obj(f), 0, true);
     }
@@ -614,7 +640,7 @@ impl Vm {
         self.value_prop(symc, "toStringTag", Val::Obj(tag_sym));
         self.value_prop(symc, "species", Val::Obj(species_sym));
         self.value_prop(symc, "unscopables", Val::Obj(unscop_sym));
-        for (name, desc) in vec![("match", "Symbol.match"), ("matchAll", "Symbol.matchAll"), ("replace", "Symbol.replace"), ("search", "Symbol.search"), ("split", "Symbol.split"), ("isConcatSpreadable", "Symbol.isConcatSpreadable")] {
+        for (name, desc) in vec![("match", "Symbol.match"), ("matchAll", "Symbol.matchAll"), ("replace", "Symbol.replace"), ("search", "Symbol.search"), ("split", "Symbol.split"), ("isConcatSpreadable", "Symbol.isConcatSpreadable"), ("dispose", "Symbol.dispose"), ("asyncDispose", "Symbol.asyncDispose")] {
             let a = self.intern(format!("@@{}", name).as_str());
             let s = self.well_known_symbol(a, desc);
             self.value_prop(symc, name, Val::Obj(s));
@@ -623,12 +649,12 @@ impl Vm {
         self.getter(symp, "description", NF_SYMP_DESCRIPTION);
 
         // Errors
-        let err_names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError"];
+        let err_names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError", "SuppressedError"];
         let mut k: int = 0;
         let mut base_ctor: int = -1;
         for n in err_names {
             let proto = if k == 0 { ep } else { self.alloc(C_OBJECT, ep) };
-            let c = self.ctor(n, NF_ERROR + k, if n == "AggregateError" { 2 } else { 1 }, proto);
+            let c = self.ctor(n, NF_ERROR + k, if n == "AggregateError" { 2 } else if n == "SuppressedError" { 3 } else { 1 }, proto);
             if k == 0 {
                 base_ctor = c;
             } else {
@@ -752,34 +778,38 @@ impl Vm {
         let me = self.method(mp, "entries", NF_MP_ENTRIES, 0);
         self.add_own(mp, A_ITERATOR, Val::Obj(me), P_HIDDEN);
         self.getter(mp, "size", NF_MP_SIZE);
+        self.method(mp, "getOrInsert", NF_MP_GETORINSERT, 2);
+        self.method(mp, "getOrInsertComputed", NF_MP_GETORINSERTC, 2);
         self.ctor("Set", NF_SET, 0, setp);
         self.method(setp, "add", NF_SETP_ADD, 1);
-        self.method(setp, "has", NF_MP_HAS, 1);
-        self.method(setp, "delete", NF_MP_DELETE, 1);
-        self.method(setp, "clear", NF_MP_CLEAR, 0);
-        self.method(setp, "forEach", NF_MP_FOREACH, 1);
-        self.method(setp, "entries", NF_MP_ENTRIES, 0);
-        let sv = self.method(setp, "values", NF_MP_KEYS, 0);
+        self.method(setp, "has", NF_SP_HAS, 1);
+        self.method(setp, "delete", NF_SP_DELETE, 1);
+        self.method(setp, "clear", NF_SP_CLEAR, 0);
+        self.method(setp, "forEach", NF_SP_FOREACH, 1);
+        self.method(setp, "entries", NF_SP_ENTRIES, 0);
+        let sv = self.method(setp, "values", NF_SP_KEYS, 0);
         let a_keys = self.intern("keys");
         self.add_own(setp, a_keys, Val::Obj(sv), P_HIDDEN);
         self.add_own(setp, A_ITERATOR, Val::Obj(sv), P_HIDDEN);
-        self.getter(setp, "size", NF_MP_SIZE);
+        self.getter(setp, "size", NF_SP_SIZE);
         // WeakMap / WeakSet: a Map / Set underneath, with only the methods a
         // weak collection has (no size, no iteration)
         let op0 = self.object_proto;
         let wmp = self.alloc(C_OBJECT, op0);
         self.roots.push(wmp);
         self.ctor("WeakMap", NF_WEAKMAP, 0, wmp);
-        self.method(wmp, "get", NF_MP_GET, 1);
-        self.method(wmp, "set", NF_MP_SET, 2);
-        self.method(wmp, "has", NF_MP_HAS, 1);
-        self.method(wmp, "delete", NF_MP_DELETE, 1);
+        self.method(wmp, "get", NF_WM_GET, 1);
+        self.method(wmp, "set", NF_WM_SET, 2);
+        self.method(wmp, "has", NF_WM_HAS, 1);
+        self.method(wmp, "delete", NF_WM_DELETE, 1);
+        self.method(wmp, "getOrInsert", NF_WM_GETORINSERT, 2);
+        self.method(wmp, "getOrInsertComputed", NF_WM_GETORINSERTC, 2);
         let wsp = self.alloc(C_OBJECT, op0);
         self.roots.push(wsp);
         self.ctor("WeakSet", NF_WEAKSET, 0, wsp);
-        self.method(wsp, "add", NF_SETP_ADD, 1);
-        self.method(wsp, "has", NF_MP_HAS, 1);
-        self.method(wsp, "delete", NF_MP_DELETE, 1);
+        self.method(wsp, "add", NF_WS_ADD, 1);
+        self.method(wsp, "has", NF_WS_HAS, 1);
+        self.method(wsp, "delete", NF_WS_DELETE, 1);
         let a_tag2 = self.intern("@@toStringTag");
         let sv3 = self.str_val("WeakMap");
         self.add_prop(wmp, a_tag2, sv3, P_HIDDEN | P_READONLY);
@@ -871,7 +901,7 @@ impl Vm {
     }
 
     pub fn error_ctor_proto(&self, kind: int) -> int {
-        let names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError"];
+        let names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError", "SuppressedError"];
         let g = self.global;
         let a = self.atoms[names[kind as usize]];
         let slot = self.find(g, a);
@@ -1436,6 +1466,38 @@ impl Vm {
     /// odd), which no atom is; anything else is an interned tagged string.
     /// Formatting and interning every number cost more than the rest of
     /// `set` / `get` together, and kept every key ever used as an atom.
+    // CanBeHeldWeakly: an object, or a symbol not made by Symbol.for
+    pub fn held_weakly(&self, v: &Val) -> bool {
+        let o = obj_of(v);
+        if o < 0 {
+            return false;
+        }
+        if self.objs[o as usize].class != C_SYMBOL {
+            return true;
+        }
+        let a = self.objs[o as usize].pos as usize;
+        !self.atom_names[a].starts_with("@@for:")
+    }
+
+    // the Map / Set method a Set / WeakMap / WeakSet method id runs as
+    pub fn coll_base(id: int) -> int {
+        match id {
+            NF_SP_HAS | NF_WM_HAS | NF_WS_HAS => NF_MP_HAS,
+            NF_SP_DELETE | NF_WM_DELETE | NF_WS_DELETE => NF_MP_DELETE,
+            NF_SP_CLEAR => NF_MP_CLEAR,
+            NF_SP_FOREACH => NF_MP_FOREACH,
+            NF_SP_SIZE => NF_MP_SIZE,
+            NF_SP_KEYS => NF_MP_KEYS,
+            NF_SP_ENTRIES => NF_MP_ENTRIES,
+            NF_WM_GET => NF_MP_GET,
+            NF_WM_SET => NF_MP_SET,
+            NF_WS_ADD => NF_SETP_ADD,
+            NF_WM_GETORINSERT => NF_MP_GETORINSERT,
+            NF_WM_GETORINSERTC => NF_MP_GETORINSERTC,
+            _ => id,
+        }
+    }
+
     pub fn map_key(&mut self, k: &Val) -> int {
         match k {
             Val::Num(n) => {
@@ -3010,7 +3072,7 @@ impl Vm {
                 }
             }
         }
-        if id >= NF_ERROR && id < NF_ERROR + 8 {
+        if id >= NF_ERROR && id < NF_ERROR + 9 {
             let kind = id - NF_ERROR;
             let dflt = self.error_ctor_proto(kind);
             let proto = if construct { self.proto_from(&new_target, dflt) } else { dflt };
@@ -3023,13 +3085,26 @@ impl Vm {
                 self.add_own(e, A_ERRORS, Val::Obj(arr), P_HIDDEN);
                 mi = 1;
             }
+            if kind == 8 {
+                mi = 2;
+            }
             let m = arg(&args, mi);
             if !matches!(m, Val::Undef) {
                 let ms = self.to_str(&m);
+                if self.throwing {
+                    return Val::Undef;
+                }
                 let sv4 = self.rc_val(ms);
                 self.add_own(e, A_MESSAGE, sv4, P_HIDDEN);
             }
-            let opts = arg(&args, mi + 1);
+            if kind == 8 {
+                // SuppressedError(error, suppressed, message)
+                let a_err = self.intern("error");
+                let a_sup = self.intern("suppressed");
+                self.add_own(e, a_err, arg(&args, 0), P_HIDDEN);
+                self.add_own(e, a_sup, arg(&args, 1), P_HIDDEN);
+            }
+            let opts = if kind == 8 { Val::Undef } else { arg(&args, mi + 1) };
             if let Val::Obj(oo) = &opts {
                 if self.has_atom(*oo, A_CAUSE) {
                     let c = self.get(&opts, A_CAUSE);

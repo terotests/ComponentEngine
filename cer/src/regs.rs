@@ -693,7 +693,7 @@ impl Tr {
                 self.result(i, R_NOT, 0, 1, x, 0);
             } else if (c as int) == OP_TONUM || (c as int) == OP_NEG {
                 let x = self.opnd(d - 1);
-                self.result(i, R_TONUM, if (c as int) == OP_NEG { 1 } else { 0 }, 1, x, 0);
+                self.result(i, R_TONUM, if (c as int) == OP_NEG { 1 } else if op.a == 1 { 2 } else { 0 }, 1, x, 0);
             } else if (c as int) == OP_INC || (c as int) == OP_DEC {
                 let x = self.opnd(d - 1);
                 self.result(i, R_INC, if (c as int) == OP_INC { 0 } else { 1 }, 1, x, 0);

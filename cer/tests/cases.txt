@@ -597,3 +597,30 @@ for (var i = 0; i < 300; i++) {
 out.join('|') + '#' + log.length + '#' + log.slice(0, 8).join(',')
 ----
 10 20 no:m1 true o30 o5 3 3 Gz Gw0 trap boom E:TypeError|10 10 no:m2 true o30 o5 3 3 Gz Gw1 trap boom E:TypeError#2400#a,b,m0,self,a,b,boom,fixed
+
+==== js test262 round 11: DisposableStack, getOrInsert, collection brands, Set methods, iterator chunks / zip, Promise.allKeyed, unary plus on BigInt
+var log = [];
+function res(n) { return { [Symbol.dispose]() { log.push('d' + n); } }; }
+var st = new DisposableStack();
+st.defer(function () { log.push('defer'); });
+st.use(res(4));
+st.dispose();
+log.push(st.disposed);
+var m = new Map();
+var r1 = m.getOrInsert('k', 1), r2 = m.getOrInsert('k', 2), r3 = m.getOrInsertComputed('j', function (k) { return k + '!'; });
+var brand = [];
+try { Map.prototype.get.call(new Set(), 1); } catch (e) { brand.push(e.constructor.name); }
+try { Set.prototype.has.call(new WeakSet(), 1); } catch (e) { brand.push(e.constructor.name); }
+try { new WeakMap().set(Symbol.for('r'), 1); } catch (e) { brand.push(e.constructor.name); }
+var wm = new WeakMap(); var sym = Symbol('s'); wm.set(sym, 5);
+var sets = [new Set([1, 2, 3]).union(new Set([3, 4])), new Set([1, 2, 3]).intersection(new Set([2, 3, 9])), new Set([1, 2, 3]).difference(new Set([2])), new Set([1, 2]).symmetricDifference(new Set([2, 5]))].map(function (s) { return Array.from(s).join(','); });
+var ch = Array.from([1, 2, 3, 4, 5].values().chunks(2)).map(function (a) { return a.join(''); }).join(' ');
+var win = Array.from([1, 2, 3, 4].values().windows(3)).map(function (a) { return a.join(''); }).join(' ');
+var zp = Array.from(Iterator.zip([[1, 2], ['a', 'b']])).map(function (a) { return a.join(''); }).join(' ');
+var bi;
+try { bi = +1n; } catch (e) { bi = e.constructor.name; }
+var keyed;
+Promise.allKeyed({ a: Promise.resolve(1), b: 2 }).then(function (o) { keyed = o.a + o.b; });
+[log.join(','), r1, r2, r3, brand.join(','), wm.get(sym), sets.join('|'), ch, win, zp, bi, [1, 2, 3].values().includes(2), [1, 2].values().join('-')].join(' / ')
+----
+d4,defer,true / 1 / 1 / j! / TypeError,TypeError,TypeError / 5 / 1,2,3,4|2,3|1,3|1,5 / 12 34 5 / 123 234 / 1a 2b / TypeError / true / 1-2
