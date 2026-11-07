@@ -4074,6 +4074,45 @@ impl Vm {
         it
     }
 
+    /// An array iterator's step over an object not an array: its length
+    /// read again (a typed array out of bounds throws), then element i.
+    fn array_like_next(&mut self, o: int, src: int, i: int, kind: int) -> Option<Val> {
+        let len = if self.objs[src as usize].class == C_TYPED {
+            if self.ta_out_of_bounds(src) {
+                self.throw_type("Cannot iterate a typed array out of bounds");
+                return None;
+            }
+            self.ta_length(src)
+        } else {
+            let l = self.get(&Val::Obj(src), A_LENGTH);
+            if self.throwing {
+                return None;
+            }
+            let n = to_integer(self.to_number(&l));
+            if n > 0.0 { n as int } else { 0 }
+        };
+        if self.throwing {
+            return None;
+        }
+        if i >= len {
+            self.put_env(o, -1);
+            return None;
+        }
+        self.objs[o as usize].func = (i + 1) as i32;
+        if kind == 1 {
+            return Some(Val::Num(i as double));
+        }
+        let v = self.get_index(&Val::Obj(src), i);
+        if self.throwing {
+            return None;
+        }
+        if kind == 2 {
+            let pair = self.new_array(vec![Val::Num(i as double), v]);
+            return Some(Val::Obj(pair));
+        }
+        Some(v)
+    }
+
     /// The next value of an iterator made by `iter_values` / ITER_KEYS;
     /// None when done.
     pub fn iter_next(&mut self, it: &Val) -> Option<Val> {
@@ -4087,6 +4126,9 @@ impl Vm {
             }
             if (kind & 3) == 3 {
                 return self.for_in_next(o, src, i, kind >> 2);
+            }
+            if (kind & 8) != 0 {
+                return self.array_like_next(o, src, i, kind & 3);
             }
             let len = self.evecs[self.objs[src as usize].elems as usize].v.len() as int;
             if i >= len {

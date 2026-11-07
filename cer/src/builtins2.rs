@@ -659,15 +659,12 @@ impl Vm {
                 let ip = self.iter_proto;
                 let it = self.alloc(C_ITER, ip);
                 let class = self.objs[o as usize].class;
-                if class == C_ARRAY || class == C_ARGUMENTS {
-                    self.put_env(it, o);
-                } else {
-                    let items = self.array_like_to_vec(&Val::Obj(o));
-                    let a = self.new_array(items);
-                    self.put_env(it, a);
-                }
+                self.put_env(it, o);
                 self.objs[it as usize].func = 0;
-                self.objs[it as usize].pos = if id == NF_AP_KEYS {
+                // another object than an array is read as the iterator
+                // goes (its length and elements each step): + 8
+                let generic = if class == C_ARRAY || class == C_ARGUMENTS { 0 } else { 8 };
+                self.objs[it as usize].pos = generic + if id == NF_AP_KEYS {
                     1
                 } else if id == NF_AP_ENTRIES {
                     2
