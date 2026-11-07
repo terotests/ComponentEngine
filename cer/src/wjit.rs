@@ -74,6 +74,8 @@ pub struct Layout {
     pub vm_frames_len: u32,
     pub vm_handlers_len: u32,
     pub vm_gc_flag: u32,
+    /// Vm.big_zero (0n, the one falsy object), from the Vm's address
+    pub vm_big_zero: u32,
     pub frame_size: u32,
     pub frame_this: u32,
     /// a Frame's env (low word), a JsObj's elems, Vm.evecs' buffer word
@@ -206,6 +208,7 @@ pub fn probe() -> Layout {
         vm_frames_len: 0,
         vm_handlers_len: 0,
         vm_gc_flag: 0,
+        vm_big_zero: 0,
         frame_size: 0,
         frame_this: 0,
         frame_env: 0,
@@ -381,6 +384,7 @@ pub fn probe() -> Layout {
         l.vm_frames_len = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vl;
         l.vm_handlers_len = std::mem::offset_of!(crate::vm::Vm, handlers) as u32 + vl;
         l.vm_gc_flag = std::mem::offset_of!(crate::vm::Vm, gc_flag) as u32;
+        l.vm_big_zero = std::mem::offset_of!(crate::vm::Vm, big_zero) as u32;
         l.frame_size = std::mem::size_of::<Frame>() as u32;
         l.frame_this = std::mem::offset_of!(Frame, this_val) as u32;
         l.frame_env = std::mem::offset_of!(Frame, env) as u32;
@@ -975,14 +979,18 @@ impl<'a> Cg<'a> {
     fn truthy(&mut self, x: i32, pc: i64) {
         if x < 0 {
             let k = (-1 - x) as usize;
-            let t = match self.kvals.get(k) {
-                Some(v) => crate::vm::truthy(v),
-                None => false,
-            };
-            self.i32c(if t { 1 } else { 0 });
-            return;
+            // an object constant may be 0n: tested at run time
+            let obj = matches!(self.kvals.get(k), Some(Val::Obj(_)));
+            if !obj {
+                let t = match self.kvals.get(k) {
+                    Some(v) => crate::vm::truthy(v),
+                    None => false,
+                };
+                self.i32c(if t { 1 } else { 0 });
+                return;
+            }
         }
-        let o = Opnd::Reg(x as u32);
+        let o = self.raw(x);
         let (b, off) = self.place(o);
         self.tag(o);
         self.set(L_TAG);
@@ -1010,6 +1018,13 @@ impl<'a> Cg<'a> {
         self.get(L_TAG);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
+        // an object other than 0n
+        self.get(b);
+        self.mem(I32_LOAD, 2, off + l.off_int);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_big_zero);
+        self.op(I32_NE);
+        self.op(I32_AND);
         self.get(L_TAG);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);

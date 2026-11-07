@@ -4890,7 +4890,7 @@ impl PComp {
             let mut flags = 0;
             let mut fflags = 0;
             let ms = self.pos;
-            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") {
+            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") && !self.tok_nl(self.pos + 1) {
                 self.next();
                 fflags |= F_ASYNC;
             }
@@ -4904,6 +4904,10 @@ impl PComp {
                     flags |= F_SETTER;
                 }
                 self.next();
+            }
+            if self.text().starts_with("#") {
+                self.fail("private names are not allowed in object literals");
+                return;
             }
             let key_ident = self.kind() == T_IDENT;
             let key_text = self.text();
@@ -4953,7 +4957,7 @@ impl PComp {
                     self.fail("Invalid shorthand property initializer");
                     return;
                 }
-                if is_reserved(key_text.as_str()) {
+                if is_reserved(key_text.as_str()) || self.bad_ident(key_text.as_str()) {
                     self.fail("unexpected reserved word");
                     return;
                 }

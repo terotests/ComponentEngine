@@ -1085,12 +1085,9 @@ impl Vm {
             self.add_own(arr, A_GROUPS, Val::Undef, 0);
         } else {
             let go = self.alloc(C_OBJECT, -1);
-            let mut i: usize = 0;
-            while i < names.len() {
-                let a = self.intern(names[i].as_str());
-                let v = items[nidx[i] as usize].clone();
-                self.add_own(go, a, v, 0);
-                i += 1;
+            for g in group_pairs(&names, &nidx, &items).iter() {
+                let a = self.intern(g.0.as_str());
+                self.add_own(go, a, g.1, 0);
             }
             self.add_own(arr, A_GROUPS, Val::Obj(go), 0);
         }
@@ -1114,12 +1111,9 @@ impl Vm {
                 self.add_own(ind, A_GROUPS, Val::Undef, 0);
             } else {
                 let gi = self.alloc(C_OBJECT, -1);
-                let mut i: usize = 0;
-                while i < names.len() {
-                    let a = self.intern(names[i].as_str());
-                    let v = pairs[nidx[i] as usize].clone();
-                    self.add_own(gi, a, v, 0);
-                    i += 1;
+                for g in group_pairs(&names, &nidx, &pairs).iter() {
+                    let a = self.intern(g.0.as_str());
+                    self.add_own(gi, a, g.1, 0);
                 }
                 self.add_own(ind, A_GROUPS, Val::Obj(gi), 0);
             }
@@ -1246,12 +1240,7 @@ impl Vm {
                     capv.push(if a < 0 || b < 0 { Val::Undef } else { self.string_val(jsstr::sub_units(s.as_str(), &units, a, b)) });
                     g += 1;
                 }
-                let mut groups: Vec<(String, Val)> = Vec::new();
-                let mut i: usize = 0;
-                while i < names.len() {
-                    groups.push((names[i].clone(), capv[nidx[i] as usize].clone()));
-                    i += 1;
-                }
+                let groups: Vec<(String, Val)> = group_pairs(&names, &nidx, &capv);
                 if fn_repl {
                     let mut args: Vec<Val> = capv.clone();
                     args.push(Val::Num(ms as double));
@@ -4249,4 +4238,34 @@ fn date_digits(cs: &Vec<char>, i: usize, count: usize) -> int {
         k += 1;
     }
     v
+}
+
+/// A match's named groups in order, each name once: a duplicate name
+/// (in another alternative) takes the value of the group that matched.
+fn group_pairs(names: &Vec<String>, nidx: &Vec<int>, vals: &Vec<Val>) -> Vec<(String, Val)> {
+    let mut out: Vec<(String, Val)> = Vec::new();
+    let mut i: usize = 0;
+    while i < names.len() {
+        let mut seen = false;
+        let mut j: usize = 0;
+        while j < i {
+            if names[j].as_str() == names[i].as_str() {
+                seen = true;
+            }
+            j += 1;
+        }
+        if !seen {
+            let mut v = vals[nidx[i] as usize].clone();
+            let mut k: usize = i + 1;
+            while k < names.len() {
+                if names[k].as_str() == names[i].as_str() && matches!(v, Val::Undef) {
+                    v = vals[nidx[k] as usize].clone();
+                }
+                k += 1;
+            }
+            out.push((names[i].clone(), v));
+        }
+        i += 1;
+    }
+    out
 }

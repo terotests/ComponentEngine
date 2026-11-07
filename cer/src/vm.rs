@@ -1920,6 +1920,10 @@ impl Vm {
             }
             return r;
         }
+        if !matches!(tp, Val::Undef | Val::Null) {
+            self.throw_type("Symbol.toPrimitive is not a function");
+            return Val::Undef;
+        }
         let order = if hint == "string" { vec![A_TOSTRING, A_VALUEOF] } else { vec![A_VALUEOF, A_TOSTRING] };
         for a in order {
             let f = self.get_obj(o, a, v);

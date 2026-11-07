@@ -44,6 +44,8 @@ const I_MATCH: int = 13;
 const I_SETPOS: int = 14;
 const I_CHKPOS: int = 15;
 const I_ANYNL: int = 16;
+/// caps[a..=b] = -1 (a repetition's groups, at each iteration)
+const I_CLEAR: int = 17;
 
 struct RNode {
     kind: int,
@@ -101,6 +103,15 @@ struct RParser {
     ngroups: int,
     names: Vec<String>,
     name_index: Vec<int>,
+    /// each named group's alternatives: [disjunction, alternative, …]
+    name_paths: Vec<Vec<int>>,
+    /// the open disjunctions, as pairs like name_paths
+    alt_path: Vec<int>,
+    ndisj: int,
+    /// the pattern has a named group: \k is then a reference
+    has_names: bool,
+    /// the \k<name> references, checked at the end
+    refs: Vec<String>,
     error: String,
     unicode: bool,
     /// the capturing groups in the whole pattern
@@ -246,19 +257,166 @@ impl RParser {
     }
 
     fn disjunction(&mut self) -> int {
+        let id = self.ndisj;
+        self.ndisj += 1;
+        self.alt_path.push(id);
+        self.alt_path.push(0);
         let first = self.alternative();
         if self.cur() != 124 {
+            self.alt_path.pop();
+            self.alt_path.pop();
             return first;
         }
         let n = self.node(R_ALT);
         let mut alts: Vec<int> = vec![first];
+        let mut k: int = 0;
         while self.cur() == 124 {
             self.pos += 1;
+            k += 1;
+            let last = self.alt_path.len() - 1;
+            self.alt_path[last] = k;
             let a = self.alternative();
             alts.push(a);
         }
+        self.alt_path.pop();
+        self.alt_path.pop();
         self.nodes[n as usize].list = alts;
         n
+    }
+
+    /// A group name after `<` up to `>` (RegExpIdentifierName), or fails.
+    fn group_name(&mut self) -> String {
+        let mut name = String::new();
+        let mut first = true;
+        loop {
+            let mut c = self.cur();
+            if c == 62 && !first {
+                self.pos += 1;
+                return name;
+            }
+            if c < 0 {
+                self.fail("Invalid capture group name");
+                return name;
+            }
+            self.pos += 1;
+            if c == 92 {
+                if self.cur() != 117 {
+                    self.fail("Invalid capture group name");
+                    return name;
+                }
+                self.pos += 1;
+                c = self.name_u_escape();
+                if c < 0 {
+                    self.fail("Invalid capture group name");
+                    return name;
+                }
+            } else if c >= 0xD800 && c <= 0xDBFF && self.cur() >= 0xDC00 && self.cur() <= 0xDFFF {
+                c = 0x10000 + ((c - 0xD800) << 10) + (self.cur() - 0xDC00);
+                self.pos += 1;
+            }
+            let ok = if c == 36 || c == 95 {
+                true
+            } else if c < 128 {
+                (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (!first && c >= 48 && c <= 57)
+            } else if c >= 0xD800 && c <= 0xDFFF {
+                false
+            } else if !first && (c == 0x200C || c == 0x200D) {
+                true
+            } else {
+                match char::from_u32(c as u32) {
+                    Some(ch) => id_wide(ch, first),
+                    None => false,
+                }
+            };
+            if !ok {
+                self.fail("Invalid capture group name");
+                return name;
+            }
+            crate::jsstr::push_cp(&mut name, c);
+            first = false;
+        }
+    }
+
+    /// After `\u` in a group name: XXXX (a surrogate pair of two such
+    /// escapes joins) or {X…}; -1 when malformed
+    fn name_u_escape(&mut self) -> int {
+        if self.cur() == 123 {
+            self.pos += 1;
+            let mut v: int = 0;
+            let mut n = 0;
+            while hexv(self.cur()) >= 0 {
+                v = v * 16 + hexv(self.cur());
+                if v > 0x10FFFF {
+                    return -1;
+                }
+                self.pos += 1;
+                n += 1;
+            }
+            if n == 0 || self.cur() != 125 {
+                return -1;
+            }
+            self.pos += 1;
+            return v;
+        }
+        let v = self.hex4();
+        if v < 0 {
+            return -1;
+        }
+        if v >= 0xD800 && v <= 0xDBFF && self.cur() == 92 && self.peek(1) == 117 {
+            let save = self.pos;
+            self.pos += 2;
+            let t = self.hex4();
+            if t >= 0xDC00 && t <= 0xDFFF {
+                return 0x10000 + ((v - 0xD800) << 10) + (t - 0xDC00);
+            }
+            self.pos = save;
+        }
+        v
+    }
+
+    fn hex4(&mut self) -> int {
+        let mut v: int = 0;
+        let mut i = 0;
+        while i < 4 {
+            let h = hexv(self.cur());
+            if h < 0 {
+                return -1;
+            }
+            v = v * 16 + h;
+            self.pos += 1;
+            i += 1;
+        }
+        v
+    }
+
+    /// A named group: a SyntaxError for a name already used where both
+    /// groups could match (not in different alternatives)
+    fn add_name(&mut self, name: String, cap: int) {
+        let mut i: usize = 0;
+        while i < self.names.len() {
+            if self.names[i].as_str() == name.as_str() {
+                let other = self.name_paths[i].clone();
+                let mut apart = false;
+                let mut k: usize = 0;
+                while k + 1 < other.len() && k + 1 < self.alt_path.len() {
+                    if other[k] != self.alt_path[k] {
+                        break;
+                    }
+                    if other[k + 1] != self.alt_path[k + 1] {
+                        apart = true;
+                        break;
+                    }
+                    k += 2;
+                }
+                if !apart {
+                    self.fail("Invalid regular expression: duplicate capture group name");
+                }
+            }
+            i += 1;
+        }
+        self.names.push(name);
+        self.name_index.push(cap);
+        self.name_paths.push(self.alt_path.clone());
     }
 
     fn alternative(&mut self) -> int {
@@ -321,15 +479,10 @@ impl RParser {
                 self.pos += 2;
             } else if self.cur() == 63 && self.peek(1) == 60 {
                 self.pos += 2;
-                while self.cur() >= 0 && self.cur() != 62 {
-                    crate::jsstr::push_cp(&mut name, self.cur());
-                    self.pos += 1;
-                }
-                self.pos += 1;
+                name = self.group_name();
                 self.ngroups += 1;
                 cap = self.ngroups;
-                self.names.push(name.clone());
-                self.name_index.push(cap);
+                self.add_name(name.clone(), cap);
             } else if self.cur() == 63 && (self.peek(1) == 105 || self.peek(1) == 109 || self.peek(1) == 115 || self.peek(1) == 45) {
                 // (?ims-ims: …) pattern modifiers
                 self.pos += 1;
@@ -950,14 +1103,14 @@ impl RParser {
             self.nodes[n as usize].c = v;
             return n;
         }
-        if c == 107 && self.peek(1) == 60 {
-            self.pos += 2;
-            let mut name = String::new();
-            while self.cur() >= 0 && self.cur() != 62 {
-                crate::jsstr::push_cp(&mut name, self.cur());
-                self.pos += 1;
+        if c == 107 && (self.unicode || self.has_names) {
+            if self.peek(1) != 60 {
+                self.fail("Invalid named reference");
+                return -1;
             }
-            self.pos += 1;
+            self.pos += 2;
+            let name = self.group_name();
+            self.refs.push(name.clone());
             let n = self.node(R_NAMEDREF);
             self.nodes[n as usize].name = name;
             return n;
@@ -1061,8 +1214,15 @@ impl Gen {
         if k == R_REPEAT {
             let inner = nd.list[0];
             let (min, max, greedy) = (nd.min, nd.max, nd.greedy);
+            // each iteration starts with its groups unset (RepeatMatcher)
+            let mut lo: int = -1;
+            let mut hi: int = -1;
+            cap_range(p, inner, &mut lo, &mut hi);
             let mut i = 0;
             while i < min {
+                if lo >= 0 {
+                    self.emit(I_CLEAR, lo * 2, hi * 2 + 1);
+                }
                 self.gen(p, inner, flags, backward);
                 i += 1;
             }
@@ -1072,6 +1232,9 @@ impl Gen {
                 let top = self.emit(I_SPLIT, 0, 0);
                 let body = self.code.len() as int;
                 self.emit(I_SETPOS, reg, 0);
+                if lo >= 0 {
+                    self.emit(I_CLEAR, lo * 2, hi * 2 + 1);
+                }
                 self.gen(p, inner, flags, backward);
                 self.emit(I_CHKPOS, reg, 0);
                 self.emit(I_JMP, top, 0);
@@ -1091,6 +1254,9 @@ impl Gen {
                 let s = self.emit(I_SPLIT, 0, 0);
                 splits.push(s);
                 let body = self.code.len() as int;
+                if lo >= 0 {
+                    self.emit(I_CLEAR, lo * 2, hi * 2 + 1);
+                }
                 self.gen(p, inner, flags, backward);
                 if greedy {
                     self.code[s as usize].a = body;
@@ -1130,15 +1296,15 @@ impl Gen {
             return;
         }
         if k == R_NAMEDREF {
-            let mut idx: int = 0;
+            // a duplicate name: one reference each; the groups that did
+            // not match match the empty string
             let mut i: usize = 0;
             while i < p.names.len() {
                 if p.names[i].as_str() == nd.name.as_str() {
-                    idx = p.name_index[i];
+                    self.emit(I_BACKREF, p.name_index[i], (if backward { 1 } else { 0 }) + 2 * ic);
                 }
                 i += 1;
             }
-            self.emit(I_BACKREF, idx, (if backward { 1 } else { 0 }) + 2 * ic);
             return;
         }
         if k == R_LOOK {
@@ -1184,6 +1350,50 @@ fn count_groups(src: &Vec<int>) -> int {
         i += 1;
     }
     n
+}
+
+/// The lowest and highest capturing group under node n (-1: none).
+fn cap_range(p: &RParser, n: int, lo: &mut int, hi: &mut int) {
+    let nd = &p.nodes[n as usize];
+    if nd.kind == R_GROUP && nd.c >= 0 {
+        if *lo < 0 || nd.c < *lo {
+            *lo = nd.c;
+        }
+        if nd.c > *hi {
+            *hi = nd.c;
+        }
+    }
+    if nd.kind == R_GROUP || nd.kind == R_SEQ || nd.kind == R_ALT || nd.kind == R_REPEAT || nd.kind == R_LOOK || nd.kind == R_MODS {
+        let mut i: usize = 0;
+        while i < nd.list.len() {
+            cap_range(p, nd.list[i], lo, hi);
+            i += 1;
+        }
+    }
+}
+
+/// The pattern has a named group `(?<name>` (not a lookbehind).
+fn has_group_names(src: &Vec<int>) -> bool {
+    let mut i: usize = 0;
+    let mut in_class = false;
+    while i < src.len() {
+        let c = src[i];
+        if c == 92 {
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if c == 93 {
+                in_class = false;
+            }
+        } else if c == 91 {
+            in_class = true;
+        } else if c == 40 && i + 3 < src.len() && src[i + 1] == 63 && src[i + 2] == 60 && src[i + 3] != 61 && src[i + 3] != 33 {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// The flags and the pattern read (no code yet): `re` keeps the flags and
@@ -1254,9 +1464,19 @@ fn parse_pattern(re: &mut Regex, p: &mut RParser, pattern: &str, flags: &str, ch
     p.vmode = crate::jsstr::index_of(flags, "v", 0) >= 0;
     p.check_only = check_only;
     p.total_groups = count_groups(&p.src);
+    p.has_names = has_group_names(&p.src);
     let root = p.disjunction();
     if p.error.is_empty() && p.cur() >= 0 {
         p.error = String::from("Invalid regular expression: unmatched )");
+    }
+    if p.error.is_empty() {
+        let mut i: usize = 0;
+        while i < p.refs.len() {
+            if !p.names.contains(&p.refs[i]) {
+                p.error = String::from("Invalid named capture referenced");
+            }
+            i += 1;
+        }
     }
     if !p.error.is_empty() {
         re.error = p.error.clone();
@@ -1290,6 +1510,11 @@ fn empty_parser() -> RParser {
         ngroups: 0,
         names: Vec::new(),
         name_index: Vec::new(),
+        name_paths: Vec::new(),
+        alt_path: Vec::new(),
+        ndisj: 0,
+        has_names: false,
+        refs: Vec::new(),
         error: String::new(),
         unicode: false,
         total_groups: 0,
@@ -1594,7 +1819,7 @@ impl Regex {
                 work.push(ins.b);
             } else if ins.op == I_JMP {
                 work.push(ins.a);
-            } else if ins.op == I_SAVE || ins.op == I_SETPOS || ins.op == I_CHKPOS || ins.op == I_BOL || ins.op == I_EOL || ins.op == I_WORDB || ins.op == I_NWORDB {
+            } else if ins.op == I_SAVE || ins.op == I_CLEAR || ins.op == I_SETPOS || ins.op == I_CHKPOS || ins.op == I_BOL || ins.op == I_EOL || ins.op == I_WORDB || ins.op == I_NWORDB {
                 // nothing consumed: what follows starts the match
                 work.push(pc + 1);
             } else {
@@ -1746,6 +1971,17 @@ impl Regex {
                 I_SAVE => {
                     stack.push((1, ins.a, caps[ins.a as usize]));
                     caps[ins.a as usize] = pos;
+                    pc += 1;
+                }
+                I_CLEAR => {
+                    let mut k = ins.a;
+                    while k <= ins.b {
+                        if caps[k as usize] >= 0 {
+                            stack.push((1, k, caps[k as usize]));
+                            caps[k as usize] = -1;
+                        }
+                        k += 1;
+                    }
                     pc += 1;
                 }
                 I_SETPOS => {
