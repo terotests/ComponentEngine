@@ -198,6 +198,42 @@ impl Vm {
         (entry, String::new())
     }
 
+    /// A direct eval of `src` from the running frame: its code sees the
+    /// caller's bindings (`desc`, pcomp `x_eval_desc`), `this`, and
+    /// strictness.
+    pub fn direct_eval(&mut self, src: &str, desc: &str) -> Val {
+        let strict = self.caller_strict();
+        if !self.pcomp || src.starts_with("/*@cerxesModule ") {
+            return self.eval_source(src, strict, true);
+        }
+        let atoms = self.atoms.clone();
+        let names = self.atom_names.clone();
+        let base = self.protos.len() as int;
+        let mut c = crate::pcomp::PComp::new(src, atoms, names, base);
+        c.force_strict = strict;
+        c.local_if_strict = true;
+        c.outer_desc = String::from(desc);
+        let entry = c.compile_program();
+        if !c.error.is_empty() || entry < 0 {
+            let e = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
+            self.throw_syntax(e.as_str());
+            return Val::Undef;
+        }
+        self.atoms = c.atoms;
+        self.atom_names = c.atom_names;
+        for pr in c.protos {
+            let mut p2 = pr;
+            self.link_strs(&mut p2);
+            pack_code(&mut p2);
+            self.protos.push(p2);
+        }
+        // an arrow over the caller's environment: its `this` and new.target
+        self.protos[entry as usize].arrow = true;
+        self.protos[entry as usize].lexical_ctor = true;
+        let f = self.closure(entry);
+        self.call_value(Val::Obj(f), Val::Undef, Vec::new())
+    }
+
     /// A module's function (`parser::module_source`) compiled with pcomp
     /// and linked: its proto, or -1 (nothing changed).
     fn pcomp_module(&mut self, ms: &parser::ModuleSource) -> int {
@@ -356,9 +392,10 @@ impl Vm {
             if let Val::Str(s) = &args[0] {
                 let s = self.sget(s.clone());
                 let src = s.as_ref().clone();
-                // the caller's strictness (a direct eval's; an indirect one
-                // from strict code is taken as direct)
-                let strict = self.caller_strict();
+                // an indirect eval is sloppy global code (pcomp calls a
+                // direct one with OP_CALL_EVAL); the AST compiler's are
+                // taken as direct
+                let strict = if self.pcomp { false } else { self.caller_strict() };
                 return self.eval_source(src.as_str(), strict, true);
             }
             return args[0].clone();

@@ -624,3 +624,17 @@ const c = new C();
 [c.run(c), c.inc(), c.has(c), c.has({}), c.has(Object.create(C.prototype)), c.bad(c), c.inner()].join()
 ----
 11105,7,true,false,false,TypeError,i,TypeError
+
+==== js direct eval sees the caller's bindings, adds sloppy vars to the function, indirect eval is global
+var gg = 10;
+function f(a) { var b = 2; let c = 3; { let d = 4; return eval("a + b + c + d"); } }
+function g() { var x = 1; eval("var x = 5; var y = 7"); return x + typeof y + y; }
+function h() { let q = 1; eval("q = 9"); return eval("(function () { return q * 2 })()"); }
+function k() { var e = eval; var gg = 20; return [e("gg"), eval("gg")].join('/'); }
+function m() { try { eval("z; let z = 1"); } catch (err) { return err.name; } }
+function n() { eval("function ff() { return 42 }"); return ff(); }
+function p() { "use strict"; eval("var s = 1"); return typeof s; }
+function r() { return eval("arguments.length"); }
+[f(1), g(), h(), k(), m(), n(), p(), r(1, 2, 3), eval("{}")].join()
+----
+10,5number7,18,10/20,ReferenceError,42,undefined,3,

@@ -294,3 +294,7 @@ pub const OP_TO_KEY: int = 154;
 pub const OP_SET_PRIVATE: int = 155;
 /// `#x in obj`: [_, obj] → [bool]; a the key, b the brand (-1: none)
 pub const OP_HAS_PRIVATE: int = 156;
+/// `eval(…)` called by name: as OP_CALL; when the callee is the global
+/// eval, a direct eval that sees the caller's scope. b: the constant
+/// describing the scopes' environments (pcomp `x_eval_desc`)
+pub const OP_CALL_EVAL: int = 157;

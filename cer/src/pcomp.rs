@@ -65,6 +65,8 @@ const PH_BODY_VARS: int = 1007;
 const PH_ANNEX: int = 1008;
 /// nothing
 const PH_NOP: int = 1009;
+/// a direct eval's call: `a` its scope, `b` the argument count
+const PH_EVAL: int = 1010;
 
 const M_LOAD: int = 0;
 const M_STORE: int = 1;
@@ -138,6 +140,40 @@ fn ex(k: int) -> Ex {
     Ex { k: k, a: -1, b: -1, c: -1 }
 }
 
+/// `s`'s parts between the bytes `sep` (none for an empty `s`).
+fn split_on(s: &str, sep: int) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let n = s.as_bytes().len();
+    if n == 0 {
+        return out;
+    }
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i <= n {
+        if i == n || (s.as_bytes()[i] as int) == sep {
+            out.push(String::from(&s[start..i]));
+            start = i + 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The decimal digits of `s` as a number.
+fn digits_int(s: &str) -> int {
+    let mut v: int = 0;
+    let n = s.as_bytes().len();
+    let mut i: usize = 0;
+    while i < n {
+        let c = s.as_bytes()[i] as int;
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+        }
+        i += 1;
+    }
+    v
+}
+
 pub struct PBind {
     pub name: String,
     pub kind: int,
@@ -180,6 +216,8 @@ pub struct PScope {
     /// the async functions and generators declared in it (a block's plain
     /// functions alone may share a name, in sloppy code)
     pub odd_fns: HashMap<String, bool>,
+    /// a direct eval inside may name its bindings: all go in its object
+    pub has_eval: bool,
 }
 
 pub struct PRef {
@@ -440,6 +478,25 @@ pub struct PComp {
     /// a host's script (CErXes `Engine::compile`) may `import` the host's
     /// modules and keep its `export`ed declarations, as the parser reads it
     pub script_imports: bool,
+    /// direct eval code: the caller's environments (`x_eval_desc`)
+    pub outer_desc: String,
+    /// the scopes of direct eval calls
+    eval_sites: Vec<int>,
+    /// sloppy direct eval code in a function: the caller's environments
+    /// from the innermost to the function's, where its vars may already be
+    eval_var_scopes: Vec<int>,
+    /// sloppy direct eval code in a function: the binding of the object
+    /// that keeps the vars it adds (the function's `%ev`), -1 for none
+    eval_ev: int,
+    /// direct eval code in a function's parameters / where new.target is
+    /// allowed
+    eval_in_params: bool,
+    eval_new_target: bool,
+    /// direct eval code: the caller's CX_* bits; its program scope
+    eval_ctx: int,
+    eval_prog: int,
+    /// strict code (a strict caller's direct eval)
+    pub force_strict: bool,
     mex_names: Vec<String>,
     mex_values: Vec<String>,
     mex_stars: Vec<String>,
@@ -482,6 +539,9 @@ pub struct PComp {
     priv_nm: Vec<Vec<String>>,
     priv_kd: Vec<Vec<int>>,
     priv_next: int,
+    /// catch scopes whose parameter is a pattern (Annex B: a block
+    /// function of a name it binds is not copied to the var)
+    catch_patterns: Vec<int>,
     /// reading a (non-arrow) function's parameters
     in_params: bool,
     /// computed field keys so far (their bindings' names)
@@ -546,6 +606,15 @@ impl PComp {
             jsx_fragment: String::from(fragment),
             module_path: String::new(),
             script_imports: false,
+            outer_desc: String::new(),
+            eval_sites: Vec::new(),
+            eval_var_scopes: Vec::new(),
+            eval_ev: -1,
+            eval_in_params: false,
+            eval_new_target: false,
+            eval_ctx: 0,
+            eval_prog: -1,
+            force_strict: false,
             mex_names: Vec::new(),
             mex_values: Vec::new(),
             mex_stars: Vec::new(),
@@ -574,6 +643,7 @@ impl PComp {
             priv_nm: Vec::new(),
             priv_kd: Vec::new(),
             priv_next: 0,
+            catch_patterns: Vec::new(),
             in_params: false,
             fk_count: 0,
             in_generator: false,
@@ -973,6 +1043,7 @@ impl PComp {
             vthru: HashMap::new(),
             params_scope: -1,
             odd_fns: HashMap::new(),
+            has_eval: false,
         });
         let id = (self.scopes.len() as int) - 1;
         if fnid >= 0 {
@@ -992,7 +1063,34 @@ impl PComp {
             }
             return existing;
         }
-        let global = self.scopes[scope as usize].is_program && !self.local_program;
+        if (kind == K_VAR || kind == K_FUNC) && !self.eval_var_scopes.is_empty() && self.scopes[scope as usize].is_program {
+            // sloppy direct eval: the caller's var of the name
+            if self.eval_in_params && name == "arguments" {
+                self.fail("'arguments' may not be declared by eval code in parameters");
+                return -1;
+            }
+            let vs = self.eval_var_scopes.clone();
+            for es in vs.iter() {
+                let b = match self.scopes[*es as usize].names.get(name) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if b >= 0 {
+                    let bk = self.binds[b as usize].kind;
+                    if bk == K_VAR || bk == K_FUNC || bk == K_PARAM || bk == K_ARGS {
+                        self.scopes[scope as usize].names.insert(String::from(name), b);
+                        return b;
+                    }
+                    if bk == K_LET || bk == K_CONST || bk == K_CLASS {
+                        self.fail(format!("Identifier '{}' has already been declared", name).as_str());
+                        return -1;
+                    }
+                }
+            }
+        }
+        let lexical = kind == K_LET || kind == K_CONST || kind == K_CLASS;
+        // eval code's lexical declarations are its own
+        let global = self.scopes[scope as usize].is_program && !self.local_program && !(self.local_if_strict && lexical);
         self.binds.push(PBind {
             name: String::from(name),
             kind: kind,
@@ -1337,7 +1435,8 @@ impl PComp {
                 let wb = self.scopes[s as usize].with_bind;
                 if wb >= 0 {
                     let wn = self.binds[wb as usize].name.clone();
-                    let x = self.lookup(scope, wn.as_str());
+                    // a direct eval's vars (`%ev`): that function's own
+                    let x = if wn.as_str() == "%ev" { wb } else { self.lookup(scope, wn.as_str()) };
                     if x >= 0 {
                         list.push(x);
                     }
@@ -1507,6 +1606,23 @@ impl PComp {
         self.emit(OP_CONST, c, 0);
     }
 
+    /// new.target here: inside a function (not an arrow's alone), or in a
+    /// direct eval's code where its caller may name it.
+    fn new_target_ok(&self) -> bool {
+        let mut s = self.cur_scope;
+        while s >= 0 {
+            let sc = &self.scopes[s as usize];
+            if sc.is_program {
+                return self.eval_new_target;
+            }
+            if sc.is_func && !sc.is_arrow {
+                return true;
+            }
+            s = sc.parent;
+        }
+        self.eval_new_target
+    }
+
     fn mark_lexical_ctor(&mut self) {
         let mut i = self.fs.len();
         while i > 0 && self.fs[i - 1].proto.arrow {
@@ -1540,6 +1656,9 @@ impl PComp {
             self.resolve_ref(i);
             i += 1;
         }
+        if !self.eval_sites.is_empty() {
+            self.eval_captures();
+        }
         let nf = self.fns.len() as int;
         let mut f: int = 0;
         while f < nf {
@@ -1551,6 +1670,82 @@ impl PComp {
             self.expand(f);
             f += 1;
         }
+    }
+
+    /// Direct evals: the bindings of the scopes around them go in the
+    /// scopes' objects, lexical ones start uninitialized, and the
+    /// function's `arguments` is made.
+    fn eval_captures(&mut self) {
+        let sites = self.eval_sites.clone();
+        for site in sites.iter() {
+            self.lookup(*site, "arguments");
+        }
+        let ns = self.scopes.len();
+        let mut s: usize = 0;
+        while s < ns {
+            if self.scopes[s].has_eval && self.scopes[s].fnid >= 0 {
+                let binds = self.scopes[s].binds.clone();
+                for b in binds.iter() {
+                    let bi = *b as usize;
+                    if self.binds[bi].global || self.binds[bi].placed {
+                        continue;
+                    }
+                    self.binds[bi].captured = true;
+                    let k = self.binds[bi].kind;
+                    if k == K_LET || k == K_CONST || k == K_CLASS {
+                        self.binds[bi].tdz = true;
+                    }
+                }
+            }
+            s += 1;
+        }
+    }
+
+    /// A direct eval's view of the environments from scope `site` out:
+    /// "F" (in a function) or "G", then per environment, innermost first,
+    /// ";" + "f" (a function's) or "b" + "|" + its bindings as
+    /// "name:kind:slot", joined by ",".
+    fn x_eval_desc(&self, site: int, flags: int) -> String {
+        let mut levels: Vec<String> = Vec::new();
+        let mut in_fn = false;
+        let mut nt = false;
+        let mut nt_known = false;
+        let mut s = site;
+        while s >= 0 {
+            let si = s as usize;
+            if self.scopes[si].is_func && !self.scopes[si].is_program {
+                in_fn = true;
+            }
+            if !nt_known && self.scopes[si].is_func && (!self.scopes[si].is_arrow || self.scopes[si].is_program) {
+                nt_known = true;
+                nt = !self.scopes[si].is_program;
+            }
+            if self.scopes[si].has_env {
+                let mut items: Vec<String> = Vec::new();
+                for b in self.scopes[si].binds.iter() {
+                    let bi = *b as usize;
+                    if !self.binds[bi].in_env || self.binds[bi].global {
+                        continue;
+                    }
+                    let nm = self.binds[bi].name.as_str();
+                    if nm.is_empty() || nm.contains(",") || nm.contains(":") || nm.contains(";") || nm.contains("|") || (nm.contains("%") && nm != "%ev") || nm.contains("\u{1}") {
+                        continue;
+                    }
+                    items.push(format!("{}:{}:{}", nm, self.binds[bi].kind, self.binds[bi].slot));
+                }
+                let flag = if self.scopes[si].is_func && !self.scopes[si].is_program { "f" } else { "b" };
+                levels.push(format!("{}|{}", flag, items.join(",")));
+            }
+            s = self.scopes[si].parent;
+        }
+        if self.eval_new_target && !nt_known {
+            nt = true;
+        }
+        let head = format!("{}{}{}{}", if in_fn { "F" } else { "G" }, if (flags & 1) != 0 { "P" } else { "" }, if nt { "N" } else { "" }, flags / 2);
+        if levels.is_empty() {
+            return head;
+        }
+        format!("{};{}", head, levels.join(";"))
     }
 
     /// Slots for the function's bindings: parameters first, then each
@@ -1593,7 +1788,7 @@ impl PComp {
         let pi = self.fns[fi].proto as usize;
         self.protos[pi].nslots = next_slot;
         let fs = self.fns[fi].fscope;
-        if !self.fns[fi].is_program || self.local_program {
+        if !self.fns[fi].is_program || self.local_program || self.local_if_strict {
             self.protos[pi].env_size = self.scopes[fs as usize].env_size;
         }
     }
@@ -1721,6 +1916,14 @@ impl PComp {
         if self.binds[b as usize].global {
             let nm = self.binds[b as usize].name.clone();
             let a = self.atom(nm.as_str());
+            if self.eval_ev >= 0 && self.binds[b as usize].scope == self.eval_prog {
+                // sloppy direct eval code's var: on the caller's `%ev`
+                let ev = self.eval_ev;
+                self.xload_bind(ev, scope);
+                self.xop(OP_SWAP);
+                self.xemit(OP_SET_PROP, a, 0);
+                return;
+            }
             self.xemit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
             return;
         }
@@ -1815,14 +2018,19 @@ impl PComp {
             return;
         }
         if b < 0 {
+            let ps = if self.eval_prog >= 0 { self.eval_prog } else { 0 };
             let gb = if self.scopes.is_empty() {
                 -1
             } else {
-                match self.scopes[0].names.get(&name) {
+                match self.scopes[ps as usize].names.get(&name) {
                     Some(x) => *x,
                     None => -1,
                 }
             };
+            if gb >= 0 && self.eval_ev >= 0 && self.binds[gb as usize].global && self.binds[gb as usize].scope == ps {
+                self.xstore_bind(gb, init, scope);
+                return;
+            }
             if gb >= 0 && self.binds[gb as usize].kind == K_CONST && !init {
                 let c = self.xstr(name.as_str());
                 self.xemit(OP_CONST_ERROR, c, 0);
@@ -2058,14 +2266,17 @@ impl PComp {
             } else if (c as int) == PH_HOIST {
                 self.x_hoist((o.a as int));
             } else if (c as int) == PH_DECL_GLOBALS {
-                if !self.local_program {
+                if !self.local_program && self.eval_ev >= 0 {
+                    self.x_ev_decls((o.a as int));
+                } else if !self.local_program {
                     let binds = self.scopes[o.a as usize].binds.clone();
                     for b in binds.iter() {
                         let k = self.binds[*b as usize].kind;
                         if k == K_VAR || k == K_FUNC {
                             let nm = self.binds[*b as usize].name.clone();
                             let a = self.atom(nm.as_str());
-                            self.xemit(OP_DECL_GLOBAL, a, 0);
+                            // eval code's vars and functions can be deleted
+                            self.xemit(OP_DECL_GLOBAL, a, if self.local_if_strict { 1 } else { 0 });
                         }
                     }
                 }
@@ -2077,6 +2288,10 @@ impl PComp {
                 self.x_annex((o.a as int));
             } else if (c as int) == PH_NOP {
                 // nothing
+            } else if (c as int) == PH_EVAL {
+                let desc = self.x_eval_desc((o.a as int), (o.c as int));
+                let k = self.xstr(desc.as_str());
+                self.xemit(OP_CALL_EVAL, (o.b as int), k);
             } else if (c as int) == OP_POP {
                 self.xop(OP_POP);
             } else {
@@ -2167,6 +2382,40 @@ impl PComp {
                 self.xop(OP_CALLEE);
                 self.xstore_bind(*b, true, fscope);
                 self.xop(OP_POP);
+            }
+        }
+        let ev = self.scopes[fscope as usize].with_bind;
+        if ev >= 0 && self.binds[ev as usize].name.as_str() == "%ev" {
+            // a direct eval's vars: an object without a prototype
+            self.xop(OP_NEW_OBJECT);
+            self.xop(OP_NULL);
+            let a = self.atom("__proto__");
+            self.xemit(OP_INIT_PROP, a, 1);
+            self.xstore_bind(ev, true, fscope);
+            self.xop(OP_POP);
+        }
+    }
+
+    /// Sloppy direct eval code's new vars: on the caller's `%ev` object
+    /// (undefined unless there).
+    fn x_ev_decls(&mut self, scope: int) {
+        let ev = self.eval_ev;
+        let binds = self.scopes[scope as usize].binds.clone();
+        for b in binds.iter() {
+            let k = self.binds[*b as usize].kind;
+            if (k == K_VAR || k == K_FUNC) && self.binds[*b as usize].global {
+                let nm = self.binds[*b as usize].name.clone();
+                let a = self.atom(nm.as_str());
+                self.xpush_str(nm.as_str());
+                self.xload_bind(ev, scope);
+                self.xop(OP_IN);
+                let jt = self.xemit(OP_JT, 0, 0);
+                self.xfixed[jt as usize] = true;
+                self.xload_bind(ev, scope);
+                self.xop(OP_UNDEF);
+                self.xemit(OP_SET_PROP, a, 0);
+                self.xop(OP_POP);
+                self.xpatch(jt);
             }
         }
     }
@@ -2284,6 +2533,40 @@ impl PComp {
                     continue;
                 }
             }
+            // a parameter's name (parameters with expressions have a
+            // scope of their own), or a lexical binding of a block between
+            // the function's block and the var scope: `var f` there would
+            // be an early error, so no copy
+            let fnid = self.f().fnid;
+            let fs = self.fns[fnid as usize].fscope;
+            if fs >= 0 && fs != vs {
+                let pb = match self.scopes[fs as usize].names.get(&nm) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if pb >= 0 && self.binds[pb as usize].kind == K_PARAM {
+                    continue;
+                }
+            }
+            let mut blocked = false;
+            let ascope = self.annexes[*k as usize].scope;
+            let mut sc = self.scopes[ascope as usize].parent;
+            while sc >= 0 && sc != vs && sc != fs {
+                let lb = match self.scopes[sc as usize].names.get(&nm) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if lb >= 0 {
+                    let lk = self.binds[lb as usize].kind;
+                    if lk == K_LET || lk == K_CONST || lk == K_CLASS || lk == K_FUNC || (lk == K_CATCH && self.catch_patterns.contains(&sc)) {
+                        blocked = true;
+                    }
+                }
+                sc = self.scopes[sc as usize].parent;
+            }
+            if blocked {
+                continue;
+            }
             let b = self.declare(vs, nm.as_str(), K_VAR);
             self.annexes[*k as usize].var_bind = b;
         }
@@ -2374,21 +2657,27 @@ impl PComp {
         if !self.error.is_empty() {
             return -1;
         }
-        let strict = self.directives();
+        let mut strict = self.directives();
+        if self.force_strict {
+            strict = true;
+            self.strict = true;
+        }
         if strict && self.local_if_strict {
             self.local_program = true;
         }
         let mut proto = Proto::new("<script>");
         proto.strict = strict;
-        // eval code: what its caller may contain is not known here
-        self.ctx = if self.local_if_strict { CX_SUPER_CALL | CX_SUPER_PROP } else { 0 };
+        let outer = if self.outer_desc.is_empty() { -1 } else { self.outer_scopes(strict) };
+        // indirect eval code: what its caller may contain is not known here
+        self.ctx = if !self.outer_desc.is_empty() { self.eval_ctx & (CX_SUPER_CALL | CX_SUPER_PROP | CX_NO_ARGS) } else if self.local_if_strict { CX_SUPER_CALL | CX_SUPER_PROP } else { 0 };
         let fnid = self.push_fn(proto, true, 1);
-        let s = self.new_scope(-1, true, false);
+        let s = self.new_scope(outer, true, false);
         self.scopes[s as usize].is_program = true;
         self.fns[fnid as usize].fscope = s;
         self.f().var_scope = s;
         self.cur_scope = s;
-        if self.local_program {
+        self.eval_prog = s;
+        if self.local_program || self.local_if_strict {
             self.emit(PH_ENTER, s, 1);
         }
         self.emit(PH_DECL_GLOBALS, s, 0);
@@ -2412,6 +2701,81 @@ impl PComp {
             return -1;
         }
         entry
+    }
+
+    /// Direct eval code: the caller's environments (`outer_desc`) as
+    /// scopes outside the program's, their bindings placed; the innermost.
+    fn outer_scopes(&mut self, strict: bool) -> int {
+        let desc = self.outer_desc.clone();
+        let parts = split_on(desc.as_str(), 59);
+        let head = if parts.is_empty() { String::new() } else { parts[0].clone() };
+        let in_fn = head.starts_with("F");
+        self.eval_in_params = head.contains("P");
+        self.eval_new_target = head.contains("N");
+        self.eval_ctx = digits_int(head.as_str());
+        let mut ids: Vec<int> = Vec::new();
+        let mut fn_level: Vec<bool> = Vec::new();
+        let mut parent: int = -1;
+        let mut i = parts.len();
+        while i > 1 {
+            i -= 1;
+            let lv = parts[i].clone();
+            let s = self.new_scope(parent, false, false);
+            self.scopes[s as usize].has_env = true;
+            fn_level.insert(0, lv.starts_with("f"));
+            let n = lv.as_bytes().len();
+            let items = if n > 2 { String::from(&lv[2..n]) } else { String::new() };
+            let mut size: int = 0;
+            let entries = split_on(items.as_str(), 44);
+            for it in entries.iter() {
+                let f = split_on(it.as_str(), 58);
+                if f.len() != 3 {
+                    continue;
+                }
+                let kind = digits_int(f[1].as_str());
+                let slot = digits_int(f[2].as_str());
+                let lexical = kind == K_LET || kind == K_CONST || kind == K_CLASS;
+                self.binds.push(PBind {
+                    name: f[0].clone(),
+                    kind: kind,
+                    captured: true,
+                    slot: slot,
+                    in_env: true,
+                    scope: s,
+                    global: false,
+                    placed: true,
+                    tdz: lexical,
+                    init_seq: if lexical { SEQ_NEVER } else { 0 },
+                });
+                let b = (self.binds.len() as int) - 1;
+                self.scopes[s as usize].names.insert(f[0].clone(), b);
+                self.scopes[s as usize].binds.push(b);
+                if f[0].as_str() == "%ev" {
+                    self.scopes[s as usize].with_bind = b;
+                    self.has_with = true;
+                    if in_fn && !strict && self.eval_ev < 0 {
+                        self.eval_ev = b;
+                    }
+                }
+                if slot + 1 > size {
+                    size = slot + 1;
+                }
+            }
+            self.scopes[s as usize].env_size = size;
+            ids.insert(0, s);
+            parent = s;
+        }
+        if in_fn && !strict {
+            let mut j: usize = 0;
+            while j < ids.len() {
+                self.eval_var_scopes.push(ids[j]);
+                if fn_level[j] {
+                    break;
+                }
+                j += 1;
+            }
+        }
+        parent
     }
 
     // =====================================================================
@@ -2741,6 +3105,16 @@ impl PComp {
                 || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1))));
             if lexical {
                 self.fail("Lexical declaration cannot appear in a single-statement context");
+                return;
+            }
+            if if_body && w.as_str() == "function" {
+                // Annex B: `if (x) function f() {}` as if in a block
+                let saved = self.cur_scope;
+                let sc = self.new_scope(saved, false, false);
+                self.enter_block(sc);
+                self.emit(PH_HOIST, sc, 0);
+                self.statement();
+                self.leave_block(sc, saved);
                 return;
             }
         }
@@ -3284,6 +3658,9 @@ impl PComp {
             let s = self.new_scope(saved, false, false);
             self.enter_block(s);
             if self.eat("(") {
+                if !(self.kind() == T_IDENT && self.peek_is(1, ")")) {
+                    self.catch_patterns.push(s);
+                }
                 self.pattern_target(K_CATCH);
                 self.skip_annotation();
                 self.expect(")");
@@ -4484,6 +4861,28 @@ impl PComp {
         let n = self.call_args();
         if n < 0 {
             self.op(OP_CALL_SPREAD);
+        } else if !optional && e.k == E_IDENT && self.refs[e.a as usize].name.as_str() == "eval" {
+            let site = self.cur_scope;
+            let mut s = site;
+            while s >= 0 {
+                self.scopes[s as usize].has_eval = true;
+                s = self.scopes[s as usize].parent;
+            }
+            self.eval_sites.push(site);
+            if !self.strict {
+                // the function's vars a sloppy eval may add: in `%ev`
+                let mut fs = site;
+                while fs >= 0 && !self.scopes[fs as usize].is_func {
+                    fs = self.scopes[fs as usize].parent;
+                }
+                if fs >= 0 && !self.scopes[fs as usize].is_program && self.scopes[fs as usize].with_bind < 0 {
+                    let b = self.declare(fs, "%ev", K_VAR);
+                    self.scopes[fs as usize].with_bind = b;
+                    self.has_with = true;
+                }
+            }
+            let flags = self.ctx * 2 + if self.in_params { 1 } else { 0 };
+            self.emit3(PH_EVAL, site, n, flags);
         } else {
             self.emit(OP_CALL, n, 0);
         }
@@ -4499,6 +4898,9 @@ impl PComp {
                 let t = self.ident_name();
                 if t.as_str() != "target" {
                     self.fail("new.target expected");
+                }
+                if !self.new_target_ok() {
+                    self.fail("new.target expression is not allowed here");
                 }
                 self.mark_lexical_ctor();
                 self.op(OP_NEW_TARGET);
@@ -5208,6 +5610,11 @@ impl PComp {
         self.cur_scope = fscope;
         self.emit(PH_ENTER, fscope, 1);
         self.emit(PH_PROLOGUE, fscope, fnid);
+        // an async function's parameters' errors reject its promise
+        let async_only = (flags & F_ASYNC) != 0 && (flags & F_GENERATOR) == 0;
+        if async_only {
+            self.op(OP_GEN_START);
+        }
         let saved_names = self.param_names.clone();
         self.param_names = Vec::new();
         let saved_pending = self.pending_inits.clone();
@@ -5331,7 +5738,7 @@ impl PComp {
         if (flags & F_GETTER) != 0 && i != 0 {
             self.fail("Getter must not have any formal parameters");
         }
-        if (flags & (F_GENERATOR | F_ASYNC)) != 0 {
+        if (flags & F_GENERATOR) != 0 {
             self.op(OP_GEN_START);
         }
         if arrow {
