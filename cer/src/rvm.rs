@@ -50,6 +50,38 @@ impl Vm {
         obj_at(&self.objs, o as usize)
     }
 
+    /// The scope `depth` levels out from frame fi's (fi is the running
+    /// frame): Vm::get_env without looking the frame up again.
+    #[inline(always)]
+    pub fn env_of(&self, fi: usize, depth: int) -> int {
+        let mut e = self.frames[fi].env;
+        let mut d = depth;
+        while d > 0 {
+            e = self.ob(e).proto as int;
+            d -= 1;
+        }
+        e
+    }
+
+    /// Vm::ic_slot for a global read (any data property), its lookups
+    /// unchecked: the shape ids and key indexes come from the object and
+    /// are checked against the shape's key count.
+    #[inline(always)]
+    pub fn global_ic(&self, g: int, atom: int, c: int) -> int {
+        let sh = self.ob(g).shape as int;
+        if c >= 65536 {
+            return if (c >> 16) == sh { c & 65535 } else { -1 };
+        }
+        let sd = shape_at(&self.shapes, sh as usize);
+        if c >= 0 && c < sd.nkeys {
+            let s = shape_at(&self.shapes, sd.kref as usize);
+            if *int_at(&s.keys, c as usize) == atom && (*int_at(&s.attrs, c as usize) & P_ACCESSOR) == 0 {
+                return c;
+            }
+        }
+        -1
+    }
+
     /// Slot `k` of scope `e`, unchecked: the compiler resolved it against
     /// the scope the closure was made in.
     #[inline(always)]
@@ -58,6 +90,20 @@ impl Vm {
         // a scope gets its slots when it is made (renter, PUSH_ENV) and
         // keeps them while a closure or frame refers to it
         *val_at(&evec_at(&self.evecs, ev).v, k as usize)
+    }
+
+    /// Slot `k` of scope `e` takes `v` (Vm::put_elem unchecked, as
+    /// env_slot): counts change only when a value on either side is on
+    /// the heap.
+    #[inline(always)]
+    pub fn env_put(&mut self, e: int, k: int, v: Val) {
+        let ev = self.ob(e).elems as usize;
+        let old = *val_at(&evec_at(&self.evecs, ev).v, k as usize);
+        if is_heap(&v) || is_heap(&old) {
+            self.put_elem(e, k, v);
+            return;
+        }
+        val_put(&mut evec_mut(&mut self.evecs, ev).v, k as usize, v);
     }
 
     /// Register slot `i` (absolute) takes `v`, unchecked like rget.
@@ -805,7 +851,7 @@ impl Vm {
                     }
                     R_CALL => {
                         let argc = w2;
-                        self.frames[fi].pc = (pc + 1 + ((w0 >> 16) as int));
+                        frame_mut(&mut self.frames, fi).pc = (pc + 1 + ((w0 >> 16) as int));
                         if self.gc_due() {
                             self.rgc(want);
                         }
@@ -813,17 +859,17 @@ impl Vm {
                         if ((w0 >> 8) & 255) == 1 {
                             self.stack[(fpos + 1) as usize] = Val::Undef;
                         }
-                        let fo = obj_of(&self.stack[fpos as usize]);
+                        let fo = obj_of(val_at(&self.stack, fpos as usize));
                         if fo >= 0 && self.ob(fo).class == C_FUNCTION {
-                            let fp = self.objs[fo as usize].func as usize;
+                            let fp = self.ob(fo).func as usize;
                             let plain = {
-                                let p = &self.protos[fp];
+                                let p = proto_at(&self.protos, fp);
                                 !p.uses_args && p.rest < 0 && !p.class_ctor
                             };
                             // the result goes to the slot of f, or to w3 - 1
                             let dst = if w3 > 0 { bp + (w3 as int) - 1 } else { fpos };
                             if plain {
-                                let co = self.protos[fp].generator || self.protos[fp].is_async;
+                                let co = proto_at(&self.protos, fp).generator || proto_at(&self.protos, fp).is_async;
                                 if co && dst != fpos {
                                     self.frames[fi].mv_from = fpos;
                                     self.frames[fi].mv_to = dst;
@@ -835,9 +881,9 @@ impl Vm {
                                 fi = self.frames.len() - 1;
                                 pi = fp;
                                 bp = fpos + 2;
-                                pc = self.frames[fi].pc;
-                                want = (bp + self.protos[pi].fsize) as usize;
-                                rb = self.protos[pi].rbase;
+                                pc = frame_at(&self.frames, fi).pc;
+                                want = (bp + proto_at(&self.protos, pi).fsize) as usize;
+                                rb = proto_at(&self.protos, pi).rbase;
                                 if self.slicing && self.frame_brk() {
                                     return;
                                 }
@@ -915,7 +961,7 @@ impl Vm {
                     }
                     R_RET | R_RET_UNDEF => {
                         let mut v = if ((w0 & 255) as int) == R_RET { self.rget(bp, (w1 as int)).clone() } else { Val::Undef };
-                        if self.frames[fi].construct && !is_obj(&v) {
+                        if frame_at(&self.frames, fi).construct && !is_obj(&v) {
                             if self.r_ret_construct(&mut v, fi, pc) {
                                 if !self.unwind(base) {
                                     return;
@@ -934,13 +980,15 @@ impl Vm {
                             // call named); the stack ends at the caller's
                             // frame again and the caller goes on here
                             fi = self.frames.len() - 1;
-                            pi = self.frames[fi].proto as usize;
-                            bp = self.frames[fi].bp;
-                            want = (bp + self.protos[pi].fsize) as usize;
-                            rb = self.protos[pi].rbase;
-                            pc = self.frames[fi].pc;
+                            let fc = frame_at(&self.frames, fi);
+                            pi = fc.proto as usize;
+                            bp = fc.bp;
+                            pc = fc.pc;
+                            want = (bp + proto_at(&self.protos, pi).fsize) as usize;
+                            rb = proto_at(&self.protos, pi).rbase;
                             let to = if fr.ret >= 0 { fr.ret as usize } else { fpos };
-                            self.stack[to] = v;
+                            // the caller's slot of f or a register of its frame
+                            val_put(&mut self.stack, to, v);
                             self.grow_stack(want);
                             if self.slicing && self.frame_brk() {
                                 return;
@@ -969,7 +1017,7 @@ impl Vm {
                         continue;
                     }
                     R_GET_ENV => {
-                        let e = self.get_env((w2 as int));
+                        let e = self.env_of(fi, (w2 as int));
                         let v = self.env_slot(e, (w3 as int));
                         self.rset((bp + (w1 as int)) as usize, v);
                         if ((w0 >> 8) & 255) == 1 {
@@ -979,18 +1027,18 @@ impl Vm {
                         continue;
                     }
                     R_SET_ENV => {
-                        let e = self.get_env((w2 as int));
+                        let e = self.env_of(fi, (w2 as int));
                         let v = self.rget(bp, (w1 as int)).clone();
-                        self.put_elem(e, (w3 as int), v);
+                        self.env_put(e, (w3 as int), v);
                         pc = (pc + 1 + ((w0 >> 16) as int));
                         continue;
                     }
                     R_GET_GLOBAL => {
                         let g = self.global;
-                        let c = self.protos[pi].code[pc as usize].c;
-                        let slot = self.ic_slot(g, (w3 as int), (c as int), false);
+                        let c = op_at(&proto_at(&self.protos, pi).code, pc as usize).c;
+                        let slot = self.global_ic(g, (w3 as int), (c as int));
                         if slot >= 0 {
-                            let v = self.objs[g as usize].get_slot(slot as usize).clone();
+                            let v = slot_of(self.ob(g), slot as usize);
                             self.rset((bp + (w1 as int)) as usize, v);
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
@@ -1013,6 +1061,13 @@ impl Vm {
                         continue;
                     }
                     R_ADD_ENV => {
+                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w1 as int)), self.rget(bp, (w2 as int))) {
+                            let r = Val::Num(*x + *y);
+                            let e = self.env_of(fi, ((w0 >> 8) & 255) as int);
+                            self.env_put(e, (w3 as int), r);
+                            pc = (pc + 1 + ((w0 >> 16) as int));
+                            continue;
+                        }
                         self.r_add_env(bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
                     }
                     R_GET_METHOD_ELEM => {
@@ -1133,6 +1188,13 @@ impl Vm {
                     R_ADD_LOCAL_POP => {
                         let b = *self.rget(bp, (w2 as int));
                         let i = (bp + (w1 as int)) as usize;
+                        // numbers first: the string append below is the rarer case
+                        if let (Val::Num(x), Val::Num(y)) = (val_at(&self.stack, i), &b) {
+                            let r = Val::Num(*x + *y);
+                            self.rset(i, r);
+                            pc = (pc + 1 + ((w0 >> 16) as int));
+                            continue;
+                        }
                         let h = self.append_val(self.stack[i], b);
                         if h >= 0 {
                             self.stack[i] = Val::Str(h);
@@ -1941,11 +2003,11 @@ impl Vm {
     /// where the frame does.
     pub fn renter(&mut self, fo: int, fpos: int, argc: int, ret: int) -> bool {
         let pi = self.ob(fo).func as usize;
-        if self.protos[pi].rstate == 0 && !self.renter_translate(pi) {
+        if proto_at(&self.protos, pi).rstate == 0 && !self.renter_translate(pi) {
             return false;
         }
         let (nparams, nslots, fsize, env_size, arrow, strict, entry) = {
-            let p = &self.protos[pi];
+            let p = proto_at(&self.protos, pi);
             (p.nparams, p.nslots, p.fsize, p.env_size, p.arrow, p.strict, p.rentry)
         };
         let bp = fpos + 2;
@@ -1973,14 +2035,22 @@ impl Vm {
             }
             self.colds[c].prim
         } else {
-            let t = self.stack[(bp - 1) as usize];
-            if strict || is_obj(&t) { t } else { self.sloppy_this(t) }
+            let t = *val_at(&self.stack, (bp - 1) as usize);
+            if strict || is_obj(&t) {
+                t
+            } else if matches!(t, Val::Undef) {
+                // a plain call f(): the global object, no call out
+                Val::Obj(self.global)
+            } else {
+                self.sloppy_this(t)
+            }
         };
         let mut env = self.ob(fo).env as int;
         if env_size > 0 {
             env = self.renter_env(env, env_size);
         }
-        unpack_code(&mut self.protos[pi]);
+        // translated code is unpacked already (renter_translate): only a
+        // new function's code is packed (pack_code), before it first runs
         self.frames.push(Frame {
             proto: pi as int,
             fobj: fo,
@@ -2219,6 +2289,97 @@ pub fn op_at(v: &Vec<Op>, i: usize) -> Op {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn op_at(v: &Vec<Op>, i: usize) -> Op {
     v[i]
+}
+
+/// `v[i]` of the frames.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn frame_at(v: &Vec<Frame>, i: usize) -> &Frame {
+    debug_assert!(i < v.len(), "frame index past frames");
+    // SAFETY: rrun's fi is frames.len() - 1, refreshed whenever a frame
+    // comes or goes
+    unsafe { v.get_unchecked(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn frame_at(v: &Vec<Frame>, i: usize) -> &Frame {
+    &v[i]
+}
+
+/// `v[i]` of the frames, to write.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn frame_mut(v: &mut Vec<Frame>, i: usize) -> &mut Frame {
+    debug_assert!(i < v.len(), "frame index past frames");
+    // SAFETY: as frame_at
+    unsafe { v.get_unchecked_mut(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn frame_mut(v: &mut Vec<Frame>, i: usize) -> &mut Frame {
+    &mut v[i]
+}
+
+/// `v[i]` of the functions.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn proto_at(v: &Vec<Proto>, i: usize) -> &Proto {
+    debug_assert!(i < v.len(), "function index past protos");
+    // SAFETY: a frame's proto and a function object's func name compiled
+    // functions, which are never removed
+    unsafe { v.get_unchecked(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn proto_at(v: &Vec<Proto>, i: usize) -> &Proto {
+    &v[i]
+}
+
+/// `v[i]` of the shapes.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn shape_at(v: &Vec<Shape>, i: usize) -> &Shape {
+    debug_assert!(i < v.len(), "shape id past shapes");
+    // SAFETY: an object's shape and a shape's kref name live shapes
+    unsafe { v.get_unchecked(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn shape_at(v: &Vec<Shape>, i: usize) -> &Shape {
+    &v[i]
+}
+
+/// `v[i]` of an int vector (a shape's keys or attributes).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn int_at(v: &Vec<int>, i: usize) -> &int {
+    debug_assert!(i < v.len(), "index past an int vector");
+    // SAFETY: callers check i against the shape's key count, which the
+    // holder's keys and attrs cover
+    unsafe { v.get_unchecked(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn int_at(v: &Vec<int>, i: usize) -> &int {
+    &v[i]
+}
+
+/// Property slot `i` of `o` (JsObj::get_slot without the bounds check).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn slot_of(o: &JsObj, i: usize) -> Val {
+    if i == 0 {
+        o.inl0
+    } else if i == 1 {
+        o.inl1
+    } else {
+        *val_at(&o.vals, i - 2)
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn slot_of(o: &JsObj, i: usize) -> Val {
+    o.get_slot(i)
 }
 
 /// `v[i]` of the objects.

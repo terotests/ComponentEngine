@@ -405,6 +405,16 @@ pub fn is_obj(v: &Val) -> bool {
     }
 }
 
+/// A value that reference counts track (an object or a string).
+#[inline]
+pub fn is_heap(v: &Val) -> bool {
+    match v {
+        Val::Obj(_) => true,
+        Val::Str(_) => true,
+        _ => false,
+    }
+}
+
 pub fn obj_of(v: &Val) -> int {
     match v {
         Val::Obj(o) => *o,
