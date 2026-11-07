@@ -171,7 +171,7 @@ pub fn net_effect(op: &Op) -> int {
         OP_SET_ELEM | OP_INIT_ELEM | OP_DEFINE_FIELD_ELEM | OP_INIT_GETTER_ELEM | OP_INIT_SETTER_ELEM | OP_DEFINE_METHOD_ELEM | OP_CALL_SPREAD | OP_ADD_ENV_POP => -2,
         OP_ADD_PROP_POP => -3,
         OP_YIELD => 1,
-        OP_CALL => ((-op.a - 1) as int),
+        OP_CALL | OP_CALL_EVAL => ((-op.a - 1) as int),
         OP_NEW => (-op.a as int),
         OP_SUPER_CALL | OP_NEW_ARRAY | OP_OBJ_REST => (1 - op.a as int),
         OP_CLASS => {
