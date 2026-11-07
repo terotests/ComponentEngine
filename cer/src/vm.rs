@@ -2223,9 +2223,27 @@ impl Vm {
         p.generator || p.constructible()
     }
 
+    /// A function's built-in `length` / `name` (not stored, function_own)
+    /// was deleted: a hidden private-named marker stands for that.
+    pub fn vgone(&mut self, f: int, atom: int) -> bool {
+        let m = self.vgone_atom(atom);
+        self.find(f, m) >= 0
+    }
+
+    pub fn vgone_atom(&mut self, atom: int) -> int {
+        if atom == A_NAME {
+            self.intern("\u{1}gone:name")
+        } else {
+            self.intern("\u{1}gone:length")
+        }
+    }
+
     /// A function's own `length`, `name`, `prototype` when not stored.
-    fn function_own(&mut self, f: int, atom: int) -> Val {
+    pub fn function_own(&mut self, f: int, atom: int) -> Val {
         let class = self.objs[f as usize].class;
+        if (atom == A_LENGTH || atom == A_NAME) && (class == C_FUNCTION || class == C_BOUND) && self.vgone(f, atom) {
+            return Val::Undef;
+        }
         if class == C_FUNCTION {
             let pi = self.objs[f as usize].func as int;
             if atom == A_LENGTH {
@@ -2287,7 +2305,7 @@ impl Vm {
                 if class == C_FUNCTION || class == C_BOUND {
                     if atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE {
                         let v = self.function_own(cur, atom);
-                        if !matches!(v, Val::Undef) || atom != A_PROTOTYPE {
+                        if !matches!(v, Val::Undef) {
                             return v;
                         }
                     }
@@ -2724,10 +2742,10 @@ impl Vm {
                 return true;
             }
             let class = self.objs[cur as usize].class;
-            if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING || class == C_FUNCTION || class == C_BOUND) {
+            if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING) {
                 return true;
             }
-            if (a == A_NAME) && (class == C_FUNCTION || class == C_BOUND) {
+            if (a == A_NAME || a == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) && !self.vgone(cur, a) {
                 return true;
             }
             if a == A_PROTOTYPE && class == C_FUNCTION {
@@ -2765,11 +2783,11 @@ impl Vm {
         if self.find(o, a) >= 0 {
             return true;
         }
-        if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING || class == C_FUNCTION) {
+        if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING) {
             return true;
         }
-        if a == A_NAME && class == C_FUNCTION {
-            return true;
+        if (a == A_NAME || a == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) {
+            return !self.vgone(o, a);
         }
         if a == A_PROTOTYPE && class == C_FUNCTION {
             let v = self.function_own(o, a);
@@ -2816,6 +2834,10 @@ impl Vm {
                 return false;
             }
             self.remove_own(o, slot);
+        }
+        if (atom == A_NAME || atom == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) && !self.vgone(o, atom) {
+            let m = self.vgone_atom(atom);
+            self.add_own(o, m, Val::Undef, P_HIDDEN);
         }
         true
     }
@@ -3414,6 +3436,35 @@ impl Vm {
         r
     }
 
+    /// IsConstructor(v): a function `new` may call.
+    pub fn is_constructor(&mut self, v: &Val) -> bool {
+        let mut o = obj_of(v);
+        let mut hops = 0;
+        while o >= 0 && hops < 10000 {
+            let class = self.objs[o as usize].class;
+            if class == C_FUNCTION {
+                let pi = self.objs[o as usize].func as usize;
+                return self.protos[pi].constructible();
+            }
+            if class == C_NATIVE {
+                // the built-in constructors are the natives with a prototype
+                return self.objs[o as usize].func as int == NF_PROXY || self.find(o, A_PROTOTYPE) >= 0;
+            }
+            if class == C_BOUND {
+                o = self.objs[o as usize].env as int;
+            } else if class == C_PROXY {
+                if self.objs[o as usize].pos != 1 {
+                    return false;
+                }
+                o = self.objs[o as usize].env as int;
+            } else {
+                return false;
+            }
+            hops += 1;
+        }
+        false
+    }
+
     /// `new f(...args)` from native code.
     pub fn construct(&mut self, f: Val, args: Vec<Val>, new_target: Val) -> Val {
         let fo = obj_of(&f);
@@ -3422,6 +3473,10 @@ impl Vm {
             return Val::Undef;
         }
         let class = self.objs[fo as usize].class;
+        if class == C_NATIVE && !self.is_constructor(&f) {
+            self.throw_type("value is not a constructor");
+            return Val::Undef;
+        }
         if class == C_NATIVE {
             let id = self.objs[fo as usize].func as int;
             let this = Val::Undef;
@@ -5212,6 +5267,19 @@ impl Vm {
                     }
                 }
             }
+            OP_ASTAR_CALL => {
+                if self.astar_call() {
+                    *pc = (op.b as int);
+                }
+            }
+            OP_ASTAR_DONE => {
+                let r = self.astar_done();
+                if r == 1 {
+                    *pc = (op.a as int);
+                } else if r == 2 {
+                    *pc = (op.b as int);
+                }
+            }
             OP_YIELD_STAR => {
                 let r = self.yield_star_step();
                 if r == 1 {
@@ -5412,6 +5480,22 @@ impl Vm {
                     _ => self.to_number(&v),
                 };
                 self.stack.push(Val::Num(if (op.code as int) == OP_INC { n + 1.0 } else { n - 1.0 }));
+            }
+            OP_TO_KEY => {
+                let v = self.pop();
+                let p = if is_obj(&v) && self.class_of(&v) != C_SYMBOL { self.to_primitive(&v, "string") } else { v };
+                if self.throwing {
+                    return false;
+                }
+                if let Val::Str(_) = p {
+                    self.stack.push(p);
+                } else if is_obj(&p) && self.class_of(&p) == C_SYMBOL {
+                    self.stack.push(p);
+                } else {
+                    let s = self.to_str(&p);
+                    let sv = self.rc_val(s);
+                    self.stack.push(sv);
+                }
             }
             OP_TOSTR => {
                 let v = self.pop();

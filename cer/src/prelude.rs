@@ -10,7 +10,14 @@ pub const PRELUDE: &str = r#"(function () {
 var defineProperty = Object.defineProperty;
 var getPrototypeOf = Object.getPrototypeOf;
 var create = Object.create;
-function hide(o, name, v) { defineProperty(o, name, { value: v, writable: true, enumerable: false, configurable: true }); }
+var asMethod = globalThis.__asMethod;
+delete globalThis.__asMethod;
+var isConstructor = globalThis.__isConstructor;
+delete globalThis.__isConstructor;
+function hide(o, name, v) {
+  if (typeof v === 'function' && o !== globalThis && !(typeof name === 'string' && name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90)) asMethod(v);
+  defineProperty(o, name, { value: v, writable: true, enumerable: false, configurable: true });
+}
 function tag(o, name) { defineProperty(o, Symbol.toStringTag, { value: name, writable: false, enumerable: false, configurable: true }); }
 function isCallable(f) { return typeof f === 'function'; }
 function isObject(v) { return (typeof v === 'object' && v !== null) || typeof v === 'function'; }
@@ -230,7 +237,7 @@ function capability(C) {
   if (!isCallable(res) || !isCallable(rej)) throw new TypeError('Promise resolve or reject function is not callable');
   return { promise: p, resolve: res, reject: rej };
 }
-defineProperty(Promise, Symbol.species, { get: function () { return this; }, enumerable: false, configurable: true });
+getter(Promise, Symbol.species, function () { return this; });
 hide(PP, 'then', function then(ok, err) {
   if (!isPromise(this)) throw new TypeError('Promise.prototype.then called on incompatible receiver');
   var C = speciesOf(this, Promise);
@@ -354,7 +361,13 @@ function protoFrom(nt, dflt) {
   var p = nt.prototype;
   return isObject(p) ? p : dflt;
 }
-function getter(o, name, f) { defineProperty(o, name, { get: f, enumerable: false, configurable: true }); }
+// a function's name for property key `k` (a symbol's in brackets)
+function fnKeyName(k) { if (typeof k !== 'symbol') return String(k); var d = k.description; return d === undefined ? '' : '[' + d + ']'; }
+function getter(o, name, f) {
+  defineProperty(f, 'name', { value: 'get ' + fnKeyName(name), writable: false, enumerable: false, configurable: true });
+  asMethod(f);
+  defineProperty(o, name, { get: f, enumerable: false, configurable: true });
+}
 function speciesSelf() { return this; }
 
 function bufLength(b, shared, what) {
@@ -389,7 +402,7 @@ function bufferSlice(Default, shared, name) {
   var C = e[0], shared = e[1], name = e[2], P = C.prototype;
   getter(P, 'byteLength', function () { var n = bufLength(this, shared, name + '.prototype.byteLength'); return n < 0 ? 0 : n; });
   hide(P, 'slice', bufferSlice(C, shared, name));
-  defineProperty(C, Symbol.species, { get: speciesSelf, enumerable: false, configurable: true });
+  getter(C, Symbol.species, speciesSelf);
   tag(P, name);
   hide(globalThis, name, C);
 });
@@ -483,7 +496,7 @@ defineTA(7, function Float32Array(a, b, c) { if (new.target === undefined) throw
 defineTA(8, function Float64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float64Array requires 'new'"); return construct(8, new.target, a, b, c); });
 defineTA(9, function BigInt64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigInt64Array requires 'new'"); return construct(9, new.target, a, b, c); });
 defineTA(10, function BigUint64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigUint64Array requires 'new'"); return construct(10, new.target, a, b, c); });
-defineProperty(TypedArray, Symbol.species, { get: speciesSelf, enumerable: false, configurable: true });
+getter(TypedArray, Symbol.species, speciesSelf);
 
 /** A new typed array from `exemplar`'s species, checked. */
 function speciesCreate(exemplar, args) {
@@ -1044,7 +1057,7 @@ if (!Reflect.preventExtensions) hide(Reflect, 'preventExtensions', function prev
 // ---- Symbol.species and the methods that honour it; the String methods
 // that hand a pattern object to its Symbol.match / replace / search / split
 [Array, Map, Set, RegExp].forEach(function (C) {
-  defineProperty(C, Symbol.species, { get: speciesSelf, enumerable: false, configurable: true });
+  getter(C, Symbol.species, speciesSelf);
 });
 function setLength(f, n) { defineProperty(f, 'length', { value: n, writable: false, enumerable: false, configurable: true }); return f; }
 /** ArraySpeciesCreate: null when a plain Array does. */
@@ -1166,6 +1179,63 @@ hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
   }
   A.length = len;
   return A;
+}, 1));
+function createDataPropertyOrThrow(o, k, v) {
+  defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true });
+}
+// Array.fromAsync: an async iterable, a sync one (each value awaited) or an
+// array-like
+hide(Array, 'fromAsync', setLength(function fromAsync(items, mapFn, thisArg) {
+  var C = this;
+  return (async function () {
+    var mapping = mapFn !== undefined;
+    if (mapping && !isCallable(mapFn)) throw new TypeError(String(mapFn) + ' is not a function');
+    var A, k = 0;
+    var am = items === undefined || items === null ? undefined : items[Symbol.asyncIterator];
+    var it, next;
+    if (am !== undefined && am !== null) {
+      if (!isCallable(am)) throw new TypeError('Symbol.asyncIterator is not a function');
+      it = am.call(items);
+      if (!isObject(it)) throw new TypeError('Result of the Symbol.asyncIterator method is not an object');
+      next = it.next;
+    } else {
+      var sm = items === undefined || items === null ? undefined : items[Symbol.iterator];
+      if (sm !== undefined && sm !== null) {
+        if (!isCallable(sm)) throw new TypeError('Symbol.iterator is not a function');
+        var sit = sm.call(items);
+        if (!isObject(sit)) throw new TypeError('Result of the Symbol.iterator method is not an object');
+        it = asyncFromSyncOf(sit);
+        next = it.next;
+      }
+    }
+    if (it !== undefined) {
+      A = isConstructor(C) ? new C() : [];
+      for (;;) {
+        var r = await next.call(it);
+        if (!isObject(r)) throw new TypeError('Iterator result is not an object');
+        if (r.done) { A.length = k; return A; }
+        var v = r.value;
+        try {
+          if (mapping) v = await mapFn.call(thisArg, v, k);
+          createDataPropertyOrThrow(A, k, v);
+        } catch (e) {
+          var ret = it.return;
+          if (ret !== undefined && ret !== null) { try { await ret.call(it); } catch (e2) {} }
+          throw e;
+        }
+        k++;
+      }
+    }
+    var src = Object(items), len = toLength(src.length);
+    A = isConstructor(C) ? new C(len) : new Array(len);
+    for (; k < len; k++) {
+      var x = await src[k];
+      if (mapping) x = await mapFn.call(thisArg, x, k);
+      createDataPropertyOrThrow(A, k, x);
+    }
+    A.length = len;
+    return A;
+  })();
 }, 1));
 hide(Array, 'of', function of() {
   var C = this;
@@ -1452,23 +1522,53 @@ hide(RP, Symbol.split, function (s, lim) {
 // ---- CreateAsyncFromSyncIterator, for `for await` over a sync iterable
 var setAsyncFromSync = globalThis.__setAsyncFromSync; delete globalThis.__setAsyncFromSync;
 var AsyncIteratorProto = getPrototypeOf(getPrototypeOf(getPrototypeOf((async function* () {})())));
-setAsyncFromSync(function (sync) {
-  var it = create(AsyncIteratorProto);
-  function step(r) {
-    if (!isObject(r)) throw new TypeError('Iterator result is not an object');
-    return Promise.resolve(r.value).then(function (v) { return { value: v, done: !!r.done }; });
+var afsResolve = Promise.resolve, afsReject = Promise.reject, afsThen = Promise.prototype.then, AfsPromise = Promise;
+var asyncFromSyncOf = function (sync) {
+  // CreateAsyncFromSyncIterator: next is read once
+  var it = create(AsyncIteratorProto), syncNext = sync.next;
+  // IteratorClose: after an error (`thrown`) that error stands
+  function closeSync(thrown) {
+    if (thrown) { try { var m0 = sync.return; if (m0 !== undefined && m0 !== null) m0.call(sync); } catch (e) {} return; }
+    var m = sync.return;
+    if (m !== undefined && m !== null && !isObject(m.call(sync))) throw new TypeError('Iterator result is not an object');
   }
-  hide(it, 'next', function (v) { try { return step(sync.next(v)); } catch (e) { return Promise.reject(e); } });
+  // AsyncFromSyncIteratorContinuation
+  function cont(r, closeOnRejection) {
+    if (!isObject(r)) throw new TypeError('Iterator result is not an object');
+    var done = !!r.done, value = r.value, w;
+    try { w = afsResolve.call(AfsPromise, value); }
+    catch (e) { if (!done && closeOnRejection) closeSync(true); throw e; }
+    return afsThen.call(w, function (v) { return { value: v, done: done }; },
+      done || !closeOnRejection ? undefined : function (e) { closeSync(true); throw e; });
+  }
+  hide(it, 'next', function (v) {
+    try { return cont(arguments.length > 0 ? syncNext.call(sync, v) : syncNext.call(sync), true); }
+    catch (e) { return afsReject.call(AfsPromise, e); }
+  });
   hide(it, 'return', function (v) {
-    try { var m = sync.return; if (m === undefined || m === null) return Promise.resolve({ value: v, done: true }); return step(m.call(sync, v)); }
-    catch (e) { return Promise.reject(e); }
+    try {
+      var m = sync.return;
+      if (m === undefined || m === null) return afsResolve.call(AfsPromise, { value: v, done: true });
+      var r = arguments.length > 0 ? m.call(sync, v) : m.call(sync);
+      if (!isObject(r)) throw new TypeError('Iterator result is not an object');
+      return cont(r, false);
+    } catch (e) { return afsReject.call(AfsPromise, e); }
   });
   hide(it, 'throw', function (v) {
-    try { var m = sync.throw; if (m === undefined || m === null) throw v; return step(m.call(sync, v)); }
-    catch (e) { return Promise.reject(e); }
+    try {
+      var m = sync.throw;
+      if (m === undefined || m === null) {
+        closeSync(false);
+        throw new TypeError('The iterator does not provide a throw method');
+      }
+      var r = m.call(sync, v);
+      if (!isObject(r)) throw new TypeError('Iterator result is not an object');
+      return cont(r, true);
+    } catch (e) { return afsReject.call(AfsPromise, e); }
   });
   return it;
-});
+};
+setAsyncFromSync(asyncFromSyncOf);
 
 // ---- the mutating Array methods on array-likes, as the specification
 // writes them (arrays keep the native ones)

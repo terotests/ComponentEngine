@@ -145,11 +145,17 @@ pub fn lexer_for(src: &str, jsx: bool, factory: &str, fragment: &str) -> Lexer {
 }
 
 pub fn is_id_start(c: char) -> bool {
-    c.is_alphabetic() || c == '_' || c == '$'
+    if (c as int) < 128 {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$';
+    }
+    crate::regex::id_wide(c, true)
 }
 
 pub fn is_id_part(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '$' || c == '\u{200c}' || c == '\u{200d}'
+    if (c as int) < 128 {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
+    }
+    c == '\u{200c}' || c == '\u{200d}' || crate::regex::id_wide(c, false)
 }
 
 fn hex_val(c: char) -> int {
@@ -603,6 +609,19 @@ impl Lexer {
             if c == '\\' && self.at(self.pos + 1) == 'u' {
                 self.pos += 2;
                 let cp = self.read_unicode_escape();
+                let ok = match char::from_u32(cp as u32) {
+                    Some(ch) => {
+                        if s.is_empty() {
+                            is_id_start(ch)
+                        } else {
+                            is_id_part(ch)
+                        }
+                    }
+                    None => false,
+                };
+                if !ok {
+                    self.fail("Invalid Unicode escape sequence");
+                }
                 push_code_point(&mut s, cp);
                 *escaped = true;
                 continue;

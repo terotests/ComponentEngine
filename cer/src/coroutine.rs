@@ -411,6 +411,74 @@ impl Vm {
         0
     }
 
+    /// OP_ASTAR_CALL: true to its b (a return without a `return` method).
+    pub fn astar_call(&mut self) -> bool {
+        let mode = num_of(&self.stack.pop().unwrap());
+        let received = self.stack.pop().unwrap();
+        let it = self.stack[self.stack.len() - 1].clone();
+        let name = if mode == GM_THROW {
+            "throw"
+        } else if mode == GM_RETURN {
+            "return"
+        } else {
+            "next"
+        };
+        let a = self.intern(name);
+        let m = self.get(&it, a);
+        if self.throwing {
+            return false;
+        }
+        if matches!(m, Val::Undef) || matches!(m, Val::Null) {
+            if mode == GM_RETURN {
+                self.stack.push(received);
+                return true;
+            }
+            if mode == GM_THROW {
+                self.iter_close(&it);
+                if !self.throwing {
+                    self.throw_type("The iterator does not provide a 'throw' method");
+                }
+                return false;
+            }
+        }
+        let r = self.call_fixed(m, it, 1, received, Val::Undef, Val::Undef);
+        if self.throwing {
+            return false;
+        }
+        self.stack.push(Val::Num(mode as double));
+        self.stack.push(r);
+        false
+    }
+
+    /// OP_ASTAR_DONE: 1 to its a, 2 to its b, 0 on.
+    pub fn astar_done(&mut self) -> int {
+        let r = self.stack.pop().unwrap();
+        let mode = num_of(&self.stack.pop().unwrap());
+        if !is_obj(&r) {
+            self.throw_type("Iterator result is not an object");
+            return 0;
+        }
+        let done = self.get(&r, A_DONE);
+        if self.throwing {
+            return 0;
+        }
+        let v = self.get(&r, A_VALUE);
+        if self.throwing {
+            return 0;
+        }
+        if truthy(&done) {
+            if mode == GM_RETURN {
+                self.stack.push(v);
+                return 2;
+            }
+            let n = self.stack.len();
+            self.stack[n - 1] = v;
+            return 1;
+        }
+        self.stack.push(v);
+        0
+    }
+
     /// Calls `it.return()` when there is one (closing an iterator early).
     pub fn iter_close(&mut self, it: &Val) {
         if !is_obj(it) || self.class_of(it) == C_ITER {

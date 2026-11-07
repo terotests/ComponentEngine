@@ -110,12 +110,17 @@ pub fn next_tok(lx: &mut Lexer) -> Tok {
 }
 
 fn is_id_start(c: char) -> bool {
-    // U+2E2F VERTICAL TILDE is a letter (Lm) but Pattern_Syntax
-    (c.is_alphabetic() && c != '\u{2e2f}') || c == '_' || c == '$'
+    if (c as int) < 128 {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$';
+    }
+    crate::regex::id_wide(c, true)
 }
 
 fn is_id_part(c: char) -> bool {
-    (c.is_alphanumeric() && c != '\u{2e2f}') || c == '_' || c == '$' || c == '\u{200c}' || c == '\u{200d}'
+    if (c as int) < 128 {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
+    }
+    c == '\u{200c}' || c == '\u{200d}' || crate::regex::id_wide(c, false)
 }
 
 fn hex_val(c: char) -> int {
@@ -432,6 +437,19 @@ impl Lexer {
             if c == '\\' && self.at(self.pos + 1) == 'u' {
                 self.pos += 2;
                 let cp = self.read_unicode_escape();
+                let ok = match char::from_u32(cp as u32) {
+                    Some(ch) => {
+                        if s.is_empty() {
+                            is_id_start(ch)
+                        } else {
+                            is_id_part(ch)
+                        }
+                    }
+                    None => false,
+                };
+                if !ok {
+                    self.fail("Invalid Unicode escape sequence");
+                }
                 push_code_point(&mut s, cp);
                 *escaped = true;
                 continue;

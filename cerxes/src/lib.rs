@@ -214,6 +214,11 @@ impl Engine {
             if u.error.is_empty() {
                 return u;
             }
+            if !sx.typescript {
+                // JavaScript that has no JSX in it: pcomp's error stands
+                // (the parser does not check every early error)
+                pcomp_error = u.error.clone();
+            }
         }
         if self.vm.pcomp {
             // TypeScript, JSX or a module: the parser writes it as

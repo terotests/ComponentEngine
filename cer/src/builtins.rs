@@ -628,7 +628,7 @@ impl Vm {
         let mut base_ctor: int = -1;
         for n in err_names {
             let proto = if k == 0 { ep } else { self.alloc(C_OBJECT, ep) };
-            let c = self.ctor(n, NF_ERROR + k, 1, proto);
+            let c = self.ctor(n, NF_ERROR + k, if n == "AggregateError" { 2 } else { 1 }, proto);
             if k == 0 {
                 base_ctor = c;
             } else {
@@ -1769,8 +1769,8 @@ impl Vm {
                 self.add_own(d, A_CONFIGURABLE, Val::Bool(false), 0);
                 return Val::Obj(d);
             }
-            if class == C_FUNCTION && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
-                let v = self.get_obj(o, atom, &Val::Obj(o));
+            if (class == C_FUNCTION || class == C_BOUND) && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
+                let v = self.function_own(o, atom);
                 if matches!(v, Val::Undef) {
                     return Val::Undef;
                 }
@@ -3466,12 +3466,12 @@ impl Vm {
                 if id != NF_O_OWNSYMBOLS && (class == C_ARRAY || class == C_STRING) {
                     keys.push(self.str_val("length"));
                 }
-                if id != NF_O_OWNSYMBOLS && class == C_FUNCTION {
+                if id != NF_O_OWNSYMBOLS && (class == C_FUNCTION || class == C_BOUND) {
                     let mut extra: Vec<Val> = Vec::new();
-                    if self.find(o, A_LENGTH) < 0 {
+                    if self.find(o, A_LENGTH) < 0 && !self.vgone(o, A_LENGTH) {
                         extra.push(self.str_val("length"));
                     }
-                    if self.find(o, A_NAME) < 0 {
+                    if self.find(o, A_NAME) < 0 && !self.vgone(o, A_NAME) {
                         extra.push(self.str_val("name"));
                     }
                     for k in keys {
@@ -3738,12 +3738,16 @@ impl Vm {
                 self.call_value(a0, t, items)
             }
             NF_REFLECT_CONSTRUCT => {
+                let nt = if args.len() > 2 { args[2].clone() } else { a0.clone() };
+                if !self.is_constructor(&a0) || !self.is_constructor(&nt) {
+                    self.throw_type("Reflect.construct: target and newTarget must be constructors");
+                    return Val::Undef;
+                }
                 let a1 = arg(&args, 1);
                 let items = self.array_like_to_vec(&a1);
                 if self.throwing {
                     return Val::Undef;
                 }
-                let nt = if args.len() > 2 { args[2].clone() } else { a0.clone() };
                 self.construct(a0, items, nt)
             }
             NF_REFLECT_HAS => {

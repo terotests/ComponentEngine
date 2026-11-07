@@ -110,6 +110,8 @@ struct RParser {
     vmode: bool,
     /// the ranges of the class escape v_char read last
     v_pending: Vec<int>,
+    /// a syntax check only (`check`): property escapes are not decoded
+    check_only: bool,
 }
 
 fn is_digit(c: int) -> bool {
@@ -508,6 +510,17 @@ impl RParser {
             self.pos += 1;
         }
         self.pos += 1;
+        if self.check_only {
+            // a syntax check: the name alone
+            if property_line(spec.as_str()).is_empty() {
+                self.fail("Invalid regular expression: invalid property name");
+                return Vec::new();
+            }
+            let mut one: Vec<int> = Vec::new();
+            one.push(0);
+            one.push(0);
+            return one;
+        }
         let r = unicode_property(spec.as_str());
         if r.is_empty() {
             self.fail("Invalid regular expression: invalid property name");
@@ -1173,7 +1186,9 @@ fn count_groups(src: &Vec<int>) -> int {
     n
 }
 
-pub fn compile(pattern: &str, flags: &str) -> Regex {
+/// The flags and the pattern read (no code yet): `re` keeps the flags and
+/// any error; the parser the pattern's nodes.
+fn parse_pattern(pattern: &str, flags: &str, check_only: bool) -> (Regex, RParser, int) {
     let mut re = Regex {
         code: Vec::new(),
         classes: Vec::new(),
@@ -1206,12 +1221,12 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
             'v' => re.unicode,
             _ => {
                 re.error = format!("Invalid regular expression flags '{}'", flags);
-                return re;
+                return (re, empty_parser(), -1);
             }
         };
         if dup {
             re.error = format!("Invalid regular expression flags '{}'", flags);
-            return re;
+            return (re, empty_parser(), -1);
         }
         match c {
             'g' => re.global = true,
@@ -1242,6 +1257,7 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
         ignore_case: re.ignore_case,
         vmode: crate::jsstr::index_of(flags, "v", 0) >= 0,
         v_pending: Vec::new(),
+        check_only: check_only,
     };
     p.total_groups = count_groups(&p.src);
     let root = p.disjunction();
@@ -1250,7 +1266,7 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
     }
     if !p.error.is_empty() {
         re.error = p.error.clone();
-        return re;
+        return (re, p, root);
     }
     // back references past the group count are octal escapes (Annex B)
     let ng = p.ngroups;
@@ -1259,7 +1275,7 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
         if p.nodes[i].kind == R_BACKREF && p.nodes[i].c > ng {
             if re.unicode {
                 re.error = String::from("Invalid regular expression: invalid escape");
-                return re;
+                return (re, p, root);
             }
             let v = p.nodes[i].c;
             // \8 and \9 are the digits themselves
@@ -1267,6 +1283,234 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
             p.nodes[i].c = if v < 8 { v } else { 48 + (v % 10) };
         }
         i += 1;
+    }
+    (re, p, root)
+}
+
+fn empty_parser() -> RParser {
+    RParser {
+        src: Vec::new(),
+        pos: 0,
+        nodes: Vec::new(),
+        classes: Vec::new(),
+        ngroups: 0,
+        names: Vec::new(),
+        name_index: Vec::new(),
+        error: String::new(),
+        unicode: false,
+        total_groups: 0,
+        ignore_case: false,
+        vmode: false,
+        v_pending: Vec::new(),
+        check_only: false,
+    }
+}
+
+/// Whether /pattern/flags is certainly valid by a quick scan: no u / v
+/// flag, plain characters, common escapes, `.`, anchors, `|`, groups
+/// `(` `(?:` `(?=` `(?!`, quantifiers after an atom and classes of plain
+/// characters and ordered ASCII ranges. False means "read it fully".
+fn simple_ok(pattern: &str, flags: &str) -> bool {
+    let mut seen = String::new();
+    for c in flags.chars() {
+        if !(c == 'g' || c == 'i' || c == 'm' || c == 's' || c == 'y' || c == 'd') || seen.contains(c) {
+            return false;
+        }
+        seen.push(c);
+    }
+    let cs: Vec<char> = pattern.chars().collect();
+    let n = cs.len();
+    let mut i: usize = 0;
+    let mut depth: int = 0;
+    // an atom precedes (a quantifier may follow)
+    let mut atom = false;
+    while i < n {
+        let c = cs[i];
+        if c == '\\' {
+            if i + 1 >= n {
+                return false;
+            }
+            let e = cs[i + 1];
+            if !(e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S' || e == 'n' || e == 'r' || e == 't' || e == '.' || e == '\\' || e == '/' || e == '-' || e == '(' || e == ')' || e == '[' || e == ']' || e == '{' || e == '}' || e == '*' || e == '+' || e == '?' || e == '|' || e == '^' || e == '$' || e == 'b' || e == 'B') {
+                return false;
+            }
+            atom = e != 'b' && e != 'B';
+            i += 2;
+            continue;
+        }
+        if c == '*' || c == '+' || c == '?' {
+            if !atom {
+                return false;
+            }
+            i += 1;
+            if i < n && cs[i] == '?' {
+                i += 1;
+            }
+            atom = false;
+            continue;
+        }
+        if c == '{' {
+            // {n}, {n,}, {n,m} with n <= m, after an atom
+            if !atom {
+                return false;
+            }
+            let mut j = i + 1;
+            let mut lo: int = 0;
+            let mut digits = 0;
+            while j < n && cs[j] >= '0' && cs[j] <= '9' && digits < 6 {
+                lo = lo * 10 + ((cs[j] as int) - 48);
+                j += 1;
+                digits += 1;
+            }
+            if digits == 0 || j >= n {
+                return false;
+            }
+            if cs[j] == ',' {
+                j += 1;
+                let mut hi: int = 0;
+                let mut hd = 0;
+                while j < n && cs[j] >= '0' && cs[j] <= '9' && hd < 6 {
+                    hi = hi * 10 + ((cs[j] as int) - 48);
+                    j += 1;
+                    hd += 1;
+                }
+                if hd > 0 && hi < lo {
+                    return false;
+                }
+            }
+            if j >= n || cs[j] != '}' {
+                return false;
+            }
+            i = j + 1;
+            if i < n && cs[i] == '?' {
+                i += 1;
+            }
+            atom = false;
+            continue;
+        }
+        if c == '(' {
+            if i + 1 < n && cs[i + 1] == '?' {
+                if i + 2 < n && (cs[i + 2] == ':' || cs[i + 2] == '=' || cs[i + 2] == '!') {
+                    i += 3;
+                } else {
+                    return false;
+                }
+            } else {
+                i += 1;
+            }
+            depth += 1;
+            atom = false;
+            continue;
+        }
+        if c == ')' {
+            if depth == 0 {
+                return false;
+            }
+            depth -= 1;
+            atom = true;
+            i += 1;
+            continue;
+        }
+        if c == '[' {
+            let mut j = i + 1;
+            if j < n && cs[j] == '^' {
+                j += 1;
+            }
+            let mut prev: int = -1;
+            while j < n && cs[j] != ']' {
+                let mut v: int = cs[j] as int;
+                if cs[j] == '\\' {
+                    if j + 1 >= n {
+                        return false;
+                    }
+                    let e = cs[j + 1];
+                    if e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S' {
+                        prev = -1;
+                        j += 2;
+                        continue;
+                    }
+                    if !(e == 'n' || e == 'r' || e == 't' || e == '.' || e == '\\' || e == '/' || e == '-' || e == '(' || e == ')' || e == '[' || e == ']' || e == '{' || e == '}' || e == '*' || e == '+' || e == '?' || e == '|' || e == '^' || e == '$') {
+                        return false;
+                    }
+                    v = if e == 'n' { 10 } else if e == 'r' { 13 } else if e == 't' { 9 } else { e as int };
+                    j += 1;
+                } else if cs[j] == '[' {
+                    return false;
+                } else if cs[j] == '-' && prev >= 0 && j + 1 < n && cs[j + 1] != ']' {
+                    // a range prev-x: plain ASCII ends, in order
+                    let x = cs[j + 1];
+                    if x == '\\' || x == '[' || (x as int) > 127 || prev > 127 || (x as int) < prev {
+                        return false;
+                    }
+                    prev = -1;
+                    j += 2;
+                    continue;
+                }
+                prev = v;
+                j += 1;
+            }
+            if j >= n {
+                return false;
+            }
+            i = j + 1;
+            atom = true;
+            continue;
+        }
+        if c == ']' || c == '}' {
+            return false;
+        }
+        atom = !(c == '|' || c == '^' || c == '$');
+        i += 1;
+    }
+    depth == 0
+}
+
+/// The error of the regular expression literal /pattern/flags ("" when it
+/// is one), without compiling it.
+pub fn check(pattern: &str, flags: &str) -> String {
+    if simple_ok(pattern, flags) {
+        return String::new();
+    }
+    check_memo(pattern, flags)
+}
+
+fn check_full(pattern: &str, flags: &str) -> String {
+    let (re, _p, _root) = parse_pattern(pattern, flags, true);
+    re.error
+}
+
+#[ranger::target(rust)]
+thread_local! {
+    static CHECKED: std::cell::RefCell<std::collections::HashMap<String, String>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Rust: a literal read before is not read again.
+#[ranger::target(rust)]
+fn check_memo(pattern: &str, flags: &str) -> String {
+    let key = format!("{}/{}", flags, pattern);
+    if let Some(e) = CHECKED.with(|m| m.borrow().get(&key).cloned()) {
+        return e;
+    }
+    let e = check_full(pattern, flags);
+    CHECKED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 4096 {
+            m.clear();
+        }
+        m.insert(key, e.clone());
+    });
+    e
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn check_memo(pattern: &str, flags: &str) -> String {
+    check_full(pattern, flags)
+}
+
+pub fn compile(pattern: &str, flags: &str) -> Regex {
+    let (mut re, p, root) = parse_pattern(pattern, flags, false);
+    if !re.error.is_empty() {
+        return re;
     }
     let mut g = Gen { code: Vec::new(), nregs: 0 };
     g.emit(I_SAVE, 0, 0);
@@ -1811,6 +2055,24 @@ fn complement(r: &Vec<int>) -> Vec<int> {
 }
 
 /// The rest of the line `key` begins in the property table ("" if none).
+/// Rust: by bytes (the table is ASCII).
+#[ranger::target(rust)]
+fn table_line(t: &str, key: &str) -> String {
+    let pat = format!("\n{} ", key);
+    match t.find(pat.as_str()) {
+        Some(i) => {
+            let start = i + pat.len();
+            let end = match t[start..].find('\n') {
+                Some(e) => start + e,
+                None => t.len(),
+            };
+            String::from(&t[start..end])
+        }
+        None => String::new(),
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 fn table_line(t: &str, key: &str) -> String {
     let pat = format!("\n{} ", key);
     let i = crate::jsstr::index_of(t, pat.as_str(), 0);
@@ -1856,8 +2118,37 @@ fn decode_ranges(s: &str) -> Vec<int> {
 /// General_Category, Script and Script_Extensions, else a General_Category
 /// value or a binary property. Empty when there is no such property.
 pub fn unicode_property(spec: &str) -> Vec<int> {
+    let line = property_line(spec);
+    if line.is_empty() {
+        return Vec::new();
+    }
+    decode_ranges(line.as_str())
+}
+
+#[ranger::target(rust)]
+thread_local! {
+    static UNI_TABLE: String = {
+        let mut t = String::from("\n");
+        t.push_str(crate::uniprops::table().as_str());
+        t
+    };
+}
+
+/// The encoded ranges of `\p{spec}` in the property table ("" if none).
+/// Rust: the table is built once.
+#[ranger::target(rust)]
+fn property_line(spec: &str) -> String {
+    UNI_TABLE.with(|t| property_line_in(t.as_str(), spec))
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn property_line(spec: &str) -> String {
     let mut t = String::from("\n");
     t.push_str(crate::uniprops::table().as_str());
+    property_line_in(t.as_str(), spec)
+}
+
+fn property_line_in(t: &str, spec: &str) -> String {
     let eq = crate::jsstr::index_of(spec, "=", 0);
     if eq >= 0 {
         let name = crate::jsstr::slice(spec, 0, eq);
@@ -1869,31 +2160,62 @@ pub fn unicode_property(spec: &str) -> Vec<int> {
         } else if name.as_str() == "Script_Extensions" || name.as_str() == "scx" {
             "X"
         } else {
-            return Vec::new();
+            return String::new();
         };
         let akind = if kind == "X" { "S" } else { kind };
-        let mut canon = table_line(t.as_str(), format!("={}{}", akind, value).as_str());
+        let mut canon = table_line(t, format!("={}{}", akind, value).as_str());
         if canon.is_empty() {
             canon = value;
         }
         if kind == "X" {
-            let x = table_line(t.as_str(), format!("X{}", canon).as_str());
+            let x = table_line(t, format!("X{}", canon).as_str());
             if !x.is_empty() {
-                return decode_ranges(x.as_str());
+                return x;
             }
         }
-        let r = table_line(t.as_str(), format!("{}{}", akind, canon).as_str());
-        return decode_ranges(r.as_str());
+        return table_line(t, format!("{}{}", akind, canon).as_str());
     }
     for kind in vec!["G", "B"] {
-        let mut canon = table_line(t.as_str(), format!("={}{}", kind, spec).as_str());
+        let mut canon = table_line(t, format!("={}{}", kind, spec).as_str());
         if canon.is_empty() {
             canon = String::from(spec);
         }
-        let r = table_line(t.as_str(), format!("{}{}", kind, canon).as_str());
+        let r = table_line(t, format!("{}{}", kind, canon).as_str());
         if !r.is_empty() {
-            return decode_ranges(r.as_str());
+            return r;
         }
     }
-    Vec::new()
+    String::new()
+}
+
+#[ranger::target(rust)]
+thread_local! {
+    static ID_TABLES: std::cell::RefCell<(Vec<int>, Vec<int>)> = std::cell::RefCell::new((Vec::new(), Vec::new()));
+}
+
+/// ID_Start (start) or ID_Continue for a non-ASCII `c`, from the Unicode
+/// property table (decoded once, on the first non-ASCII identifier char).
+#[ranger::target(rust)]
+pub fn id_wide(c: char, start: bool) -> bool {
+    ID_TABLES.with(|t| {
+        let mut t = t.borrow_mut();
+        if t.0.is_empty() {
+            t.0 = unicode_property("ID_Start");
+            t.1 = unicode_property("ID_Continue");
+        }
+        if start {
+            in_ranges(&t.0, c as int)
+        } else {
+            in_ranges(&t.1, c as int)
+        }
+    })
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn id_wide(c: char, start: bool) -> bool {
+    if start {
+        c.is_alphabetic() && c != '\u{2e2f}'
+    } else {
+        (c.is_alphanumeric() && c != '\u{2e2f}') || c == '\u{200c}' || c == '\u{200d}'
+    }
 }

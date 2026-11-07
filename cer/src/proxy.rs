@@ -32,6 +32,8 @@ pub const NF_PROXY_SETUP: int = 932;
 pub const NF_IS_PROXY: int = 933;
 pub const NF_IS_REGEXP: int = 934;
 pub const NF_IS_PROMISE: int = 935;
+pub const NF_AS_METHOD: int = 936;
+pub const NF_IS_CTOR: int = 937;
 
 impl Vm {
     pub fn is_proxy(&self, o: int) -> bool {
@@ -47,6 +49,8 @@ impl Vm {
         self.method(g, "__isProxy", NF_IS_PROXY, 1);
         self.method(g, "__isRegExp", NF_IS_REGEXP, 1);
         self.method(g, "__isPromise", NF_IS_PROMISE, 1);
+        self.method(g, "__asMethod", NF_AS_METHOD, 1);
+        self.method(g, "__isConstructor", NF_IS_CTOR, 1);
     }
 
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
@@ -261,6 +265,21 @@ impl Vm {
         if id == NF_IS_REGEXP {
             let o = obj_of(&a0);
             return Val::Bool(o >= 0 && self.objs[o as usize].class == C_REGEXP);
+        }
+        if id == NF_AS_METHOD {
+            // a built-in method the prelude defines: not a constructor and
+            // without a `prototype`, as the specification's built-ins
+            let o = obj_of(&a0);
+            if o >= 0 && self.objs[o as usize].class == C_FUNCTION {
+                let pi = self.objs[o as usize].func as usize;
+                if !self.protos[pi].class_ctor {
+                    self.protos[pi].method = true;
+                }
+            }
+            return a0;
+        }
+        if id == NF_IS_CTOR {
+            return Val::Bool(self.is_constructor(&a0));
         }
         if id == NF_IS_PROMISE {
             let o = obj_of(&a0);

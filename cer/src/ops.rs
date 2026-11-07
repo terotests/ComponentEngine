@@ -276,3 +276,14 @@ pub const OP_CASE_INT_JT: int = 150;
 /// `x OP null` or `null OP x` for local x = b / 256 and OP = b % 256 one of
 /// OP_SEQ, OP_SNE, OP_EQ, OP_NE: to a when it is false
 pub const OP_LOCAL_NULL_JF: int = 151;
+/// an async generator's `yield*`, first half: [iter, received, mode] →
+/// [iter, mode, result of iter.next / throw / return(received)], awaited
+/// next; to b with [iter, received] for a return the iterator has no
+/// method for (a: the second half's a)
+pub const OP_ASTAR_CALL: int = 152;
+/// its second half, on the awaited result: [iter, mode, result] → done:
+/// [value] to a, for a return [iter, value] to b; else [iter, value],
+/// yielded next
+pub const OP_ASTAR_DONE: int = 153;
+/// ToPropertyKey: [v] → [its key: a symbol, or a string]
+pub const OP_TO_KEY: int = 154;
