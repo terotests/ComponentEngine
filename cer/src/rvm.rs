@@ -716,7 +716,7 @@ impl Vm {
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
                                 let ev = ob.elems as usize;
-                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == *n {
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == *n && ob.pos != 3 {
                                     r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
@@ -762,7 +762,7 @@ impl Vm {
                             if ob.class == C_ARRAY {
                                 let i = n as int;
                                 let ev = ob.elems as usize;
-                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos != 2 {
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos < 2 {
                                     old = obj_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
                                     old_s = str_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
                                     val_put(&mut evec_mut(&mut self.evecs, ev).v, i as usize, val.clone());

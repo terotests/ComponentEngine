@@ -21,12 +21,35 @@ impl Vm {
         }
     }
 
+    /// HasProperty(o, k) for an index: an element in place, else the
+    /// generic lookup (element properties, prototypes, proxies).
+    pub fn has_elem_or_prop(&mut self, o: int, k: int) -> bool {
+        if self.objs[o as usize].class == C_ARRAY && (k as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, k) {
+            return true;
+        }
+        let kv = Val::Num(k as double);
+        self.has_property(o, &kv)
+    }
+
     /// The elements of an array-like `this` (arrays directly).
     fn elems_of(&mut self, o: int) -> Vec<Val> {
         if o < 0 {
             return Vec::new();
         }
         let class = self.objs[o as usize].class;
+        if class == C_ARRAY && !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() && (self.objs[o as usize].pos == 3 || self.idx_protos) {
+            // holes read through element properties and the prototypes
+            let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+            let mut out: Vec<Val> = Vec::with_capacity(n as usize);
+            let ov = Val::Obj(o);
+            let mut k: int = 0;
+            while k < n {
+                let v = self.get_index(&ov, k);
+                out.push(v);
+                k += 1;
+            }
+            return out;
+        }
         if class == C_ARRAY || class == C_ARGUMENTS {
             return self.evecs[self.objs[o as usize].elems as usize].v.clone();
         }
@@ -299,13 +322,28 @@ impl Vm {
             }
             NF_AP_INDEXOF | NF_AP_LASTINDEXOF | NF_AP_INCLUDES => {
                 let o = self.this_array(&this);
-                let items = self.elems_of(o);
-                let len = items.len() as int;
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let ov = Val::Obj(o);
+                let len = self.len_of(&ov);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let none = if id == NF_AP_INCLUDES { Val::Bool(false) } else { Val::Num(-1.0) };
+                if len == 0 {
+                    return none;
+                }
+                // a plain array: its elements read in place
+                let plain = self.objs[o as usize].class == C_ARRAY && self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() && self.objs[o as usize].pos != 3;
                 if id == NF_AP_LASTINDEXOF {
                     let mut i = if args.len() > 1 {
                         let n = to_integer(self.to_number(&a1));
+                        if self.throwing {
+                            return Val::Undef;
+                        }
                         if n < 0.0 {
-                            len + (n as int)
+                            if len as double + n < 0.0 { -1 } else { len + (n as int) }
                         } else if n >= len as double {
                             len - 1
                         } else {
@@ -315,26 +353,49 @@ impl Vm {
                         len - 1
                     };
                     while i >= 0 {
-                        if self.strict_equals(&items[i as usize], &a0) {
+                        let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                            self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
+                        } else {
+                            if !self.has_elem_or_prop(o, i) {
+                                i -= 1;
+                                continue;
+                            }
+                            self.get_index(&ov, i)
+                        };
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        if self.strict_equals(&v, &a0) {
                             return Val::Num(i as double);
                         }
                         i -= 1;
                     }
-                    return Val::Num(-1.0);
+                    return none;
                 }
                 let mut i = self.rel_index(&a1, len, 0);
+                if self.throwing {
+                    return Val::Undef;
+                }
                 while i < len {
-                    let hit = if id == NF_AP_INCLUDES { self.same_value_zero(&items[i as usize], &a0) } else { self.strict_equals(&items[i as usize], &a0) };
+                    let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                        self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
+                    } else {
+                        if id != NF_AP_INCLUDES && !self.has_elem_or_prop(o, i) {
+                            i += 1;
+                            continue;
+                        }
+                        self.get_index(&ov, i)
+                    };
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    let hit = if id == NF_AP_INCLUDES { self.same_value_zero(&v, &a0) } else { self.strict_equals(&v, &a0) };
                     if hit {
                         return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(i as double) };
                     }
                     i += 1;
                 }
-                if id == NF_AP_INCLUDES {
-                    Val::Bool(false)
-                } else {
-                    Val::Num(-1.0)
-                }
+                none
             }
             NF_AP_FOREACH | NF_AP_MAP | NF_AP_FILTER | NF_AP_SOME | NF_AP_EVERY | NF_AP_FIND | NF_AP_FINDINDEX | NF_AP_FINDLAST | NF_AP_FINDLASTINDEX | NF_AP_FLATMAP => {
                 let o = self.this_array(&this);
@@ -354,8 +415,8 @@ impl Vm {
                     // holes are skipped by forEach / map / filter / some / every
                     let present = if id == NF_AP_FIND || id == NF_AP_FINDINDEX || back {
                         true
-                    } else if self.objs[o as usize].class == C_ARRAY {
-                        (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i)
+                    } else if self.objs[o as usize].class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
+                        true
                     } else {
                         let kv = Val::Num(i as double);
                         self.has_property(o, &kv)
@@ -426,42 +487,61 @@ impl Vm {
             }
             NF_AP_REDUCE | NF_AP_REDUCERIGHT => {
                 let o = self.this_array(&this);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let ov = Val::Obj(o);
+                let len = self.len_of(&ov);
+                if self.throwing {
+                    return Val::Undef;
+                }
                 if !self.callback(&a0, "reducer") {
                     return Val::Undef;
                 }
-                let items = self.elems_of(o);
-                let len = items.len() as int;
                 let right = id == NF_AP_REDUCERIGHT;
-                // the indices present (holes skipped)
-                let mut present: Vec<int> = Vec::new();
-                let mut q: int = 0;
-                while q < len {
-                    let i = if right { len - 1 - q } else { q };
-                    if self.has_index(o, i) {
-                        present.push(i);
-                    }
-                    q += 1;
-                }
-                let mut k: usize = 0;
-                let mut acc: Val;
+                let mut k: int = if right { len - 1 } else { 0 };
+                let mut acc: Val = Val::Undef;
                 if args.len() >= 2 {
                     acc = a1.clone();
                 } else {
-                    if present.is_empty() {
+                    let mut found = false;
+                    while (right && k >= 0) || (!right && k < len) {
+                        let here = self.has_elem_or_prop(o, k);
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        let i = k;
+                        k = if right { k - 1 } else { k + 1 };
+                        if here {
+                            acc = self.get_index(&ov, i);
+                            if self.throwing {
+                                return Val::Undef;
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
                         self.throw_type("Reduce of empty array with no initial value");
                         return Val::Undef;
                     }
-                    acc = items[present[0] as usize].clone();
-                    k = 1;
                 }
-                while k < present.len() {
-                    let i = present[k];
-                    let v = items[i as usize].clone();
-                    acc = self.call_value(a0.clone(), Val::Undef, vec![acc, v, Val::Num(i as double), Val::Obj(o)]);
+                while (right && k >= 0) || (!right && k < len) {
+                    let here = self.has_elem_or_prop(o, k);
                     if self.throwing {
                         return Val::Undef;
                     }
-                    k += 1;
+                    if here {
+                        let v = self.get_index(&ov, k);
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        acc = self.call_value(a0.clone(), Val::Undef, vec![acc, v, Val::Num(k as double), ov.clone()]);
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                    }
+                    k = if right { k - 1 } else { k + 1 };
                 }
                 acc
             }

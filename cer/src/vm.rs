@@ -217,6 +217,9 @@ pub struct Vm {
     pub async_generator_function_proto: int,
     /// the prelude's CreateAsyncFromSyncIterator, for `for await`
     pub async_from_sync: int,
+    /// the prelude's generic Array.prototype methods (an array by native
+    /// id - NF_AP_PUSH), for receivers that are not plain arrays
+    pub array_generic: int,
     /// the prelude's proxy hooks (an array), -1 before
     pub proxy_hooks: int,
     /// %ThrowTypeError%
@@ -344,6 +347,9 @@ pub struct Vm {
     /// some object has a setter or a read-only property: writes that miss
     /// look along the prototype chain
     pub any_setter: bool,
+    /// an element or index property was put on Array.prototype or
+    /// Object.prototype: holes and reads past an array's end look there
+    pub idx_protos: bool,
     /// the atoms some object has as a setter or a read-only property (by
     /// atom), and whether a proxy was made: a write that adds a property
     /// looks along the chain only for these
@@ -518,6 +524,7 @@ impl Vm {
             async_generator_proto: -1,
             async_generator_function_proto: -1,
             async_from_sync: -1,
+            array_generic: -1,
             proxy_hooks: -1,
             thrower: -1,
             callee_pair: -1,
@@ -580,6 +587,7 @@ impl Vm {
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
+            idx_protos: false,
             setter_atoms: Vec::new(),
             proxy_made: false,
             rng: 42,
@@ -2359,12 +2367,26 @@ impl Vm {
             Val::Obj(o) => {
                 let ob = &self.objs[*o as usize];
                 if ob.class == C_ARRAY || ob.class == C_ARGUMENTS {
-                    if i < self.evecs[ob.elems as usize].v.len() as int {
+                    let n = self.evecs[ob.elems as usize].v.len() as int;
+                    if i < n && ((ob.pos != 3 && !self.idx_protos) || !self.is_hole(*o, i)) {
                         return self.evecs[ob.elems as usize].v[i as usize].clone();
                     }
-                    // an index far past the end is a property (set_index)
-                    if ob.class == C_ARRAY && ob.shape == 0 {
-                        return Val::Undef;
+                    if ob.class == C_ARRAY {
+                        // a hole or past the end: an own index property (an
+                        // element property, an index far past the end), then
+                        // the prototypes
+                        let has_shape = ob.shape != 0;
+                        let p = ob.proto as int;
+                        if has_shape {
+                            let a = self.index_atom(i);
+                            if self.find(*o, a) >= 0 {
+                                return self.get_obj(*o, a, v);
+                            }
+                        }
+                        if p < 0 || (!self.idx_protos && (p == self.array_proto || p == self.object_proto)) {
+                            return Val::Undef;
+                        }
+                        return self.get_index(&Val::Obj(p), i);
                     }
                 }
                 let class = ob.class;
@@ -2510,6 +2532,13 @@ impl Vm {
         let class = self.objs[o as usize].class;
         if class == C_ARRAY && atom == A_LENGTH {
             let n = self.to_number(&v);
+            if self.objs[o as usize].pos == 2 {
+                // a frozen array's length is read-only
+                if self.strict_now() {
+                    self.throw_type("Cannot assign to read only property 'length' of object '[object Array]'");
+                }
+                return;
+            }
             self.set_length(o, n);
             return;
         }
@@ -2550,6 +2579,30 @@ impl Vm {
             self.throw_range("Invalid array length");
             return;
         }
+        if len < cur && self.objs[o as usize].pos == 3 {
+            // element properties at len.. go too, down to a non-configurable one
+            let mut k = cur - 1;
+            while k >= len {
+                if self.is_hole(o, k) {
+                    let a = self.index_atom(k);
+                    let sl = self.find(o, a);
+                    if sl >= 0 {
+                        if (self.attr_at(o, sl) & P_FIXED) != 0 {
+                            self.cut_elems(o, k + 1);
+                            if self.colds[self.objs[o as usize].cold as usize].elems2.len() > (k + 1) as usize {
+                                self.cut_elems2(o, k + 1);
+                            }
+                            if self.strict_now() {
+                                self.throw_type(format!("Cannot delete property '{}' of [object Array]", k).as_str());
+                            }
+                            return;
+                        }
+                        self.remove_own(o, sl);
+                    }
+                }
+                k -= 1;
+            }
+        }
         if len < cur {
             self.cut_elems(o, len);
             if self.colds[self.objs[o as usize].cold as usize].elems2.len() > len as usize {
@@ -2588,6 +2641,9 @@ impl Vm {
 
     pub fn set_index(&mut self, o: int, i: int, v: Val) {
         let class = self.objs[o as usize].class;
+        if o == self.array_proto || o == self.object_proto {
+            self.idx_protos = true;
+        }
         if class == C_TYPED {
             self.ta_set(o, i, &v);
             return;
@@ -2601,6 +2657,14 @@ impl Vm {
                         self.throw_type(format!("Cannot assign to read only property '{}' of object '[object Array]'", i).as_str());
                     }
                     return;
+                }
+                if class == C_ARRAY && self.objs[o as usize].pos == 3 && self.is_hole(o, i) {
+                    // an element kept as a property (attributes, accessor)
+                    let a = self.index_atom(i);
+                    if self.find(o, a) >= 0 {
+                        self.set_obj(o, a, v);
+                        return;
+                    }
                 }
                 self.put_elem(o, i, v);
                 if class == C_ARRAY && !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() {
@@ -2714,6 +2778,21 @@ impl Vm {
             if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                 return true;
             }
+            if class == C_ARRAY {
+                // an own index property, then the prototypes (their elements too)
+                let at = self.index_atom(i);
+                if self.find(o, at) >= 0 {
+                    return true;
+                }
+                let p = self.objs[o as usize].proto as int;
+                if p < 0 {
+                    return false;
+                }
+                if self.objs[p as usize].class == C_ARRAY || self.objs[p as usize].class == C_PROXY {
+                    return self.has_property(p, k);
+                }
+                return self.has_atom(p, at);
+            }
             if class == C_TYPED {
                 return i < self.ta_length(o);
             }
@@ -2811,7 +2890,15 @@ impl Vm {
         }
         if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) {
             let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
-            if i < len {
+            if class == C_ARRAY && i < len && self.objs[o as usize].pos == 2 && !self.is_hole(o, i) {
+                // a frozen array's elements stay
+                if self.strict_now() {
+                    self.throw_type(format!("Cannot delete property '{}' of [object Array]", i).as_str());
+                }
+                return false;
+            }
+            let as_prop = class == C_ARRAY && i < len && self.objs[o as usize].pos == 3 && self.is_hole(o, i);
+            if i < len && !as_prop {
                 if i == len - 1 && class == C_ARGUMENTS {
                     self.pop_elem(o);
                 } else {
@@ -2821,7 +2908,9 @@ impl Vm {
                     }
                 }
             }
-            return true;
+            if !as_prop {
+                return true;
+            }
         }
         let atom = if i >= 0 { self.index_atom(i) } else { a };
         let slot = self.find(o, atom);
@@ -2850,12 +2939,18 @@ impl Vm {
         if class == C_PROXY {
             return self.proxy_keys(o, !include_hidden, symbols);
         }
+        let mixed = class == C_ARRAY && self.objs[o as usize].pos == 3;
+        let mut elem_ix: Vec<int> = Vec::new();
         if class == C_ARRAY || class == C_ARGUMENTS {
             let n = self.evecs[self.objs[o as usize].elems as usize].v.len();
             let mut i: usize = 0;
             while i < n {
                 if !self.is_hole(o, i as int) {
-                    out.push(self.string_val(format!("{}", i)));
+                    if mixed {
+                        elem_ix.push(i as int);
+                    } else {
+                        out.push(self.string_val(format!("{}", i)));
+                    }
                 }
                 i += 1;
             }
@@ -2920,9 +3015,29 @@ impl Vm {
                 i += 1;
             }
         }
-        for a in ints {
-            let v = self.atom_val(a);
-            out.push(v);
+        if mixed {
+            // elements and element properties (pos 3), in index order
+            let mut j: usize = 0;
+            for a in ints {
+                let ix = jsstr::array_index(self.atom_names[a as usize].as_str());
+                while j < elem_ix.len() && (elem_ix[j] as double) < (ix as double) {
+                    let ev = self.string_val(format!("{}", elem_ix[j]));
+                    out.push(ev);
+                    j += 1;
+                }
+                let v = self.atom_val(a);
+                out.push(v);
+            }
+            while j < elem_ix.len() {
+                let ev = self.string_val(format!("{}", elem_ix[j]));
+                out.push(ev);
+                j += 1;
+            }
+        } else {
+            for a in ints {
+                let v = self.atom_val(a);
+                out.push(v);
+            }
         }
         for a in others {
             let v = self.atom_val(a);
@@ -3881,7 +3996,11 @@ impl Vm {
                 return None;
             }
             self.objs[o as usize].func = (i + 1) as i32;
-            let v = self.evecs[self.objs[src as usize].elems as usize].v[i as usize].clone();
+            let v = if self.objs[src as usize].pos == 3 && self.is_hole(src, i) {
+                self.get_index(&Val::Obj(src), i)
+            } else {
+                self.evecs[self.objs[src as usize].elems as usize].v[i as usize].clone()
+            };
             if kind == 1 {
                 return Some(Val::Num(i as double));
             }
@@ -3912,7 +4031,7 @@ impl Vm {
 
     pub fn iterable_to_vec(&mut self, v: &Val) -> Vec<Val> {
         if let Val::Obj(o) = v {
-            if self.objs[*o as usize].class == C_ARRAY {
+            if self.objs[*o as usize].class == C_ARRAY && (self.objs[*o as usize].pos != 3 && !self.idx_protos || self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty()) {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
@@ -3942,7 +4061,7 @@ impl Vm {
     /// closed (array destructuring without a rest element).
     pub fn iterable_take(&mut self, v: &Val, n: int) -> Vec<Val> {
         if let Val::Obj(o) = v {
-            if self.objs[*o as usize].class == C_ARRAY {
+            if self.objs[*o as usize].class == C_ARRAY && (self.objs[*o as usize].pos != 3 && !self.idx_protos || self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty()) {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
@@ -4416,7 +4535,7 @@ impl Vm {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n {
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 3 {
                                     let r = self.evecs[ob.elems as usize].v[i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
@@ -4441,7 +4560,7 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 2 {
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos < 2 {
                                     old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     self.evecs[ob.elems as usize].v[i as usize] = val.clone();
@@ -4648,6 +4767,55 @@ impl Vm {
         if (i as usize) < n {
             self.put_elem2(o, i, Val::Bool(true));
         }
+    }
+
+    /// Turns array element i into an own property (index atom) so it can
+    /// carry attributes or be an accessor: the element becomes a hole, the
+    /// array is extended to cover i, and pos 3 marks the array so element
+    /// reads and writes look the property up. Returns the element's value
+    /// and whether it was present.
+    pub fn elem_to_prop(&mut self, o: int, i: int) -> (Val, bool) {
+        let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+        let mut v = Val::Undef;
+        let mut present = false;
+        if i < len {
+            if !self.is_hole(o, i) {
+                v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
+                present = true;
+                self.put_elem(o, i, Val::Undef);
+            }
+        } else {
+            let mut k = len;
+            while k <= i {
+                self.push_elem(o, Val::Undef);
+                k += 1;
+            }
+            let mut h = len;
+            while h < i {
+                self.mark_hole(o, h);
+                h += 1;
+            }
+        }
+        self.mark_hole(o, i);
+        self.objs[o as usize].pos = 3;
+        (v, present)
+    }
+
+    /// Whether an array has an element (not a hole) in its elems.
+    pub fn has_plain_elem(&self, o: int) -> bool {
+        let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+        let mut i: int = 0;
+        while i < n {
+            if !self.is_hole(o, i) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    pub fn clear_elem_hole(&mut self, o: int, i: int) {
+        self.clear_hole(o, i);
     }
 
     fn clear_hole(&mut self, o: int, i: int) {
@@ -4954,7 +5122,7 @@ impl Vm {
             Val::Undef | Val::Null => return out,
             Val::Obj(o) => {
                 let class = self.objs[*o as usize].class;
-                if class == C_ARRAY || class == C_ARGUMENTS {
+                if (class == C_ARRAY && self.objs[*o as usize].pos != 3) || class == C_ARGUMENTS {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                 }
                 let l = self.get(v, A_LENGTH);
@@ -6488,6 +6656,7 @@ impl Vm {
             self.async_generator_proto,
             self.async_generator_function_proto,
             self.async_from_sync,
+            self.array_generic,
             self.proxy_hooks,
             self.thrower,
             self.callee_pair,

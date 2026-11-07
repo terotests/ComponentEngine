@@ -291,6 +291,8 @@ pub fn snapshot(vm: &Vm) -> String {
         vm.gc_runs,
         if vm.echo { 1 } else { 0 },
         if vm.any_setter { 1 } else { 0 },
+        vm.array_generic,
+        if vm.idx_protos { 1 } else { 0 },
     ];
     put_ints(&mut b, &ints);
     put_num(&mut b, vm.bigints.len() as int);
@@ -536,7 +538,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     }
     vm.free_list = get_ints(&mut r);
     let ints = get_ints(&mut r);
-    if ints.len() != 41 {
+    if ints.len() != 43 {
         return false;
     }
     vm.global = ints[0];
@@ -584,6 +586,8 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.gc_runs = ints[38];
     vm.echo = ints[39] == 1;
     vm.any_setter = ints[40] == 1;
+    vm.array_generic = ints[41];
+    vm.idx_protos = ints[42] == 1;
     vm.bigints = HashMap::new();
     let nb = r.num();
     i = 0;

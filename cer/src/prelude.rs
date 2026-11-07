@@ -339,6 +339,278 @@ hide(Array.prototype, 'toSpliced', function toSpliced(start, skip) {
   return out;
 });
 
+// ---- Array.prototype, generic (the spec's steps): the native methods
+// call these for a receiver that is not a plain array (an array-like, a
+// proxy, an array with element properties or a species constructor)
+var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArrayGeneric;
+(function () {
+  'use strict';
+  var MAX = 9007199254740991;
+  var isArray = Array.isArray;
+  function toObj(v) { if (v === null || v === undefined) throw new TypeError('Array.prototype method called on null or undefined'); return Object(v); }
+  function toLength(v) { var n = toIntegerOrInfinity(v); return n <= 0 ? 0 : n > MAX ? MAX : n; }
+  function lenOf(o) { return toLength(o.length); }
+  function relIndex(v, len, dflt) {
+    if (v === undefined) return dflt;
+    var n = toIntegerOrInfinity(v);
+    return n < 0 ? (n === -Infinity ? 0 : Math.max(len + n, 0)) : Math.min(n, len);
+  }
+  function fnArg(f) { if (typeof f !== 'function') throw new TypeError(typeof f === 'object' && f !== null ? 'object is not a function' : String(f) + ' is not a function'); }
+  function arrayCreate(n) { if (n > 4294967295) throw new RangeError('Invalid array length'); return new Array(n); }
+  function speciesCreate(o, n) {
+    if (!isArray(o)) return arrayCreate(n);
+    var C = o.constructor;
+    if (isObject(C)) { C = C[Symbol.species]; if (C === null) C = undefined; }
+    if (C === undefined) return arrayCreate(n);
+    if (!isConstructor(C)) throw new TypeError('object.constructor[Symbol.species] is not a constructor');
+    return new C(n);
+  }
+  function put(o, k, v) { o[k] = v; }
+  function move(o, from, to) { if (from in o) o[to] = o[from]; else delete o[to]; }
+  function sameValueZero(x, y) { return x === y || (x !== x && y !== y); }
+  function str(v) { return `${v}`; }
+  var fns = [];
+  fns[0] = function push() {
+    var o = toObj(this), len = lenOf(o), n = arguments.length;
+    if (len + n > MAX) throw new TypeError('Pushing ' + n + ' elements on an array-like of length ' + len + ' is disallowed');
+    for (var i = 0; i < n; i++) o[len++] = arguments[i];
+    o.length = len; return len;
+  };
+  fns[1] = function pop() {
+    var o = toObj(this), len = lenOf(o);
+    if (len === 0) { o.length = 0; return undefined; }
+    var i = len - 1, v = o[i]; delete o[i]; o.length = i; return v;
+  };
+  fns[2] = function shift() {
+    var o = toObj(this), len = lenOf(o);
+    if (len === 0) { o.length = 0; return undefined; }
+    var first = o[0];
+    for (var k = 1; k < len; k++) move(o, k, k - 1);
+    delete o[len - 1]; o.length = len - 1; return first;
+  };
+  fns[3] = function unshift() {
+    var o = toObj(this), len = lenOf(o), n = arguments.length;
+    if (n > 0) {
+      if (len + n > MAX) throw new TypeError('Unshift would exceed the maximum array-like length');
+      for (var k = len; k > 0; k--) move(o, k - 1, k + n - 1);
+      for (var j = 0; j < n; j++) o[j] = arguments[j];
+    }
+    o.length = len + n; return len + n;
+  };
+  fns[4] = function slice(start, end) {
+    var o = toObj(this), len = lenOf(o);
+    var k = relIndex(start, len, 0), fin = relIndex(end, len, len);
+    var a = speciesCreate(o, Math.max(fin - k, 0)), n = 0;
+    for (; k < fin; k++, n++) if (k in o) createDataPropertyOrThrow(a, n, o[k]);
+    a.length = n; return a;
+  };
+  fns[5] = function splice(start, deleteCount) {
+    var o = toObj(this), len = lenOf(o), s = relIndex(start, len, 0), argc = arguments.length;
+    var dc = argc === 0 ? 0 : argc === 1 ? len - s : Math.min(Math.max(toIntegerOrInfinity(deleteCount), 0), len - s);
+    var items = argc > 2 ? argc - 2 : 0;
+    if (len + items - dc > MAX) throw new TypeError('Invalid array length');
+    var a = speciesCreate(o, dc), k;
+    for (k = 0; k < dc; k++) if (s + k in o) createDataPropertyOrThrow(a, k, o[s + k]);
+    a.length = dc;
+    if (items < dc) {
+      for (k = s; k < len - dc; k++) move(o, k + dc, k + items);
+      for (k = len; k > len - dc + items; k--) delete o[k - 1];
+    } else if (items > dc) {
+      for (k = len - dc; k > s; k--) move(o, k + dc - 1, k + items - 1);
+    }
+    for (var j = 0; j < items; j++) o[s + j] = arguments[j + 2];
+    o.length = len - dc + items; return a;
+  };
+  function spreadable(e) {
+    if (!isObject(e)) return false;
+    var sp = e[Symbol.isConcatSpreadable];
+    return sp !== undefined ? !!sp : isArray(e);
+  }
+  fns[6] = function concat() {
+    var o = toObj(this), a = speciesCreate(o, 0), n = 0;
+    for (var i = -1; i < arguments.length; i++) {
+      var e = i < 0 ? o : arguments[i];
+      if (spreadable(e)) {
+        var len = lenOf(e);
+        if (n + len > MAX) throw new TypeError('Invalid array length');
+        for (var k = 0; k < len; k++, n++) if (k in e) createDataPropertyOrThrow(a, n, e[k]);
+      } else {
+        if (n >= MAX) throw new TypeError('Invalid array length');
+        createDataPropertyOrThrow(a, n++, e);
+      }
+    }
+    a.length = n; return a;
+  };
+  fns[7] = function join(sep) {
+    var o = toObj(this), len = lenOf(o), s = sep === undefined ? ',' : str(sep), r = '';
+    for (var k = 0; k < len; k++) { if (k > 0) r += s; var e = o[k]; if (e !== undefined && e !== null) r += str(e); }
+    return r;
+  };
+  fns[8] = function reverse() {
+    var o = toObj(this), len = lenOf(o), mid = Math.floor(len / 2);
+    for (var lo = 0; lo !== mid; lo++) {
+      var up = len - lo - 1, le = lo in o, lv, uv;
+      if (le) lv = o[lo];
+      var ue = up in o;
+      if (ue) uv = o[up];
+      if (le && ue) { o[lo] = uv; o[up] = lv; }
+      else if (ue) { o[lo] = uv; delete o[up]; }
+      else if (le) { delete o[lo]; o[up] = lv; }
+    }
+    return o;
+  };
+  fns[9] = function indexOf(x, from) {
+    var o = toObj(this), len = lenOf(o); if (len === 0) return -1;
+    var n = toIntegerOrInfinity(from); if (n === Infinity) return -1;
+    for (var k = n >= 0 ? n : Math.max(len + n, 0); k < len; k++) if (k in o && o[k] === x) return k;
+    return -1;
+  };
+  fns[10] = function lastIndexOf(x, from) {
+    var o = toObj(this), len = lenOf(o); if (len === 0) return -1;
+    var n = arguments.length > 1 ? toIntegerOrInfinity(from) : len - 1; if (n === -Infinity) return -1;
+    for (var k = n >= 0 ? Math.min(n, len - 1) : len + n; k >= 0; k--) if (k in o && o[k] === x) return k;
+    return -1;
+  };
+  fns[11] = function includes(x, from) {
+    var o = toObj(this), len = lenOf(o); if (len === 0) return false;
+    var n = toIntegerOrInfinity(from); if (n === Infinity) return false;
+    for (var k = n >= 0 ? n : Math.max(len + n, 0); k < len; k++) if (sameValueZero(o[k], x)) return true;
+    return false;
+  };
+  fns[12] = function forEach(f, t) {
+    var o = toObj(this), len = lenOf(o); fnArg(f);
+    for (var k = 0; k < len; k++) if (k in o) f.call(t, o[k], k, o);
+  };
+  fns[13] = function map(f, t) {
+    var o = toObj(this), len = lenOf(o); fnArg(f);
+    var a = speciesCreate(o, len);
+    for (var k = 0; k < len; k++) if (k in o) createDataPropertyOrThrow(a, k, f.call(t, o[k], k, o));
+    return a;
+  };
+  fns[14] = function filter(f, t) {
+    var o = toObj(this), len = lenOf(o); fnArg(f);
+    var a = speciesCreate(o, 0), n = 0;
+    for (var k = 0; k < len; k++) if (k in o) { var v = o[k]; if (f.call(t, v, k, o)) createDataPropertyOrThrow(a, n++, v); }
+    return a;
+  };
+  function reduceWith(o, f, args, right) {
+    var len = lenOf(o); fnArg(f);
+    var k = right ? len - 1 : 0, step = right ? -1 : 1, acc;
+    if (args.length >= 2) acc = args[1];
+    else {
+      for (;;) {
+        if (right ? k < 0 : k >= len) throw new TypeError('Reduce of empty array with no initial value');
+        var has = k in o; if (has) acc = o[k]; k += step; if (has) break;
+      }
+    }
+    for (; right ? k >= 0 : k < len; k += step) if (k in o) acc = f(acc, o[k], k, o);
+    return acc;
+  }
+  fns[15] = function reduce(f) { return reduceWith(toObj(this), f, arguments, false); };
+  fns[16] = function reduceRight(f) { return reduceWith(toObj(this), f, arguments, true); };
+  fns[17] = function some(f, t) {
+    var o = toObj(this), len = lenOf(o); fnArg(f);
+    for (var k = 0; k < len; k++) if (k in o && f.call(t, o[k], k, o)) return true;
+    return false;
+  };
+  fns[18] = function every(f, t) {
+    var o = toObj(this), len = lenOf(o); fnArg(f);
+    for (var k = 0; k < len; k++) if (k in o && !f.call(t, o[k], k, o)) return false;
+    return true;
+  };
+  function findWith(o, f, t, back, wantIndex) {
+    var len = lenOf(o); fnArg(f);
+    for (var i = 0; i < len; i++) {
+      var k = back ? len - 1 - i : i, v = o[k];
+      if (f.call(t, v, k, o)) return wantIndex ? k : v;
+    }
+    return wantIndex ? -1 : undefined;
+  }
+  fns[19] = function find(f, t) { return findWith(toObj(this), f, t, false, false); };
+  fns[20] = function findIndex(f, t) { return findWith(toObj(this), f, t, false, true); };
+  fns[21] = function findLast(f, t) { return findWith(toObj(this), f, t, true, false); };
+  fns[22] = function findLastIndex(f, t) { return findWith(toObj(this), f, t, true, true); };
+  var plainSort = Array.prototype.sort;
+  function sortItems(items, cmp) {
+    return plainSort.call(items, cmp === undefined ? undefined : function (x, y) {
+      var v = Number(cmp(x, y)); return v !== v ? 0 : v;
+    });
+  }
+  fns[23] = function sort(cmp) {
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    var o = toObj(this), len = lenOf(o), items = [];
+    for (var k = 0; k < len; k++) if (k in o) items[items.length] = o[k];
+    sortItems(items, cmp);
+    var j = 0;
+    for (; j < items.length; j++) o[j] = items[j];
+    for (; j < len; j++) delete o[j];
+    return o;
+  };
+  fns[24] = function fill(v, start, end) {
+    var o = toObj(this), len = lenOf(o);
+    for (var k = relIndex(start, len, 0), fin = relIndex(end, len, len); k < fin; k++) o[k] = v;
+    return o;
+  };
+  function flattenInto(target, src, len, start, depth, f, t) {
+    var ti = start;
+    for (var si = 0; si < len; si++) {
+      if (!(si in src)) continue;
+      var e = src[si];
+      if (f) e = f.call(t, e, si, src);
+      if (depth > 0 && isArray(e)) ti = flattenInto(target, e, lenOf(e), ti, depth === Infinity ? Infinity : depth - 1);
+      else { if (ti >= MAX) throw new TypeError('Invalid array length'); createDataPropertyOrThrow(target, ti++, e); }
+    }
+    return ti;
+  }
+  fns[28] = function flat(depth) {
+    var o = toObj(this), len = lenOf(o), d = depth === undefined ? 1 : toIntegerOrInfinity(depth);
+    if (d < 0) d = 0;
+    var a = speciesCreate(o, 0); flattenInto(a, o, len, 0, d); return a;
+  };
+  fns[29] = function flatMap(f, t) {
+    var o = toObj(this), len = lenOf(o); fnArg(f);
+    var a = speciesCreate(o, 0); flattenInto(a, o, len, 0, 1, f, t); return a;
+  };
+  fns[30] = function toString() {
+    var o = toObj(this), j = o.join;
+    return typeof j === 'function' ? j.call(o) : Object.prototype.toString.call(o);
+  };
+  fns[31] = function at(i) {
+    var o = toObj(this), len = lenOf(o), r = toIntegerOrInfinity(i), k = r >= 0 ? r : len + r;
+    return k < 0 || k >= len ? undefined : o[k];
+  };
+  fns[32] = function copyWithin(target, start, end) {
+    var o = toObj(this), len = lenOf(o);
+    var to = relIndex(target, len, 0), from = relIndex(start, len, 0), fin = relIndex(end, len, len);
+    var count = Math.min(fin - from, len - to), dir = 1;
+    if (from < to && to < from + count) { dir = -1; from += count - 1; to += count - 1; }
+    for (; count > 0; count--, from += dir, to += dir) move(o, from, to);
+    return o;
+  };
+  fns[33] = function toReversed() {
+    var o = toObj(this), len = lenOf(o), a = arrayCreate(len);
+    for (var k = 0; k < len; k++) a[k] = o[len - k - 1];
+    return a;
+  };
+  fns[34] = function toSorted(cmp) {
+    if (cmp !== undefined && typeof cmp !== 'function') throw new TypeError('The comparison function must be either a function or undefined');
+    var o = toObj(this), len = lenOf(o), a = arrayCreate(len), items = [];
+    for (var k = 0; k < len; k++) items[k] = o[k];
+    sortItems(items, cmp);
+    for (var j = 0; j < len; j++) a[j] = items[j];
+    return a;
+  };
+  fns[35] = function with_(index, value) {
+    var o = toObj(this), len = lenOf(o), r = toIntegerOrInfinity(index), at = r >= 0 ? r : len + r;
+    if (at >= len || at < 0) throw new RangeError('Invalid index : ' + index);
+    var a = arrayCreate(len);
+    for (var k = 0; k < len; k++) a[k] = k === at ? value : o[k];
+    return a;
+  };
+  fns[36] = Array;
+  setArrayGeneric(fns);
+})();
+
 // ---- ArrayBuffer, SharedArrayBuffer, the typed arrays, DataView, Atomics:
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
@@ -1076,18 +1348,6 @@ function copyInto(A, r) {
   return A;
 }
 var AP = Array.prototype;
-['filter', 'map', 'slice', 'splice', 'flat', 'flatMap'].forEach(function (name) {
-  var nat = AP[name];
-  var f = {
-    filter: function filter(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, 0); return A === null ? r : copyInto(A, r); },
-    map: function map(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, r.length); return A === null ? r : copyInto(A, r); },
-    slice: function slice(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, r.length); return A === null ? r : copyInto(A, r); },
-    splice: function splice(a, b) { var r = nat.apply(this, arguments); var A = arraySpecies(this, r.length); return A === null ? r : copyInto(A, r); },
-    flat: function flat() { var r = nat.apply(this, arguments); var A = arraySpecies(this, 0); return A === null ? r : copyInto(A, r); },
-    flatMap: function flatMap(a) { var r = nat.apply(this, arguments); var A = arraySpecies(this, 0); return A === null ? r : copyInto(A, r); }
-  }[name];
-  hide(AP, name, setLength(f, nat.length));
-});
 // forEach and map in JavaScript: the callback runs as one of the
 // interpreter's frames, so a time slice (Engine::set_slice) can stop in it
 var fcall = Function.prototype.call;
@@ -1111,38 +1371,6 @@ hide(AP, 'map', setLength(function map(f, t) {
       if (plain) A[i] = v; else defineProperty(A, i, { value: v, writable: true, enumerable: true, configurable: true });
     }
   }
-  return A;
-}, 1));
-var nativeConcat = AP.concat;
-function spreadable(o) {
-  if (!isObject(o)) return false;
-  var s = o[Symbol.isConcatSpreadable];
-  return s !== undefined ? !!s : Array.isArray(o);
-}
-hide(AP, 'concat', setLength(function concat(x) {
-  var px = isProxy(this);
-  for (var i0 = 0; i0 < arguments.length && !px; i0++) px = isProxy(arguments[i0]);
-  if (!px) {
-    var plain = this.constructor === Array || !Array.isArray(this);
-    var marked = isObject(this) && this[Symbol.isConcatSpreadable] !== undefined;
-    for (var i = 0; i < arguments.length && !marked; i++) if (isObject(arguments[i]) && arguments[i][Symbol.isConcatSpreadable] !== undefined) marked = true;
-    if (plain && !marked) return nativeConcat.apply(this, arguments);
-  }
-  var O = Object(this);
-  var A = arraySpecies(O, 0);
-  if (A === null) A = [];
-  var n = 0, items = [O];
-  for (var j = 0; j < arguments.length; j++) items.push(arguments[j]);
-  for (var k = 0; k < items.length; k++) {
-    var E = items[k];
-    if (spreadable(E)) {
-      var len = toLength(E.length);
-      for (var m = 0; m < len; m++, n++) if (m in E) defineProperty(A, n, { value: E[m], writable: true, enumerable: true, configurable: true });
-    } else {
-      defineProperty(A, n++, { value: E, writable: true, enumerable: true, configurable: true });
-    }
-  }
-  A.length = n;
   return A;
 }, 1));
 var nativeFrom = Array.from, nativeOf = Array.of;
@@ -1569,101 +1797,6 @@ var asyncFromSyncOf = function (sync) {
   return it;
 };
 setAsyncFromSync(asyncFromSyncOf);
-
-// ---- the mutating Array methods on array-likes, as the specification
-// writes them (arrays keep the native ones)
-function genericOnly(name, len, f) {
-  var nat = AP[name];
-  var w = function () {
-    'use strict';
-    if (this === undefined || this === null) throw new TypeError('Array.prototype.' + name + ' called on null or undefined');
-    return Array.isArray(this) && !isProxy(this) ? nat.apply(this, arguments) : f.apply(Object(this), arguments);
-  };
-  defineProperty(w, 'name', { value: name, writable: false, enumerable: false, configurable: true });
-  hide(AP, name, setLength(w, len));
-}
-function moveTo(O, from, to) { if (from in O) O[to] = O[from]; else delete O[to]; }
-genericOnly('reverse', 0, function () {
-  var n = toLength(this.length);
-  for (var lo = 0, hi = n - 1; lo < hi; lo++, hi--) {
-    var hasLo = lo in this, a, b;
-    if (hasLo) a = this[lo];
-    var hasHi = hi in this;
-    if (hasHi) b = this[hi];
-    if (hasLo && hasHi) { this[lo] = b; this[hi] = a; }
-    else if (hasHi) { this[lo] = b; delete this[hi]; }
-    else if (hasLo) { delete this[lo]; this[hi] = a; }
-  }
-  return this;
-});
-genericOnly('copyWithin', 2, function (target, start, end) {
-  var n = toLength(this.length);
-  var to = relIndex(target, n, 0), from = relIndex(start, n, 0), fin = relIndex(end, n, n);
-  var count = Math.min(fin - from, n - to), dir = 1;
-  if (from < to && to < from + count) { dir = -1; from += count - 1; to += count - 1; }
-  for (; count > 0; count--, from += dir, to += dir) moveTo(this, from, to);
-  return this;
-});
-genericOnly('lastIndexOf', 1, function (x, fromIndex) {
-  var n = toLength(this.length);
-  if (n === 0) return -1;
-  var k = arguments.length > 1 ? toIntegerOrInfinity(fromIndex) : n - 1;
-  k = k >= 0 ? Math.min(k, n - 1) : n + k;
-  for (; k >= 0; k--) if (k in this && this[k] === x) return k;
-  return -1;
-});
-genericOnly('reduceRight', 1, function (f, init) {
-  var n = toLength(this.length);
-  need(f);
-  var k = n - 1, acc;
-  if (arguments.length > 1) acc = init;
-  else {
-    while (k >= 0 && !(k in this)) k--;
-    if (k < 0) throw new TypeError('Reduce of empty array with no initial value');
-    acc = this[k--];
-  }
-  for (; k >= 0; k--) if (k in this) acc = f(acc, this[k], k, this);
-  return acc;
-});
-genericOnly('shift', 0, function () {
-  var n = toLength(this.length);
-  if (n === 0) { this.length = 0; return undefined; }
-  var first = this[0];
-  for (var k = 1; k < n; k++) moveTo(this, k, k - 1);
-  delete this[n - 1];
-  this.length = n - 1;
-  return first;
-});
-genericOnly('unshift', 1, function () {
-  var n = toLength(this.length), c = arguments.length;
-  if (c > 0) {
-    for (var k = n; k > 0; k--) moveTo(this, k - 1, k + c - 1);
-    for (var j = 0; j < c; j++) this[j] = arguments[j];
-  }
-  this.length = n + c;
-  return n + c;
-});
-genericOnly('splice', 2, function (start, count) {
-  var n = toLength(this.length);
-  var s = relIndex(start, n, 0);
-  var del = arguments.length === 0 ? 0 : arguments.length === 1 ? n - s : Math.min(Math.max(toIntegerOrInfinity(count), 0), n - s);
-  var removed = arraySpecies(this, del);
-  if (removed === null) removed = [];
-  for (var i = 0; i < del; i++) if ((s + i) in this) removed[i] = this[s + i];
-  removed.length = del;
-  var items = [];
-  for (var a = 2; a < arguments.length; a++) items.push(arguments[a]);
-  var c = items.length;
-  if (c < del) {
-    for (var k = s; k < n - del; k++) moveTo(this, k + del, k + c);
-    for (var d = n; d > n - del + c; d--) delete this[d - 1];
-  } else if (c > del) {
-    for (var k2 = n - del; k2 > s; k2--) moveTo(this, k2 + del - 1, k2 + c - 1);
-  }
-  for (var j = 0; j < c; j++) this[s + j] = items[j];
-  this.length = n - del + c;
-  return removed;
-});
 
 // ---- Date string forms the built-ins lack (the time zone is UTC)
 var DP = Date.prototype;

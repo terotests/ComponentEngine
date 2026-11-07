@@ -34,6 +34,7 @@ pub const NF_IS_REGEXP: int = 934;
 pub const NF_IS_PROMISE: int = 935;
 pub const NF_AS_METHOD: int = 936;
 pub const NF_IS_CTOR: int = 937;
+pub const NF_ARRAY_GENERIC: int = 938;
 
 impl Vm {
     pub fn is_proxy(&self, o: int) -> bool {
@@ -51,6 +52,7 @@ impl Vm {
         self.method(g, "__isPromise", NF_IS_PROMISE, 1);
         self.method(g, "__asMethod", NF_AS_METHOD, 1);
         self.method(g, "__isConstructor", NF_IS_CTOR, 1);
+        self.method(g, "__setArrayGeneric", NF_ARRAY_GENERIC, 1);
     }
 
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
@@ -280,6 +282,14 @@ impl Vm {
         }
         if id == NF_IS_CTOR {
             return Val::Bool(self.is_constructor(&a0));
+        }
+        if id == NF_ARRAY_GENERIC {
+            // the prelude's generic Array.prototype methods, by native id
+            self.array_generic = obj_of(&a0);
+            if self.array_generic >= 0 {
+                self.roots.push(self.array_generic);
+            }
+            return Val::Undef;
         }
         if id == NF_IS_PROMISE {
             let o = obj_of(&a0);

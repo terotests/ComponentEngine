@@ -1403,6 +1403,11 @@ impl<'a> Cg<'a> {
             self.op(I32_NE);
             self.fail_if(pc);
             self.get(L_T5);
+            self.mem(I32_LOAD, 2, l.off_pos);
+            self.i32c(3);
+            self.op(I32_EQ);
+            self.fail_if(pc);
+            self.get(L_T5);
             self.mem(I32_LOAD, 2, l.off_elems);
             self.i32c(l.elems_size as i64);
             self.op(I32_MUL);
@@ -1663,6 +1668,12 @@ impl<'a> Cg<'a> {
         self.mem(I32_LOAD, 2, l.off_class);
         self.i32c(C_ARRAY as i64);
         self.op(I32_NE);
+        self.fail_if(pc);
+        // pos 3: elements kept as properties (attributes, accessors)
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.i32c(3);
+        self.op(I32_EQ);
         self.fail_if(pc);
         // a whole number 0 <= k < 2^31 in L_T3
         self.num(key);
@@ -6567,7 +6578,7 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
         Val::Num(x) => *x,
         _ => return false,
     };
-    if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos == 2 {
+    if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos >= 2 {
         return false;
     }
     let i = n as int;
