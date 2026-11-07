@@ -268,6 +268,19 @@ struct PCtl {
     fin: int,
     installed: bool,
     scope: int,
+    /// a `using` region (fin -2): its resource list's binding, and
+    /// whether disposing awaits
+    uname: String,
+    uasync: bool,
+}
+
+/// The statements after a `using` declaration up to the end of its list:
+/// a try whose exits dispose of the list's resources
+struct URegion {
+    list: String,
+    err: String,
+    at: int,
+    is_async: bool,
 }
 
 struct PState {
@@ -291,7 +304,7 @@ struct PState {
 }
 
 fn new_ctl(kind: int) -> PCtl {
-    PCtl { kind: kind, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), fin: -1, installed: false, scope: -1 }
+    PCtl { kind: kind, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), fin: -1, installed: false, scope: -1, uname: String::new(), uasync: false }
 }
 
 fn binary_prec(op: &str) -> int {
@@ -482,6 +495,14 @@ pub struct PComp {
     pub outer_desc: String,
     /// the scopes of direct eval calls
     eval_sites: Vec<int>,
+    /// `using` regions open, the ones of the list being read from
+    /// `using_mark`; whether the statement being read may be a `using`
+    /// declaration, and the token ending its list
+    usings: Vec<URegion>,
+    using_mark: int,
+    using_here: bool,
+    using_end: int,
+    using_count: int,
     /// sloppy direct eval code in a function: the caller's environments
     /// from the innermost to the function's, where its vars may already be
     eval_var_scopes: Vec<int>,
@@ -608,6 +629,11 @@ impl PComp {
             script_imports: false,
             outer_desc: String::new(),
             eval_sites: Vec::new(),
+            usings: Vec::new(),
+            using_mark: 0,
+            using_here: false,
+            using_end: -1,
+            using_count: 0,
             eval_var_scopes: Vec::new(),
             eval_ev: -1,
             eval_in_params: false,
@@ -2876,6 +2902,12 @@ impl PComp {
                     let saved = self.split_ctl(i);
                     self.block_at(fin);
                     self.join_ctl(saved);
+                } else if fin == -2 {
+                    let un = self.f().ctl[i as usize].uname.clone();
+                    let ua = self.f().ctl[i as usize].uasync;
+                    let saved = self.split_ctl(i);
+                    self.emit_dispose(un.as_str(), "", ua);
+                    self.join_ctl(saved);
                 }
             } else if kind == CT_ENV && !ret {
                 let s = self.f().ctl[i as usize].scope;
@@ -2906,6 +2938,8 @@ impl PComp {
     fn statement(&mut self) {
         let in_list = self.list_stmt;
         self.list_stmt = false;
+        let using_ok = self.using_here;
+        self.using_here = false;
         if !self.error.is_empty() {
             return;
         }
@@ -2936,6 +2970,18 @@ impl PComp {
         if word {
             let w = self.text();
             let ws = w.as_str();
+            if ws == "using" || ws == "await" {
+                let u = self.using_kind();
+                if u > 0 {
+                    if !in_list || !using_ok {
+                        self.fail("using declarations are not allowed here");
+                        return;
+                    }
+                    self.using_decl(u == 2);
+                    self.semicolon();
+                    return;
+                }
+            }
             if ws == "var" || ws == "const" || (ws == "let" && self.is_let_decl() && (in_list || !self.tok_nl(self.pos + 1) || !(self.peek_kind(1) == T_IDENT))) {
                 self.var_decl();
                 self.semicolon();
@@ -3171,13 +3217,180 @@ impl PComp {
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
         self.emit(PH_HOIST, s, 0);
+        let end = self.mate_of(self.pos);
         self.expect("{");
+        let (mark, saved_end) = self.using_open(end);
         while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
             self.list_stmt = true;
+            self.using_here = true;
             self.statement();
         }
+        self.using_close(mark, saved_end);
         self.expect("}");
         self.leave_block(s, saved);
+    }
+
+    /// A statement list that may hold `using` declarations starts (`end`
+    /// its closing token): the mark and the end to give `using_close`.
+    fn using_open(&mut self, end: int) -> (int, int) {
+        let mark = self.using_mark;
+        self.using_mark = self.usings.len() as int;
+        let saved_end = self.using_end;
+        self.using_end = end;
+        ((mark), saved_end)
+    }
+
+    /// The list's end: its `using` region, if one started, ends here.
+    fn using_close(&mut self, mark: int, saved_end: int) {
+        while (self.usings.len() as int) > self.using_mark {
+            let n = self.usings.len() - 1;
+            let list = self.usings[n].list.clone();
+            let err = self.usings[n].err.clone();
+            let at = self.usings[n].at;
+            let is_async = self.usings[n].is_async;
+            self.usings.remove(n);
+            self.f().ctl.pop();
+            self.op(OP_END_TRY);
+            self.emit_dispose(list.as_str(), "", is_async);
+            let j = self.emit(OP_JUMP, 0, 0);
+            self.patch(at);
+            self.emit_ref(err.as_str(), M_INIT, true);
+            self.op(OP_POP);
+            self.emit_dispose(list.as_str(), err.as_str(), is_async);
+            self.emit_ref(err.as_str(), M_LOAD, false);
+            self.op(OP_THROW);
+            self.patch(j);
+        }
+        self.using_mark = mark;
+        self.using_end = saved_end;
+    }
+
+    /// [__cerxesUsing[name], __cerxesUsing]
+    fn push_using_api(&mut self, name: &str) {
+        let g = self.atom("__cerxesUsing");
+        self.emit(OP_GET_GLOBAL, g, 0);
+        let a = self.atom(name);
+        self.emit(OP_GET_METHOD, a, 0);
+    }
+
+    /// DisposeResources of the list in binding `list`, after the error in
+    /// binding `err` ("" for none); awaited for `await using`.
+    fn emit_dispose(&mut self, list: &str, err: &str, is_async: bool) {
+        self.push_using_api(if is_async { "disposeAsync" } else { "dispose" });
+        self.emit_ref(list, M_LOAD, false);
+        if err.is_empty() {
+            self.op(OP_FALSE);
+            self.op(OP_UNDEF);
+        } else {
+            self.op(OP_TRUE);
+            self.emit_ref(err, M_LOAD, false);
+        }
+        self.emit(OP_CALL, 3, 0);
+        if is_async {
+            self.emit(OP_YIELD, 2, 0);
+            self.resume_point();
+        }
+        self.op(OP_POP);
+    }
+
+    /// At `using` / `await`: 1 for a `using` declaration, 2 for `await
+    /// using`, 0 for neither.
+    fn using_kind(&self) -> int {
+        if self.escaped() {
+            return 0;
+        }
+        let k = self.pos;
+        if self.is("using") && self.peek_kind(1) == T_IDENT && !self.tok_nl(k + 1) && !self.peek_is(1, "in") && !self.peek_is(1, "instanceof") && !self.peek_is(1, "of") {
+            return 1;
+        }
+        let k2 = k + 2;
+        if self.is("await") && (self.in_async || !self.module_path.is_empty()) && self.peek_is(1, "using") && !self.tok_nl(k + 1) && self.peek_kind(2) == T_IDENT && !self.tok_nl(k2) && !self.peek_is(2, "in") && !self.peek_is(2, "instanceof") {
+            return 2;
+        }
+        0
+    }
+
+    /// `using x = v, …` / `await using x = v, …`, no semicolon.
+    fn using_decl(&mut self, is_async: bool) {
+        if is_async {
+            self.next();
+        }
+        self.next();
+        self.using_begin(is_async);
+        let n = self.usings.len() - 1;
+        let list = self.usings[n].list.clone();
+        loop {
+            if self.kind() != T_IDENT || self.is("let") {
+                self.fail("using declarations bind identifiers");
+                return;
+            }
+            let ts = self.pos;
+            let name = self.text();
+            self.next();
+            self.skip_annotation();
+            if !self.is("=") {
+                self.fail("Missing initializer in using declaration");
+                return;
+            }
+            self.next();
+            self.push_using_api("add");
+            self.emit_ref(list.as_str(), M_LOAD, false);
+            let e = self.assign();
+            self.name_anonymous(e, name.as_str());
+            self.op(if is_async { OP_TRUE } else { OP_FALSE });
+            self.emit(OP_CALL, 3, 0);
+            let after = self.pos;
+            self.goto(ts);
+            self.pattern_target(K_CONST);
+            self.goto(after);
+            self.mark_pending();
+            if !self.eat(",") {
+                break;
+            }
+        }
+    }
+
+    /// The `using` region of the list being read, started here unless it
+    /// has: its resource list made, a try around the rest of the list.
+    fn using_begin(&mut self, is_async: bool) {
+        if (self.usings.len() as int) > self.using_mark {
+            return;
+        }
+        // disposing awaits when the list holds an `await using`
+        let mut awaits = is_async;
+        let mut k = self.pos;
+        while !awaits && k < self.using_end {
+            if self.tok_is(k, "{") || self.tok_is(k, "(") || self.tok_is(k, "[") {
+                let m = self.mate_of(k);
+                if m <= k {
+                    break;
+                }
+                k = m + 1;
+                continue;
+            }
+            if self.tok_is(k, "await") && self.tok_is(k + 1, "using") && (self.toks[(k + 2) as usize].kind as int) == T_IDENT {
+                awaits = true;
+            }
+            k += 1;
+        }
+        let n = self.using_count;
+        self.using_count += 1;
+        let list = format!("%ul{}", n);
+        let err = format!("%ue{}", n);
+        let s = self.cur_scope;
+        self.declare(s, list.as_str(), K_CATCH);
+        self.declare(s, err.as_str(), K_CATCH);
+        self.emit(OP_NEW_ARRAY, 0, 0);
+        self.emit_ref(list.as_str(), M_INIT, true);
+        self.op(OP_POP);
+        let at = self.emit(OP_TRY, 0, 0);
+        let mut c = new_ctl(CT_TRY);
+        c.fin = -2;
+        c.installed = true;
+        c.uname = list.clone();
+        c.uasync = awaits;
+        self.f().ctl.push(c);
+        self.usings.push(URegion { list: list, err: err, at: at, is_async: awaits });
     }
 
     /// `var` / `let` / `const` and its declarators, no semicolon.
@@ -3380,10 +3593,14 @@ impl PComp {
         let saved = self.cur_scope;
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
+        let (umark, uend) = self.using_open(-1);
         if !self.is(";") {
             let decl = self.is("var") || self.is("const") || self.is_let_decl();
+            let u = self.using_kind();
             self.no_in = true;
-            if decl {
+            if u > 0 {
+                self.using_decl(u == 2);
+            } else if decl {
                 self.var_decl();
             } else {
                 let e = self.expression();
@@ -3428,6 +3645,7 @@ impl PComp {
         for x in ctl.breaks.iter() {
             self.patch(*x);
         }
+        self.using_close(umark, uend);
         self.leave_block(s, saved);
     }
 
@@ -3436,9 +3654,19 @@ impl PComp {
     fn forin_statement(&mut self, head: int, kw: int, close: int, is_await: bool) {
         let of = self.tok_is(kw, "of");
         let labels = self.take_labels();
-        let decl = self.tok_is(head, "var") || self.tok_is(head, "const") || (self.tok_is(head, "let") && head + 1 < kw);
+        // `for (using x of …)` / `for (await using x of …)`
+        let using_sync = of && self.tok_is(head, "using") && kw == head + 2 && (self.toks[(head + 1) as usize].kind as int) == T_IDENT;
+        let using_async = of && self.tok_is(head, "await") && (self.in_async || !self.module_path.is_empty()) && self.tok_is(head + 1, "using") && kw == head + 3 && (self.toks[(head + 2) as usize].kind as int) == T_IDENT;
+        let using = if using_async { 2 } else if using_sync { 1 } else { 0 };
+        let decl = using > 0 || self.tok_is(head, "var") || self.tok_is(head, "const") || (self.tok_is(head, "let") && head + 1 < kw);
         let mut kind = K_VAR;
-        if decl {
+        if using > 0 {
+            kind = K_CONST;
+            if self.tok_is(kw - 1, "let") {
+                self.fail("let is disallowed as a lexically bound name");
+                return;
+            }
+        } else if decl {
             if self.tok_is(head, "const") {
                 kind = K_CONST;
             } else if self.tok_is(head, "let") {
@@ -3507,8 +3735,13 @@ impl PComp {
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
         self.for_target(head, kw, decl, kind);
+        let (umark, uend) = self.using_open(-1);
+        if decl && (self.tok_is(head, "using") || self.tok_is(head, "await")) {
+            self.for_using(head, kw);
+        }
         self.goto(body);
         self.sub_statement(false);
+        self.using_close(umark, uend);
         self.leave_block(s, saved);
         let ctl = self.f().ctl.pop().unwrap();
         let cont = self.pc();
@@ -3543,12 +3776,31 @@ impl PComp {
         self.f().ctl.pop();
     }
 
+    /// `for (using x of …)`: each step's x is a resource of the step's own
+    /// `using` region.
+    fn for_using(&mut self, head: int, kw: int) {
+        let is_async = self.tok_is(head, "await");
+        self.using_begin(is_async);
+        let n = self.usings.len() - 1;
+        let list = self.usings[n].list.clone();
+        let name = self.tok_text(kw - 1);
+        self.push_using_api("add");
+        self.emit_ref(list.as_str(), M_LOAD, false);
+        self.emit_ref(name.as_str(), M_LOAD, false);
+        self.op(if is_async { OP_TRUE } else { OP_FALSE });
+        self.emit(OP_CALL, 3, 0);
+        self.op(OP_POP);
+    }
+
     /// The loop's target, read from `head`: the value is on the stack.
     fn for_target(&mut self, head: int, kw: int, decl: bool, kind: int) {
         let back = self.pos;
         self.goto(head);
         if decl {
             self.next();
+            if self.tok_is(head, "await") {
+                self.next();
+            }
             self.pattern_target(kind);
             if self.is("=") {
                 self.goto(kw);
@@ -3586,8 +3838,13 @@ impl PComp {
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
         self.for_target(head, kw, decl, kind);
+        let (umark, uend) = self.using_open(-1);
+        if decl && (self.tok_is(head, "using") || self.tok_is(head, "await")) {
+            self.for_using(head, kw);
+        }
         self.goto(body);
         self.sub_statement(false);
+        self.using_close(umark, uend);
         self.leave_block(s, saved);
         let ctl = self.f().ctl.pop().unwrap();
         let cont = self.pc();
@@ -3668,11 +3925,15 @@ impl PComp {
                 self.op(OP_POP);
             }
             self.emit(PH_HOIST, s, 0);
+            let cend = self.mate_of(self.pos);
             self.expect("{");
+            let (cmark, csaved) = self.using_open(cend);
             while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
                 self.list_stmt = true;
+                self.using_here = true;
                 self.statement();
             }
+            self.using_close(cmark, csaved);
             self.expect("}");
             self.leave_block(s, saved);
             if fin >= 0 {
@@ -4701,7 +4962,8 @@ impl PComp {
                 if s == "-" {
                     self.op(OP_NEG);
                 } else if s == "+" {
-                    self.op(OP_TONUM);
+                    // a = 1: ToNumber (a BigInt throws); ++ / -- use a = 0, ToNumeric
+                    self.emit(OP_TONUM, 1, 0);
                 } else if s == "!" {
                     self.op(OP_NOT);
                     return ex(E_NOT);
@@ -5759,6 +6021,7 @@ impl PComp {
             self.no_in = saved_no_in;
             self.op(OP_RETURN);
         } else {
+            let body_end = self.mate_of(self.pos);
             self.expect("{");
             own_strict = self.directives();
             if own_strict {
@@ -5778,8 +6041,10 @@ impl PComp {
                 self.param_props(&props);
                 props = Vec::new();
             }
+            let (umark, uend) = self.using_open(body_end);
             while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
                 self.list_stmt = true;
+                self.using_here = true;
                 let st = self.pos;
                 self.statement();
                 if !props.is_empty() && self.tok_is(st, "super") && self.tok_is(st + 1, "(") {
@@ -5788,6 +6053,7 @@ impl PComp {
                     props = Vec::new();
                 }
             }
+            self.using_close(umark, uend);
             if !props.is_empty() {
                 self.ts_fail();
             }

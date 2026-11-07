@@ -2894,7 +2894,8 @@ impl Compiler {
         if o == "-" {
             self.op(OP_NEG);
         } else if o == "+" {
-            self.op(OP_TONUM);
+            // a = 1: ToNumber, a BigInt throws
+            self.emit(OP_TONUM, 1, 0);
         } else if o == "!" {
             self.op(OP_NOT);
         } else if o == "~" {

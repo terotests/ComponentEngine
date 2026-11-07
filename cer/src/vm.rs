@@ -5130,10 +5130,10 @@ impl Vm {
                     r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
                     hit = true;
                 } else if (tclass == C_MAP || tclass == C_SET) && !weak {
-                    if id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS {
+                    if (tclass == C_MAP && (id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS)) || (tclass == C_SET && id == crate::builtins::NF_SP_HAS) {
                         let k = self.stack[bp as usize].clone();
                         let i = self.map_find(tobj, &k);
-                        r = if id == crate::builtins::NF_MP_HAS {
+                        r = if id != crate::builtins::NF_MP_GET {
                             Val::Bool(i >= 0)
                         } else if i >= 0 {
                             self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
@@ -5141,13 +5141,13 @@ impl Vm {
                             Val::Undef
                         };
                         hit = true;
-                    } else if id == crate::builtins::NF_MP_SET && argc >= 2 {
+                    } else if tclass == C_MAP && id == crate::builtins::NF_MP_SET && argc >= 2 {
                         let k = self.stack[bp as usize].clone();
                         let v = self.stack[(bp + 1) as usize].clone();
                         self.map_set(tobj, k, v);
                         r = Val::Obj(tobj);
                         hit = true;
-                    } else if id == crate::builtins::NF_SETP_ADD {
+                    } else if tclass == C_SET && id == crate::builtins::NF_SETP_ADD {
                         let k = self.stack[bp as usize].clone();
                         self.map_set(tobj, k.clone(), k);
                         r = Val::Obj(tobj);
@@ -5825,8 +5825,12 @@ impl Vm {
                 if let Val::Num(_) = v {
                     self.stack.push(v);
                 } else if self.class_of(&v) == C_BIGINT {
-                    // ToNumeric keeps a BigInt
-                    self.stack.push(v);
+                    // ToNumeric keeps a BigInt; unary + (a = 1) is ToNumber
+                    if op.a == 1 {
+                        self.throw_type("Cannot convert a BigInt value to a number");
+                    } else {
+                        self.stack.push(v);
+                    }
                 } else {
                     let n = self.to_number(&v);
                     self.stack.push(Val::Num(n));

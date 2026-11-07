@@ -7382,7 +7382,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             if let Val::Num(x) = *vm.rget(bp, w2) {
                 vm.rset((bp + w1) as usize, Val::Num(if neg { -x } else { x }));
             } else {
-                vm.r_unary_slow(bp, fi, pc, if neg { 1 } else { 0 }, w1, w2);
+                vm.r_unary_slow(bp, fi, pc, if neg { 1 } else if sub == 2 { 4 } else { 0 }, w1, w2);
             }
         }
         R_ADD_LOCAL_POP => {
