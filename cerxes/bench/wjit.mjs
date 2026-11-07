@@ -202,7 +202,9 @@ if (opt("eval", "")) {
   const src = fs.readFileSync(opt("eval", ""), "utf8");
   for (const on of opt("only-on", "") ? [true] : opt("only-off", "") ? [false] : [false, true]) {
     const e = engine();
-    e.setJit(on, on ? Number(opt("min", "0")) : 0);
+    // --mask=a,b: debug mask bits (wjit.rs MASK), e.g. 43 turns inlining off
+    const mask = opt("mask", "") ? opt("mask", "").split(",").map(Number) : [];
+    e.setJit(on, on ? Number(opt("min", "0")) : 0, mask);
     const r = e.eval(src);
     console.log((on ? "on:  " : "off: ") + r.value + (r.output ? "\n" + r.output : ""));
     if (on) console.log(JSON.stringify(e.stats()) + "\ncompileMs " + e.jit.compileMs.toFixed(1) + " modules " + e.jit.modules + " evicted " + e.jit.evicted);
