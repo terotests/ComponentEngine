@@ -352,6 +352,8 @@ pub struct Vm {
     pub idx_protos: bool,
     /// the BigInt 0n (interned), the one falsy object; -1 until made
     pub big_zero: int,
+    /// the last class id unit::link gave private keys
+    pub priv_seq: int,
     /// the atoms some object has as a setter or a read-only property (by
     /// atom), and whether a proxy was made: a write that adds a property
     /// looks along the chain only for these
@@ -600,6 +602,7 @@ impl Vm {
             any_setter: false,
             idx_protos: false,
             big_zero: -1,
+            priv_seq: 0,
             setter_atoms: Vec::new(),
             proxy_made: false,
             rng: 42,
@@ -2737,6 +2740,85 @@ impl Vm {
     }
 
     /// Defines (or redefines) an own data property.
+    /// The object holding private key `a` for `o`: `o` itself (a field, a
+    /// static member) or, through `o`'s brand, its class's prototype (a
+    /// method, an accessor); -1 when `o` has neither.
+    pub fn priv_holder(&self, o: int, a: int, brand: int) -> int {
+        if self.find(o, a) >= 0 {
+            return o;
+        }
+        if brand >= 0 {
+            let s = self.find(o, brand);
+            if s >= 0 {
+                let home = obj_of(&self.objs[o as usize].get_slot(s as usize));
+                if home >= 0 && self.find(home, a) >= 0 {
+                    return home;
+                }
+            }
+        }
+        -1
+    }
+
+    pub fn throw_private(&mut self, a: int, what: &str) {
+        let n = self.atom_str(a);
+        let mut shown = n.clone();
+        let cut = jsstr::index_of(n.as_str(), "\u{2}", 0);
+        if cut >= 0 {
+            shown = jsstr::slice(n.as_str(), 0, cut);
+        }
+        if shown.starts_with('\u{1}') {
+            shown = jsstr::slice(shown.as_str(), 1, jsstr::len(shown.as_str()));
+        }
+        self.throw_type(format!("Cannot {} private member {} from an object whose class did not declare it", what, shown).as_str());
+    }
+
+    /// obj.#x
+    pub fn priv_get(&mut self, v: &Val, a: int, brand: int) -> Val {
+        let o = obj_of(v);
+        let h = if o >= 0 { self.priv_holder(o, a, brand) } else { -1 };
+        if h < 0 {
+            self.throw_private(a, "read");
+            return Val::Undef;
+        }
+        let slot = self.find(h, a);
+        if (self.attr_at(h, slot) & P_ACCESSOR) != 0 {
+            let pair = obj_of(&self.objs[h as usize].get_slot(slot as usize));
+            let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
+            if !self.is_callable(&g) {
+                self.throw_private(a, "read (no getter)");
+                return Val::Undef;
+            }
+            return self.call_fixed(g, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+        }
+        self.objs[h as usize].get_slot(slot as usize).clone()
+    }
+
+    /// obj.#x = val; kind 1: a method (not writable)
+    pub fn priv_set(&mut self, v: &Val, a: int, brand: int, kind: int, val: Val) {
+        let o = obj_of(v);
+        let h = if o >= 0 { self.priv_holder(o, a, brand) } else { -1 };
+        if h < 0 {
+            self.throw_private(a, "write");
+            return;
+        }
+        let slot = self.find(h, a);
+        if (self.attr_at(h, slot) & P_ACCESSOR) != 0 {
+            let pair = obj_of(&self.objs[h as usize].get_slot(slot as usize));
+            let f = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
+            if !self.is_callable(&f) {
+                self.throw_private(a, "write (no setter)");
+                return;
+            }
+            self.call_fixed(f, v.clone(), 1, val, Val::Undef, Val::Undef);
+            return;
+        }
+        if kind == 1 || h != o {
+            self.throw_private(a, "assign to a private method");
+            return;
+        }
+        self.put_slot(h, slot, val);
+    }
+
     pub fn define(&mut self, o: int, atom: int, v: Val, attr: int) {
         let slot = self.find(o, atom);
         if slot >= 0 {
@@ -5584,20 +5666,45 @@ impl Vm {
             }
             OP_GET_PRIVATE => {
                 let v = self.pop();
-                let has = match &v {
-                    Val::Obj(o) => {
-                        let k = self.key_val((op.a as int));
-                        self.has_property(*o, &k)
+                if op.b == -2 {
+                    // the AST compiler's private names: a plain lookup
+                    let has = match &v {
+                        Val::Obj(o) => {
+                            let k = self.key_val((op.a as int));
+                            self.has_property(*o, &k)
+                        }
+                        _ => false,
+                    };
+                    if !has {
+                        self.throw_private(op.a as int, "read");
+                    } else {
+                        let r = self.get(&v, (op.a as int));
+                        self.stack.push(r);
                     }
-                    _ => false,
-                };
-                if !has {
-                    let n = self.atom_str((op.a as int));
-                    let shown = if n.starts_with('\u{1}') { jsstr::slice(n.as_str(), 1, jsstr::len(n.as_str())) } else { n.clone() };
-                    self.throw_type(format!("Cannot read private member {} from an object whose class did not declare it", shown).as_str());
                 } else {
-                    let r = self.get(&v, (op.a as int));
-                    self.stack.push(r);
+                    let r = self.priv_get(&v, op.a as int, op.b as int);
+                    if !self.throwing {
+                        self.stack.push(r);
+                    }
+                }
+            }
+            OP_SET_PRIVATE => {
+                let val = self.pop();
+                let v = self.pop();
+                self.priv_set(&v, op.a as int, op.b as int, op.c as int, val.clone());
+                if !self.throwing {
+                    self.stack.push(val);
+                }
+            }
+            OP_HAS_PRIVATE => {
+                let v = self.pop();
+                self.pop();
+                let o = obj_of(&v);
+                if o < 0 {
+                    self.throw_type("Cannot use 'in' operator to search for a private field in a non-object");
+                } else {
+                    let h = self.priv_holder(o, op.a as int, op.b as int);
+                    self.stack.push(Val::Bool(h >= 0));
                 }
             }
             OP_IN => {
@@ -5879,7 +5986,23 @@ impl Vm {
                 let v = self.pop();
                 let o = obj_of(self.top());
                 if o >= 0 {
-                    self.define(o, (op.a as int), v, 0);
+                    let slot = self.find(o, op.a as int);
+                    if op.b == 1 {
+                        // a private field or brand (PrivateFieldAdd)
+                        if slot >= 0 {
+                            self.throw_private(op.a as int, "initialize twice");
+                        } else if !self.objs[o as usize].extensible {
+                            self.throw_private(op.a as int, "add to a non-extensible object");
+                        } else {
+                            self.add_own(o, (op.a as int), v, 0);
+                        }
+                    } else if (slot >= 0 && (self.attr_at(o, slot) & P_FIXED) != 0) || (slot < 0 && !self.objs[o as usize].extensible && self.objs[o as usize].class == C_OBJECT) {
+                        // CreateDataPropertyOrThrow
+                        let n = self.atom_str(op.a as int);
+                        self.throw_type(format!("Cannot define property {}, object is not extensible", n).as_str());
+                    } else {
+                        self.define(o, (op.a as int), v, 0);
+                    }
                 }
             }
             OP_DEFINE_FIELD_ELEM => {

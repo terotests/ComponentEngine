@@ -223,6 +223,8 @@ pub const OP_SET_PROP_POP: int = 131;
 /// OP_SET_ELEM likewise
 pub const OP_SET_ELEM_POP: int = 132;
 /// [obj] → [obj.<private atom a>]: a TypeError when obj does not have it
+/// obj.#x: [obj] → [v]; a the key, b the brand (-1: none, -2: the AST
+/// compiler's plain lookup), c the kind as OP_SET_PRIVATE's
 pub const OP_GET_PRIVATE: int = 133;
 /// `x += v;` as a statement on local a: [v] → []. When x and v are strings
 /// and nothing else holds x's text, v is appended in place instead of both
@@ -287,3 +289,8 @@ pub const OP_ASTAR_CALL: int = 152;
 pub const OP_ASTAR_DONE: int = 153;
 /// ToPropertyKey: [v] → [its key: a symbol, or a string]
 pub const OP_TO_KEY: int = 154;
+/// obj.#x = v: [obj, v] → [v]; a the key, b the brand (-1: none), c the
+/// kind (0 field, 1 method, 2 accessor)
+pub const OP_SET_PRIVATE: int = 155;
+/// `#x in obj`: [_, obj] → [bool]; a the key, b the brand (-1: none)
+pub const OP_HAS_PRIVATE: int = 156;

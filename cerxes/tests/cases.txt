@@ -606,3 +606,21 @@ for (let i = 0; i < 300; i++) s = [t(0n), t(1n), t(0), t({}), k()].join();
 s
 ----
 10,5,10,5,10
+
+==== js private names: fields, methods, accessors, brand checks, `in`, nested classes
+class C {
+  #x = 1; static #s = 5;
+  #m() { return this.#x; }
+  get #g() { return this.#x * 10; }
+  set #g(v) { this.#x = v; }
+  static #sm() { return C.#s; }
+  run(o) { return [o.#x, o.#m(), o.#g, C.#sm()].join(''); }
+  inc() { this.#x++; this.#x += 2; this.#g = 7; return this.#x; }
+  has(o) { return #m in o; }
+  bad(o) { try { o.#m = 1; return 'no'; } catch (e) { return e.name; } }
+  inner() { const I = class { #x = 'i'; get(o) { try { return o.#x; } catch (e) { return e.name; } } }; return [new I().get(new I()), new I().get(this)].join(); }
+}
+const c = new C();
+[c.run(c), c.inc(), c.has(c), c.has({}), c.has(Object.create(C.prototype)), c.bad(c), c.inner()].join()
+----
+11105,7,true,false,false,TypeError,i,TypeError

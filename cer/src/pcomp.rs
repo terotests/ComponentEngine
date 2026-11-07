@@ -114,6 +114,14 @@ const E_UPDATE_IDENT: int = 12;
 const E_CHAIN: int = 13;
 const E_PRIVATE: int = 14;
 const E_LITERAL: int = 15;
+/// `#x` before `in`: a its key's atom, b its brand's (-1: none)
+const E_PRIVNAME: int = 16;
+
+/// a private name's kind: a field, a method, an accessor; static added
+const PK_FIELD: int = 0;
+const PK_METHOD: int = 1;
+const PK_ACCESSOR: int = 2;
+const PK_STATIC: int = 4;
 
 /// before every sequence number
 const SEQ_NEVER: int = 2000000000;
@@ -467,6 +475,13 @@ pub struct PComp {
     /// "1"/"0" + name) and the ones its code refers to
     priv_decl: Vec<Vec<String>>,
     priv_refs: Vec<Vec<String>>,
+    /// per class being read: its id in the unit, its private names
+    /// ("\u{1}#x") and their kinds (PK_*, + PK_STATIC); a name's key is
+    /// "\u{1}#x\u{2}<id>" (unit::link renumbers the ids per engine)
+    priv_cls: Vec<int>,
+    priv_nm: Vec<Vec<String>>,
+    priv_kd: Vec<Vec<int>>,
+    priv_next: int,
     /// reading a (non-arrow) function's parameters
     in_params: bool,
     /// computed field keys so far (their bindings' names)
@@ -555,6 +570,10 @@ impl PComp {
             logic_top: false,
             priv_decl: Vec::new(),
             priv_refs: Vec::new(),
+            priv_cls: Vec::new(),
+            priv_nm: Vec::new(),
+            priv_kd: Vec::new(),
+            priv_next: 0,
             in_params: false,
             fk_count: 0,
             in_generator: false,
@@ -1002,6 +1021,91 @@ impl PComp {
             return;
         }
         self.priv_refs[n - 1].push(String::from(s));
+    }
+
+    /// The private names a class body declares (from its `{` at open),
+    /// read ahead on the tokens: references may come first.
+    fn priv_scan(&self, open: int) -> (Vec<String>, Vec<int>) {
+        let mut names: Vec<String> = Vec::new();
+        let mut kinds: Vec<int> = Vec::new();
+        let close = self.mate_of(open);
+        let mut k = open + 1;
+        while k < close {
+            if self.tok_is(k, "(") || self.tok_is(k, "[") || self.tok_is(k, "{") {
+                let m = self.mate_of(k);
+                if m <= k {
+                    break;
+                }
+                k = m + 1;
+                continue;
+            }
+            if (self.toks[k as usize].kind as int) == T_PRIVATE && !self.tok_is(k - 1, ".") && !self.tok_is(k - 1, "?.") && !self.tok_is(k + 1, "in") {
+                let mut kind = if self.tok_is(k + 1, "(") { PK_METHOD } else { PK_FIELD };
+                let mut j = k - 1;
+                while self.tok_is(j, "get") || self.tok_is(j, "set") || self.tok_is(j, "async") || self.tok_is(j, "*") {
+                    if self.tok_is(j, "get") || self.tok_is(j, "set") {
+                        kind = PK_ACCESSOR;
+                    }
+                    j -= 1;
+                }
+                if self.tok_is(j, "static") {
+                    kind += PK_STATIC;
+                }
+                names.push(format!("\u{1}#{}", self.tok_text(k)));
+                kinds.push(kind);
+            }
+            k += 1;
+        }
+        (names, kinds)
+    }
+
+    /// Private name `s` ("\u{1}#x"): its key, its brand ("" for none: a
+    /// field, a static member) and its kind; `s` itself when no class
+    /// around declares it (an early error then).
+    fn priv_lookup(&self, s: &str) -> (String, String, int) {
+        let mut d = self.priv_cls.len();
+        while d > 0 {
+            d -= 1;
+            let mut i: usize = 0;
+            while i < self.priv_nm[d].len() {
+                if self.priv_nm[d][i].as_str() == s {
+                    let kind = self.priv_kd[d][i];
+                    let id = self.priv_cls[d];
+                    let brand = if kind == PK_METHOD || kind == PK_ACCESSOR { format!("\u{1}brand\u{2}{}", id) } else { String::new() };
+                    return (format!("{}\u{2}{}", s, id), brand, kind & 3);
+                }
+                i += 1;
+            }
+        }
+        (String::from(s), String::new(), PK_FIELD)
+    }
+
+    /// `obj.#x` read: OP_GET_PRIVATE key, brand atom (-1: none), kind.
+    fn emit_priv_get(&mut self, s: &str) -> Ex {
+        self.priv_ref(s);
+        let (key, brand, kind) = self.priv_lookup(s);
+        let at = self.atom(key.as_str());
+        let bt = if brand.is_empty() { -1 } else { self.atom(brand.as_str()) };
+        self.emit3(OP_GET_PRIVATE, at, bt, kind);
+        Ex { k: E_PRIVATE, a: at, b: -1, c: -1 }
+    }
+
+    /// The get (or set) of the member read last as `last`: a private
+    /// one's or OP_GET_PROP's (OP_SET_PROP's).
+    fn emit_member_get(&mut self, last: Op) {
+        if (last.code as int) == OP_GET_PRIVATE {
+            self.emit3(OP_GET_PRIVATE, last.a as int, last.b as int, last.c as int);
+        } else {
+            self.emit(OP_GET_PROP, last.a as int, 0);
+        }
+    }
+
+    fn emit_member_set(&mut self, last: Op) {
+        if (last.code as int) == OP_GET_PRIVATE {
+            self.emit3(OP_SET_PRIVATE, last.a as int, last.b as int, last.c as int);
+        } else {
+            self.emit(OP_SET_PROP, last.a as int, 0);
+        }
     }
 
     /// A class member's private name `s`; kind 'g', 's' or 'o'.
@@ -3532,7 +3636,7 @@ impl PComp {
         if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
             self.op(OP_SWAP);
-            self.emit(OP_SET_PROP, (last.a as int), 0);
+            self.emit_member_set(last);
             self.op(OP_POP);
             return;
         }
@@ -3958,19 +4062,18 @@ impl PComp {
             return ex(E_OTHER);
         }
         if (left.k == E_MEMBER || left.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
-            let at = last.a;
             self.pop_op();
             if o == "=" {
                 self.assign();
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
                 return ex(E_OTHER);
             }
             self.op(OP_DUP);
-            self.emit(OP_GET_PROP, (at as int), 0);
+            self.emit_member_get(last);
             if logical {
                 let j = self.emit(jcode, 0, 0);
                 self.assign();
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
                 let jend = self.emit(OP_JUMP, 0, 0);
                 self.patch(j);
                 self.op(OP_SWAP);
@@ -3982,9 +4085,9 @@ impl PComp {
             let bop = &o[0..(o.as_bytes().len() - 1)];
             let code = binary_code(bop);
             self.op(code);
-            self.emit(OP_SET_PROP, (at as int), 0);
-            if o == "+=" {
-                return Ex { k: E_MEMBER_ADDASSIGN, a: (at as int), b: -1, c: -1 };
+            self.emit_member_set(last);
+            if o == "+=" && (last.code as int) == OP_GET_PROP {
+                return Ex { k: E_MEMBER_ADDASSIGN, a: (last.a as int), b: -1, c: -1 };
             }
             return ex(E_OTHER);
         }
@@ -4110,7 +4213,11 @@ impl PComp {
                 self.binary(prec + 1);
             }
             let code = binary_code(o);
-            self.op(code);
+            if code == OP_IN && left.k == E_PRIVNAME {
+                self.emit(OP_HAS_PRIVATE, left.a, left.b);
+            } else {
+                self.op(code);
+            }
             if is_compare(code) {
                 left = ex(E_CMP);
             } else if o == "+" && left.k == E_IDENT {
@@ -4142,19 +4249,18 @@ impl PComp {
             return Ex { k: E_UPDATE_IDENT, a: e.b, b: -1, c: -1 };
         }
         if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
-            let at = last.a;
             self.pop_op();
             self.op(OP_DUP);
-            self.emit(OP_GET_PROP, (at as int), 0);
+            self.emit_member_get(last);
             self.op(OP_TONUM);
             if prefix {
                 self.op(code);
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
             } else {
                 self.op(OP_DUP);
                 self.op(OP_ROT3);
                 self.op(code);
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
                 self.op(OP_POP);
             }
             return ex(E_OTHER);
@@ -4333,7 +4439,12 @@ impl PComp {
     /// The callee just read becomes a function and its `this`.
     fn callee(&mut self, e: Ex, optional: bool) {
         let last = self.last_op();
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+        if e.k == E_PRIVATE && (last.code as int) == OP_GET_PRIVATE {
+            self.pop_op();
+            self.op(OP_DUP);
+            self.emit3(OP_GET_PRIVATE, last.a as int, last.b as int, last.c as int);
+            self.op(OP_SWAP);
+        } else if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
             self.emit(OP_GET_METHOD, (last.a as int), if optional { 1 } else { 0 });
         } else if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
@@ -4450,11 +4561,8 @@ impl PComp {
                 self.next();
                 if self.kind() == T_PRIVATE {
                     let s = format!("\u{1}#{}", self.text());
-                    self.priv_ref(s.as_str());
                     self.next();
-                    let at = self.atom(s.as_str());
-                    self.emit(OP_GET_PRIVATE, at, 0);
-                    e = Ex { k: E_PRIVATE, a: at, b: -1, c: -1 };
+                    e = self.emit_priv_get(s.as_str());
                 } else {
                     let name = self.ident_name();
                     let at = self.atom(name.as_str());
@@ -4466,12 +4574,9 @@ impl PComp {
                 chain = true;
                 if self.kind() == T_PRIVATE {
                     let s = format!("\u{1}#{}", self.text());
-                    self.priv_ref(s.as_str());
                     self.next();
                     self.chain_check();
-                    let at = self.atom(s.as_str());
-                    self.emit(OP_GET_PRIVATE, at, 0);
-                    e = Ex { k: E_PRIVATE, a: at, b: -1, c: -1 };
+                    e = self.emit_priv_get(s.as_str());
                 } else if self.is("(") {
                     self.call(e, true);
                     e = ex(E_OTHER);
@@ -4611,7 +4716,12 @@ impl PComp {
 
     fn tagged(&mut self, e: Ex) {
         let last = self.last_op();
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+        if e.k == E_PRIVATE && (last.code as int) == OP_GET_PRIVATE {
+            self.pop_op();
+            self.op(OP_DUP);
+            self.emit3(OP_GET_PRIVATE, last.a as int, last.b as int, last.c as int);
+            self.op(OP_SWAP);
+        } else if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
             self.emit(OP_GET_METHOD, (last.a as int), 0);
         } else {
@@ -4709,11 +4819,19 @@ impl PComp {
             return ex(E_LITERAL);
         }
         if k == T_PRIVATE {
+            // `#x in obj`
             let s = format!("\u{1}#{}", self.text());
             self.priv_ref(s.as_str());
             self.next();
-            self.push_str(s.as_str());
-            return ex(E_LITERAL);
+            if !self.is("in") {
+                self.fail("Unexpected private name");
+                return ex(E_OTHER);
+            }
+            let (key, brand, _) = self.priv_lookup(s.as_str());
+            let at = self.atom(key.as_str());
+            let bt = if brand.is_empty() { -1 } else { self.atom(brand.as_str()) };
+            self.op(OP_UNDEF);
+            return Ex { k: E_PRIVNAME, a: at, b: bt, c: -1 };
         }
         if k == T_IDENT {
             let w = self.text();
@@ -4857,7 +4975,8 @@ impl PComp {
             *key_flags = 2;
             let s = format!("\u{1}#{}", self.text());
             self.next();
-            return s;
+            let (key, _, _) = self.priv_lookup(s.as_str());
+            return key;
         }
         if self.kind() == T_STR {
             let s = self.text();
@@ -5035,7 +5154,7 @@ impl PComp {
 
     fn method(&mut self, flags: int, name0: &str) -> int {
         // a private method's name is its `#name`
-        let bare = if name0.starts_with("\u{1}") { crate::jsstr::slice(name0, 1, crate::jsstr::len(name0)) } else { String::from(name0) };
+        let bare = priv_shown(name0);
         let name = bare.as_str();
         let full = if (flags & F_GETTER) != 0 && !name.is_empty() {
             format!("get {}", name)
@@ -5419,6 +5538,25 @@ impl PComp {
         self.in_class = true;
         self.priv_decl.push(Vec::new());
         self.priv_refs.push(Vec::new());
+        let (pnames, pkinds) = self.priv_scan(self.pos);
+        let cid = self.priv_next;
+        self.priv_next += 1;
+        let mut branded = false;
+        for k in pkinds.iter() {
+            if *k == PK_METHOD || *k == PK_ACCESSOR {
+                branded = true;
+            }
+        }
+        self.priv_cls.push(cid);
+        self.priv_nm.push(pnames);
+        self.priv_kd.push(pkinds);
+        // instances of a class with private methods carry its brand: its
+        // prototype, where those methods are, under a hidden key
+        let home = format!("%home{}", cid);
+        let mut home_b: int = -1;
+        if branded {
+            home_b = self.declare(class_scope, home.as_str(), K_LET);
+        }
         let c_at = self.emit(OP_CLOSURE, -1, 0);
         if derived {
             self.op(OP_SWAP);
@@ -5428,6 +5566,20 @@ impl PComp {
         let mut ctor: int = -1;
         let mut inst_id: int = -1;
         let mut stat_id: int = -1;
+        if branded {
+            self.op(OP_DUP);
+            self.emit_bind_init(home_b);
+            self.op(OP_POP);
+            self.mark_inited(home_b);
+            inst_id = self.resume_member_fn(inst_id, class_scope);
+            self.in_function = true;
+            self.op(OP_THIS);
+            self.emit_ref(home.as_str(), M_LOAD, false);
+            let bt = self.atom(format!("\u{1}brand\u{2}{}", cid).as_str());
+            self.emit(OP_DEFINE_FIELD, bt, 1);
+            self.op(OP_POP);
+            self.park_member_fn(inst_id);
+        }
         while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
             if self.eat(";") {
                 continue;
@@ -5532,8 +5684,9 @@ impl PComp {
                 let kname = self.prop_key(&mut kf);
                 if kf == 2 {
                     let pk = if (flags & F_GETTER) != 0 { "g" } else if (flags & F_SETTER) != 0 { "s" } else { "o" };
-                    self.priv_declare(kname.as_str(), pk, (flags & F_STATIC) != 0);
-                    if kname.as_str() == "\u{1}#constructor" {
+                    let raw = priv_raw(kname.as_str());
+                    self.priv_declare(raw.as_str(), pk, (flags & F_STATIC) != 0);
+                    if raw.as_str() == "\u{1}#constructor" {
                         self.fail("Classes may not have a private field named '#constructor'");
                         return ex(E_OTHER);
                     }
@@ -5593,13 +5746,14 @@ impl PComp {
                 self.prop_key(&mut kf)
             };
             if kf == 2 {
-                self.priv_declare(kname.as_str(), "o", st);
+                let raw = priv_raw(kname.as_str());
+                self.priv_declare(raw.as_str(), "o", st);
             }
             self.skip_annotation();
             if self.eat("=") {
                 let e = self.assign();
                 if !computed {
-                    let nm = if kname.starts_with("\u{1}") { crate::jsstr::slice(kname.as_str(), 1, crate::jsstr::len(kname.as_str())) } else { kname.clone() };
+                    let nm = priv_shown(kname.as_str());
                     self.name_anonymous(e, nm.as_str());
                 }
             } else {
@@ -5609,7 +5763,7 @@ impl PComp {
                 self.op(OP_DEFINE_FIELD_ELEM);
             } else {
                 let at = self.atom(kname.as_str());
-                self.emit(OP_DEFINE_FIELD, at, 0);
+                self.emit(OP_DEFINE_FIELD, at, if kf == 2 { 1 } else { 0 });
             }
             self.op(OP_POP);
             self.park_member_fn(id);
@@ -5617,6 +5771,9 @@ impl PComp {
         }
         self.expect("}");
         self.in_class = saved_in_class;
+        self.priv_cls.pop();
+        self.priv_nm.pop();
+        self.priv_kd.pop();
         if !self.error.is_empty() {
             return ex(E_OTHER);
         }
@@ -7129,3 +7286,21 @@ fn trim_toks(v: &mut Vec<PTok>) {
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 fn trim_toks(_v: &mut Vec<PTok>) {}
+
+/// A private key ("\u{1}#x\u{2}<id>") as its name ("\u{1}#x").
+fn priv_raw(k: &str) -> String {
+    let i = crate::jsstr::index_of(k, "\u{2}", 0);
+    if i < 0 {
+        return String::from(k);
+    }
+    crate::jsstr::slice(k, 0, i)
+}
+
+/// A name as shown: a private key's `#x`.
+fn priv_shown(k: &str) -> String {
+    let r = priv_raw(k);
+    if r.starts_with("\u{1}") {
+        return crate::jsstr::slice(r.as_str(), 1, crate::jsstr::len(r.as_str()));
+    }
+    r
+}

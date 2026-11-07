@@ -2572,7 +2572,7 @@ impl Compiler {
                 self.expr(a);
                 self.chain_check(n);
                 let at = self.atom(s.as_str());
-                self.emit(OP_GET_PRIVATE, at, 0);
+                self.emit(OP_GET_PRIVATE, at, -2);
                 return;
             }
             if self.ast.nodes[a as usize].kind == N_THIS && self.ast.nodes[n as usize].d != 1 {

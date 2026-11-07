@@ -734,9 +734,9 @@ impl Lexer {
             if self.cur() == '_' {
                 self.fail("invalid numeric separator");
             }
-            let before = exp.len();
+            let before = exp.as_bytes().len();
             self.dec_digits(&mut exp, false);
-            let digits = exp.len() - before;
+            let digits = exp.as_bytes().len() - before;
             if digits == 0 {
                 self.pos = save;
             } else {
