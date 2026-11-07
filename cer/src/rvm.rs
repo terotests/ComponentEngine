@@ -246,12 +246,16 @@ impl Vm {
     }
 
     /// R_TONUM / R_INC on a value that is not a number: kind 0 ToNumeric,
-    /// 1 minus, 2 + 1, 3 - 1.
+    /// 1 minus, 2 + 1, 3 - 1, 4 ToNumber (unary +).
     #[inline(never)]
     pub fn r_unary_slow(&mut self, bp: int, fi: usize, pc: int, kind: int, w1: int, w2: int) {
         self.frames[fi].pc = pc + 1;
         let v = self.rget(bp, w2).clone();
-        let r = if kind == 0 {
+        let r = if kind == 0 || kind == 4 {
+            if kind == 4 && self.class_of(&v) == C_BIGINT {
+                self.throw_type("Cannot convert a BigInt value to a number");
+                return;
+            }
             self.to_numeric(v)
         } else if kind == 1 {
             self.neg_val(v)
@@ -1091,7 +1095,7 @@ impl Vm {
                             let r = if neg { -*x } else { *x };
                             self.rset((bp + (w1 as int)) as usize, Val::Num(r));
                         } else {
-                            self.r_unary_slow(bp, fi, pc, if neg { 1 } else { 0 }, (w1 as int), (w2 as int));
+                            self.r_unary_slow(bp, fi, pc, if neg { 1 } else if ((w0 >> 8) & 255) == 2 { 4 } else { 0 }, (w1 as int), (w2 as int));
                         }
                     }
                     R_INC => {

@@ -30,51 +30,119 @@ if (typeof Reflect === 'object') tag(Reflect, 'Reflect');
   if (!Object.prototype.hasOwnProperty.call(e[0].prototype, Symbol.toStringTag)) tag(e[0].prototype, e[1]);
 });
 
-// ---- Set methods (ES2025): the argument is any set-like: size, has, keys
-function setLike(o) {
-  if (!isObject(o)) throw new TypeError('The argument must be a set-like object');
-  var size = Number(o.size);
-  if (size !== size) throw new TypeError("The 'size' property must be a number");
-  var has = o.has, keys = o.keys;
-  if (!isCallable(has)) throw new TypeError("The 'has' property must be a function");
-  if (!isCallable(keys)) throw new TypeError("The 'keys' property must be a function");
-  return { size: size, has: function (v) { return !!has.call(o, v); }, keys: function () { return keys.call(o); } };
-}
-function eachKey(sl, f) {
-  var it = sl.keys();
-  for (;;) { var r = it.next(); if (r.done) return; if (f(r.value) === false) { if (isCallable(it.return)) it.return(); return; } }
-}
+// ---- Set methods (ES2025), as the specification writes them: the
+// argument is any set-like (size, has, keys); the receiver's own data is
+// read through the original native methods, never its overridable ones
 var SetProto = Set.prototype;
+var setSizeGet = Object.getOwnPropertyDescriptor(SetProto, 'size').get;
+var setHasN = SetProto.has, setAddN = SetProto.add, setDelN = SetProto['delete'], setEachN = SetProto.forEach;
+function setRecord(o) {
+  if (!isObject(o)) throw new TypeError('The argument must be a set-like object');
+  var raw = o.size;
+  var num = +raw;
+  if (num !== num) throw new TypeError("The 'size' property must be a number");
+  var size = toIntegerOrInfinity(num);
+  if (size < 0) throw new RangeError("The 'size' property must not be negative");
+  var has = o.has;
+  if (!isCallable(has)) throw new TypeError("The 'has' property must be a function");
+  var keys = o.keys;
+  if (!isCallable(keys)) throw new TypeError("The 'keys' property must be a function");
+  return { obj: o, size: size, has: has, keys: keys };
+}
+function setKeys(rec) {
+  var it = rec.keys.call(rec.obj);
+  if (!isObject(it)) throw new TypeError('keys() result is not an object');
+  return { iter: it, next: it.next };
+}
+function setStep(kr) {
+  var r = kr.next.call(kr.iter);
+  if (!isObject(r)) throw new TypeError('Iterator result ' + String(r) + ' is not an object');
+  return r;
+}
+function setClose(kr) {
+  var m = kr.iter['return'];
+  if (m === undefined || m === null) return;
+  var r = m.call(kr.iter);
+  if (!isObject(r)) throw new TypeError('Iterator result ' + String(r) + ' is not an object');
+}
+function setCopy(o) {
+  var out = new Set();
+  setEachN.call(o, function (v) { setAddN.call(out, v); });
+  return out;
+}
+// each element of the receiver, as a live index walk; f returning true stops
+function setEach(o, f) {
+  var stop = false;
+  setEachN.call(o, function (v) { if (!stop && f(v) === true) stop = true; });
+  return stop;
+}
+function canon(v) { return v === 0 ? 0 : v; }
 hide(SetProto, 'union', function union(other) {
-  var o = setLike(other); var out = new Set(this);
-  eachKey(o, function (v) { out.add(v); }); return out;
+  setSizeGet.call(this);
+  var rec = setRecord(other), kr = setKeys(rec), out = setCopy(this);
+  for (;;) { var r = setStep(kr); if (r.done) break; setAddN.call(out, canon(r.value)); }
+  return out;
 });
 hide(SetProto, 'intersection', function intersection(other) {
-  var o = setLike(other); var out = new Set(); var self = this;
-  if (this.size <= o.size) { this.forEach(function (v) { if (o.has(v)) out.add(v); }); }
-  else { eachKey(o, function (v) { if (self.has(v)) out.add(v); }); }
+  var self = this, size = setSizeGet.call(this);
+  var rec = setRecord(other), out = new Set();
+  if (size <= rec.size) {
+    setEach(this, function (v) { if (rec.has.call(rec.obj, v)) setAddN.call(out, v); });
+  } else {
+    var kr = setKeys(rec);
+    for (;;) { var r = setStep(kr); if (r.done) break; var v = canon(r.value); if (setHasN.call(self, v)) setAddN.call(out, v); }
+  }
   return out;
 });
 hide(SetProto, 'difference', function difference(other) {
-  var o = setLike(other); var out = new Set(); this.forEach(function (v) { if (!o.has(v)) out.add(v); }); return out;
+  var size = setSizeGet.call(this);
+  var rec = setRecord(other), out = setCopy(this);
+  if (size <= rec.size) {
+    setEach(this, function (v) { if (rec.has.call(rec.obj, v)) setDelN.call(out, v); });
+  } else {
+    var kr = setKeys(rec);
+    for (;;) { var r = setStep(kr); if (r.done) break; setDelN.call(out, canon(r.value)); }
+  }
+  return out;
 });
 hide(SetProto, 'symmetricDifference', function symmetricDifference(other) {
-  var o = setLike(other); var out = new Set(this); var self = this;
-  eachKey(o, function (v) { if (self.has(v)) out.delete(v); else out.add(v); }); return out;
+  setSizeGet.call(this);
+  var rec = setRecord(other), kr = setKeys(rec), out = setCopy(this);
+  for (;;) {
+    var r = setStep(kr); if (r.done) break;
+    var v = canon(r.value), inThis = setHasN.call(this, v), inOut = setHasN.call(out, v);
+    if (inThis) { if (inOut) setDelN.call(out, v); }
+    else if (!inOut) setAddN.call(out, v);
+  }
+  return out;
 });
 hide(SetProto, 'isSubsetOf', function isSubsetOf(other) {
-  var o = setLike(other); if (this.size > o.size) return false; var ok = true;
-  this.forEach(function (v) { if (ok && !o.has(v)) ok = false; }); return ok;
+  var size = setSizeGet.call(this);
+  var rec = setRecord(other);
+  if (size > rec.size) return false;
+  return !setEach(this, function (v) { return !rec.has.call(rec.obj, v); });
 });
 hide(SetProto, 'isSupersetOf', function isSupersetOf(other) {
-  var o = setLike(other); if (this.size < o.size) return false; var ok = true; var self = this;
-  eachKey(o, function (v) { if (!self.has(v)) { ok = false; return false; } }); return ok;
+  var size = setSizeGet.call(this);
+  var rec = setRecord(other);
+  if (size < rec.size) return false;
+  var kr = setKeys(rec);
+  for (;;) {
+    var r = setStep(kr); if (r.done) return true;
+    if (!setHasN.call(this, r.value)) { setClose(kr); return false; }
+  }
 });
 hide(SetProto, 'isDisjointFrom', function isDisjointFrom(other) {
-  var o = setLike(other); var ok = true; var self = this;
-  if (this.size <= o.size) { this.forEach(function (v) { if (ok && o.has(v)) ok = false; }); }
-  else { eachKey(o, function (v) { if (self.has(v)) { ok = false; return false; } }); }
-  return ok;
+  var size = setSizeGet.call(this);
+  var rec = setRecord(other);
+  if (size <= rec.size) {
+    return !setEach(this, function (v) { return !!rec.has.call(rec.obj, v); });
+  }
+  var kr = setKeys(rec);
+  for (;;) {
+    var r = setStep(kr); if (r.done) return true;
+    if (setHasN.call(this, r.value)) { setClose(kr); return false; }
+  }
 });
 
 // ---- Iterator (ES2025): the prototype every built-in iterator shares, and
@@ -268,10 +336,10 @@ function ignoringSetter(p) {
 }
 defineProperty(IteratorProto, Symbol.toStringTag, { get: asMethod(function () { return 'Iterator'; }), set: asMethod(ignoringSetter(Symbol.toStringTag)), enumerable: false, configurable: true });
 defineProperty(IteratorProto, 'constructor', { get: asMethod(function () { return Iterator; }), set: asMethod(ignoringSetter('constructor')), enumerable: false, configurable: true });
-if (typeof Symbol.dispose === 'symbol') hide(IteratorProto, Symbol.dispose, function () {
-  var m = this.return; if (m !== undefined && m !== null) { if (!isCallable(m)) throw new TypeError('return is not a function'); m.call(this); }
+if (typeof Symbol.dispose === 'symbol') hide(IteratorProto, Symbol.dispose, defineProperty(function () {
+  var m = this.return; if (m !== undefined && m !== null) m.call(this);
   return undefined;
-});
+}, 'name', { value: '[Symbol.dispose]', configurable: true }));
 var WrapProto = create(IteratorProto);
 var wrapSlots = new WeakMap();
 function wrapSlot(w) {
@@ -286,6 +354,209 @@ hide(WrapProto, 'return', function () {
   if (!isCallable(m)) throw new TypeError('return is not a function');
   return m.call(s.iter);
 });
+// ---- Iterator.prototype.includes / chunks / windows / join (proposals)
+function intArg(o, n, name, lo, hi) {
+  if (typeof n !== 'number' || n !== n) closeThrow(o, new TypeError(name + ' must be a number'));
+  if (n === Infinity || n === -Infinity || Math.floor(n) !== n) closeThrow(o, new TypeError(name + ' must be an integer'));
+  if (n < lo || n > hi) closeThrow(o, new RangeError(name + ' is out of range'));
+  return n;
+}
+hide(IteratorProto, 'includes', function includes(searchElement) {
+  var o = thisIter(this, 'includes');
+  var skip = arguments.length > 1 ? arguments[1] : undefined, toSkip = 0;
+  if (skip !== undefined) {
+    if (skip === Infinity) toSkip = Infinity; else if (skip === -Infinity) closeThrow(o, new RangeError('skippedElements is out of range'));
+    else toSkip = intArg(o, skip, 'skippedElements', 0, 9007199254740991);
+  }
+  var rec = iterDirect(o), skipped = 0;
+  for (;;) {
+    var r = stepRec(rec); if (r.done) return false;
+    var v = r.value;
+    if (skipped < toSkip) { skipped++; continue; }
+    if (v === searchElement || (v !== v && searchElement !== searchElement)) { closeNormal(o); return true; }
+  }
+});
+hide(IteratorProto, 'chunks', function chunks(chunkSize) {
+  var o = thisIter(this, 'chunks');
+  var size = intArg(o, chunkSize, 'chunkSize', 1, 4294967295);
+  var rec = iterDirect(o);
+  return makeHelper([o], (function* () {
+    var buf = [];
+    for (;;) {
+      var r = stepRec(rec);
+      if (r.done) { if (buf.length > 0) yield buf; return; }
+      buf.push(r.value);
+      if (buf.length === size) { var out = buf; buf = []; yield* yieldOrClose(out, o); }
+    }
+  })());
+});
+hide(IteratorProto, 'windows', function windows(windowSize) {
+  var o = thisIter(this, 'windows');
+  var size = intArg(o, windowSize, 'windowSize', 1, 4294967295);
+  var undersized = arguments.length > 1 ? arguments[1] : undefined;
+  if (undersized === undefined) undersized = 'only-full';
+  if (undersized !== 'only-full' && undersized !== 'allow-partial') closeThrow(o, new TypeError('undersized must be "only-full" or "allow-partial"'));
+  var rec = iterDirect(o);
+  return makeHelper([o], (function* () {
+    var buf = [];
+    for (;;) {
+      var r = stepRec(rec);
+      if (r.done) { if (undersized === 'allow-partial' && buf.length > 0 && buf.length < size) yield buf.slice(); return; }
+      buf.push(r.value);
+      if (buf.length > size) buf.shift();
+      if (buf.length === size) yield* yieldOrClose(buf.slice(), o);
+    }
+  })());
+});
+hide(IteratorProto, 'join', function join(separator) {
+  var o = thisIter(this, 'join');
+  var sep = ',';
+  if (separator !== undefined) { try { sep = String(separator); if (typeof separator === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string'); } catch (e) { closeThrow(o, e); } }
+  var rec = iterDirect(o), out = '', first = true;
+  for (;;) {
+    var r = stepRec(rec); if (r.done) return out;
+    var v = r.value, t;
+    if (v === undefined || v === null) t = '';
+    else { try { if (typeof v === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string'); t = String(v); } catch (e) { closeThrow(o, e); } }
+    out = first ? t : out + sep + t;
+    first = false;
+  }
+});
+// ---- Iterator.zip / zipKeyed (joint iteration)
+// IteratorCloseAll: the records' iterators, last first; a throw stands
+function closeAll(recs, thrown, err) {
+  for (var i = recs.length - 1; i >= 0; i--) {
+    var o = recs[i].iter;
+    if (thrown) { try { var m = o.return; if (m !== undefined && m !== null) m.call(o); } catch (x) {} }
+    else { try { closeNormal(o); } catch (x) { thrown = true; err = x; } }
+  }
+  if (thrown) throw err;
+}
+function dropRec(list, rec) { var i = list.indexOf(rec); if (i >= 0) list.splice(i, 1); }
+function getIterRec(o) {
+  var f = o[Symbol.iterator];
+  if (!isCallable(f)) throw new TypeError(String(f) + ' is not a function');
+  var it = f.call(o);
+  if (!isObject(it)) throw new TypeError(String(it) + ' is not an object');
+  return iterDirect(it);
+}
+function zipMode(options) {
+  if (options === undefined) return { mode: 'shortest', opts: undefined };
+  if (!isObject(options)) throw new TypeError('options must be an object');
+  var mode = options.mode;
+  if (mode === undefined) mode = 'shortest';
+  if (mode !== 'shortest' && mode !== 'longest' && mode !== 'strict') throw new TypeError('mode must be "shortest", "longest" or "strict"');
+  var pad;
+  if (mode === 'longest') {
+    pad = options.padding;
+    if (pad !== undefined && !isObject(pad)) throw new TypeError('padding must be an object');
+  }
+  return { mode: mode, pad: pad };
+}
+function zipCore(iters, mode, padding, finish) {
+  var open = iters.slice();
+  var n = iters.length;
+  var gen = (function* () {
+    if (n === 0) return;
+    var cur = iters.slice();
+    for (;;) {
+      var results = [];
+      for (var i = 0; i < n; i++) {
+        var rec = cur[i], v, done = false;
+        if (rec === null) v = padding[i];
+        else {
+          try { var r = stepRec(rec); done = !!r.done; if (!done) v = r.value; }
+          catch (e) { dropRec(open, rec); closeAll(open, true, e); }
+          if (done) {
+            dropRec(open, rec);
+            if (mode === 'shortest') { closeAll(open, false); return; }
+            if (mode === 'strict') {
+              if (i !== 0) closeAll(open, true, new TypeError('Iterator.zip: the iterators have different lengths'));
+              for (var k = 1; k < n; k++) {
+                var o2 = cur[k], d2 = false;
+                try { d2 = !!stepRec(o2).done; } catch (e) { dropRec(open, o2); closeAll(open, true, e); }
+                if (!d2) closeAll(open, true, new TypeError('Iterator.zip: the iterators have different lengths'));
+                dropRec(open, o2);
+              }
+              return;
+            }
+            if (open.length === 0) return;
+            cur[i] = null; v = padding[i];
+          }
+        }
+        results.push(v);
+      }
+      var out = finish(results);
+      var resumed = false;
+      try { yield out; resumed = true; } finally { if (!resumed) closeAll(open, false); }
+    }
+  })();
+  return makeHelper(iters.slice().reverse().map(function (r) { return r.iter; }), gen);
+}
+hide(Iterator, 'zip', function zip(iterables, options) {
+  if (!isObject(iterables)) throw new TypeError('Iterator.zip requires an object');
+  var m = zipMode(options);
+  var iters = [];
+  var input = getIterRec(iterables);
+  for (;;) {
+    var r, v;
+    try { r = stepRec(input); if (r.done) break; v = r.value; } catch (e) { closeAll(iters, true, e); }
+    var it;
+    try { it = flattenable(v, false); } catch (e) { closeAll([input].concat(iters), true, e); }
+    iters.push(it);
+  }
+  var n = iters.length, padding = [];
+  if (m.mode === 'longest') {
+    if (m.pad === undefined) { for (var i = 0; i < n; i++) padding.push(undefined); }
+    else {
+      var pit;
+      try { pit = getIterRec(m.pad); } catch (e) { closeAll(iters, true, e); }
+      var using = true;
+      for (var j = 0; j < n; j++) {
+        if (using) {
+          var pr;
+          try { pr = stepRec(pit); var pd = !!pr.done; var pv = pd ? undefined : pr.value; } catch (e) { closeAll(iters, true, e); }
+          if (pd) using = false; else padding.push(pv);
+        }
+        if (!using) padding.push(undefined);
+      }
+      if (using) { try { closeNormal(pit.iter); } catch (e) { closeAll(iters, true, e); } }
+    }
+  }
+  return zipCore(iters, m.mode, padding, function (results) { return results; });
+});
+defineProperty(Iterator.zip, 'length', { value: 1, configurable: true });
+hide(Iterator, 'zipKeyed', function zipKeyed(iterables, options) {
+  if (!isObject(iterables)) throw new TypeError('Iterator.zipKeyed requires an object');
+  var m = zipMode(options);
+  var iters = [], keys = [];
+  var all = Reflect.ownKeys(iterables);
+  for (var i = 0; i < all.length; i++) {
+    var key = all[i], value;
+    try {
+      var desc = Reflect.getOwnPropertyDescriptor(iterables, key);
+      if (desc === undefined || !desc.enumerable) continue;
+      value = iterables[key];
+      if (value === undefined) continue;
+      var it = flattenable(value, false);
+    } catch (e) { closeAll(iters, true, e); }
+    keys.push(key); iters.push(it);
+  }
+  var padding = [];
+  if (m.mode === 'longest') {
+    for (var j = 0; j < keys.length; j++) {
+      var pv;
+      if (m.pad !== undefined) { try { pv = m.pad[keys[j]]; } catch (e) { closeAll(iters, true, e); } }
+      padding.push(pv);
+    }
+  }
+  return zipCore(iters, m.mode, padding, function (results) {
+    var o = create(null);
+    for (var k = 0; k < keys.length; k++) defineProperty(o, keys[k], { value: results[k], writable: true, enumerable: true, configurable: true });
+    return o;
+  });
+});
+defineProperty(Iterator.zipKeyed, 'length', { value: 1, configurable: true });
 hide(Iterator, 'from', function from(o) {
   var rec = flattenable(o, true);
   if (rec.iter instanceof Iterator) return rec.iter;
@@ -455,6 +726,46 @@ hide(Promise, 'any', function any(items) {
     if (--left === 0) reject(new AggregateError(errs, 'All promises were rejected'));
   });
 });
+// Promise.allKeyed / allSettledKeyed (Await Dictionary): an object's own
+// enumerable values awaited, the result a null-prototype object of the keys
+function awaitKeyed(C, promises, settled) {
+  var cap = capability(C);
+  try {
+    var resolveFn = C.resolve; if (!isCallable(resolveFn)) throw new TypeError('Promise.resolve is not a function');
+    if (!isObject(promises)) throw new TypeError('Promise.' + (settled ? 'allSettledKeyed' : 'allKeyed') + ' requires an object');
+    var allKeys = Reflect.ownKeys(promises);
+    var keys = [], values = [], left = 1;
+    var finish = function () {
+      var out = create(null);
+      for (var j = 0; j < keys.length; j++) defineProperty(out, keys[j], { value: values[j], writable: true, enumerable: true, configurable: true });
+      cap.resolve(out);
+    };
+    for (var i = 0; i < allKeys.length; i++) {
+      var key = allKeys[i];
+      var desc = Reflect.getOwnPropertyDescriptor(promises, key);
+      if (desc === undefined || !desc.enumerable) continue;
+      var value = promises[key];
+      var k = keys.length;
+      keys.push(key); values.push(undefined);
+      left++;
+      var next = resolveFn.call(C, value);
+      (function (k) {
+        var called = false;
+        var onOk = settled
+          ? (x) => { if (called) return; called = true; var r = create(Object.prototype); r.status = 'fulfilled'; r.value = x; values[k] = r; if (--left === 0) finish(); }
+          : (x) => { if (called) return; called = true; values[k] = x; if (--left === 0) finish(); };
+        var onErr = settled
+          ? (e) => { if (called) return; called = true; var r = create(Object.prototype); r.status = 'rejected'; r.reason = e; values[k] = r; if (--left === 0) finish(); }
+          : cap.reject;
+        next.then(onOk, onErr);
+      })(k);
+    }
+    if (--left === 0) finish();
+  } catch (e) { cap.reject(e); }
+  return cap.promise;
+}
+hide(Promise, 'allKeyed', function allKeyed(promises) { return awaitKeyed(this, promises, false); });
+hide(Promise, 'allSettledKeyed', function allSettledKeyed(promises) { return awaitKeyed(this, promises, true); });
 hide(Promise, 'withResolvers', function withResolvers() {
   var out = {};
   out.promise = new this(function (res, rej) { out.resolve = res; out.reject = rej; });
@@ -2350,22 +2661,226 @@ hide(DP, 'toLocaleTimeString', function toLocaleTimeString(locales, options) { r
 
 // ---- WeakRef / FinalizationRegistry (ES2021): the collector never runs
 // a callback, so a held object simply stays
+(function () {
+function canHold(v) { return isObject(v) || (typeof v === 'symbol' && Symbol.keyFor(v) === undefined); }
+// OrdinaryCreateFromConstructor: newTarget.prototype, or dflt when that is
+// not an object
+function fromCtor(self, nt, dflt) {
+  var P = nt.prototype;
+  if (!isObject(P)) P = dflt;
+  return getPrototypeOf(self) === P ? self : create(P);
+}
+var refSlots = new WeakMap(), regSlots = new WeakMap();
 function WeakRef(target) {
   if (new.target === undefined) throw new TypeError("Constructor WeakRef requires 'new'");
-  if (!isObject(target)) throw new TypeError('WeakRef: invalid target');
-  var t = target;
-  hide(this, 'deref', function deref() { return t; });
+  if (!canHold(target)) throw new TypeError('WeakRef: invalid target');
+  var self = fromCtor(this, new.target, WeakRef.prototype);
+  refSlots.set(self, { t: target });
+  return self;
 }
+defineProperty(WeakRef, 'prototype', { writable: false });
+hide(WeakRef.prototype, 'deref', function deref() {
+  var s = isObject(this) ? refSlots.get(this) : undefined;
+  if (s === undefined) throw new TypeError('WeakRef.prototype.deref called on incompatible receiver');
+  return s.t;
+});
 tag(WeakRef.prototype, 'WeakRef');
 hide(globalThis, 'WeakRef', WeakRef);
 function FinalizationRegistry(cleanup) {
   if (new.target === undefined) throw new TypeError("Constructor FinalizationRegistry requires 'new'");
   if (!isCallable(cleanup)) throw new TypeError('FinalizationRegistry: cleanup must be callable');
+  var self = fromCtor(this, new.target, FinalizationRegistry.prototype);
+  regSlots.set(self, { cleanup: cleanup, cells: [] });
+  return self;
 }
-hide(FinalizationRegistry.prototype, 'register', function register(target, held, token) {
-  if (!isObject(target)) throw new TypeError('FinalizationRegistry.prototype.register: invalid target');
+defineProperty(FinalizationRegistry, 'prototype', { writable: false });
+function regSlot(o, name) {
+  var s = isObject(o) ? regSlots.get(o) : undefined;
+  if (s === undefined) throw new TypeError('FinalizationRegistry.prototype.' + name + ' called on incompatible receiver');
+  return s;
+}
+hide(FinalizationRegistry.prototype, 'register', function register(target, heldValue) {
+  var s = regSlot(this, 'register');
+  var token = arguments.length > 2 ? arguments[2] : undefined;
+  if (!canHold(target)) throw new TypeError('FinalizationRegistry.prototype.register: invalid target');
+  if (target === heldValue) throw new TypeError('FinalizationRegistry.prototype.register: target and holdings must not be the same');
+  if (token !== undefined && !canHold(token)) throw new TypeError('FinalizationRegistry.prototype.register: invalid unregister token');
+  s.cells.push({ target: target, held: heldValue, token: token });
 });
-hide(FinalizationRegistry.prototype, 'unregister', function unregister(token) { return false; });
+hide(FinalizationRegistry.prototype, 'unregister', function unregister(unregisterToken) {
+  var s = regSlot(this, 'unregister');
+  if (!canHold(unregisterToken)) throw new TypeError('FinalizationRegistry.prototype.unregister: invalid unregister token');
+  var removed = false, keep = [];
+  for (var i = 0; i < s.cells.length; i++) {
+    if (s.cells[i].token !== undefined && s.cells[i].token === unregisterToken) removed = true;
+    else keep.push(s.cells[i]);
+  }
+  s.cells = keep;
+  return removed;
+});
 tag(FinalizationRegistry.prototype, 'FinalizationRegistry');
 hide(globalThis, 'FinalizationRegistry', FinalizationRegistry);
+})();
+// ---- Explicit resource management: DisposableStack, AsyncDisposableStack,
+// and what `using` / `await using` declarations call (__cerxesUsing)
+(function () {
+var SymDispose = Symbol.dispose, SymAsyncDispose = Symbol.asyncDispose;
+var PromiseC = Promise, pResolve = Promise.resolve, pThen = Promise.prototype.then;
+var Suppressed = SuppressedError;
+function named(f, n) { return defineProperty(f, 'name', { value: n, configurable: true }); }
+hide(AsyncIteratorProto, SymAsyncDispose, named(function () {
+  var self = this;
+  return new PromiseC(function (resolve, reject) {
+    var m;
+    try { m = self.return; } catch (e) { reject(e); return; }
+    if (m === undefined || m === null) { resolve(undefined); return; }
+    var r;
+    try { r = m.call(self); } catch (e) { reject(e); return; }
+    pThen.call(pResolve.call(PromiseC, r), function () { resolve(undefined); }, reject);
+  });
+}, '[Symbol.asyncDispose]'));
+// GetDisposeMethod: the method, or (async) the sync one wrapped
+function disposeMethod(v, async) {
+  var m;
+  if (async) {
+    m = v[SymAsyncDispose];
+    if (m === undefined || m === null) {
+      var sm = v[SymDispose];
+      if (sm === undefined || sm === null) return undefined;
+      if (!isCallable(sm)) throw new TypeError('Symbol.dispose is not a function');
+      return function () {
+        var o = this;
+        return new PromiseC(function (resolve) { sm.call(o); resolve(undefined); });
+      };
+    }
+  } else {
+    m = v[SymDispose];
+    if (m === undefined || m === null) return undefined;
+  }
+  if (!isCallable(m)) throw new TypeError((async ? 'Symbol.asyncDispose' : 'Symbol.dispose') + ' is not a function');
+  return m;
+}
+// AddDisposableResource
+function addResource(list, v, async) {
+  if (v === null || v === undefined) {
+    if (async) list.push({ v: undefined, m: undefined });
+    return;
+  }
+  if (!isObject(v)) throw new TypeError('the value of a using declaration must be an object, null or undefined');
+  var m = disposeMethod(v, async);
+  if (m === undefined) throw new TypeError((async ? 'Symbol.asyncDispose' : 'Symbol.dispose') + ' is not a function');
+  list.push({ v: v, m: m });
+}
+function suppress(err, has, e) { return has ? new Suppressed(e, err, 'An error was suppressed during disposal') : e; }
+// DisposeResources (sync): throws what the block threw (has / err) or what
+// disposing threw
+function disposeSync(list, has, err) {
+  for (var i = list.length - 1; i >= 0; i--) {
+    var r = list[i];
+    try { r.m.call(r.v); } catch (e) { err = suppress(err, has, e); has = true; }
+  }
+  list.length = 0;
+  if (has) throw err;
+}
+// DisposeResources (async): a promise of the same
+function disposeAsync(list, has, err) {
+  return new PromiseC(function (resolve, reject) {
+    var i = list.length;
+    function step() {
+      for (;;) {
+        i--;
+        if (i < 0) { list.length = 0; if (has) reject(err); else resolve(undefined); return; }
+        var r = list[i], x;
+        try { x = r.m === undefined ? undefined : r.m.call(r.v); } catch (e) { err = suppress(err, has, e); has = true; continue; }
+        pThen.call(pResolve.call(PromiseC, x), step, function (e) { err = suppress(err, has, e); has = true; step(); });
+        return;
+      }
+    }
+    step();
+  });
+}
+var usingApi = {
+  add: function (list, v, async) { addResource(list, v, async); return v; },
+  dispose: function (list, has, err) { disposeSync(list, has, err); },
+  disposeAsync: function (list, has, err) { return disposeAsync(list, has, err); }
+};
+defineProperty(globalThis, '__cerxesUsing', { value: usingApi, writable: false, enumerable: false, configurable: false });
+
+var dsSlots = new WeakMap();
+function slots(o, cls, name) {
+  var s = isObject(o) ? dsSlots.get(o) : undefined;
+  if (s === undefined || s.cls !== cls) throw new TypeError(cls + '.prototype.' + name + ' called on incompatible receiver');
+  return s;
+}
+function live(s, cls) { if (s.disposed) throw new ReferenceError(cls + ' already disposed'); }
+function makeStack(cls) {
+  var C = function () {
+    if (new.target === undefined) throw new TypeError("Constructor " + cls + " requires 'new'");
+    var self = this;
+    // OrdinaryCreateFromConstructor: new.target's prototype, else this one
+    if (getPrototypeOf(self) !== new.target.prototype) self = create(P);
+    dsSlots.set(self, { cls: cls, disposed: false, list: [] });
+    return self;
+  };
+  named(C, cls);
+  defineProperty(C, 'length', { value: 0, configurable: true });
+  var P = C.prototype;
+  defineProperty(C, 'prototype', { writable: false });
+  var async = cls === 'AsyncDisposableStack';
+  hide(P, 'use', function use(value) {
+    var s = slots(this, cls, 'use'); live(s, cls);
+    addResource(s.list, value, async);
+    return value;
+  });
+  hide(P, 'adopt', function adopt(value, onDispose) {
+    var s = slots(this, cls, 'adopt'); live(s, cls);
+    if (!isCallable(onDispose)) throw new TypeError('onDispose is not a function');
+    s.list.push({ v: undefined, m: function () { return onDispose.call(undefined, value); } });
+    return value;
+  });
+  hide(P, 'defer', function defer(onDispose) {
+    var s = slots(this, cls, 'defer'); live(s, cls);
+    if (!isCallable(onDispose)) throw new TypeError('onDispose is not a function');
+    s.list.push({ v: undefined, m: onDispose });
+    return undefined;
+  });
+  hide(P, 'move', function move() {
+    var s = slots(this, cls, 'move'); live(s, cls);
+    var n = create(P);
+    dsSlots.set(n, { cls: cls, disposed: false, list: s.list });
+    s.list = []; s.disposed = true;
+    return n;
+  });
+  var d;
+  if (async) {
+    d = function disposeAsync() {
+      var s;
+      try { s = slots(this, cls, 'disposeAsync'); } catch (e) { return new PromiseC(function (_, reject) { reject(e); }); }
+      if (s.disposed) return pResolve.call(PromiseC, undefined);
+      s.disposed = true;
+      var list = s.list; s.list = [];
+      return disposeAsyncList(list);
+    };
+    hide(P, 'disposeAsync', d);
+    hide(P, SymAsyncDispose, d);
+  } else {
+    d = function dispose() {
+      var s = slots(this, cls, 'dispose');
+      if (s.disposed) return undefined;
+      s.disposed = true;
+      var list = s.list; s.list = [];
+      disposeSync(list, false, undefined);
+      return undefined;
+    };
+    hide(P, 'dispose', d);
+    hide(P, SymDispose, d);
+  }
+  defineProperty(P, 'disposed', { get: asMethod(named(function () { return slots(this, cls, 'disposed').disposed; }, 'get disposed')), enumerable: false, configurable: true });
+  tag(P, cls);
+  hide(globalThis, cls, C);
+}
+function disposeAsyncList(list) { return disposeAsync(list, false, undefined); }
+makeStack('DisposableStack');
+makeStack('AsyncDisposableStack');
+})();
 })();"#;
