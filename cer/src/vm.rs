@@ -322,6 +322,8 @@ pub struct Vm {
     pub jit_min: int,
     /// by proto: the compiled function (a table index), -1 not yet, -2 none
     pub jit_fn: Vec<int>,
+    /// the machine's key to its compiled code state (wjit.rs), 0 none yet
+    pub jit_id: int,
     /// by proto: back edges taken while not compiled
     pub jit_hot: Vec<int>,
     /// by rcode index of a loop head: entries that left at once (wjit.rs)
@@ -568,6 +570,7 @@ impl Vm {
             jit_on: false,
             jit_min: 64,
             jit_fn: Vec::new(),
+            jit_id: 0,
             jit_hot: Vec::new(),
             jit_miss: Vec::new(),
             jit_res: Vec::new(),
@@ -3942,6 +3945,9 @@ impl Vm {
     pub fn run(&mut self, base: int) {
         if self.regs {
             self.rrun(base);
+            if self.frames.is_empty() && self.jit_on {
+                crate::rvm::jit_flush(self);
+            }
             return;
         }
         'frames: loop {
@@ -4653,6 +4659,137 @@ impl Vm {
         self.gc_flag = self.alloc_count >= self.gc_threshold || self.made >= self.made_limit || (self.zct.len() as int) >= self.zct_limit || (self.szct.len() as int) >= self.szct_limit || self.snew >= self.slimit || self.sbytes >= self.sbytes_limit;
     }
 
+    /// The hottest natives (Math of numbers, String of a string or number,
+    /// hasOwnProperty, push, Map/Set get/has/set/add) straight off the
+    /// stack: [f, this, args...] at fpos, no argument vector, same checks
+    /// as their builtins. True when it ran: the result is in slot fpos (or
+    /// it threw); the stack keeps its length.
+    pub fn native_fast(&mut self, id: int, fpos: int, argc: int) -> bool {
+        let bp = fpos + 2;
+        // Math's functions of numbers, straight off the stack
+        let which = id - crate::builtins::NF_MATH;
+        if which >= 0 && which <= 30 && argc >= 1 {
+            let x = match &self.stack[bp as usize] {
+                Val::Num(n) => *n,
+                _ => nan(),
+            };
+            let y = if which >= 28 && argc >= 2 {
+                match &self.stack[(bp + 1) as usize] {
+                    Val::Num(n) => *n,
+                    _ => nan(),
+                }
+            } else {
+                0.0
+            };
+            let numbers = matches!(self.stack[bp as usize], Val::Num(_)) && (which < 28 || (argc >= 2 && matches!(self.stack[(bp + 1) as usize], Val::Num(_))));
+            if numbers {
+                let r = match which {
+                    28 => arith_num(crate::ops::OP_EXP, x, y),
+                    29 => x.atan2(y),
+                    30 => imul(to_int32(x), to_int32(y)) as double,
+                    _ => crate::builtins::math1(which, x),
+                };
+                self.stack[fpos as usize] = Val::Num(r);
+                return true;
+            }
+        }
+        // Math.min / Math.max of numbers
+        if (which == 31 || which == 32) && argc <= 8 {
+            let mut r = if which == 31 { infinity() } else { -infinity() };
+            let mut nan_seen = false;
+            let mut numbers = true;
+            let mut i: int = 0;
+            while i < argc {
+                if let Val::Num(n) = self.stack[(bp + i) as usize] {
+                    if is_nan(n) {
+                        nan_seen = true;
+                    } else if which == 31 {
+                        if n < r || (n == 0.0 && r == 0.0 && 1.0 / n < 0.0) {
+                            r = n;
+                        }
+                    } else if n > r || (n == 0.0 && r == 0.0 && 1.0 / n > 0.0) {
+                        r = n;
+                    }
+                } else {
+                    numbers = false;
+                    break;
+                }
+                i += 1;
+            }
+            if numbers {
+                self.stack[fpos as usize] = Val::Num(if nan_seen { nan() } else { r });
+                return true;
+            }
+        }
+        // String(x) of a string or a number
+        if id == crate::builtins::NF_STRING && argc >= 1 {
+            let a = self.stack[bp as usize].clone();
+            let mut r = Val::Undef;
+            if let Val::Str(_) = a {
+                r = a;
+            } else if let Val::Num(n) = a {
+                r = self.string_val(number_to_string(n));
+            }
+            if !matches!(r, Val::Undef) {
+                self.stack[fpos as usize] = r;
+                return true;
+            }
+        }
+        // The hottest natives, straight off the stack: no argument
+        // vector, same checks as their builtins.
+        if argc >= 1 {
+            let tobj = obj_of(&self.stack[(fpos + 1) as usize]);
+            if tobj >= 0 {
+                let tclass = self.objs[tobj as usize].class;
+                let weak = self.objs[tobj as usize].func == 1;
+                let mut r = Val::Undef;
+                let mut hit = false;
+                if id == crate::builtins::NF_OP_HASOWN {
+                    let k = self.stack[bp as usize].clone();
+                    r = Val::Bool(self.has_own(tobj, &k));
+                    if self.throwing {
+                        return true;
+                    }
+                    hit = true;
+                } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
+                    let a = self.stack[bp as usize].clone();
+                    self.push_elem(tobj, a);
+                    r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
+                    hit = true;
+                } else if (tclass == C_MAP || tclass == C_SET) && !weak {
+                    if id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS {
+                        let k = self.stack[bp as usize].clone();
+                        let i = self.map_find(tobj, &k);
+                        r = if id == crate::builtins::NF_MP_HAS {
+                            Val::Bool(i >= 0)
+                        } else if i >= 0 {
+                            self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
+                        } else {
+                            Val::Undef
+                        };
+                        hit = true;
+                    } else if id == crate::builtins::NF_MP_SET && argc >= 2 {
+                        let k = self.stack[bp as usize].clone();
+                        let v = self.stack[(bp + 1) as usize].clone();
+                        self.map_set(tobj, k, v);
+                        r = Val::Obj(tobj);
+                        hit = true;
+                    } else if id == crate::builtins::NF_SETP_ADD {
+                        let k = self.stack[bp as usize].clone();
+                        self.map_set(tobj, k.clone(), k);
+                        r = Val::Obj(tobj);
+                        hit = true;
+                    }
+                }
+                if hit {
+                    self.stack[fpos as usize] = r;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// The calling part of OP_CALL; true when a frame was pushed or the
     /// stack changed frames.
     pub fn call_op(&mut self, argc_in: int) -> bool {
@@ -4700,130 +4837,11 @@ impl Vm {
                     continue;
                 }
                 let bp = fpos + 2;
-                // Math's functions of numbers, straight off the stack
-                let which = id - crate::builtins::NF_MATH;
-                if which >= 0 && which <= 30 && argc >= 1 {
-                    let x = match &self.stack[bp as usize] {
-                        Val::Num(n) => *n,
-                        _ => nan(),
-                    };
-                    let y = if which >= 28 && argc >= 2 {
-                        match &self.stack[(bp + 1) as usize] {
-                            Val::Num(n) => *n,
-                            _ => nan(),
-                        }
-                    } else {
-                        0.0
-                    };
-                    let numbers = matches!(self.stack[bp as usize], Val::Num(_)) && (which < 28 || (argc >= 2 && matches!(self.stack[(bp + 1) as usize], Val::Num(_))));
-                    if numbers {
-                        let r = match which {
-                            28 => arith_num(crate::ops::OP_EXP, x, y),
-                            29 => x.atan2(y),
-                            30 => imul(to_int32(x), to_int32(y)) as double,
-                            _ => crate::builtins::math1(which, x),
-                        };
-                        self.stack.truncate(fpos as usize);
-                        self.stack.push(Val::Num(r));
-                        return false;
+                if self.native_fast(id, fpos, argc) {
+                    if !self.throwing {
+                        self.stack.truncate((fpos + 1) as usize);
                     }
-                }
-                // Math.min / Math.max of numbers
-                if (which == 31 || which == 32) && argc <= 8 {
-                    let mut r = if which == 31 { infinity() } else { -infinity() };
-                    let mut nan_seen = false;
-                    let mut numbers = true;
-                    let mut i: int = 0;
-                    while i < argc {
-                        if let Val::Num(n) = self.stack[(bp + i) as usize] {
-                            if is_nan(n) {
-                                nan_seen = true;
-                            } else if which == 31 {
-                                if n < r || (n == 0.0 && r == 0.0 && 1.0 / n < 0.0) {
-                                    r = n;
-                                }
-                            } else if n > r || (n == 0.0 && r == 0.0 && 1.0 / n > 0.0) {
-                                r = n;
-                            }
-                        } else {
-                            numbers = false;
-                            break;
-                        }
-                        i += 1;
-                    }
-                    if numbers {
-                        self.stack.truncate(fpos as usize);
-                        self.stack.push(Val::Num(if nan_seen { nan() } else { r }));
-                        return false;
-                    }
-                }
-                // String(x) of a string or a number
-                if id == crate::builtins::NF_STRING && argc >= 1 {
-                    let a = self.stack[bp as usize].clone();
-                    let mut r = Val::Undef;
-                    if let Val::Str(_) = a {
-                        r = a;
-                    } else if let Val::Num(n) = a {
-                        r = self.string_val(number_to_string(n));
-                    }
-                    if !matches!(r, Val::Undef) {
-                        self.stack.truncate(fpos as usize);
-                        self.stack.push(r);
-                        return false;
-                    }
-                }
-                // The hottest natives, straight off the stack: no argument
-                // vector, same checks as their builtins.
-                if argc >= 1 {
-                    let tobj = obj_of(&self.stack[(fpos + 1) as usize]);
-                    if tobj >= 0 {
-                        let tclass = self.objs[tobj as usize].class;
-                        let weak = self.objs[tobj as usize].func == 1;
-                        let mut r = Val::Undef;
-                        let mut hit = false;
-                        if id == crate::builtins::NF_OP_HASOWN {
-                            let k = self.stack[bp as usize].clone();
-                            r = Val::Bool(self.has_own(tobj, &k));
-                            if self.throwing {
-                                return false;
-                            }
-                            hit = true;
-                        } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
-                            let a = self.stack[bp as usize].clone();
-                            self.push_elem(tobj, a);
-                            r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
-                            hit = true;
-                        } else if (tclass == C_MAP || tclass == C_SET) && !weak {
-                            if id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS {
-                                let k = self.stack[bp as usize].clone();
-                                let i = self.map_find(tobj, &k);
-                                r = if id == crate::builtins::NF_MP_HAS {
-                                    Val::Bool(i >= 0)
-                                } else if i >= 0 {
-                                    self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
-                                } else {
-                                    Val::Undef
-                                };
-                                hit = true;
-                            } else if id == crate::builtins::NF_MP_SET && argc >= 2 {
-                                let k = self.stack[bp as usize].clone();
-                                let v = self.stack[(bp + 1) as usize].clone();
-                                self.map_set(tobj, k, v);
-                                r = Val::Obj(tobj);
-                                hit = true;
-                            } else if id == crate::builtins::NF_SETP_ADD {
-                                let k = self.stack[bp as usize].clone();
-                                self.map_set(tobj, k.clone(), k);
-                                r = Val::Obj(tobj);
-                                hit = true;
-                            }
-                        }
-                        if hit {
-                            self.stack.truncate(fpos as usize);
-                            self.stack.push(r);
-                            return false;
-                        }
-                    }
+                    return false;
                 }
                 // the arguments in a vector from the pool: no allocation per call
                 let mut args: Vec<Val> = take_args(&mut self.arg_pool);

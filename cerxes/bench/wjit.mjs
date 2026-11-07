@@ -56,6 +56,14 @@ function engine() {
   const jit = {
     modules: 0,
     compileMs: 0,
+    evicted: 0,
+    // an evicted module's slots get the runtime's `gone` (back to the
+    // interpreter at once), so that nothing holds the module any more
+    release(base, n) {
+      const t = x.__indirect_function_table;
+      for (let k = 0; k < n; k++) t.set(base + k, jit.rt.gone);
+      jit.evicted += n;
+    },
     install(ptr, len) {
       const t0 = performance.now();
       const bytes = new Uint8Array(x.memory.buffer, ptr, len).slice();
@@ -82,15 +90,18 @@ function engine() {
         jit.compileMs += performance.now() - t0;
         return 0;
       }
+      // a batch: f0, f1, … into consecutive slots; the first one's index
       const t = x.__indirect_function_table;
-      const idx = t.grow(1);
-      t.set(idx, inst.exports.f);
+      let n = 0;
+      while (inst.exports["f" + n]) n++;
+      const idx = t.grow(n);
+      for (let k = 0; k < n; k++) t.set(idx + k, inst.exports["f" + k]);
       jit.modules++;
       jit.compileMs += performance.now() - t0;
       return idx;
     },
   };
-  const inst = new WebAssembly.Instance(wasmModule, { ...wasi.imports, cerxes_jit: { install: (p, n) => jit.install(p, n) } });
+  const inst = new WebAssembly.Instance(wasmModule, { ...wasi.imports, cerxes_jit: { install: (p, n) => jit.install(p, n), release: (b, n) => jit.release(b, n) } });
   x = inst.exports;
   wasi.setMemory(x.memory);
   if (x._initialize) x._initialize();
@@ -99,8 +110,8 @@ function engine() {
   return {
     jit,
     out,
-    setJit(on, m) {
-      const mask = opt("mask", "").split(",").filter(Boolean).map(Number);
+    setJit(on, m, extra = []) {
+      const mask = opt("mask", "").split(",").filter(Boolean).map(Number).concat(extra);
       let lo = 0, hi = 0;
       for (const k of mask) if (k < 32) lo |= 1 << k; else hi |= 1 << (k - 32);
       x.cerxes_jit_mask(lo, hi);
@@ -194,7 +205,7 @@ if (opt("eval", "")) {
     e.setJit(on, on ? Number(opt("min", "0")) : 0);
     const r = e.eval(src);
     console.log((on ? "on:  " : "off: ") + r.value + (r.output ? "\n" + r.output : ""));
-    if (on) console.log(JSON.stringify(e.stats()) + "\ncompileMs " + e.jit.compileMs.toFixed(1) + " modules " + e.jit.modules);
+    if (on) console.log(JSON.stringify(e.stats()) + "\ncompileMs " + e.jit.compileMs.toFixed(1) + " modules " + e.jit.modules + " evicted " + e.jit.evicted);
     if (on && e.out.length) console.log(e.out.join("\n"));
   }
   process.exit(0);
@@ -212,23 +223,31 @@ if (doCases) {
       const a = engine();
       a.setJit(false, 0);
       const ra = a.eval(c.src);
-      const b = engine();
-      if (!b.setJit(true, 0)) {
-        console.log("FAIL this build cannot run compiled code");
-        process.exit(1);
+      // each function in a module of its own (mask 45: every function
+      // runs compiled from its first call), then in batches
+      let ok = true;
+      for (const extra of [[45], []]) {
+        const b = engine();
+        if (!b.setJit(true, 0, extra)) {
+          console.log("FAIL this build cannot run compiled code");
+          process.exit(1);
+        }
+        let rb;
+        try {
+          rb = b.eval(c.src);
+        } catch (e) {
+          rb = { failed: 2, value: String(e), output: "" };
+        }
+        if (extra.length) compiled += b.stats().compiled;
+        if (!(ra.value === rb.value && ra.output === rb.output && ra.failed === rb.failed)) {
+          ok = false;
+          console.log(`FAIL ${path.basename(path.dirname(f))}${extra.length ? "" : " (batches)"}: ${c.title}\n  off: ${ra.value}\n  on:  ${rb.value}`);
+        }
       }
-      let rb;
-      try {
-        rb = b.eval(c.src);
-      } catch (e) {
-        rb = { failed: 2, value: String(e), output: "" };
-      }
-      compiled += b.stats().compiled;
-      if (ra.value === rb.value && ra.output === rb.output && ra.failed === rb.failed) {
+      if (ok) {
         same++;
       } else {
         failures++;
-        console.log(`FAIL ${path.basename(path.dirname(f))}: ${c.title}\n  off: ${ra.value}\n  on:  ${rb.value}`);
       }
     }
   }

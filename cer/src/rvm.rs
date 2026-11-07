@@ -1750,6 +1750,25 @@ impl Vm {
     #[inline(never)]
     pub fn r_call_slow(&mut self, fo: int, fpos: int, argc: int, bp: int, w3: int, want: usize) -> bool {
         let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
+        // a hot native (Math, hasOwnProperty, push, Map get...) in place:
+        // its result to dst, its operands' slots emptied as the
+        // truncation below would
+        if fo >= 0 && self.ob(fo).class == C_NATIVE {
+            let id = self.ob(fo).func as int;
+            if id != crate::builtins::NF_CALL && id != crate::builtins::NF_APPLY && self.native_fast(id, fpos, argc) {
+                if self.throwing {
+                    return false;
+                }
+                let v = self.stack[fpos as usize];
+                let mut i = fpos;
+                while i < fpos + argc + 2 {
+                    self.stack[i as usize] = Val::Undef;
+                    i += 1;
+                }
+                self.stack[dst as usize] = v;
+                return false;
+            }
+        }
         let nf = self.frames.len();
         self.stack.truncate((fpos + argc + 2) as usize);
         let mut fo = fo;
@@ -2281,6 +2300,17 @@ pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bo
 pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _head: bool) -> int {
     pc
 }
+
+/// The machine has run to its end (no frames left): functions compiled
+/// and waiting for their batch go to the host now (wjit.rs). Only Rust
+/// compiles.
+#[ranger::target(rust)]
+pub fn jit_flush(vm: &mut Vm) {
+    crate::wjit::flush_pending(vm);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_flush(_vm: &mut Vm) {}
 
 /// A loop head whose compiled code went back to the interpreter before a
 /// back edge this often (4 per such entry, 1 back per good one) is no
