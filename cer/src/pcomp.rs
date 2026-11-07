@@ -1039,7 +1039,11 @@ impl PComp {
                 k = m + 1;
                 continue;
             }
-            if (self.toks[k as usize].kind as int) == T_PRIVATE && !self.tok_is(k - 1, ".") && !self.tok_is(k - 1, "?.") && !self.tok_is(k + 1, "in") {
+            let before = k - 1;
+            let after = k + 1;
+            let member = self.tok_is(before, ".") || self.tok_is(before, "?.");
+            let in_test = self.tok_is(after, "in");
+            if (self.toks[k as usize].kind as int) == T_PRIVATE && !member && !in_test {
                 let mut kind = if self.tok_is(k + 1, "(") { PK_METHOD } else { PK_FIELD };
                 let mut j = k - 1;
                 while self.tok_is(j, "get") || self.tok_is(j, "set") || self.tok_is(j, "async") || self.tok_is(j, "*") {
