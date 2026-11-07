@@ -482,6 +482,9 @@ pub struct PComp {
     priv_nm: Vec<Vec<String>>,
     priv_kd: Vec<Vec<int>>,
     priv_next: int,
+    /// catch scopes whose parameter is a pattern (Annex B: a block
+    /// function of a name it binds is not copied to the var)
+    catch_patterns: Vec<int>,
     /// reading a (non-arrow) function's parameters
     in_params: bool,
     /// computed field keys so far (their bindings' names)
@@ -574,6 +577,7 @@ impl PComp {
             priv_nm: Vec::new(),
             priv_kd: Vec::new(),
             priv_next: 0,
+            catch_patterns: Vec::new(),
             in_params: false,
             fk_count: 0,
             in_generator: false,
@@ -2065,7 +2069,8 @@ impl PComp {
                         if k == K_VAR || k == K_FUNC {
                             let nm = self.binds[*b as usize].name.clone();
                             let a = self.atom(nm.as_str());
-                            self.xemit(OP_DECL_GLOBAL, a, 0);
+                            // eval code's vars and functions can be deleted
+                            self.xemit(OP_DECL_GLOBAL, a, if self.local_if_strict { 1 } else { 0 });
                         }
                     }
                 }
@@ -2283,6 +2288,40 @@ impl PComp {
                 if ek != K_VAR && ek != K_FUNC {
                     continue;
                 }
+            }
+            // a parameter's name (parameters with expressions have a
+            // scope of their own), or a lexical binding of a block between
+            // the function's block and the var scope: `var f` there would
+            // be an early error, so no copy
+            let fnid = self.f().fnid;
+            let fs = self.fns[fnid as usize].fscope;
+            if fs >= 0 && fs != vs {
+                let pb = match self.scopes[fs as usize].names.get(&nm) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if pb >= 0 && self.binds[pb as usize].kind == K_PARAM {
+                    continue;
+                }
+            }
+            let mut blocked = false;
+            let ascope = self.annexes[*k as usize].scope;
+            let mut sc = self.scopes[ascope as usize].parent;
+            while sc >= 0 && sc != vs && sc != fs {
+                let lb = match self.scopes[sc as usize].names.get(&nm) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if lb >= 0 {
+                    let lk = self.binds[lb as usize].kind;
+                    if lk == K_LET || lk == K_CONST || lk == K_CLASS || lk == K_FUNC || (lk == K_CATCH && self.catch_patterns.contains(&sc)) {
+                        blocked = true;
+                    }
+                }
+                sc = self.scopes[sc as usize].parent;
+            }
+            if blocked {
+                continue;
             }
             let b = self.declare(vs, nm.as_str(), K_VAR);
             self.annexes[*k as usize].var_bind = b;
@@ -2741,6 +2780,16 @@ impl PComp {
                 || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1))));
             if lexical {
                 self.fail("Lexical declaration cannot appear in a single-statement context");
+                return;
+            }
+            if if_body && w.as_str() == "function" {
+                // Annex B: `if (x) function f() {}` as if in a block
+                let saved = self.cur_scope;
+                let sc = self.new_scope(saved, false, false);
+                self.enter_block(sc);
+                self.emit(PH_HOIST, sc, 0);
+                self.statement();
+                self.leave_block(sc, saved);
                 return;
             }
         }
@@ -3284,6 +3333,9 @@ impl PComp {
             let s = self.new_scope(saved, false, false);
             self.enter_block(s);
             if self.eat("(") {
+                if !(self.kind() == T_IDENT && self.peek_is(1, ")")) {
+                    self.catch_patterns.push(s);
+                }
                 self.pattern_target(K_CATCH);
                 self.skip_annotation();
                 self.expect(")");

@@ -5661,7 +5661,7 @@ impl Vm {
             OP_DECL_GLOBAL => {
                 let g = self.global;
                 if self.find(g, (op.a as int)) < 0 {
-                    self.add_own(g, (op.a as int), Val::Undef, P_FIXED);
+                    self.add_own(g, (op.a as int), Val::Undef, if op.b == 1 { 0 } else { P_FIXED });
                 }
             }
             OP_TYPEOF_GLOBAL => {
