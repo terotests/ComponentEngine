@@ -3638,8 +3638,15 @@ impl PComp {
                     self.ident_name()
                 };
                 seen.push(name.clone());
-                let at = self.atom(name.as_str());
-                self.emit(OP_GET_PROP, at, 0);
+                let ix = crate::jsstr::array_index(name.as_str());
+                if ix >= 0 && ix < 2147483647 {
+                    // an index key: an array's element
+                    self.push_num(ix as double);
+                    self.op(OP_GET_ELEM);
+                } else {
+                    let at = self.atom(name.as_str());
+                    self.emit(OP_GET_PROP, at, 0);
+                }
             }
             if self.eat(":") {
                 self.pattern_elem(pk);

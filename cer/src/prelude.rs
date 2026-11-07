@@ -85,102 +85,237 @@ function Iterator() {
   if (new.target === undefined || new.target === Iterator) throw new TypeError('Abstract class Iterator not directly constructable');
 }
 defineProperty(Iterator, 'prototype', { value: IteratorProto, writable: false, enumerable: false, configurable: false });
-hide(IteratorProto, 'constructor', Iterator);
-tag(IteratorProto, 'Iterator');
 hide(globalThis, 'Iterator', Iterator);
 
+(function () {
+'use strict';
+// the helpers as the specification writes them: an Iterator Helper object
+// runs a generator over the underlying iterator record; a return closes
+// what is open
 var HelperProto = create(IteratorProto);
 tag(HelperProto, 'Iterator Helper');
-function helper(src, step) {
-  var h = create(HelperProto); var done = false;
-  var next = src.next;
-  hide(h, 'next', function () {
-    if (done) return { value: undefined, done: true };
-    var r = step(src, next);
-    if (r.done) done = true;
-    return r;
-  });
-  hide(h, 'return', function () {
-    done = true; if (isCallable(src.return)) src.return(); return { value: undefined, done: true };
-  });
+var helperSlots = new WeakMap();
+function iterDirect(o) {
+  if (!isObject(o)) throw new TypeError(String(o) + ' is not an object');
+  return { iter: o, next: o.next };
+}
+function stepRec(rec) {
+  var r = rec.next.call(rec.iter);
+  if (!isObject(r)) throw new TypeError('Iterator result ' + String(r) + ' is not an object');
+  return r;
+}
+function closeNormal(o) {
+  var m = o.return;
+  if (m === undefined || m === null) return;
+  if (!isCallable(m)) throw new TypeError('iterator.return is not a function');
+  var r = m.call(o);
+  if (!isObject(r)) throw new TypeError('Iterator result ' + String(r) + ' is not an object');
+}
+function closeThrow(o, e) {
+  try { var m = o.return; if (m !== undefined && m !== null) m.call(o); } catch (x) {}
+  throw e;
+}
+function makeHelper(under, gen) {
+  var h = create(HelperProto);
+  helperSlots.set(h, { gen: gen, started: false, under: under });
   return h;
 }
-function need(f) { if (!isCallable(f)) throw new TypeError(String(f) + ' is not a function'); }
-function nextOf(it) { return it.next(); }
+function helperSlot(h, name) {
+  var s = isObject(h) ? helperSlots.get(h) : undefined;
+  if (s === undefined) throw new TypeError('Iterator Helper.prototype.' + name + ' called on incompatible receiver');
+  return s;
+}
+hide(HelperProto, 'next', function next() {
+  var s = helperSlot(this, 'next'); s.started = true; return s.gen.next();
+});
+hide(HelperProto, 'return', function () {
+  var s = helperSlot(this, 'return');
+  if (!s.started) {
+    s.started = true; s.gen.return(undefined);
+    for (var i = 0; i < s.under.length; i++) closeNormal(s.under[i]);
+    return { value: undefined, done: true };
+  }
+  return s.gen.return(undefined);
+});
+function thisIter(o, name) {
+  if (!isObject(o)) throw new TypeError('Iterator.prototype.' + name + ' called on non-object');
+  return o;
+}
+function needOrClose(f, o) {
+  if (!isCallable(f)) closeThrow(o, new TypeError(String(f) + ' is not a function'));
+}
+// yields v; a return at the yield closes the open iterators (last first)
+function* yieldOrClose(v, a, b) {
+  var resumed = false;
+  try { yield v; resumed = true; }
+  finally { if (!resumed) { if (b) { try { closeNormal(b); } catch (e) { closeThrow(a, e); } } closeNormal(a); } }
+}
 hide(IteratorProto, 'map', function map(f) {
-  need(f); var i = 0;
-  return helper(this, function (src, next) { var r = next.call(src); if (r.done) return r; return { value: f(r.value, i++), done: false }; });
+  var o = thisIter(this, 'map'); needOrClose(f, o); var rec = iterDirect(o);
+  return makeHelper([o], (function* () {
+    for (var c = 0; ; c++) {
+      var r = stepRec(rec); if (r.done) return; var v = r.value, m;
+      try { m = f(v, c); } catch (e) { closeThrow(o, e); }
+      yield* yieldOrClose(m, o);
+    }
+  })());
 });
 hide(IteratorProto, 'filter', function filter(f) {
-  need(f); var i = 0;
-  return helper(this, function (src, next) { for (;;) { var r = next.call(src); if (r.done) return r; if (f(r.value, i++)) return { value: r.value, done: false }; } });
+  var o = thisIter(this, 'filter'); needOrClose(f, o); var rec = iterDirect(o);
+  return makeHelper([o], (function* () {
+    for (var c = 0; ; c++) {
+      var r = stepRec(rec); if (r.done) return; var v = r.value, keep;
+      try { keep = f(v, c); } catch (e) { closeThrow(o, e); }
+      if (keep) yield* yieldOrClose(v, o);
+    }
+  })());
 });
-function count(n) {
-  var v = Number(n); if (v !== v) throw new RangeError(String(n) + ' must be positive');
-  v = toIntegerOrInfinity(v); if (v < 0) throw new RangeError(String(n) + ' must be positive'); return v;
+function limitOf(n, o) {
+  var v;
+  try { v = Number(n); } catch (e) { closeThrow(o, e); }
+  if (v !== v) closeThrow(o, new RangeError(String(n) + ' must be positive'));
+  v = toIntegerOrInfinity(v);
+  if (v < 0 || (v !== Infinity && v > 9007199254740991)) closeThrow(o, new RangeError(String(n) + ' must be positive'));
+  return v;
 }
 hide(IteratorProto, 'take', function take(n) {
-  var left = count(n);
-  return helper(this, function (src, next) {
-    if (left <= 0) { if (isCallable(src.return)) src.return(); return { value: undefined, done: true }; }
-    left--; var r = next.call(src); return r.done ? r : { value: r.value, done: false };
-  });
+  var o = thisIter(this, 'take'); var left = limitOf(n, o); var rec = iterDirect(o);
+  return makeHelper([o], (function* () {
+    for (;;) {
+      if (left === 0) { closeNormal(o); return; }
+      if (left !== Infinity) left--;
+      var r = stepRec(rec); if (r.done) return;
+      yield* yieldOrClose(r.value, o);
+    }
+  })());
 });
 hide(IteratorProto, 'drop', function drop(n) {
-  var left = count(n);
-  return helper(this, function (src, next) {
-    while (left > 0) { left--; var s = next.call(src); if (s.done) return s; }
-    var r = next.call(src); return r.done ? r : { value: r.value, done: false };
-  });
+  var o = thisIter(this, 'drop'); var left = limitOf(n, o); var rec = iterDirect(o);
+  return makeHelper([o], (function* () {
+    while (left > 0) { if (left !== Infinity) left--; var s = stepRec(rec); if (s.done) return; }
+    for (;;) { var r = stepRec(rec); if (r.done) return; yield* yieldOrClose(r.value, o); }
+  })());
 });
+function flattenable(m, strings) {
+  if (!isObject(m) && !(strings && typeof m === 'string')) throw new TypeError(String(m) + ' is not an object');
+  var f = m[Symbol.iterator], it;
+  if (f === undefined || f === null) it = m;
+  else { it = f.call(m); if (!isObject(it)) throw new TypeError(String(it) + ' is not an object'); }
+  return iterDirect(it);
+}
 hide(IteratorProto, 'flatMap', function flatMap(f) {
-  need(f); var i = 0; var inner = null;
-  return helper(this, function (src, next) {
-    for (;;) {
-      if (inner) { var ir = inner.next(); if (!ir.done) return { value: ir.value, done: false }; inner = null; }
-      var r = next.call(src); if (r.done) return r;
-      var m = f(r.value, i++);
-      if (!isObject(m) && typeof m !== 'string') throw new TypeError('flatMap mapper must return an iterable');
-      inner = m[Symbol.iterator]();
+  var o = thisIter(this, 'flatMap'); needOrClose(f, o); var rec = iterDirect(o);
+  return makeHelper([o], (function* () {
+    for (var c = 0; ; c++) {
+      var r = stepRec(rec); if (r.done) return; var v = r.value, inner;
+      try { inner = flattenable(f(v, c), false); } catch (e) { closeThrow(o, e); }
+      for (;;) {
+        var ir;
+        try { ir = stepRec(inner); } catch (e) { closeThrow(o, e); }
+        if (ir.done) break;
+        yield* yieldOrClose(ir.value, o, inner.iter);
+      }
     }
-  });
+  })());
 });
+function consume(o, name, f, each) {
+  thisIter(o, name); needOrClose(f, o); var rec = iterDirect(o);
+  for (var c = 0; ; c++) {
+    var r = stepRec(rec); if (r.done) return undefined;
+    var v = r.value, out;
+    try { out = each(v, c); } catch (e) { closeThrow(o, e); }
+    if (out !== undefined) { closeNormal(o); return out.v; }
+  }
+}
 hide(IteratorProto, 'reduce', function reduce(f) {
-  need(f); var acc, i = 0, r;
-  if (arguments.length < 2) { r = this.next(); if (r.done) throw new TypeError('Reduce of empty iterator with no initial value'); acc = r.value; i = 1; }
-  else acc = arguments[1];
-  for (;;) { r = this.next(); if (r.done) return acc; acc = f(acc, r.value, i++); }
+  var o = thisIter(this, 'reduce'); needOrClose(f, o); var rec = iterDirect(o), acc, c = 0, r;
+  if (arguments.length < 2) {
+    r = stepRec(rec); if (r.done) throw new TypeError('Reduce of empty iterator with no initial value');
+    acc = r.value; c = 1;
+  } else acc = arguments[1];
+  for (;; c++) {
+    r = stepRec(rec); if (r.done) return acc; var v = r.value;
+    try { acc = f(acc, v, c); } catch (e) { closeThrow(o, e); }
+  }
 });
 hide(IteratorProto, 'toArray', function toArray() {
-  var out = []; for (;;) { var r = this.next(); if (r.done) return out; out.push(r.value); }
+  var o = thisIter(this, 'toArray'), rec = iterDirect(o), out = [];
+  for (;;) { var r = stepRec(rec); if (r.done) return out; out.push(r.value); }
 });
 hide(IteratorProto, 'forEach', function forEach(f) {
-  need(f); var i = 0; for (;;) { var r = this.next(); if (r.done) return undefined; f(r.value, i++); }
+  consume(this, 'forEach', f, function (v, c) { f(v, c); });
 });
 hide(IteratorProto, 'some', function some(f) {
-  need(f); var i = 0; for (;;) { var r = this.next(); if (r.done) return false; if (f(r.value, i++)) { if (isCallable(this.return)) this.return(); return true; } }
+  var r = consume(this, 'some', f, function (v, c) { return f(v, c) ? { v: true } : undefined; });
+  return r === true;
 });
 hide(IteratorProto, 'every', function every(f) {
-  need(f); var i = 0; for (;;) { var r = this.next(); if (r.done) return true; if (!f(r.value, i++)) { if (isCallable(this.return)) this.return(); return false; } }
+  var r = consume(this, 'every', f, function (v, c) { return f(v, c) ? undefined : { v: false }; });
+  return r !== false;
 });
 hide(IteratorProto, 'find', function find(f) {
-  need(f); var i = 0; for (;;) { var r = this.next(); if (r.done) return undefined; if (f(r.value, i++)) { if (isCallable(this.return)) this.return(); return r.value; } }
+  return consume(this, 'find', f, function (v, c) { return f(v, c) ? { v: v } : undefined; });
+});
+// Iterator.prototype's constructor and Symbol.toStringTag: accessors whose
+// setters leave Iterator.prototype alone (SetterThatIgnoresPrototypeProperties)
+function ignoringSetter(p) {
+  return function (v) {
+    if (!isObject(this)) throw new TypeError('Cannot set property on a non-object');
+    if (this === IteratorProto) throw new TypeError('Cannot assign to read only property of Iterator.prototype');
+    if (Object.getOwnPropertyDescriptor(this, p) === undefined) createDataPropertyOrThrow(this, p, v);
+    else this[p] = v;
+  };
+}
+defineProperty(IteratorProto, Symbol.toStringTag, { get: asMethod(function () { return 'Iterator'; }), set: asMethod(ignoringSetter(Symbol.toStringTag)), enumerable: false, configurable: true });
+defineProperty(IteratorProto, 'constructor', { get: asMethod(function () { return Iterator; }), set: asMethod(ignoringSetter('constructor')), enumerable: false, configurable: true });
+if (typeof Symbol.dispose === 'symbol') hide(IteratorProto, Symbol.dispose, function () {
+  var m = this.return; if (m !== undefined && m !== null) { if (!isCallable(m)) throw new TypeError('return is not a function'); m.call(this); }
+  return undefined;
 });
 var WrapProto = create(IteratorProto);
-hide(Iterator, 'from', function from(o) {
-  var it;
-  if (typeof o === 'string' || isObject(o)) {
-    var m = o[Symbol.iterator];
-    if (m !== undefined && m !== null) { need(m); it = m.call(o); } else it = o;
-  } else throw new TypeError(String(o) + ' is not an object');
-  if (it instanceof Iterator) return it;
-  var w = create(WrapProto);
-  hide(w, 'next', function () { return it.next(); });
-  hide(w, 'return', function () { return isCallable(it.return) ? it.return() : { value: undefined, done: true }; });
-  return w;
+var wrapSlots = new WeakMap();
+function wrapSlot(w) {
+  var s = isObject(w) ? wrapSlots.get(w) : undefined;
+  if (s === undefined) throw new TypeError('incompatible receiver');
+  return s;
+}
+hide(WrapProto, 'next', function next() { var s = wrapSlot(this); return s.next.call(s.iter); });
+hide(WrapProto, 'return', function () {
+  var s = wrapSlot(this), m = s.iter.return;
+  if (m === undefined || m === null) return { value: undefined, done: true };
+  if (!isCallable(m)) throw new TypeError('return is not a function');
+  return m.call(s.iter);
 });
+hide(Iterator, 'from', function from(o) {
+  var rec = flattenable(o, true);
+  if (rec.iter instanceof Iterator) return rec.iter;
+  var w = create(WrapProto); wrapSlots.set(w, rec); return w;
+});
+hide(Iterator, 'concat', function concat() {
+  var items = [];
+  for (var i = 0; i < arguments.length; i++) {
+    var it = arguments[i];
+    if (!isObject(it)) throw new TypeError(String(it) + ' is not an object');
+    var m = it[Symbol.iterator];
+    if (!isCallable(m)) throw new TypeError(String(m) + ' is not a function');
+    items.push({ open: m, iterable: it });
+  }
+  return makeHelper([], (function* () {
+    for (var k = 0; k < items.length; k++) {
+      var x = items[k].open.call(items[k].iterable);
+      if (!isObject(x)) throw new TypeError(String(x) + ' is not an object');
+      var rec = iterDirect(x);
+      for (;;) {
+        var r = stepRec(rec); if (r.done) break;
+        yield* yieldOrClose(r.value, x);
+      }
+    }
+  })());
+});
+})();
 
 // ---- groupBy (ES2024)
+function need(f) { if (!isCallable(f)) throw new TypeError(String(f) + ' is not a function'); }
 hide(Map, 'groupBy', function groupBy(items, f) {
   need(f); var m = new Map(); var i = 0;
   for (var v of items) { var k = f(v, i++); if (k === 0) k = 0; var g = m.get(k); if (g === undefined) { g = []; m.set(k, g); } g.push(v); }
@@ -615,7 +750,8 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
 var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo;
-['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo'].forEach(function (k) { delete globalThis[k]; });
+var bufMax = globalThis.__bufMax, bufResize = globalThis.__bufResize;
+['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
 function toIndex(v, what) {
   if (v === undefined) return 0;
   var n = toIntegerOrInfinity(v);
@@ -647,13 +783,25 @@ function bufLength(b, shared, what) {
   if (i === -1 || (i % 1 !== 0) !== shared) throw new TypeError(what + ' called on incompatible receiver');
   return i === -2 ? -1 : Math.floor(i);
 }
+// options.maxByteLength (GetArrayBufferMaxByteLengthOption): undefined when absent
+function maxLengthOption(options) {
+  if (!isObject(options)) return undefined;
+  var m = options.maxByteLength;
+  return m === undefined ? undefined : toIndex(m, 'array buffer max length');
+}
+function allocBuffer(nt, dflt, n, max, shared) {
+  if (max !== undefined && n > max) throw new RangeError('Invalid array buffer length: ' + n + ' is larger than maxByteLength ' + max);
+  return bufNew(n, protoFrom(nt, dflt), shared, max);
+}
 function ArrayBuffer(length) {
   if (new.target === undefined) throw new TypeError("Constructor ArrayBuffer requires 'new'");
-  return bufNew(toIndex(length, 'array buffer length'), protoFrom(new.target, ArrayBuffer.prototype), false);
+  var n = toIndex(length, 'array buffer length');
+  return allocBuffer(new.target, ArrayBuffer.prototype, n, maxLengthOption(arguments[1]), false);
 }
 function SharedArrayBuffer(length) {
   if (new.target === undefined) throw new TypeError("Constructor SharedArrayBuffer requires 'new'");
-  return bufNew(toIndex(length, 'array buffer length'), protoFrom(new.target, SharedArrayBuffer.prototype), true);
+  var n = toIndex(length, 'array buffer length');
+  return allocBuffer(new.target, SharedArrayBuffer.prototype, n, maxLengthOption(arguments[1]), true);
 }
 function bufferSlice(Default, shared, name) {
   return function slice(start, end) {
@@ -666,7 +814,9 @@ function bufferSlice(Default, shared, name) {
     var olen = bufLength(out, shared, name + '.prototype.slice');
     if (out === this) throw new TypeError('ArrayBuffer subclass returned this from species constructor');
     if (olen < n) throw new TypeError('Species constructor returned a too small buffer');
-    bufCopy(this, first, out, 0, n);
+    var cur = bufLength(this, shared, name + '.prototype.slice');
+    if (cur < 0) throw new TypeError('Cannot perform ' + name + '.prototype.slice on a detached ArrayBuffer');
+    if (first < cur) bufCopy(this, first, out, 0, Math.min(n, cur - first));
     return out;
   };
 }
@@ -680,19 +830,43 @@ function bufferSlice(Default, shared, name) {
 });
 hide(ArrayBuffer, 'isView', function isView(x) { return taInfo(x) !== undefined || dvOf(x) !== undefined; });
 getter(ArrayBuffer.prototype, 'detached', function () { bufLength(this, false, 'ArrayBuffer.prototype.detached'); return bufInfo(this) === -2; });
-getter(ArrayBuffer.prototype, 'resizable', function () { bufLength(this, false, 'ArrayBuffer.prototype.resizable'); return false; });
-getter(ArrayBuffer.prototype, 'maxByteLength', function () { var n = bufLength(this, false, 'ArrayBuffer.prototype.maxByteLength'); return n < 0 ? 0 : n; });
-function transfer(newLength) {
-  var len = bufLength(this, false, 'ArrayBuffer.prototype.transfer');
-  if (len < 0) throw new TypeError('Cannot perform ArrayBuffer.prototype.transfer on a detached ArrayBuffer');
-  var n = newLength === undefined ? len : toIndex(newLength, 'array buffer length');
-  var out = bufNew(n, ArrayBuffer.prototype, false);
-  bufCopy(this, 0, out, 0, Math.min(n, len));
-  bufDetach(this);
+[[ArrayBuffer, false, 'ArrayBuffer', 'resizable', 'resize'], [SharedArrayBuffer, true, 'SharedArrayBuffer', 'growable', 'grow']].forEach(function (e) {
+  var shared = e[1], name = e[2], P = e[0].prototype;
+  getter(P, e[3], function () { bufLength(this, shared, name + '.prototype.' + e[3]); return bufMax(this) >= 0; });
+  getter(P, 'maxByteLength', function () {
+    var n = bufLength(this, shared, name + '.prototype.maxByteLength');
+    if (n < 0) return 0;
+    var m = bufMax(this); return m >= 0 ? m : n;
+  });
+  hide(P, e[4], ({ f: function (newLength) {
+    var what = name + '.prototype.' + e[4];
+    bufLength(this, shared, what);
+    var m = bufMax(this);
+    if (m < 0) throw new TypeError('Method ' + what + ' called on incompatible receiver');
+    var n = toIndex(newLength, 'length');
+    var cur = bufLength(this, shared, what);
+    if (cur < 0) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+    if (n > m) throw new RangeError(what + ': Invalid length parameter');
+    if (shared && n < cur) throw new RangeError(what + ': Invalid length parameter');
+    bufResize(this, n);
+    return undefined;
+  } }).f);
+  defineProperty(P[e[4]], 'name', { value: e[4], writable: false, enumerable: false, configurable: true });
+});
+function copyAndDetach(o, newLength, keep, what) {
+  bufLength(o, false, what);
+  var n0 = bufLength(o, false, what);
+  var n = newLength === undefined ? (n0 < 0 ? 0 : n0) : toIndex(newLength, 'array buffer length');
+  var len = bufLength(o, false, what);
+  if (len < 0) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+  var m = keep ? bufMax(o) : -1;
+  var out = allocBuffer(undefined, ArrayBuffer.prototype, n, m >= 0 ? m : undefined, false);
+  bufCopy(o, 0, out, 0, Math.min(n, len));
+  bufDetach(o);
   return out;
 }
-hide(ArrayBuffer.prototype, 'transfer', transfer);
-hide(ArrayBuffer.prototype, 'transferToFixedLength', function transferToFixedLength(newLength) { return transfer.call(this, newLength); });
+hide(ArrayBuffer.prototype, 'transfer', function transfer(newLength) { return copyAndDetach(this, newLength, true, 'ArrayBuffer.prototype.transfer'); });
+hide(ArrayBuffer.prototype, 'transferToFixedLength', function transferToFixedLength(newLength) { return copyAndDetach(this, newLength, false, 'ArrayBuffer.prototype.transferToFixedLength'); });
 
 var KINDS = ['Int8Array', 'Uint8Array', 'Uint8ClampedArray', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array'];
 var SIZES = [1, 1, 1, 2, 2, 4, 4, 4, 8, 8, 8];
@@ -709,6 +883,7 @@ function taOf(o, what) {
 function live(o, what) {
   var i = taOf(o, what);
   if (bufInfo(i[1]) === -2) throw new TypeError('Cannot perform ' + what + ' on a detached ArrayBuffer');
+  if (i[4]) throw new TypeError('Cannot perform ' + what + ' on an out of bounds TypedArray');
   return i;
 }
 function construct(kind, nt, a, b, c) {
@@ -722,14 +897,19 @@ function construct(kind, nt, a, b, c) {
   if (bi !== -1) {
     var off = toIndex(b, 'offset');
     if (off % size) throw new RangeError('start offset of ' + KINDS[kind] + ' should be a multiple of ' + size);
+    var len = c === undefined ? undefined : toIndex(c, 'typed array length');
     if (bi === -2) throw new TypeError('Cannot perform Construct on a detached ArrayBuffer');
-    var blen = Math.floor(bi), len;
+    var blen = Math.floor(bi);
+    if (c === undefined && bufMax(a) >= 0) {
+      // over a resizable buffer: the view tracks its length
+      if (off > blen) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
+      return taMake(kind, a, off, undefined, proto);
+    }
     if (c === undefined) {
       if (blen % size) throw new RangeError('byte length of ' + KINDS[kind] + ' should be a multiple of ' + size);
       if (off > blen) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
       len = (blen - off) / size;
     } else {
-      len = toIndex(c, 'typed array length');
       if (off + len * size > blen) throw new RangeError('Invalid typed array length: ' + len);
     }
     return taMake(kind, a, off, len, proto);
@@ -753,6 +933,7 @@ function defineTA(kind, C) {
   CTORS[kind] = C;
   Object.setPrototypeOf(C, TypedArray);
   Object.setPrototypeOf(C.prototype, TAP);
+  defineProperty(C, 'prototype', { writable: false, enumerable: false, configurable: false });
   defineProperty(C, 'BYTES_PER_ELEMENT', { value: SIZES[kind], writable: false, enumerable: false, configurable: false });
   defineProperty(C.prototype, 'BYTES_PER_ELEMENT', { value: SIZES[kind], writable: false, enumerable: false, configurable: false });
   hide(globalThis, KINDS[kind], C);
@@ -774,7 +955,7 @@ getter(TypedArray, Symbol.species, speciesSelf);
 function speciesCreate(exemplar, args) {
   var kind = taOf(exemplar, 'TypedArray species create')[0];
   var C = speciesOf(exemplar, CTORS[kind]);
-  var out = args.length === 1 ? new C(args[0]) : new C(args[0], args[1], args[2]);
+  var out = args.length === 1 ? new C(args[0]) : args.length === 2 ? new C(args[0], args[1]) : new C(args[0], args[1], args[2]);
   var oi = live(out, 'TypedArray species create');
   if (args.length === 1 && typeof args[0] === 'number' && oi[3] < args[0]) throw new TypeError('species constructor returned a too short typed array');
   return out;
@@ -804,7 +985,7 @@ hide(TypedArray, 'of', function of() {
 });
 getter(TAP, 'buffer', function () { return taOf(this, 'TypedArray.prototype.buffer')[1]; });
 getter(TAP, 'byteLength', function () { var i = taOf(this, 'TypedArray.prototype.byteLength'); return i[3] * SIZES[i[0]]; });
-getter(TAP, 'byteOffset', function () { var i = taOf(this, 'TypedArray.prototype.byteOffset'); return bufInfo(i[1]) === -2 ? 0 : i[2]; });
+getter(TAP, 'byteOffset', function () { var i = taOf(this, 'TypedArray.prototype.byteOffset'); return i[4] ? 0 : i[2]; });
 getter(TAP, 'length', function () { return taOf(this, 'TypedArray.prototype.length')[3]; });
 getter(TAP, Symbol.toStringTag, function () { var i = taInfo(this); return i === undefined ? undefined : KINDS[i[0]]; });
 function len(o, what) { return live(o, what)[3]; }
@@ -817,7 +998,13 @@ hide(TAP, 'copyWithin', function copyWithin(target, start, end) {
   var info = live(this, 'TypedArray.prototype.copyWithin'), n = info[3], size = SIZES[info[0]];
   var to = relIndex(target, n, 0), from = relIndex(start, n, 0), fin = relIndex(end, n, n);
   var count = Math.min(fin - from, n - to);
-  if (count > 0) bufCopy(info[1], info[2] + from * size, info[1], info[2] + to * size, count * size);
+  if (count > 0) {
+    // the coercions can have shrunk or detached the buffer
+    var cur = live(this, 'TypedArray.prototype.copyWithin');
+    var limit = cur[3] * size + cur[2], fb = cur[2] + from * size, tb = cur[2] + to * size;
+    var bytes = Math.min(count * size, limit - fb, limit - tb);
+    if (bytes > 0) bufCopy(info[1], fb, info[1], tb, bytes);
+  }
   return this;
 });
 hide(TAP, 'entries', function entries() { live(this, 'TypedArray.prototype.entries'); return Array.prototype.entries.call(this); });
@@ -830,6 +1017,7 @@ hide(TAP, 'some', function some(f, t) { var n = len(this, 'TypedArray.prototype.
 hide(TAP, 'fill', function fill(v, start, end) {
   var n = len(this, 'TypedArray.prototype.fill'); var x = elemOf(taInfo(this)[0])(v);
   var s = relIndex(start, n, 0), e = relIndex(end, n, n);
+  e = Math.min(e, len(this, 'TypedArray.prototype.fill'));
   for (var i = s; i < e; i++) this[i] = x;
   return this;
 });
@@ -929,7 +1117,9 @@ hide(TAP, 'sort', function sort(cmp) {
 });
 hide(TAP, 'subarray', function subarray(start, end) {
   var info = taOf(this, 'TypedArray.prototype.subarray'); var n = info[3];
-  var s = relIndex(start, n, 0), e = relIndex(end, n, n);
+  var s = relIndex(start, n, 0);
+  if (info[5] && end === undefined) return speciesCreate(this, [info[1], info[2] + s * SIZES[info[0]]]);
+  var e = relIndex(end, n, n);
   return speciesCreate(this, [info[1], info[2] + s * SIZES[info[0]], Math.max(e - s, 0)]);
 });
 hide(TAP, 'toLocaleString', function toLocaleString() {
@@ -958,6 +1148,12 @@ hide(TAP, 'with', function (index, value) {
   return out;
 });
 
+// the specification's lengths for the methods written with more parameters
+[['every', 1], ['fill', 1], ['filter', 1], ['find', 1], ['findIndex', 1], ['findLast', 1], ['findLastIndex', 1], ['forEach', 1], ['includes', 1], ['indexOf', 1], ['lastIndexOf', 1], ['map', 1], ['reduce', 1], ['reduceRight', 1], ['set', 1], ['some', 1], ['join', 1], ['copyWithin', 2], ['slice', 2], ['subarray', 2], ['sort', 1], ['with', 2], ['at', 1], ['toSorted', 1]].forEach(function (e) {
+  var f = TAP[e[0]];
+  if (typeof f === 'function' && f.length !== e[1]) setLength(f, e[1]);
+});
+if (TypedArray.from.length !== 1) setLength(TypedArray.from, 1);
 var dvData = new WeakMap();
 function dvOf(o) { return isObject(o) ? dvData.get(o) : undefined; }
 function DataView(buffer, byteOffset, byteLength) {
@@ -968,32 +1164,52 @@ function DataView(buffer, byteOffset, byteLength) {
   if (bi === -2) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
   var blen = Math.floor(bi);
   if (off > blen) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
+  var tracking = byteLength === undefined && bufMax(buffer) >= 0;
   var n = byteLength === undefined ? blen - off : toIndex(byteLength, 'DataView length');
   if (off + n > blen) throw new RangeError('Invalid DataView length ' + n);
   var o = create(protoFrom(new.target, DataView.prototype));
-  dvData.set(o, [buffer, off, n]);
+  // the buffer can be detached or resized by then
+  bi = bufInfo(buffer);
+  if (bi === -2) throw new TypeError('Cannot perform DataView constructor on a detached ArrayBuffer');
+  blen = Math.floor(bi);
+  if (off > blen) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
+  if (byteLength !== undefined && off + n > blen) throw new RangeError('Invalid DataView length ' + n);
+  dvData.set(o, [buffer, off, tracking ? -1 : n]);
   return o;
+}
+// the view's byte length; -1 when out of bounds or detached
+function dvLength(d) {
+  var bi = bufInfo(d[0]);
+  if (bi === -2) return -1;
+  var blen = Math.floor(bi);
+  if (d[1] > blen) return -1;
+  if (d[2] < 0) return blen - d[1];
+  return d[1] + d[2] > blen ? -1 : d[2];
 }
 var DVP = DataView.prototype;
 function dv(o, what) { var d = dvOf(o); if (d === undefined) throw new TypeError(what + ' called on incompatible receiver'); return d; }
 getter(DVP, 'buffer', function () { return dv(this, 'DataView.prototype.buffer')[0]; });
-getter(DVP, 'byteLength', function () { var d = dv(this, 'DataView.prototype.byteLength'); if (bufInfo(d[0]) === -2) throw new TypeError('detached'); return d[2]; });
-getter(DVP, 'byteOffset', function () { var d = dv(this, 'DataView.prototype.byteOffset'); if (bufInfo(d[0]) === -2) throw new TypeError('detached'); return d[1]; });
+getter(DVP, 'byteLength', function () { var d = dv(this, 'DataView.prototype.byteLength'), n = dvLength(d); if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.byteLength on a detached ArrayBuffer' : 'DataView is out of bounds'); return n; });
+getter(DVP, 'byteOffset', function () { var d = dv(this, 'DataView.prototype.byteOffset'); if (dvLength(d) < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.byteOffset on a detached ArrayBuffer' : 'DataView is out of bounds'); return d[1]; });
 tag(DVP, 'DataView');
 ['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64', 'BigInt64', 'BigUint64'].forEach(function (name, kind) {
   if (!name) return;
   hide(DVP, 'get' + name, function (index, little) {
     var d = dv(this, 'DataView.prototype.get' + name); var i = toIndex(index, 'offset');
-    if (bufInfo(d[0]) === -2) throw new TypeError('Cannot perform DataView.prototype.get' + name + ' on a detached ArrayBuffer');
-    if (i + SIZES[kind] > d[2]) throw new RangeError('Offset is outside the bounds of the DataView');
+    var n = dvLength(d);
+    if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.get' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
+    if (i + SIZES[kind] > n) throw new RangeError('Offset is outside the bounds of the DataView');
     return bufGet(d[0], d[1] + i, kind, !!little);
   });
   hide(DVP, 'set' + name, function (index, value, little) {
     var d = dv(this, 'DataView.prototype.set' + name); var i = toIndex(index, 'offset'); var x = elemOf(kind)(value);
-    if (bufInfo(d[0]) === -2) throw new TypeError('Cannot perform DataView.prototype.set' + name + ' on a detached ArrayBuffer');
-    if (i + SIZES[kind] > d[2]) throw new RangeError('Offset is outside the bounds of the DataView');
+    var n = dvLength(d);
+    if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.set' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
+    if (i + SIZES[kind] > n) throw new RangeError('Offset is outside the bounds of the DataView');
     bufSet(d[0], d[1] + i, kind, x, !!little);
   });
+  setLength(DVP['get' + name], 1);
+  setLength(DVP['set' + name], 2);
 });
 hide(globalThis, 'DataView', DataView);
 
