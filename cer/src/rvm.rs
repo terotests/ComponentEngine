@@ -1750,6 +1750,25 @@ impl Vm {
     #[inline(never)]
     pub fn r_call_slow(&mut self, fo: int, fpos: int, argc: int, bp: int, w3: int, want: usize) -> bool {
         let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
+        // a hot native (Math, hasOwnProperty, push, Map get...) in place:
+        // its result to dst, its operands' slots emptied as the
+        // truncation below would
+        if fo >= 0 && self.ob(fo).class == C_NATIVE {
+            let id = self.ob(fo).func as int;
+            if id != crate::builtins::NF_CALL && id != crate::builtins::NF_APPLY && self.native_fast(id, fpos, argc) {
+                if self.throwing {
+                    return false;
+                }
+                let v = self.stack[fpos as usize];
+                let mut i = fpos;
+                while i < fpos + argc + 2 {
+                    self.stack[i as usize] = Val::Undef;
+                    i += 1;
+                }
+                self.stack[dst as usize] = v;
+                return false;
+            }
+        }
         let nf = self.frames.len();
         self.stack.truncate((fpos + argc + 2) as usize);
         let mut fo = fo;
