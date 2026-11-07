@@ -3942,6 +3942,9 @@ impl Vm {
     pub fn run(&mut self, base: int) {
         if self.regs {
             self.rrun(base);
+            if self.frames.is_empty() && self.jit_on {
+                crate::rvm::jit_flush(self);
+            }
             return;
         }
         'frames: loop {

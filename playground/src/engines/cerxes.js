@@ -10,12 +10,19 @@ const HELPERS = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "
 
 /** The JIT's host side, as cerxes/bench/wjit.mjs has it: CErXes hands over a
  * module's bytes (cerxes_jit.install), the host instantiates it against the
- * engine's memory and table and puts its `f` in the table. The first module
+ * engine's memory and table and puts its functions f0, f1, … (a batch) in
+ * consecutive table slots. The first module
  * is the runtime (look, codes, hstore, callx, pget) the others import. */
 function jitHost(getExports) {
   let helpers = null;
   let rt = null;
   return {
+    // an evicted module's slots get the runtime's `gone` (back to the
+    // interpreter at once), so that nothing holds the module any more
+    release(base, n) {
+      const t = getExports().__indirect_function_table;
+      for (let k = 0; k < n; k++) t.set(base + k, rt.gone);
+    },
     install(ptr, len) {
       const x = getExports();
       const t = x.__indirect_function_table;
@@ -30,8 +37,11 @@ function jitHost(getExports) {
         rt = inst.exports;
         return 0;
       }
-      const idx = t.grow(1);
-      t.set(idx, inst.exports.f);
+      // a batch: f0, f1, … into consecutive slots; the first one's index
+      let n = 0;
+      while (inst.exports["f" + n]) n++;
+      const idx = t.grow(n);
+      for (let k = 0; k < n; k++) t.set(idx + k, inst.exports["f" + k]);
       return idx;
     },
   };
@@ -48,7 +58,7 @@ export function cerxes({ id, name, about, wasm, flags, jit, optional }) {
       const bytes = await (await fetch(base + "wasm/" + wasm)).arrayBuffer();
       let x = null;
       const host = jitHost(() => x);
-      const { instance } = await WebAssembly.instantiate(bytes, { ...wasi.imports, cerxes_jit: { install: (p, n) => host.install(p, n) } });
+      const { instance } = await WebAssembly.instantiate(bytes, { ...wasi.imports, cerxes_jit: { install: (p, n) => host.install(p, n), release: (b, n) => host.release(b, n) } });
       x = instance.exports;
       wasi.setMemory(x.memory);
       if (x._initialize) x._initialize();

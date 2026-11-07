@@ -5037,6 +5037,7 @@ fn targets(ins: Op, pc: usize, rtab: &[int], out: &mut Vec<usize>) {
 
 /// What compile made.
 pub struct Compiled {
+    /// the function's body (locals and code); module() makes the module
     pub bytes: Vec<u8>,
     /// ops written as code, and all ops
     pub done: u32,
@@ -5046,7 +5047,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
+pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -5255,7 +5256,7 @@ pub fn compile(name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout
         // stays with the interpreter
         return None;
     }
-    Some(Compiled { bytes: module(&cg.w.b, name), done, ops: n as u32, exits: cg.exits })
+    Some(Compiled { bytes: cg.w.b, done, ops: n as u32, exits: cg.exits })
 }
 
 /// A module of one function `f` (sp, kv, pc, budget, vm, bp) -> i32 over
@@ -5323,28 +5324,37 @@ fn name_section(m: &mut WBuf, list: &[(u32, String)]) {
     m.section(0, &s);
 }
 
-/// The module of one compiled function: f, which imports look, codes,
-/// hstore and callx from the runtime module (rt_module), so that V8
-/// compiles those once and not again for every function.
-pub fn module(body: &[u8], name: &str) -> Vec<u8> {
+/// The module of a batch of compiled functions: f0, f1, … (bodies in
+/// order), which import look, codes, hstore and callx from the runtime
+/// module (rt_module), so that V8 compiles those once and not again for
+/// every function. The host puts f0… in consecutive table slots.
+pub fn module(bodies: &[&[u8]], names: &[String]) -> Vec<u8> {
+    let n = bodies.len() as u64;
     let mut m = WBuf::new();
     module_head(&mut m, true);
     let mut s = WBuf::new();
-    s.u(1);
-    s.u(0);
+    s.u(n);
+    for _ in 0..n {
+        s.u(0);
+    }
     m.section(3, &s);
     let mut s = WBuf::new();
-    s.u(1);
-    s.name("f");
-    s.byte(0x00);
-    s.u(F_SELF as u64);
+    s.u(n);
+    for k in 0..n {
+        s.name(&format!("f{}", k));
+        s.byte(0x00);
+        s.u(F_SELF as u64 + k);
+    }
     m.section(7, &s);
     let mut s = WBuf::new();
-    s.u(1);
-    s.u(body.len() as u64);
-    s.b.extend_from_slice(body);
+    s.u(n);
+    for b in bodies.iter() {
+        s.u(b.len() as u64);
+        s.b.extend_from_slice(b);
+    }
     m.section(10, &s);
-    name_section(&mut m, &[(F_SELF, format!("js:{}", name))]);
+    let list: Vec<(u32, String)> = names.iter().enumerate().map(|(k, nm)| (F_SELF + k as u32, format!("js:{}", nm))).collect();
+    name_section(&mut m, &list);
     m.b
 }
 
@@ -5379,6 +5389,13 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     let lk = look_body(lay);
     let cd = codes_body();
     let eg = eget_body(lay);
+    // gone: its pc back, no locals
+    let mut gn = WBuf::new();
+    gn.u(0);
+    gn.byte(LOCAL_GET);
+    gn.u(2);
+    gn.byte(END);
+    let gn = gn.b;
     let mut m = WBuf::new();
     module_head(&mut m, false);
     let mut s = WBuf::new();
@@ -5397,7 +5414,7 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     m.section(7, &s);
     let mut s = WBuf::new();
     s.u(RT_FNS.len() as u64);
-    for b in [&lk, &cd, &hs, &cx, &pg, &me, &eg] {
+    for b in [&lk, &cd, &hs, &cx, &pg, &me, &eg, &gn] {
         s.u(b.len() as u64);
         s.b.extend_from_slice(b);
     }
@@ -5417,9 +5434,13 @@ const F_CALLX: u32 = NHELPERS + 3;
 const F_PGET: u32 = NHELPERS + 4;
 const F_MEMEQ: u32 = NHELPERS + 5;
 const F_EGET: u32 = NHELPERS + 6;
-const F_SELF: u32 = NHELPERS + 7;
+/// gone(sp, kv, pc, …) -> pc: what the host puts in the table slot of an
+/// evicted function, so that a call still made to it goes back to the
+/// interpreter at once
+const F_GONE: u32 = NHELPERS + 7;
+const F_SELF: u32 = NHELPERS + 8;
 /// rt_module's functions: (name, type)
-const RT_FNS: [(&str, u32); 7] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0), ("pget", 0), ("memeq", 2), ("eget", 2)];
+const RT_FNS: [(&str, u32); 8] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0), ("pget", 0), ("memeq", 2), ("eget", 2), ("gone", 0)];
 
 /// eget(o, atom, vm): the address of the value of property `atom` (a
 /// string's, known) of the plain object at o, from its shape or its plain
@@ -5876,14 +5897,23 @@ fn look_body(l: Layout) -> Vec<u8> {
 mod host {
     #[link(wasm_import_module = "cerxes_jit")]
     extern "C" {
-        /// compiles the module (ptr, len), puts its export `f` into the
-        /// function table; the index, or -1
+        /// compiles the module (ptr, len), puts its exports f0, f1, …
+        /// into consecutive slots of the function table; the first one's
+        /// index, or -1
         fn install(ptr: *const u8, len: usize) -> i32;
+        /// puts the runtime module's `gone` into table slots base..base+n
+        /// (an evicted module's functions), so that the module can go
+        fn release(base: i32, n: i32);
     }
 
     pub fn put(bytes: &[u8]) -> i32 {
         // SAFETY: the host reads len bytes at ptr and returns
         unsafe { install(bytes.as_ptr(), bytes.len()) }
+    }
+
+    pub fn drop_slots(base: i32, n: i32) {
+        // SAFETY: the host only writes table slots it gave out
+        unsafe { release(base, n) }
     }
 
     pub fn call(idx: i32, sp: usize, kv: usize, pc: i32, budget: i32, vm: usize, bp: i32) -> i32 {
@@ -5899,6 +5929,7 @@ mod host {
     pub fn put(_bytes: &[u8]) -> i32 {
         -1
     }
+    pub fn drop_slots(_base: i32, _n: i32) {}
     pub fn call(_idx: i32, _sp: usize, _kv: usize, pc: i32, _budget: i32, _vm: usize, _bp: i32) -> i32 {
         pc
     }
@@ -5983,6 +6014,32 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         vm.jit_fn.resize(pi + 1, -1);
     }
     let mut f = vm.jit_fn[pi];
+    let me = vm as *const crate::vm::Vm as usize;
+    if f == PENDING {
+        // waits for its batch: flushed when its functions keep coming. A
+        // batch of another machine (or of this one before it moved) was
+        // dropped: compiled again
+        let hits = BATCH.with(|b| {
+            let mut t = b.take();
+            let h = if t.vm == me {
+                t.hits += 1;
+                t.hits
+            } else {
+                0
+            };
+            b.set(t);
+            h
+        });
+        if hits == 0 {
+            vm.jit_fn[pi] = -1;
+            f = -1;
+        } else {
+            if hits >= BATCH_HITS {
+                flush(vm);
+            }
+            return vm.jit_fn[pi];
+        }
+    }
     if f == -1 {
         let rb = vm.protos[pi].rbase as usize;
         let n = vm.protos[pi].code.len();
@@ -6010,38 +6067,27 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             eprintln!("{}", crate::regs::dump(p, &vm.rcode));
         }
         if rb + n <= vm.rcode.len() {
-            if let Some(c) = compile(&format!("{}#{}", p.name, pi), &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
-                let idx = if rt_ready(lay) { host::put(&c.bytes) } else { -1 };
-                STATS.with(|s| {
-                    let mut t = s.get();
-                    if idx >= 0 {
-                        t.compiled += 1;
-                        t.bytes += c.bytes.len() as u64;
-                        t.ops_done += c.done as u64;
-                        t.ops_all += c.ops as u64;
-                        for k in 0..64 {
-                            t.exits[k] += c.exits[k];
-                        }
-                    } else {
-                        t.refused += 1;
+            let name = format!("{}#{}", p.name, pi);
+            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
+                f = PENDING;
+                let full = BATCH.with(|b| {
+                    let mut t = b.take();
+                    if t.vm != me {
+                        t = Batch::default();
+                        t.vm = me;
                     }
-                    s.set(t);
+                    t.bytes += c.bytes.len();
+                    t.items.push(Pending { pi, name, c });
+                    // debug: mask bit 45, each function in a module of its own
+                    let full = t.items.len() >= BATCH_FNS || t.bytes >= BATCH_BYTES || MASK.with(|m| m.get()) & (1u64 << 45) != 0;
+                    b.set(t);
+                    full
                 });
-                if idx >= 0 {
-                    f = idx as i64;
-                    // the pc after a call: the interpreter enters there again
-                    // when the callee returns
-                    for i in 0..n {
-                        let ins = vm.rcode[rb + i];
-                        if (ins.code & 255) as int == R_CALL || (ins.code & 255) as int == R_NEW {
-                            let at = rb + i + 1 + ((ins.code >> 16) as usize);
-                            while vm.jit_res.len() <= at {
-                                vm.jit_res.push(false);
-                            }
-                            vm.jit_res[at] = true;
-                        }
-                    }
+                vm.jit_fn[pi] = f;
+                if full {
+                    flush(vm);
                 }
+                return vm.jit_fn[pi];
             } else {
                 STATS.with(|s| {
                     let mut t = s.get();
@@ -6054,6 +6100,204 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         calls_fill(vm, pi, f);
     }
     f
+}
+
+/// jit_fn's mark for a function compiled and waiting for its batch
+const PENDING: i64 = -3;
+/// a batch goes to the host at this many functions or body bytes, or
+/// when its functions have been asked for this many times since
+const BATCH_FNS: usize = 16;
+const BATCH_BYTES: usize = 256 * 1024;
+const BATCH_HITS: u32 = 64;
+
+struct Pending {
+    pi: usize,
+    name: String,
+    c: Compiled,
+}
+
+#[derive(Default)]
+struct Batch {
+    /// the machine whose functions these are (its address)
+    vm: usize,
+    items: Vec<Pending>,
+    bytes: usize,
+    hits: u32,
+}
+
+thread_local! {
+    /// compiled functions not yet given to the host
+    static BATCH: std::cell::Cell<Batch> = std::cell::Cell::new(Batch::default());
+}
+
+/// The waiting functions as one module to the host: each gets its table
+/// slot (or -2 when the host refused the module).
+fn flush(vm: &mut crate::vm::Vm) {
+    let t = BATCH.with(|b| b.take());
+    if t.items.is_empty() || t.vm != vm as *const crate::vm::Vm as usize {
+        return;
+    }
+    let lay = LAYOUT.with(|l| *l);
+    let bodies: Vec<&[u8]> = t.items.iter().map(|q| q.c.bytes.as_slice()).collect();
+    let names: Vec<String> = t.items.iter().map(|q| q.name.clone()).collect();
+    let base = if rt_ready(lay) { host::put(&module(&bodies, &names)) } else { -1 };
+    for (k, q) in t.items.iter().enumerate() {
+        let pi = q.pi;
+        let c = &q.c;
+        STATS.with(|s| {
+            let mut st = s.get();
+            if base >= 0 {
+                st.compiled += 1;
+                st.bytes += c.bytes.len() as u64;
+                st.ops_done += c.done as u64;
+                st.ops_all += c.ops as u64;
+                for x in 0..64 {
+                    st.exits[x] += c.exits[x];
+                }
+            } else {
+                st.refused += 1;
+            }
+            s.set(st);
+        });
+        let f = if base >= 0 { base as i64 + k as i64 } else { -2 };
+        if f >= 0 {
+            // the pc after a call: the interpreter enters there again
+            // when the callee returns
+            let rb = vm.protos[pi].rbase as usize;
+            let n = vm.protos[pi].code.len();
+            for i in 0..n {
+                let ins = vm.rcode[rb + i];
+                if (ins.code & 255) as int == R_CALL || (ins.code & 255) as int == R_NEW {
+                    let at = rb + i + 1 + ((ins.code >> 16) as usize);
+                    while vm.jit_res.len() <= at {
+                        vm.jit_res.push(false);
+                    }
+                    vm.jit_res[at] = true;
+                }
+            }
+        }
+        vm.jit_fn[pi] = f;
+        calls_fill(vm, pi, f);
+    }
+    if base >= 0 {
+        let me = vm as *const crate::vm::Vm as usize;
+        let cap = if MASK.with(|m| m.get()) & (1u64 << 44) != 0 { 64 * 1024 } else { CODE_MAX };
+        let mut gone: Vec<Module> = Vec::new();
+        MODS.with(|c| {
+            let mut ms = c.take();
+            if ms.vm != me {
+                ms = Mods::default();
+                ms.vm = me;
+            }
+            ms.bytes += t.bytes;
+            ms.list.push(Module { base: base as i64, pis: t.items.iter().map(|q| q.pi).collect(), bytes: t.bytes });
+            // the oldest modules go while the code is over its cap (never
+            // the one just made)
+            while ms.bytes > cap && ms.list.len() > 1 {
+                let m = ms.list.remove(0);
+                ms.bytes -= m.bytes;
+                gone.push(m);
+            }
+            c.set(ms);
+        });
+        for m in gone.iter() {
+            let mut counts = MODS.with(|c| {
+                let mut ms = c.take();
+                let e = std::mem::take(&mut ms.evictions);
+                c.set(ms);
+                e
+            });
+            evict(vm, m, &mut counts);
+            MODS.with(|c| {
+                let mut ms = c.take();
+                ms.evictions = counts;
+                c.set(ms);
+            });
+        }
+    }
+}
+
+/// The compiled code a machine keeps, in body bytes; past it the oldest
+/// modules are dropped (functions still hot are compiled again)
+const CODE_MAX: usize = 4 * 1024 * 1024;
+
+struct Module {
+    base: i64,
+    pis: Vec<usize>,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct Mods {
+    vm: usize,
+    list: Vec<Module>,
+    bytes: usize,
+    /// by function: how often it was evicted
+    evictions: Vec<u8>,
+}
+
+/// a function evicted this often stays with the interpreter (the hot code
+/// does not fit under the cap: compiling it again and again would cost
+/// more than it gives)
+const EVICT_MAX: u8 = 2;
+
+thread_local! {
+    /// the modules given to the host, oldest first
+    static MODS: std::cell::Cell<Mods> = std::cell::Cell::new(Mods::default());
+    /// debug counter: functions evicted
+    pub static EVICTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Module m's functions back to the interpreter: their table slots get
+/// `gone`, their records and the call sites' records that name them are
+/// cleared, and each must get hot again before it is compiled again.
+fn evict(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>) {
+    let n = m.pis.len() as i64;
+    host::drop_slots(m.base as i32, n as i32);
+    let mine = |f: i64| f >= m.base && f < m.base + n;
+    for &pi in m.pis.iter() {
+        if pi < vm.jit_fn.len() && mine(vm.jit_fn[pi]) {
+            if counts.len() <= pi {
+                counts.resize(pi + 1, 0);
+            }
+            counts[pi] = counts[pi].saturating_add(1);
+            vm.jit_fn[pi] = if counts[pi] >= EVICT_MAX { -2 } else { -1 };
+            calls_fill(vm, pi, -1);
+            if pi < vm.jit_hot.len() {
+                vm.jit_hot[pi] = 0;
+            }
+            // its loop heads start again from no misses
+            let rb = vm.protos[pi].rbase as usize;
+            let end = (rb + vm.protos[pi].code.len()).min(vm.jit_miss.len());
+            for ri in rb.min(end)..end {
+                vm.jit_miss[ri] = 0;
+            }
+            EVICTED.with(|e| e.set(e.get() + 1));
+        }
+    }
+    // a call site's record of a callee that went: its proto no longer
+    // matches, so the next call fills it again
+    for ri in 0..vm.rcode.len().min(vm.jit_cache_at.len()) {
+        if (vm.rcode[ri].code & 255) as int == R_CALL && vm.jit_cache_at[ri] >= 0 {
+            let b = &mut vm.jit_caches[vm.jit_cache_at[ri] as usize];
+            if b.len() > 1 && mine(b[1] as i64) {
+                b[0] = -1;
+                b[1] = -1;
+            }
+        }
+    }
+}
+
+/// flush() when anything waits (the machine ran to its end).
+pub fn flush_pending(vm: &mut crate::vm::Vm) {
+    if BATCH.with(|b| {
+        let t = b.take();
+        let any = !t.items.is_empty();
+        b.set(t);
+        any
+    }) {
+        flush(vm);
+    }
 }
 
 fn run_at(vm: &mut crate::vm::Vm, f: i64, pi: usize, bp: i64, pc: i64, budget: i32, head: bool) -> i64 {
@@ -7478,6 +7722,10 @@ fn direct(vm: &mut crate::vm::Vm, nf: usize, f: i64) -> i32 {
 /// enough to get it, else -1.
 pub fn hot_fn(vm: &mut crate::vm::Vm, tp: usize) -> i64 {
     let f = if tp < vm.jit_fn.len() { vm.jit_fn[tp] } else { -1 };
+    if f == PENDING {
+        let f = compiled_fn(vm, tp);
+        return if f >= 0 { f } else { -1 };
+    }
     if f >= 0 || f == -2 {
         if f >= 0 {
             let ri = (vm.protos[tp].rbase + vm.protos[tp].rentry) as usize;

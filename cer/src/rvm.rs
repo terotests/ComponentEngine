@@ -2282,6 +2282,17 @@ pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _hea
     pc
 }
 
+/// The machine has run to its end (no frames left): functions compiled
+/// and waiting for their batch go to the host now (wjit.rs). Only Rust
+/// compiles.
+#[ranger::target(rust)]
+pub fn jit_flush(vm: &mut Vm) {
+    crate::wjit::flush_pending(vm);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_flush(_vm: &mut Vm) {}
+
 /// A loop head whose compiled code went back to the interpreter before a
 /// back edge this often (4 per such entry, 1 back per good one) is no
 /// longer entered.
