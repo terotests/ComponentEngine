@@ -1140,8 +1140,12 @@ impl PComp {
     /// The class's private references checked at its end: an undeclared
     /// one goes to the class around it, or is an early error.
     fn priv_end(&mut self) {
-        let decl = self.priv_decl.pop().unwrap();
-        let refs = self.priv_refs.pop().unwrap();
+        let nd = self.priv_decl.len() - 1;
+        let decl = self.priv_decl[nd].clone();
+        self.priv_decl.remove(nd);
+        let nr = self.priv_refs.len() - 1;
+        let refs = self.priv_refs[nr].clone();
+        self.priv_refs.remove(nr);
         for r in refs.iter() {
             let mut found = false;
             for d in decl.iter() {
