@@ -638,3 +638,32 @@ function r() { return eval("arguments.length"); }
 [f(1), g(), h(), k(), m(), n(), p(), r(1, 2, 3), eval("{}")].join()
 ----
 10,5number7,18,10/20,ReferenceError,42,undefined,3,
+
+==== js calls the JIT writes in place: a failed check inside the callee makes the call itself
+function add1(a) { return a + 1; }
+function mk(k) { return function (a) { return a * 2 + k; }; }
+var g = mk(3);
+var cnt = 0;
+function mkc() { var n = 0; return function () { n = n + 1; return n; }; }
+var bump = mkc();
+var o = { v: 4, m: function (a) { return a + this.v; } };
+var p = { get v() { cnt++; return 100; }, m: o.m };
+function sl() { return this === undefined ? 'u' : typeof this; }
+function two(a, b) { var t = a; return b; }
+function run() {
+  var s = 0, t = '', u = 0, w = 0, x = 0, y = [], z = 0;
+  for (var i = 0; i < 40; i++) {
+    s = add1(i < 30 ? s : '' + s);
+    u = g(i < 35 ? i : 'q');
+    w = bump();
+    x = (i < 20 ? o : p).m(x);
+    if (i === 25) { o.v = 'z'; }
+    y.push(sl());
+    z = two(i) === undefined ? z + 1 : z;
+    if (i === 33) { add1 = function (a) { return a + 'b'; }; }
+  }
+  return [s, u, w, x, y.slice(0, 2).join(''), z, cnt].join();
+}
+run()
+----
+301111bbbbbb,NaN,40,2080,objectobject,40,20
