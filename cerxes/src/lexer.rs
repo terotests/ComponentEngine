@@ -145,11 +145,17 @@ pub fn lexer_for(src: &str, jsx: bool, factory: &str, fragment: &str) -> Lexer {
 }
 
 pub fn is_id_start(c: char) -> bool {
-    c.is_alphabetic() || c == '_' || c == '$'
+    if (c as int) < 128 {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$';
+    }
+    crate::regex::id_wide(c, true)
 }
 
 pub fn is_id_part(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '$' || c == '\u{200c}' || c == '\u{200d}'
+    if (c as int) < 128 {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$';
+    }
+    c == '\u{200c}' || c == '\u{200d}' || crate::regex::id_wide(c, false)
 }
 
 fn hex_val(c: char) -> int {
@@ -603,6 +609,19 @@ impl Lexer {
             if c == '\\' && self.at(self.pos + 1) == 'u' {
                 self.pos += 2;
                 let cp = self.read_unicode_escape();
+                let ok = match char::from_u32(cp as u32) {
+                    Some(ch) => {
+                        if s.is_empty() {
+                            is_id_start(ch)
+                        } else {
+                            is_id_part(ch)
+                        }
+                    }
+                    None => false,
+                };
+                if !ok {
+                    self.fail("Invalid Unicode escape sequence");
+                }
                 push_code_point(&mut s, cp);
                 *escaped = true;
                 continue;
@@ -636,6 +655,10 @@ impl Lexer {
             loop {
                 let d = self.cur();
                 if d == '_' {
+                    let nh = hex_val(self.at(self.pos + 1));
+                    if digits == 0 || nh < 0 || (nh as double) >= base {
+                        self.fail("invalid numeric separator");
+                    }
                     self.pos += 1;
                     continue;
                 }
@@ -682,12 +705,8 @@ impl Lexer {
             }
         }
         let mut text = String::new();
-        while (self.cur() >= '0' && self.cur() <= '9') || self.cur() == '_' {
-            if self.cur() != '_' {
-                text.push(self.cur());
-            }
-            self.pos += 1;
-        }
+        let lead0 = c == '0';
+        self.dec_digits(&mut text, lead0);
         if self.cur() == 'n' {
             // a BigInt literal: its decimal text, marked (as CEr's lexer)
             self.pos += 1;
@@ -699,12 +718,10 @@ impl Lexer {
         if self.cur() == '.' {
             text.push('.');
             self.pos += 1;
-            while (self.cur() >= '0' && self.cur() <= '9') || self.cur() == '_' {
-                if self.cur() != '_' {
-                    text.push(self.cur());
-                }
-                self.pos += 1;
+            if self.cur() == '_' {
+                self.fail("invalid numeric separator");
             }
+            self.dec_digits(&mut text, false);
         }
         if self.cur() == 'e' || self.cur() == 'E' {
             let save = self.pos;
@@ -714,12 +731,12 @@ impl Lexer {
                 exp.push(self.cur());
                 self.pos += 1;
             }
-            let mut digits = 0;
-            while self.cur() >= '0' && self.cur() <= '9' {
-                exp.push(self.cur());
-                self.pos += 1;
-                digits += 1;
+            if self.cur() == '_' {
+                self.fail("invalid numeric separator");
             }
+            let before = exp.as_bytes().len();
+            self.dec_digits(&mut exp, false);
+            let digits = exp.as_bytes().len() - before;
             if digits == 0 {
                 self.pos = save;
             } else {
@@ -735,6 +752,30 @@ impl Lexer {
             text.push('0');
         }
         text.parse::<f64>().unwrap_or(0.0)
+    }
+
+    /// Decimal digits with numeric separators (each `_` between two
+    /// digits); none after a leading 0 (0_1, 08_1)
+    fn dec_digits(&mut self, text: &mut String, lead0: bool) {
+        loop {
+            let d = self.cur();
+            if d >= '0' && d <= '9' {
+                text.push(d);
+                self.pos += 1;
+                continue;
+            }
+            if d == '_' {
+                let prev = self.at(self.pos - 1);
+                let nx = self.at(self.pos + 1);
+                if lead0 || !(prev >= '0' && prev <= '9') || !(nx >= '0' && nx <= '9') {
+                    self.fail("invalid numeric separator");
+                    return;
+                }
+                self.pos += 1;
+                continue;
+            }
+            break;
+        }
     }
 
     fn check_after_number(&mut self) {

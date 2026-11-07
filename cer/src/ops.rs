@@ -223,6 +223,8 @@ pub const OP_SET_PROP_POP: int = 131;
 /// OP_SET_ELEM likewise
 pub const OP_SET_ELEM_POP: int = 132;
 /// [obj] → [obj.<private atom a>]: a TypeError when obj does not have it
+/// obj.#x: [obj] → [v]; a the key, b the brand (-1: none, -2: the AST
+/// compiler's plain lookup), c the kind as OP_SET_PRIVATE's
 pub const OP_GET_PRIVATE: int = 133;
 /// `x += v;` as a statement on local a: [v] → []. When x and v are strings
 /// and nothing else holds x's text, v is appended in place instead of both
@@ -276,3 +278,19 @@ pub const OP_CASE_INT_JT: int = 150;
 /// `x OP null` or `null OP x` for local x = b / 256 and OP = b % 256 one of
 /// OP_SEQ, OP_SNE, OP_EQ, OP_NE: to a when it is false
 pub const OP_LOCAL_NULL_JF: int = 151;
+/// an async generator's `yield*`, first half: [iter, received, mode] →
+/// [iter, mode, result of iter.next / throw / return(received)], awaited
+/// next; to b with [iter, received] for a return the iterator has no
+/// method for (a: the second half's a)
+pub const OP_ASTAR_CALL: int = 152;
+/// its second half, on the awaited result: [iter, mode, result] → done:
+/// [value] to a, for a return [iter, value] to b; else [iter, value],
+/// yielded next
+pub const OP_ASTAR_DONE: int = 153;
+/// ToPropertyKey: [v] → [its key: a symbol, or a string]
+pub const OP_TO_KEY: int = 154;
+/// obj.#x = v: [obj, v] → [v]; a the key, b the brand (-1: none), c the
+/// kind (0 field, 1 method, 2 accessor)
+pub const OP_SET_PRIVATE: int = 155;
+/// `#x in obj`: [_, obj] → [bool]; a the key, b the brand (-1: none)
+pub const OP_HAS_PRIVATE: int = 156;

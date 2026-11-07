@@ -628,7 +628,7 @@ impl Vm {
         let mut base_ctor: int = -1;
         for n in err_names {
             let proto = if k == 0 { ep } else { self.alloc(C_OBJECT, ep) };
-            let c = self.ctor(n, NF_ERROR + k, 1, proto);
+            let c = self.ctor(n, NF_ERROR + k, if n == "AggregateError" { 2 } else { 1 }, proto);
             if k == 0 {
                 base_ctor = c;
             } else {
@@ -1085,12 +1085,9 @@ impl Vm {
             self.add_own(arr, A_GROUPS, Val::Undef, 0);
         } else {
             let go = self.alloc(C_OBJECT, -1);
-            let mut i: usize = 0;
-            while i < names.len() {
-                let a = self.intern(names[i].as_str());
-                let v = items[nidx[i] as usize].clone();
-                self.add_own(go, a, v, 0);
-                i += 1;
+            for g in group_pairs(&names, &nidx, &items).iter() {
+                let a = self.intern(g.0.as_str());
+                self.add_own(go, a, g.1, 0);
             }
             self.add_own(arr, A_GROUPS, Val::Obj(go), 0);
         }
@@ -1114,12 +1111,9 @@ impl Vm {
                 self.add_own(ind, A_GROUPS, Val::Undef, 0);
             } else {
                 let gi = self.alloc(C_OBJECT, -1);
-                let mut i: usize = 0;
-                while i < names.len() {
-                    let a = self.intern(names[i].as_str());
-                    let v = pairs[nidx[i] as usize].clone();
-                    self.add_own(gi, a, v, 0);
-                    i += 1;
+                for g in group_pairs(&names, &nidx, &pairs).iter() {
+                    let a = self.intern(g.0.as_str());
+                    self.add_own(gi, a, g.1, 0);
                 }
                 self.add_own(ind, A_GROUPS, Val::Obj(gi), 0);
             }
@@ -1246,12 +1240,7 @@ impl Vm {
                     capv.push(if a < 0 || b < 0 { Val::Undef } else { self.string_val(jsstr::sub_units(s.as_str(), &units, a, b)) });
                     g += 1;
                 }
-                let mut groups: Vec<(String, Val)> = Vec::new();
-                let mut i: usize = 0;
-                while i < names.len() {
-                    groups.push((names[i].clone(), capv[nidx[i] as usize].clone()));
-                    i += 1;
-                }
+                let groups: Vec<(String, Val)> = group_pairs(&names, &nidx, &capv);
                 if fn_repl {
                     let mut args: Vec<Val> = capv.clone();
                     args.push(Val::Num(ms as double));
@@ -1586,7 +1575,7 @@ impl Vm {
     pub fn desc_flag(&mut self, d: int, desc: &Val, name: int, bit: int, existing_attr: int) -> int {
         if self.has_atom(d, name) {
             let v = self.get_obj(d, name, desc);
-            if truthy(&v) {
+            if self.truthy_v(&v) {
                 0
             } else {
                 bit
@@ -1606,6 +1595,9 @@ impl Vm {
         }
         let (i, a) = self.to_key(key);
         let atom = if i >= 0 { self.index_atom(i) } else { a };
+        if i >= 0 && (o == self.array_proto || o == self.object_proto) {
+            self.idx_protos = true;
+        }
         if atom == A_PROTOTYPE && self.objs[o as usize].class == C_FUNCTION && self.lazy_prototype(o) {
             // made now, so that a descriptor without a value keeps it
             self.function_prototype(o);
@@ -1624,9 +1616,31 @@ impl Vm {
             self.throw_type("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
             return;
         }
+        if i >= 0 && self.objs[o as usize].class == C_TYPED {
+            // a typed array's element (TypedArray [[DefineOwnProperty]])
+            let bad_flag = |vm: &mut Vm, a: int| -> bool {
+                if vm.has_atom(d, a) {
+                    let f = vm.get_obj(d, a, desc);
+                    return !vm.truthy_v(&f);
+                }
+                false
+            };
+            let nc = bad_flag(self, A_CONFIGURABLE);
+            let ne = bad_flag(self, A_ENUMERABLE);
+            let nw = bad_flag(self, A_WRITABLE);
+            if i >= self.ta_length(o) || nc || ne || nw || has_get || has_set {
+                self.throw_type("Cannot redefine property: typed array element");
+                return;
+            }
+            if has_value {
+                self.ta_set(o, i, &value);
+            }
+            return;
+        }
         let slot = self.find(o, atom);
-        let existing_attr = if slot >= 0 { self.attr_at(o, slot) } else { -1 };
         let in_elems = i >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len();
+        let plain_elem = slot < 0 && in_elems && self.objs[o as usize].class == C_ARRAY && !self.is_hole(o, i);
+        let existing_attr = if slot >= 0 { self.attr_at(o, slot) } else if plain_elem { 0 } else { -1 };
         if slot < 0 && !in_elems && !self.objs[o as usize].extensible && !(self.objs[o as usize].class == C_ARRAY && atom == A_LENGTH) {
             let n = self.atom_str(atom);
             self.throw_type(format!("Cannot define property {}, object is not extensible", n).as_str());
@@ -1663,7 +1677,7 @@ impl Vm {
             }
             if (existing_attr & P_READONLY) != 0 {
                 let wv = self.get_obj(d, A_WRITABLE, desc);
-                if has_writable && truthy(&wv) {
+                if has_writable && self.truthy_v(&wv) {
                     self.throw_type(msg.as_str());
                     return;
                 }
@@ -1674,6 +1688,18 @@ impl Vm {
                 }
                 return;
             }
+        }
+        if (has_get || has_set) && i >= 0 && self.objs[o as usize].class == C_ARRAY && slot < 0 {
+            // an accessor element: kept as a property
+            if has_get && !matches!(get_v, Val::Undef) && !self.is_callable(&get_v) {
+                self.throw_type("Getter must be a function");
+                return;
+            }
+            if has_set && !matches!(set_v, Val::Undef) && !self.is_callable(&set_v) {
+                self.throw_type("Setter must be a function");
+                return;
+            }
+            self.elem_to_prop(o, i);
         }
         if has_get || has_set {
             if has_get {
@@ -1700,27 +1726,56 @@ impl Vm {
             self.set_attr(o, slot, P_ACCESSOR | hidden | fixed);
             return;
         }
-        let readonly = self.desc_flag(d, desc, A_WRITABLE, P_READONLY, existing_attr);
+        let mut readonly = self.desc_flag(d, desc, A_WRITABLE, P_READONLY, existing_attr);
+        if !has_writable && existing_attr >= 0 && (existing_attr & P_ACCESSOR) != 0 {
+            // an accessor turned into a data property: writable defaults to false
+            readonly = P_READONLY;
+        }
         let class = self.objs[o as usize].class;
         if class == C_ARRAY && atom == A_LENGTH {
             if has_value {
                 let n = self.to_number(&value);
                 self.set_length(o, n);
+                if !self.throwing && (self.evecs[self.objs[o as usize].elems as usize].v.len() as double) != n {
+                    self.throw_type("Cannot redefine property: length");
+                    return;
+                }
             }
             if readonly != 0 {
                 self.objs[o as usize].extensible = false;
             }
             return;
         }
-        if i >= 0 && class == C_ARRAY && (hidden | readonly | fixed) == 0 {
-            self.set_index(o, i, value);
-            return;
-        }
-        if i >= 0 && class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
-            // an element with attributes: keep it as a property instead
-            let v = if has_value { value.clone() } else { self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone() };
-            self.put_elem(o, i, v.clone());
-            return;
+        if i >= 0 && class == C_ARRAY {
+            if (hidden | readonly | fixed) == 0 {
+                // a plain element (writable, enumerable, configurable)
+                let v = if has_value {
+                    value
+                } else if plain_elem {
+                    self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
+                } else if slot >= 0 && (existing_attr & P_ACCESSOR) == 0 {
+                    self.objs[o as usize].get_slot(slot as usize).clone()
+                } else {
+                    Val::Undef
+                };
+                if slot >= 0 {
+                    self.remove_own(o, slot);
+                    if (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                        self.put_elem(o, i, v);
+                        self.clear_elem_hole(o, i);
+                        return;
+                    }
+                }
+                self.set_index(o, i, v);
+                return;
+            }
+            if slot < 0 {
+                // an element with attributes: kept as a property
+                let (cur, _) = self.elem_to_prop(o, i);
+                let v = if has_value { value } else { cur };
+                self.define(o, atom, v, hidden | readonly | fixed);
+                return;
+            }
         }
         let v = if has_value {
             value
@@ -1736,7 +1791,7 @@ impl Vm {
         let (i, a) = self.to_key(key);
         let class = self.objs[o as usize].class;
         let d = self.new_object();
-        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
             let v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
             self.add_own(d, A_VALUE, v, 0);
             self.add_own(d, A_WRITABLE, Val::Bool(true), 0);
@@ -1769,8 +1824,8 @@ impl Vm {
                 self.add_own(d, A_CONFIGURABLE, Val::Bool(false), 0);
                 return Val::Obj(d);
             }
-            if class == C_FUNCTION && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
-                let v = self.get_obj(o, atom, &Val::Obj(o));
+            if (class == C_FUNCTION || class == C_BOUND) && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
+                let v = self.function_own(o, atom);
                 if matches!(v, Val::Undef) {
                     return Val::Undef;
                 }
@@ -2745,16 +2800,149 @@ impl Vm {
 
     // ---- the dispatch
 
+    /// Whether an Array.prototype method takes the prelude's generic path:
+    /// a receiver that is not a plain array (an array-like, a proxy, a
+    /// frozen array or one with element properties, holes over indexed
+    /// prototypes), or a species constructor for the methods that make an
+    /// array.
+    fn ap_generic(&mut self, id: int, this: &Val) -> bool {
+        let o = obj_of(this);
+        if o < 0 {
+            return true;
+        }
+        let ob = &self.objs[o as usize];
+        let class = ob.class;
+        if class == C_ARGUMENTS || class == C_TYPED {
+            return false;
+        }
+        if class != C_ARRAY {
+            return true;
+        }
+        if ob.pos == 3 {
+            return true;
+        }
+        if ob.pos == 2 {
+            // frozen: the methods that write
+            return id == NF_AP_PUSH || id == NF_AP_POP || id == NF_AP_SHIFT || id == NF_AP_UNSHIFT || id == NF_AP_SPLICE || id == NF_AP_REVERSE || id == NF_AP_SORT || id == NF_AP_FILL || id == NF_AP_COPYWITHIN;
+        }
+        if self.idx_protos && !self.colds[ob.cold as usize].elems2.is_empty() {
+            return true;
+        }
+        if id == NF_AP_MAP || id == NF_AP_FILTER || id == NF_AP_SLICE || id == NF_AP_SPLICE || id == NF_AP_CONCAT || id == NF_AP_FLAT || id == NF_AP_FLATMAP {
+            // ArraySpeciesCreate: a constructor other than Array
+            if ob.proto as int != self.array_proto {
+                return true;
+            }
+            if ob.shape != 0 && self.find(o, A_CONSTRUCTOR) >= 0 {
+                return true;
+            }
+            let ap = self.array_proto;
+            let sl = self.find(ap, A_CONSTRUCTOR);
+            let g = self.array_generic;
+            let arr_ctor = if self.evecs[self.objs[g as usize].elems as usize].v.len() > 36 { obj_of(&self.evecs[self.objs[g as usize].elems as usize].v[36]) } else { -1 };
+            if sl < 0 || (self.attr_at(ap, sl) & P_ACCESSOR) != 0 || obj_of(&self.objs[ap as usize].get_slot(sl as usize)) != arr_ctor {
+                return true;
+            }
+        }
+        if id == NF_AP_CONCAT || id == NF_AP_FLAT || id == NF_AP_FLATMAP {
+            // holes stay holes; Symbol.isConcatSpreadable on the receiver
+            if !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// concat's arguments the native path cannot take: an object with
+    /// Symbol.isConcatSpreadable, a proxy, an array with holes or its own
+    /// properties.
+    fn concat_generic(&mut self, this: &Val, args: &Vec<Val>) -> bool {
+        let sa = match self.atoms.get("@@isConcatSpreadable") {
+            Some(a) => *a,
+            None => return false,
+        };
+        let o = obj_of(this);
+        if o >= 0 && self.objs[o as usize].shape != 0 && self.find(o, sa) >= 0 {
+            return true;
+        }
+        let ap = self.array_proto;
+        if self.has_atom(ap, sa) {
+            return true;
+        }
+        for a in args.iter() {
+            let x = obj_of(a);
+            if x < 0 {
+                continue;
+            }
+            let class = self.objs[x as usize].class;
+            if class == C_PROXY {
+                return true;
+            }
+            if class == C_ARRAY {
+                if !self.colds[self.objs[x as usize].cold as usize].elems2.is_empty() || self.objs[x as usize].pos == 3 {
+                    return true;
+                }
+                if self.objs[x as usize].shape != 0 && self.find(x, sa) >= 0 {
+                    return true;
+                }
+                if self.objs[x as usize].proto as int != ap {
+                    return self.has_atom(x, sa);
+                }
+                continue;
+            }
+            if self.has_atom(x, sa) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && (matches!(this, Val::Undef) || matches!(this, Val::Null)) {
             self.throw_type("Array.prototype method called on null or undefined");
             return Val::Undef;
         }
+        if id >= NF_AP_PUSH && id <= NF_AP_WITH && self.array_generic >= 0 && (self.ap_generic(id, &this) || (id == NF_AP_CONCAT && self.concat_generic(&this, args))) {
+            let g = self.array_generic;
+            let k = (id - NF_AP_PUSH) as usize;
+            if k < self.evecs[self.objs[g as usize].elems as usize].v.len() {
+                let f = self.evecs[self.objs[g as usize].elems as usize].v[k].clone();
+                if !matches!(f, Val::Undef) {
+                    return self.call_value(f, this, args.clone());
+                }
+            }
+        }
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && !(id == NF_AP_FOREACH || id == NF_AP_MAP || id == NF_AP_FILTER || id == NF_AP_SOME || id == NF_AP_EVERY || id == NF_AP_REDUCE || id == NF_AP_REDUCERIGHT || id == NF_AP_INDEXOF || id == NF_AP_LASTINDEXOF) {
             // the rest read and write `elems` directly: holes become undefined
             let t = obj_of(&this);
             if t >= 0 && self.objs[t as usize].class == C_ARRAY && !self.colds[self.objs[t as usize].cold as usize].elems2.is_empty() {
-                self.put_elems2(t, Vec::new());
+                let mutates = id == NF_AP_PUSH || id == NF_AP_POP || id == NF_AP_SHIFT || id == NF_AP_UNSHIFT || id == NF_AP_SPLICE || id == NF_AP_REVERSE || id == NF_AP_SORT || id == NF_AP_FILL || id == NF_AP_COPYWITHIN;
+                if mutates {
+                    // holes and element properties become plain elements
+                    let n = self.evecs[self.objs[t as usize].elems as usize].v.len() as int;
+                    if self.objs[t as usize].pos == 3 || self.idx_protos {
+                        let mut k: int = 0;
+                        while k < n {
+                            if self.is_hole(t, k) {
+                                let v = self.get_index(&this, k);
+                                if self.throwing {
+                                    return Val::Undef;
+                                }
+                                let a = self.index_atom(k);
+                                let sl = self.find(t, a);
+                                if sl >= 0 {
+                                    self.remove_own(t, sl);
+                                }
+                                self.put_elem(t, k, v);
+                            }
+                            k += 1;
+                        }
+                        if self.objs[t as usize].pos == 3 {
+                            self.objs[t as usize].pos = 0;
+                        }
+                    }
+                    self.put_elems2(t, Vec::new());
+                }
             }
         }
         if id == NF_HOST_SYNC {
@@ -3093,7 +3281,7 @@ impl Vm {
                 Val::Num(n)
             }
             NF_BOOLEAN => {
-                let b = truthy(&a0);
+                let b = self.truthy_v(&a0);
                 if construct {
                     let proto = self.proto_from(&new_target, self.boolean_proto);
                     let o = self.alloc(C_BOOLEAN, proto);
@@ -3466,12 +3654,12 @@ impl Vm {
                 if id != NF_O_OWNSYMBOLS && (class == C_ARRAY || class == C_STRING) {
                     keys.push(self.str_val("length"));
                 }
-                if id != NF_O_OWNSYMBOLS && class == C_FUNCTION {
+                if id != NF_O_OWNSYMBOLS && (class == C_FUNCTION || class == C_BOUND) {
                     let mut extra: Vec<Val> = Vec::new();
-                    if self.find(o, A_LENGTH) < 0 {
+                    if self.find(o, A_LENGTH) < 0 && !self.vgone(o, A_LENGTH) {
                         extra.push(self.str_val("length"));
                     }
-                    if self.find(o, A_NAME) < 0 {
+                    if self.find(o, A_NAME) < 0 && !self.vgone(o, A_NAME) {
                         extra.push(self.str_val("name"));
                     }
                     for k in keys {
@@ -3515,6 +3703,20 @@ impl Vm {
             NF_O_FREEZE | NF_O_SEAL | NF_O_PREVENTEXT => {
                 if let Val::Obj(o) = &a0 {
                     let o = *o;
+                    if id != NF_O_PREVENTEXT && self.objs[o as usize].class == C_ARRAY && (id == NF_O_SEAL || self.objs[o as usize].pos == 3) {
+                        // sealed elements (or frozen ones beside element
+                        // properties) become properties with attributes
+                        let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+                        let mut k: int = 0;
+                        while k < n {
+                            if !self.is_hole(o, k) {
+                                let (v, _) = self.elem_to_prop(o, k);
+                                let a = self.index_atom(k);
+                                self.define(o, a, v, 0);
+                            }
+                            k += 1;
+                        }
+                    }
                     self.objs[o as usize].extensible = false;
                     if id != NF_O_PREVENTEXT {
                         let n = self.nkeys(o);
@@ -3535,7 +3737,7 @@ impl Vm {
                         if id == NF_O_FREEZE {
                             // frozen elements: kept as read-only properties
                             let class = self.objs[o as usize].class;
-                            if class == C_ARRAY {
+                            if class == C_ARRAY && self.objs[o as usize].pos != 3 {
                                 self.objs[o as usize].pos = 2;
                             }
                         }
@@ -3550,7 +3752,10 @@ impl Vm {
                         return Val::Bool(false);
                     }
                     let class = self.objs[o as usize].class;
-                    if id == NF_O_ISFROZEN && class == C_ARRAY && !self.evecs[self.objs[o as usize].elems as usize].v.is_empty() && self.objs[o as usize].pos != 2 {
+                    if class == C_ARRAY && self.objs[o as usize].pos == 3 && self.has_plain_elem(o) {
+                        return Val::Bool(false);
+                    }
+                    if id == NF_O_ISFROZEN && class == C_ARRAY && self.objs[o as usize].pos < 2 && self.has_plain_elem(o) {
                         return Val::Bool(false);
                     }
                     let sh = self.objs[o as usize].shape as int;
@@ -3738,12 +3943,16 @@ impl Vm {
                 self.call_value(a0, t, items)
             }
             NF_REFLECT_CONSTRUCT => {
+                let nt = if args.len() > 2 { args[2].clone() } else { a0.clone() };
+                if !self.is_constructor(&a0) || !self.is_constructor(&nt) {
+                    self.throw_type("Reflect.construct: target and newTarget must be constructors");
+                    return Val::Undef;
+                }
                 let a1 = arg(&args, 1);
                 let items = self.array_like_to_vec(&a1);
                 if self.throwing {
                     return Val::Undef;
                 }
-                let nt = if args.len() > 2 { args[2].clone() } else { a0.clone() };
                 self.construct(a0, items, nt)
             }
             NF_REFLECT_HAS => {
@@ -4029,4 +4238,34 @@ fn date_digits(cs: &Vec<char>, i: usize, count: usize) -> int {
         k += 1;
     }
     v
+}
+
+/// A match's named groups in order, each name once: a duplicate name
+/// (in another alternative) takes the value of the group that matched.
+fn group_pairs(names: &Vec<String>, nidx: &Vec<int>, vals: &Vec<Val>) -> Vec<(String, Val)> {
+    let mut out: Vec<(String, Val)> = Vec::new();
+    let mut i: usize = 0;
+    while i < names.len() {
+        let mut seen = false;
+        let mut j: usize = 0;
+        while j < i {
+            if names[j].as_str() == names[i].as_str() {
+                seen = true;
+            }
+            j += 1;
+        }
+        if !seen {
+            let mut v = vals[nidx[i] as usize].clone();
+            let mut k: usize = i + 1;
+            while k < names.len() {
+                if names[k].as_str() == names[i].as_str() && matches!(v, Val::Undef) {
+                    v = vals[nidx[k] as usize].clone();
+                }
+                k += 1;
+            }
+            out.push((names[i].clone(), v));
+        }
+        i += 1;
+    }
+    out
 }

@@ -490,7 +490,7 @@ impl Vm {
                         continue;
                     }
                     R_JF => {
-                        if truthy(self.rget(bp, (w1 as int))) {
+                        if self.truthy_v(self.rget(bp, (w1 as int))) {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
@@ -501,7 +501,7 @@ impl Vm {
                         continue;
                     }
                     R_JT => {
-                        if truthy(self.rget(bp, (w1 as int))) {
+                        if self.truthy_v(self.rget(bp, (w1 as int))) {
                             pc = (w2 as int);
                             if self.slicing && self.brk(fi, pc) {
                                 return;
@@ -542,7 +542,7 @@ impl Vm {
                         }
                     }
                     R_JF_KEEP => {
-                        if truthy(self.rget(bp, (w1 as int))) {
+                        if self.truthy_v(self.rget(bp, (w1 as int))) {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
@@ -553,7 +553,7 @@ impl Vm {
                         continue;
                     }
                     R_JT_KEEP => {
-                        if truthy(self.rget(bp, (w1 as int))) {
+                        if self.truthy_v(self.rget(bp, (w1 as int))) {
                             pc = (w2 as int);
                             if self.slicing && self.brk(fi, pc) {
                                 return;
@@ -716,7 +716,7 @@ impl Vm {
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
                                 let ev = ob.elems as usize;
-                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == *n {
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == *n && ob.pos != 3 {
                                     r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
@@ -762,7 +762,7 @@ impl Vm {
                             if ob.class == C_ARRAY {
                                 let i = n as int;
                                 let ev = ob.elems as usize;
-                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos != 2 {
+                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos < 2 {
                                     old = obj_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
                                     old_s = str_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
                                     val_put(&mut evec_mut(&mut self.evecs, ev).v, i as usize, val.clone());
@@ -1061,7 +1061,7 @@ impl Vm {
                         }
                     }
                     R_NOT => {
-                        let r = !truthy(self.rget(bp, (w2 as int)));
+                        let r = !self.truthy_v(self.rget(bp, (w2 as int)));
                         self.rset((bp + (w1 as int)) as usize, Val::Bool(r));
                         pc = (pc + 1 + ((w0 >> 16) as int));
                         continue;

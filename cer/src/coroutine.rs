@@ -397,7 +397,7 @@ impl Vm {
         if self.throwing {
             return 0;
         }
-        if truthy(&done) {
+        if self.truthy_v(&done) {
             let v = self.get(&r, A_VALUE);
             if mode == GM_RETURN {
                 self.stack.push(v);
@@ -408,6 +408,74 @@ impl Vm {
             return 1;
         }
         self.stack.push(r);
+        0
+    }
+
+    /// OP_ASTAR_CALL: true to its b (a return without a `return` method).
+    pub fn astar_call(&mut self) -> bool {
+        let mode = num_of(&self.stack.pop().unwrap());
+        let received = self.stack.pop().unwrap();
+        let it = self.stack[self.stack.len() - 1].clone();
+        let name = if mode == GM_THROW {
+            "throw"
+        } else if mode == GM_RETURN {
+            "return"
+        } else {
+            "next"
+        };
+        let a = self.intern(name);
+        let m = self.get(&it, a);
+        if self.throwing {
+            return false;
+        }
+        if matches!(m, Val::Undef) || matches!(m, Val::Null) {
+            if mode == GM_RETURN {
+                self.stack.push(received);
+                return true;
+            }
+            if mode == GM_THROW {
+                self.iter_close(&it);
+                if !self.throwing {
+                    self.throw_type("The iterator does not provide a 'throw' method");
+                }
+                return false;
+            }
+        }
+        let r = self.call_fixed(m, it, 1, received, Val::Undef, Val::Undef);
+        if self.throwing {
+            return false;
+        }
+        self.stack.push(Val::Num(mode as double));
+        self.stack.push(r);
+        false
+    }
+
+    /// OP_ASTAR_DONE: 1 to its a, 2 to its b, 0 on.
+    pub fn astar_done(&mut self) -> int {
+        let r = self.stack.pop().unwrap();
+        let mode = num_of(&self.stack.pop().unwrap());
+        if !is_obj(&r) {
+            self.throw_type("Iterator result is not an object");
+            return 0;
+        }
+        let done = self.get(&r, A_DONE);
+        if self.throwing {
+            return 0;
+        }
+        let v = self.get(&r, A_VALUE);
+        if self.throwing {
+            return 0;
+        }
+        if self.truthy_v(&done) {
+            if mode == GM_RETURN {
+                self.stack.push(v);
+                return 2;
+            }
+            let n = self.stack.len();
+            self.stack[n - 1] = v;
+            return 1;
+        }
+        self.stack.push(v);
         0
     }
 
@@ -560,7 +628,7 @@ impl Vm {
             let req = self.new_array(vec![Val::Num(mode as double), a0, Val::Obj(p)]);
             let q = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
             self.push_elem(q, Val::Obj(req));
-            let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !truthy(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
+            let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !self.truthy_v(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
             if idle && self.evecs[self.objs[q as usize].elems as usize].v.len() == 1 {
                 self.agen_run(g, GM_NEXT, Val::Undef, false);
             }
