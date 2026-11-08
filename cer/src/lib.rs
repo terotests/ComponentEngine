@@ -24,6 +24,7 @@ pub mod builtins2;
 pub mod compiler;
 pub mod coroutine;
 pub mod dynamic;
+pub mod esm;
 pub mod intl;
 pub mod intl_data;
 pub mod jsstr;

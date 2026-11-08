@@ -22,11 +22,15 @@ pub const NF_RE_COMPILE: int = 947;
 /// %ThrowTypeError%, and the Function.prototype caller / arguments getter
 pub const NF_THROWER: int = 948;
 pub const NF_FN_CALLER: int = 949;
+/// __cerxesESMCompile(source, path, async): a module's entries and script
+/// as JSON (esm.rs), for the module loader in prelude.rs
+pub const NF_ESM_COMPILE: int = 955;
 
 impl Vm {
     pub fn setup_dynamic(&mut self) {
         let g = self.global;
         self.method(g, "eval", NF_EVAL, 1);
+        self.method(g, "__cerxesESMCompile", NF_ESM_COMPILE, 3);
         let symp = self.symbol_proto;
         self.method(symp, "valueOf", NF_SYMP_VALUEOF, 0);
         let a_tp = crate::vm::A_TOPRIMITIVE;
@@ -182,7 +186,10 @@ impl Vm {
         let mut c = crate::pcomp::PComp::new(code, atoms, names, base);
         c.local_program = strict;
         c.local_if_strict = is_eval;
+        // its classes' private keys: ids of the engine (as unit::link's)
+        c.priv_next = self.priv_seq + 1;
         let entry = c.compile_program();
+        self.priv_seq = c.priv_next;
         if !c.error.is_empty() || entry < 0 {
             let e = if c.error.is_empty() { String::from("SyntaxError") } else { c.error.clone() };
             return (-1, e);
@@ -213,7 +220,9 @@ impl Vm {
         c.force_strict = strict;
         c.local_if_strict = true;
         c.outer_desc = String::from(desc);
+        c.priv_next = self.priv_seq + 1;
         let entry = c.compile_program();
+        self.priv_seq = c.priv_next;
         if !c.error.is_empty() || entry < 0 {
             let e = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
             self.throw_syntax(e.as_str());
@@ -382,6 +391,22 @@ impl Vm {
             return this;
         }
         Val::Undef
+    }
+
+    pub fn call_native_esm(&mut self, args: &Vec<Val>) -> Val {
+        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
+        let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
+        let src = self.to_str(&a0);
+        let path = self.to_str(&a1);
+        let is_async = args.len() > 2 && self.truthy_v(&args[2]);
+        let m = crate::esm::esm_compile(src.as_str(), path.as_str(), is_async);
+        if !m.error.is_empty() {
+            let msg = m.error.clone();
+            let t = if msg.starts_with("SyntaxError: ") { String::from(&msg[13..]) } else { msg };
+            self.throw_syntax(t.as_str());
+            return Val::Undef;
+        }
+        self.str_val(m.json.as_str())
     }
 
     pub fn call_native_dynamic(&mut self, id: int, args: &Vec<Val>, new_target: Val) -> Val {

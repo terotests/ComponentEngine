@@ -3025,6 +3025,9 @@ impl Vm {
         if id >= 960 && id < 970 {
             return self.call_native_intl(id, args);
         }
+        if id == crate::dynamic::NF_ESM_COMPILE {
+            return self.call_native_esm(args);
+        }
         if id >= 950 && id < 960 {
             return self.call_native_bigint(id, this, args, construct);
         }

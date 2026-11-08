@@ -2883,4 +2883,294 @@ function disposeAsyncList(list) { return disposeAsync(list, false, undefined); }
 makeStack('DisposableStack');
 makeStack('AsyncDisposableStack');
 })();
+
+// ---- ECMAScript modules: esm.rs writes each module's script (a generator
+// in a `with` over its imports); this loads, links and evaluates them, and
+// answers `import()` (pcomp: __cerxesESM.dynImport). The host hands in
+// the sources (__cerxesESM.source): the loader reads no files.
+(function () {
+var esmCompile = globalThis.__cerxesESMCompile;
+delete globalThis.__cerxesESMCompile;
+var PromiseC = Promise, pResolve = Promise.resolve, pThen = Promise.prototype.then;
+var indirectEval = eval, jsonParse = JSON.parse, ProxyC = Proxy, hasOwnN = Object.prototype.hasOwnProperty;
+var preventExt = Object.preventExtensions, rGet = Reflect.get, rHas = Reflect.has, rDel = Reflect.deleteProperty;
+var rGopd = Reflect.getOwnPropertyDescriptor, rDef = Reflect.defineProperty, rKeys = Reflect.ownKeys;
+var aSort = Array.prototype.sort, objKeys = Object.keys, SyntaxErrorC = SyntaxError, TypeErrorC = TypeError;
+var sources = create(null), records = create(null), AMB = {}, evalMark = 0;
+function own(o, k) { return hasOwnN.call(o, k); }
+function promise(f) { return new PromiseC(f); }
+function later(f) { pThen.call(pResolve.call(PromiseC, undefined), f); }
+function normalize(p) {
+  var parts = p.split('/'), out = [];
+  for (var i = 0; i < parts.length; i++) {
+    var s = parts[i];
+    if (s === '.' || (s === '' && i > 0 && i < parts.length - 1)) continue;
+    if (s === '..' && out.length > 0 && out[out.length - 1] !== '..' && out[out.length - 1] !== '') { out.length = out.length - 1; continue; }
+    out[out.length] = s;
+  }
+  return out.join('/');
+}
+function resolve(spec, ref) {
+  if (spec.charAt(0) === '/') return normalize(spec);
+  if (spec.charAt(0) === '.' && typeof ref === 'string') {
+    var i = ref.lastIndexOf('/');
+    return normalize((i < 0 ? '' : ref.slice(0, i + 1)) + spec);
+  }
+  return spec;
+}
+function load(path) {
+  var r = records[path];
+  if (r) return r;
+  var src = sources[path];
+  if (src === undefined) throw new TypeErrorC("Cannot find module '" + path + "'");
+  var info = jsonParse(esmCompile(src, path, false)), make, async = false;
+  try { make = indirectEval(info.text); } catch (e) {
+    if (!(e instanceof SyntaxErrorC)) throw e;
+    var info2 = jsonParse(esmCompile(src, path, true));
+    try { make = indirectEval(info2.text); } catch (e2) { throw e; }
+    info = info2; async = true;
+  }
+  r = { path: path, info: info, make: make, async: async, status: 'new', req: create(null), deps: [], getters: null,
+        gen: null, ns: null, meta: create(null), hasError: false, error: undefined, pending: null, mark: 0 };
+  records[path] = r;
+  var q = info.requests;
+  for (var i = 0; i < q.length; i++) {
+    var d = load(resolve(q[i], path));
+    r.req[q[i]] = d;
+    r.deps[r.deps.length] = d;
+  }
+  return r;
+}
+function resolveExport(m, name, set) {
+  for (var i = 0; i < set.length; i++) if (set[i].m === m && set[i].n === name) return null;
+  set[set.length] = { m: m, n: name };
+  var info = m.info, k;
+  for (k = 0; k < info.locals.length; k++) if (info.locals[k] === name) return { m: m, n: name, ns: false };
+  for (k = 0; k < info.indirect.length; k++) {
+    var e = info.indirect[k];
+    if (e[0] === name) {
+      var t = m.req[e[1]];
+      if (e[2] === '*') return { m: t, n: '*', ns: true };
+      return resolveExport(t, e[2], set);
+    }
+  }
+  if (name === 'default') return null;
+  var star = null;
+  for (k = 0; k < info.stars.length; k++) {
+    var res = resolveExport(m.req[info.stars[k]], name, set);
+    if (res === AMB) return AMB;
+    if (res !== null) {
+      if (star === null) star = res;
+      else if (res.m !== star.m || res.n !== star.n || res.ns !== star.ns) return AMB;
+    }
+  }
+  return star;
+}
+function exportedNames(m, set) {
+  for (var i = 0; i < set.length; i++) if (set[i] === m) return [];
+  set[set.length] = m;
+  var info = m.info, names = [], k;
+  for (k = 0; k < info.locals.length; k++) names[names.length] = info.locals[k];
+  for (k = 0; k < info.indirect.length; k++) names[names.length] = info.indirect[k][0];
+  for (k = 0; k < info.stars.length; k++) {
+    var more = exportedNames(m.req[info.stars[k]], set);
+    for (var j = 0; j < more.length; j++) {
+      var n = more[j], seen = n === 'default';
+      for (var q = 0; !seen && q < names.length; q++) if (names[q] === n) seen = true;
+      if (!seen) names[names.length] = n;
+    }
+  }
+  return names;
+}
+function binder(b) {
+  if (b.ns) { var t = b.m; return function () { return namespace(t); }; }
+  var m = b.m, n = b.n;
+  return function () { return m.getters[n](); };
+}
+function sameValue(a, b) { return a === b ? (a !== 0 || 1 / a === 1 / b) : (a !== a && b !== b); }
+function namespace(m) {
+  if (m.ns) return m.ns;
+  var names = exportedNames(m, []), list = [], i;
+  for (i = 0; i < names.length; i++) {
+    var b = resolveExport(m, names[i], []);
+    if (b !== null && b !== AMB) list[list.length] = names[i];
+  }
+  aSort.call(list);
+  var target = create(null), binds = create(null);
+  for (i = 0; i < list.length; i++) {
+    defineProperty(target, list[i], { value: undefined, writable: true, enumerable: true, configurable: false });
+    binds[list[i]] = binder(resolveExport(m, list[i], []));
+  }
+  defineProperty(target, Symbol.toStringTag, { value: 'Module', writable: false, enumerable: false, configurable: false });
+  preventExt(target);
+  function isName(k) { return typeof k === 'string' && own(binds, k); }
+  m.ns = new ProxyC(target, {
+    get: function (t, k) { if (typeof k === 'symbol') return rGet(t, k); return own(binds, k) ? binds[k]() : undefined; },
+    set: function () { return false; },
+    has: function (t, k) { return typeof k === 'symbol' ? rHas(t, k) : own(binds, k); },
+    deleteProperty: function (t, k) { return typeof k === 'symbol' ? rDel(t, k) : !own(binds, k); },
+    getOwnPropertyDescriptor: function (t, k) {
+      if (typeof k === 'symbol') return rGopd(t, k);
+      if (!own(binds, k)) return undefined;
+      return { value: binds[k](), writable: true, enumerable: true, configurable: false };
+    },
+    defineProperty: function (t, k, d) {
+      if (typeof k === 'symbol') return rDef(t, k, d);
+      if (!own(binds, k)) return false;
+      var v = binds[k]();
+      if (own(d, 'configurable') && d.configurable) return false;
+      if (own(d, 'enumerable') && !d.enumerable) return false;
+      if (own(d, 'get') || own(d, 'set')) return false;
+      if (own(d, 'writable') && !d.writable) return false;
+      if (own(d, 'value')) return sameValue(d.value, v);
+      return true;
+    },
+    ownKeys: function (t) { return rKeys(t); },
+    getPrototypeOf: function () { return null; },
+    setPrototypeOf: function (t, p) { return p === null; },
+    isExtensible: function () { return false; },
+    preventExtensions: function () { return true; }
+  });
+  return m.ns;
+}
+function noAssign() { throw new TypeErrorC('Assignment to constant variable.'); }
+function instantiate(r) {
+  var info = r.info, imp = create(null), k, b;
+  for (k = 0; k < info.imports.length; k++) {
+    var e = info.imports[k], t = r.req[e[1]];
+    if (e[2] === '*') b = { m: t, n: '*', ns: true };
+    else {
+      b = resolveExport(t, e[2], []);
+      if (b === null) throw new SyntaxErrorC("The requested module '" + e[1] + "' does not provide an export named '" + e[2] + "'");
+      if (b === AMB) throw new SyntaxErrorC("The requested module '" + e[1] + "' contains conflicting star exports for name '" + e[2] + "'");
+    }
+    defineProperty(imp, e[0], { get: binder(b), set: noAssign, enumerable: true, configurable: false });
+  }
+  for (k = 0; k < info.indirect.length; k++) {
+    if (info.indirect[k][2] === '*') continue;
+    b = resolveExport(r, info.indirect[k][0], []);
+    if (b === null) throw new SyntaxErrorC("The requested module '" + info.indirect[k][1] + "' does not provide an export named '" + info.indirect[k][2] + "'");
+    if (b === AMB) throw new SyntaxErrorC("The requested module '" + info.indirect[k][1] + "' contains conflicting star exports for name '" + info.indirect[k][2] + "'");
+  }
+  var body = r.make(imp, r.meta, r.path, function (g) { r.getters = g; });
+  r.gen = body();
+  r.gen.next();
+}
+function linkAll(r, touched) {
+  if (r.status !== 'new') return;
+  r.status = 'linking';
+  touched[touched.length] = r;
+  for (var i = 0; i < r.deps.length; i++) linkAll(r.deps[i], touched);
+  instantiate(r);
+}
+function link(r) {
+  var touched = [];
+  try { linkAll(r, touched); } catch (e) {
+    for (var i = 0; i < touched.length; i++) { touched[i].status = 'new'; touched[i].gen = null; touched[i].getters = null; }
+    throw e;
+  }
+  for (var j = 0; j < touched.length; j++) touched[j].status = 'linked';
+}
+function order(r, mark, out) {
+  if (r.mark === mark) return;
+  r.mark = mark;
+  if (r.status !== 'evaluated') for (var i = 0; i < r.deps.length; i++) order(r.deps[i], mark, out);
+  out[out.length] = r;
+}
+function setError(m, e) { m.hasError = true; m.error = e; }
+function depError(m) {
+  for (var i = 0; i < m.deps.length; i++) if (m.deps[i].hasError && m.deps[i] !== m) return m.deps[i];
+  return null;
+}
+// the modules of r's graph in post order; undefined when they all ran
+// synchronously, else the promise of their end
+function evaluate(root) {
+  var list = [], i, async = false;
+  order(root, ++evalMark, list);
+  for (i = 0; i < list.length; i++) if (list[i].pending || (list[i].async && list[i].status !== 'evaluated')) async = true;
+  if (!async) {
+    for (i = 0; i < list.length; i++) {
+      var m = list[i];
+      if (m.status === 'evaluated') continue;
+      var bad = depError(m);
+      if (bad) { m.status = 'evaluated'; setError(m, bad.error); continue; }
+      m.status = 'evaluated';
+      try { m.gen.next(); } catch (e) { setError(m, e); }
+    }
+    if (root.hasError) throw root.error;
+    return undefined;
+  }
+  return promise(function (res, rej) {
+    var at = 0;
+    function step() {
+      while (at < list.length) {
+        var m = list[at++];
+        if (m.status === 'evaluated') {
+          if (m.pending) { wait(m); return; }
+          continue;
+        }
+        var bad = depError(m);
+        m.status = 'evaluated';
+        if (bad) { setError(m, bad.error); continue; }
+        if (m.async) {
+          var pr;
+          try { pr = m.gen.next(); } catch (e) { setError(m, e); continue; }
+          m.pending = pr;
+          wait(m);
+          return;
+        }
+        try { m.gen.next(); } catch (e2) { setError(m, e2); }
+      }
+      if (root.hasError) rej(root.error); else res(undefined);
+    }
+    function wait(m) {
+      pThen.call(m.pending, function () { m.pending = null; step(); }, function (e) { m.pending = null; setError(m, e); step(); });
+    }
+    step();
+  });
+}
+var api = {
+  failed: false, failure: undefined,
+  source: function (path, text) { sources[path] = text; },
+  named: function (v, decl) {
+    if (typeof v === 'function' && (decl || !own(v, 'name') || v.name === '')) defineProperty(v, 'name', { value: 'default', configurable: true });
+    return v;
+  },
+  runMain: function (path) {
+    var r = load(path);
+    link(r);
+    var p = evaluate(r);
+    if (p) pThen.call(p, undefined, function (e) { api.failed = true; api.failure = e; });
+  },
+  check: function () { if (api.failed) throw api.failure; },
+  dynImport: function (spec, ref, opts) {
+    var ok, fail;
+    var p = promise(function (a, b) { ok = a; fail = b; });
+    try {
+      var s = `${spec}`;
+      if (opts !== undefined) {
+        if (!isObject(opts)) throw new TypeErrorC('The second argument of import() must be an object');
+        var w = opts['with'];
+        if (w !== undefined) {
+          if (!isObject(w)) throw new TypeErrorC("The 'with' option of import() must be an object");
+          var ks = objKeys(w);
+          for (var i = 0; i < ks.length; i++) if (typeof w[ks[i]] !== 'string') throw new TypeErrorC('Import attribute values must be strings');
+        }
+      }
+    } catch (e) { fail(e); return p; }
+    later(function () {
+      try {
+        var r = load(resolve(s, ref));
+        link(r);
+        var q = evaluate(r);
+        if (q) pThen.call(q, function () { ok(namespace(r)); }, fail);
+        else ok(namespace(r));
+      } catch (e) { fail(e); }
+    });
+    return p;
+  }
+};
+defineProperty(globalThis, '__cerxesESM', { value: api, writable: false, enumerable: false, configurable: false });
+defineProperty(globalThis, '__cerxesRef', { value: undefined, writable: true, enumerable: false, configurable: true });
+})();
 })();"#;
