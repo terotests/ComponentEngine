@@ -2588,6 +2588,72 @@ impl Vm {
         self.add_own(o, atom, v, 0);
     }
 
+    /// `super[atom] = v` in a method of `home`: [[Set]] on home's
+    /// prototype with `this` as the receiver (class code: strict).
+    pub fn super_set(&mut self, home: int, atom: int, index: bool, v: Val, this: Val) {
+        let start = self.objs[home as usize].proto as int;
+        if start < 0 {
+            self.throw_type("Cannot set properties of null (super)");
+            return;
+        }
+        let mut o = start;
+        while o >= 0 {
+            if self.objs[o as usize].class == C_PROXY {
+                break;
+            }
+            let slot = self.find(o, atom);
+            if slot >= 0 {
+                let attr = self.attr_at(o, slot);
+                if (attr & P_ACCESSOR) != 0 {
+                    let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
+                    let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
+                    if self.is_callable(&s) {
+                        self.call_fixed(s, this, 1, v, Val::Undef, Val::Undef);
+                    } else {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("Cannot set property {} which has only a getter", n).as_str());
+                    }
+                    return;
+                }
+                if (attr & P_READONLY) != 0 {
+                    let n = self.atom_str(atom);
+                    self.throw_type(format!("Cannot assign to read only property '{}' of object", n).as_str());
+                    return;
+                }
+                break;
+            }
+            o = self.objs[o as usize].proto as int;
+        }
+        let r = obj_of(&this);
+        if r < 0 {
+            let n = self.atom_str(atom);
+            self.throw_type(format!("Cannot create property '{}' on a primitive", n).as_str());
+            return;
+        }
+        let class = self.objs[r as usize].class;
+        if class == C_PROXY || class == C_ARRAY || index {
+            self.set_obj(r, atom, v);
+            return;
+        }
+        let slot = self.find(r, atom);
+        if slot >= 0 {
+            let attr = self.attr_at(r, slot);
+            if (attr & (P_ACCESSOR | P_READONLY)) != 0 {
+                let n = self.atom_str(atom);
+                self.throw_type(format!("Cannot assign to read only property '{}' of object", n).as_str());
+                return;
+            }
+            self.put_slot(r, slot, v);
+            return;
+        }
+        if !self.objs[r as usize].extensible {
+            let n = self.atom_str(atom);
+            self.throw_type(format!("Cannot add property {}, object is not extensible", n).as_str());
+            return;
+        }
+        self.add_own(r, atom, v, 0);
+    }
+
     fn strict_now(&self) -> bool {
         if self.frames.is_empty() {
             return false;
@@ -5117,7 +5183,7 @@ impl Vm {
                 let weak = self.objs[tobj as usize].func == 1;
                 let mut r = Val::Undef;
                 let mut hit = false;
-                if id == crate::builtins::NF_OP_HASOWN {
+                if id == crate::builtins::NF_OP_HASOWN && tclass != C_PROXY {
                     let k = self.stack[bp as usize].clone();
                     r = Val::Bool(self.has_own(tobj, &k));
                     if self.throwing {
@@ -5515,6 +5581,15 @@ impl Vm {
                         let ns = self.to_string(&n);
                         self.throw_ref(format!("Cannot access '{}' before initialization", ns).as_str());
                     }
+                }
+            }
+            OP_CHECK_UNINIT => {
+                let bound = match self.top() {
+                    Val::Obj(o) => *o != self.tdz_obj,
+                    _ => true,
+                };
+                if bound {
+                    self.throw_ref("Super constructor may only be called once");
                 }
             }
             OP_BIGINT => {
@@ -6404,6 +6479,27 @@ impl Vm {
                 self.put_home(obj_of(&f), self.colds[self.objs[ctor as usize].cold as usize].home);
                 self.put_elems2(ctor, vec![f]);
             }
+            OP_SET_SUPER | OP_SET_SUPER_ELEM => {
+                let v = self.pop();
+                let key = if (op.code as int) == OP_SET_SUPER { self.key_val((op.a as int)) } else { self.pop() };
+                let fobj = self.frames[fi].fobj;
+                let home = self.colds[self.objs[fobj as usize].cold as usize].home;
+                let this = self.frames[fi].this_val.clone();
+                if home < 0 {
+                    self.throw_syntax("'super' keyword unexpected here");
+                    return false;
+                }
+                let (i, a) = self.to_key(&key);
+                if self.throwing {
+                    return false;
+                }
+                let atom = if i >= 0 { self.index_atom(i) } else { a };
+                self.super_set(home, atom, i >= 0, v.clone(), this);
+                if self.throwing {
+                    return false;
+                }
+                self.stack.push(v);
+            }
             OP_GET_SUPER | OP_GET_SUPER_ELEM => {
                 let key = if (op.code as int) == OP_GET_SUPER { self.key_val((op.a as int)) } else { self.pop() };
                 let fobj = self.frames[fi].fobj;
@@ -6431,12 +6527,18 @@ impl Vm {
             }
             OP_OBJ_REST => {
                 let n = self.stack.len() as int;
+                // the keys taken already: strings, or symbols (by identity)
                 let mut skip: Vec<String> = Vec::new();
+                let mut skip_syms: Vec<int> = Vec::new();
                 let mut i = n - (op.a as int);
                 while i < n {
                     let k = self.stack[i as usize].clone();
-                    let s = self.to_string(&k);
-                    skip.push(s);
+                    if self.class_of(&k) == C_SYMBOL {
+                        skip_syms.push(obj_of(&k));
+                    } else {
+                        let s = self.to_string(&k);
+                        skip.push(s);
+                    }
                     i += 1;
                 }
                 self.stack.truncate((n - (op.a as int)) as usize);
@@ -6445,8 +6547,9 @@ impl Vm {
                 if let Val::Obj(s) = &src {
                     let keys = self.own_keys(*s, false, true);
                     for k in keys {
-                        let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else { String::new() };
-                        let mut skipped = false;
+                        let is_sym = self.class_of(&k) == C_SYMBOL;
+                        let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else if is_sym { String::new() } else { self.to_string(&k) };
+                        let mut skipped = is_sym && skip_syms.contains(&obj_of(&k));
                         for x in skip.iter() {
                             if x.as_str() == ks.as_str() && !ks.is_empty() {
                                 skipped = true;

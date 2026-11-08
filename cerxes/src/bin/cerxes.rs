@@ -64,11 +64,55 @@ fn main() {
     // it ends (what a host that detaches the engine pays for its checks)
     let slice = std::env::var("CERXES_SLICE_MS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
     e.set_slice(slice);
+    // `--module m.js`: after the script, the module m.js runs (and the
+    // modules it imports); `--base f.js`: the script's `import()` reads
+    // relative to f.js. The files they name are handed to the loader first.
+    let mut module = String::new();
+    let mut base = String::new();
+    let mut ai = 2;
+    while ai + 1 < args.len() {
+        if args[ai] == "--module" {
+            module = absolute(args[ai + 1].as_str());
+        } else if args[ai] == "--base" {
+            base = absolute(args[ai + 1].as_str());
+        }
+        ai += 2;
+    }
+    if !module.is_empty() || !base.is_empty() {
+        let mut files: Vec<(String, String)> = Vec::new();
+        if !module.is_empty() {
+            preload(module.as_str(), &mut files);
+        }
+        if !base.is_empty() {
+            scan(src.as_str(), base.as_str(), &mut files);
+        }
+        let mut pre = String::new();
+        for (p, t) in files.iter() {
+            pre.push_str(format!("__cerxesESM.source({}, {});\n", js_str(p), js_str(t)).as_str());
+        }
+        if !base.is_empty() {
+            pre.push_str(format!("__cerxesRef = {};\n", js_str(base.as_str())).as_str());
+        }
+        let r = e.eval(pre.as_str());
+        if !e.error.is_empty() {
+            eprintln!("{}", r);
+            std::process::exit(1);
+        }
+    }
     let mut r = e.eval(src.as_str());
     let mut slices = 1;
     while e.is_suspended() {
         slices += 1;
         r = e.resume();
+    }
+    if !module.is_empty() && e.error.is_empty() {
+        r = e.eval(format!("__cerxesESM.runMain({});", js_str(module.as_str())).as_str());
+        while e.is_suspended() {
+            r = e.resume();
+        }
+        if e.error.is_empty() {
+            r = e.eval("__cerxesESM.check();");
+        }
     }
     if slice > 0.0 {
         eprintln!("slices: {}", slices);
@@ -171,4 +215,97 @@ fn main() {
         eprintln!("{}", r);
         std::process::exit(1);
     }
+}
+
+/// The path made absolute and normalized (as the module loader resolves).
+fn absolute(p: &str) -> String {
+    let full = if p.starts_with('/') {
+        String::from(p)
+    } else {
+        let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        format!("{}/{}", cwd, p)
+    };
+    normalize(full.as_str())
+}
+
+fn normalize(p: &str) -> String {
+    let parts: Vec<&str> = p.split('/').collect();
+    let mut out: Vec<&str> = Vec::new();
+    for (i, s) in parts.iter().enumerate() {
+        if *s == "." || (s.is_empty() && i > 0 && i < parts.len() - 1) {
+            continue;
+        }
+        if *s == ".." && !out.is_empty() && *out.last().unwrap() != ".." && !out.last().unwrap().is_empty() {
+            out.pop();
+            continue;
+        }
+        out.push(s);
+    }
+    out.join("/")
+}
+
+/// The file and, recursively, the .js files its string literals name.
+fn preload(path: &str, files: &mut Vec<(String, String)>) {
+    if files.iter().any(|(p, _)| p == path) {
+        return;
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    files.push((String::from(path), text.clone()));
+    scan(text.as_str(), path, files);
+}
+
+/// Preloads the .js files that string literals in `text` name, relative
+/// to `from`.
+fn scan(text: &str, from: &str, files: &mut Vec<(String, String)>) {
+    let dir = match from.rfind('/') {
+        Some(i) => &from[..i + 1],
+        None => "",
+    };
+    let cs: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        let q = cs[i];
+        if q == '\'' || q == '"' {
+            let mut j = i + 1;
+            let mut lit = String::new();
+            while j < cs.len() && cs[j] != q && cs[j] != '\n' {
+                if cs[j] == '\\' {
+                    j += 1;
+                }
+                if j < cs.len() {
+                    lit.push(cs[j]);
+                }
+                j += 1;
+            }
+            if lit.ends_with(".js") && !lit.contains(' ') {
+                let p = if lit.starts_with('/') { normalize(lit.as_str()) } else { normalize(format!("{}{}", dir, lit).as_str()) };
+                preload(p.as_str(), files);
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+}
+
+/// A JavaScript string literal of s.
+fn js_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\u{2028}' => o.push_str("\\u2028"),
+            '\u{2029}' => o.push_str("\\u2029"),
+            c if (c as u32) < 0x20 => o.push_str(format!("\\u{:04x}", c as u32).as_str()),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }

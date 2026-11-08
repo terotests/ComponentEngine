@@ -495,6 +495,8 @@ pub struct PComp {
     pub outer_desc: String,
     /// the scopes of direct eval calls
     eval_sites: Vec<int>,
+    /// a direct eval site's private environment ("p|…" desc parts)
+    eval_privs: HashMap<int, String>,
     /// `using` regions open, the ones of the list being read from
     /// `using_mark`; whether the statement being read may be a `using`
     /// declaration, and the token ending its list
@@ -540,6 +542,12 @@ pub struct PComp {
 
     // parser state
     no_in: bool,
+    /// compiling a module's body (esm.rs: `function* __cerxesModuleBody`):
+    /// its scope, its depth in fs, and whether its pause (`yield;`) was read
+    module_code: bool,
+    module_scope: int,
+    module_depth: usize,
+    module_yielded: bool,
     in_function: bool,
     in_class: bool,
     in_generator: bool,
@@ -559,7 +567,7 @@ pub struct PComp {
     priv_cls: Vec<int>,
     priv_nm: Vec<Vec<String>>,
     priv_kd: Vec<Vec<int>>,
-    priv_next: int,
+    pub priv_next: int,
     /// catch scopes whose parameter is a pattern (Annex B: a block
     /// function of a name it binds is not copied to the var)
     catch_patterns: Vec<int>,
@@ -629,6 +637,7 @@ impl PComp {
             script_imports: false,
             outer_desc: String::new(),
             eval_sites: Vec::new(),
+            eval_privs: HashMap::new(),
             usings: Vec::new(),
             using_mark: 0,
             using_here: false,
@@ -659,6 +668,10 @@ impl PComp {
             fs: Vec::new(),
             cur_scope: -1,
             no_in: false,
+            module_code: false,
+            module_scope: -1,
+            module_depth: 0,
+            module_yielded: false,
             in_function: false,
             in_class: false,
             ctx: 0,
@@ -962,7 +975,7 @@ impl PComp {
             return self.in_generator || self.strict;
         }
         if w == "await" {
-            return self.in_async || (self.ctx & CX_AWAIT) != 0;
+            return self.in_async || self.module_code || (self.ctx & CX_AWAIT) != 0;
         }
         self.strict && !self.ts && w != "eval" && w != "arguments" && is_strict_reserved(w)
     }
@@ -1139,9 +1152,7 @@ impl PComp {
     fn priv_ref(&mut self, s: &str) {
         let n = self.priv_refs.len();
         if n == 0 {
-            if !self.local_if_strict {
-                self.fail("Private field must be declared in an enclosing class");
-            }
+            self.fail("Private field must be declared in an enclosing class");
             return;
         }
         self.priv_refs[n - 1].push(String::from(s));
@@ -1206,6 +1217,67 @@ impl PComp {
             }
         }
         (String::from(s), String::new(), PK_FIELD)
+    }
+
+    /// The private names in scope here, for a direct eval's desc: one
+    /// "p|" part per class, outermost first, each name "\u{1}#x\u{2}<id>~kind".
+    fn priv_env_desc(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut d: usize = 0;
+        while d < self.priv_cls.len() {
+            let mut items: Vec<String> = Vec::new();
+            let mut i: usize = 0;
+            while i < self.priv_nm[d].len() {
+                items.push(format!("{}\u{2}{}~{}", self.priv_nm[d][i], self.priv_cls[d], self.priv_kd[d][i]));
+                i += 1;
+            }
+            parts.push(format!("p|{}", items.join(",")));
+            d += 1;
+        }
+        parts.join(";")
+    }
+
+    /// Direct eval code: the caller's private names (desc "p|" parts) as
+    /// classes around the program, so that `#x` there is the caller's.
+    fn priv_seed(&mut self, parts: &Vec<String>) {
+        for lv in parts.iter() {
+            let n = lv.as_bytes().len();
+            let items = if n > 2 { String::from(&lv[2..n]) } else { String::new() };
+            let mut names: Vec<String> = Vec::new();
+            let mut kinds: Vec<int> = Vec::new();
+            let mut cid: int = -1;
+            for it in split_on(items.as_str(), 44).iter() {
+                let cut = crate::jsstr::index_of(it.as_str(), "\u{2}", 0);
+                let til = crate::jsstr::index_of(it.as_str(), "~", 0);
+                if cut <= 0 || til <= cut {
+                    continue;
+                }
+                names.push(crate::jsstr::slice(it.as_str(), 0, cut));
+                cid = digits_int(crate::jsstr::slice(it.as_str(), cut + 1, til).as_str());
+                kinds.push(digits_int(crate::jsstr::slice(it.as_str(), til + 1, crate::jsstr::len(it.as_str())).as_str()));
+            }
+            self.priv_cls.push(cid);
+            self.priv_nm.push(names);
+            self.priv_kd.push(kinds);
+            self.priv_refs.push(Vec::new());
+        }
+    }
+
+    /// At the end of direct eval code: a `#x` no class declares is an
+    /// early error.
+    fn priv_check_seeded(&mut self) {
+        let mut d: usize = 0;
+        while d < self.priv_refs.len() {
+            let refs = self.priv_refs[d].clone();
+            for r in refs.iter() {
+                let (key, _b, _k) = self.priv_lookup(r.as_str());
+                if key.as_str() == r.as_str() {
+                    self.fail("Private field must be declared in an enclosing class");
+                    return;
+                }
+            }
+            d += 1;
+        }
     }
 
     /// `obj.#x` read: OP_GET_PRIVATE key, brand atom (-1: none), kind.
@@ -1642,11 +1714,39 @@ impl PComp {
                 return self.eval_new_target;
             }
             if sc.is_func && !sc.is_arrow {
-                return true;
+                return !(self.module_code && s == self.module_scope);
             }
             s = sc.parent;
         }
         self.eval_new_target
+    }
+
+    /// In a derived class's constructor (or an arrow in one): `this` is
+    /// its binding `%this`, uninitialized until `super(…)` returns.
+    fn in_derived_ctor(&self) -> bool {
+        let mut i = self.fs.len();
+        while i > 0 && self.fs[i - 1].proto.arrow {
+            i -= 1;
+        }
+        i > 0 && self.fs[i - 1].proto.derived && self.fs[i - 1].proto.class_ctor
+    }
+
+    /// `this` here: OP_THIS, or a derived constructor's checked `%this`.
+    fn emit_this(&mut self) {
+        if self.in_derived_ctor() {
+            self.emit_ref("%this", M_LOAD, false);
+        } else {
+            self.op(OP_THIS);
+        }
+    }
+
+    /// A derived constructor returning undefined: its `this` must be bound.
+    fn ctor_this_check(&mut self) {
+        let i = self.fs.len();
+        if i > 0 && self.fs[i - 1].proto.derived && self.fs[i - 1].proto.class_ctor {
+            self.emit_ref("%this", M_LOAD, false);
+            self.op(OP_POP);
+        }
     }
 
     fn mark_lexical_ctor(&mut self) {
@@ -1768,6 +1868,13 @@ impl PComp {
             nt = true;
         }
         let head = format!("{}{}{}{}", if in_fn { "F" } else { "G" }, if (flags & 1) != 0 { "P" } else { "" }, if nt { "N" } else { "" }, flags / 2);
+        let pv = match self.eval_privs.get(&site) {
+            Some(v) => v.clone(),
+            None => String::new(),
+        };
+        if !pv.is_empty() {
+            levels.push(pv);
+        }
         if levels.is_empty() {
             return head;
         }
@@ -2694,8 +2801,9 @@ impl PComp {
         let mut proto = Proto::new("<script>");
         proto.strict = strict;
         let outer = if self.outer_desc.is_empty() { -1 } else { self.outer_scopes(strict) };
-        // indirect eval code: what its caller may contain is not known here
-        self.ctx = if !self.outer_desc.is_empty() { self.eval_ctx & (CX_SUPER_CALL | CX_SUPER_PROP | CX_NO_ARGS) } else if self.local_if_strict { CX_SUPER_CALL | CX_SUPER_PROP } else { 0 };
+        // direct eval code takes its caller's context (eval_ctx); indirect
+        // eval code is global code, where super is an early error
+        self.ctx = if !self.outer_desc.is_empty() { self.eval_ctx & (CX_SUPER_CALL | CX_SUPER_PROP | CX_NO_ARGS) } else { 0 };
         let fnid = self.push_fn(proto, true, 1);
         let s = self.new_scope(outer, true, false);
         self.scopes[s as usize].is_program = true;
@@ -2718,6 +2826,9 @@ impl PComp {
         self.emit(OP_GET_LOCAL, 0, 0);
         self.op(OP_RETURN);
         self.end_annex();
+        if !self.outer_desc.is_empty() && self.error.is_empty() {
+            self.priv_check_seeded();
+        }
         let entry = self.pop_fn();
         if !self.error.is_empty() {
             return -1;
@@ -2743,9 +2854,14 @@ impl PComp {
         let mut fn_level: Vec<bool> = Vec::new();
         let mut parent: int = -1;
         let mut i = parts.len();
+        let mut privs: Vec<String> = Vec::new();
         while i > 1 {
             i -= 1;
             let lv = parts[i].clone();
+            if lv.starts_with("p|") {
+                privs.insert(0, lv);
+                continue;
+            }
             let s = self.new_scope(parent, false, false);
             self.scopes[s as usize].has_env = true;
             fn_level.insert(0, lv.starts_with("f"));
@@ -2790,6 +2906,9 @@ impl PComp {
             self.scopes[s as usize].env_size = size;
             ids.insert(0, s);
             parent = s;
+        }
+        if !privs.is_empty() {
+            self.priv_seed(&privs);
         }
         if in_fn && !strict {
             let mut j: usize = 0;
@@ -3017,18 +3136,24 @@ impl PComp {
                 return;
             }
             if ws == "return" {
-                if !self.in_function {
+                if !self.in_function || (self.module_code && self.fs.len() == self.module_depth) {
                     self.fail("return outside a function");
                     return;
                 }
                 self.next();
+                let mut bare = false;
                 if !self.is(";") && !self.is("}") && self.kind() != T_EOF && !self.nl_before() {
                     self.expression();
                 } else {
                     self.op(OP_UNDEF);
+                    bare = true;
                 }
                 self.semicolon();
                 self.unwind_to(-1);
+                if bare {
+                    // checked once the body is left: a finally may call super()
+                    self.ctor_this_check();
+                }
                 self.op(OP_RETURN);
                 return;
             }
@@ -3263,6 +3388,52 @@ impl PComp {
         }
         self.using_mark = mark;
         self.using_end = saved_end;
+    }
+
+    /// `import(specifier[, options])`: __cerxesESM.dynImport(specifier,
+    /// __cerxesRef, options), the promise of the module's namespace
+    /// (`__cerxesRef`: the importing module, or the script's file).
+    fn dyn_import(&mut self) -> Ex {
+        let k = self.pos;
+        if k > 0 && self.tok_is(k - 1, "new") {
+            self.fail("Cannot use new with import");
+            return ex(E_OTHER);
+        }
+        if self.peek_is(1, ".") {
+            self.fail("import.meta may only appear in module code");
+            return ex(E_OTHER);
+        }
+        self.next();
+        if !self.is("(") {
+            self.fail("Unexpected token import");
+            return ex(E_OTHER);
+        }
+        self.next();
+        if self.is(")") || self.is("...") {
+            self.fail("import() requires a specifier");
+            return ex(E_OTHER);
+        }
+        let g = self.atom("__cerxesESM");
+        self.emit(OP_GET_GLOBAL, g, 0);
+        let a = self.atom("dynImport");
+        self.emit(OP_GET_METHOD, a, 0);
+        let saved = self.no_in;
+        self.no_in = false;
+        self.assign();
+        self.emit_ref("__cerxesRef", M_LOAD, false);
+        if self.eat(",") && !self.is(")") {
+            if self.is("...") {
+                self.fail("Unexpected token ...");
+            }
+            self.assign();
+            self.eat(",");
+        } else {
+            self.op(OP_UNDEF);
+        }
+        self.no_in = saved;
+        self.expect(")");
+        self.emit(OP_CALL, 3, 0);
+        ex(E_OTHER)
     }
 
     /// [__cerxesUsing[name], __cerxesUsing]
@@ -4555,6 +4726,14 @@ impl PComp {
     }
 
     fn yield_expr(&mut self) -> Ex {
+        if self.module_code && self.fs.len() == self.module_depth {
+            // a module's own pause (esm.rs) is its only `yield`
+            if self.module_yielded {
+                self.fail("Unexpected reserved word 'yield'");
+                return ex(E_OTHER);
+            }
+            self.module_yielded = true;
+        }
         if self.in_params {
             self.fail("Yield expression not allowed in formal parameter");
             return ex(E_OTHER);
@@ -4734,6 +4913,55 @@ impl PComp {
             self.emit_member_set(last);
             if o == "+=" && (last.code as int) == OP_GET_PROP {
                 return Ex { k: E_MEMBER_ADDASSIGN, a: (last.a as int), b: -1, c: -1 };
+            }
+            return ex(E_OTHER);
+        }
+        if left.k == E_SUPER_MEMBER && ((last.code as int) == OP_GET_SUPER || (last.code as int) == OP_GET_SUPER_ELEM) {
+            let named = (last.code as int) == OP_GET_SUPER;
+            if o == "=" {
+                self.pop_op();
+                if self.in_derived_ctor() {
+                    // the receiver is read first: `this` bound yet?
+                    self.emit_this();
+                    self.op(OP_POP);
+                }
+                self.assign();
+                if named {
+                    self.emit(OP_SET_SUPER, last.a as int, 0);
+                } else {
+                    self.op(OP_SET_SUPER_ELEM);
+                }
+                return ex(E_OTHER);
+            }
+            if !named {
+                self.pop_op();
+                self.op(OP_DUP);
+                self.op(OP_GET_SUPER_ELEM);
+            }
+            if logical {
+                let j = self.emit(jcode, 0, 0);
+                self.assign();
+                if named {
+                    self.emit(OP_SET_SUPER, last.a as int, 0);
+                    self.patch(j);
+                } else {
+                    self.op(OP_SET_SUPER_ELEM);
+                    let jend = self.emit(OP_JUMP, 0, 0);
+                    self.patch(j);
+                    self.op(OP_SWAP);
+                    self.op(OP_POP);
+                    self.patch(jend);
+                }
+                return ex(E_OTHER);
+            }
+            self.assign();
+            let bop = &o[0..(o.as_bytes().len() - 1)];
+            let code = binary_code(bop);
+            self.op(code);
+            if named {
+                self.emit(OP_SET_SUPER, last.a as int, 0);
+            } else {
+                self.op(OP_SET_SUPER_ELEM);
             }
             return ex(E_OTHER);
         }
@@ -5098,7 +5326,7 @@ impl PComp {
             self.pop_op();
             self.op(OP_GET_METHOD_ELEM);
         } else if e.k == E_SUPER_MEMBER {
-            self.op(OP_THIS);
+            self.emit_this();
         } else {
             self.op(OP_UNDEF);
         }
@@ -5144,6 +5372,10 @@ impl PComp {
                 }
             }
             let flags = self.ctx * 2 + if self.in_params { 1 } else { 0 };
+            let pv = self.priv_env_desc();
+            if !pv.is_empty() {
+                self.eval_privs.insert(site, pv);
+            }
             self.emit3(PH_EVAL, site, n, flags);
         } else {
             self.emit(OP_CALL, n, 0);
@@ -5205,6 +5437,15 @@ impl PComp {
                     self.op(OP_SUPER_CALL_SPREAD);
                 } else {
                     self.emit(OP_SUPER_CALL, n, 0);
+                }
+                if self.in_derived_ctor() {
+                    // `this` bound once: a second super(…) throws
+                    let r = self.new_ref("%this", true, -1);
+                    self.emit3(PH_REF, r, M_LOAD, 0);
+                    self.op(OP_CHECK_UNINIT);
+                    self.op(OP_POP);
+                    let r2 = self.new_ref("%this", true, -1);
+                    self.emit3(PH_REF, r2, M_INIT, 0);
                 }
                 e = ex(E_OTHER);
             } else if self.eat(".") {
@@ -5526,7 +5767,7 @@ impl PComp {
                 }
                 if ws == "this" {
                     self.next();
-                    self.op(OP_THIS);
+                    self.emit_this();
                     return ex(E_LITERAL);
                 }
                 if ws == "null" {
@@ -5545,8 +5786,7 @@ impl PComp {
                     return ex(E_LITERAL);
                 }
                 if ws == "import" {
-                    self.fail("modules are not supported");
-                    return ex(E_OTHER);
+                    return self.dyn_import();
                 }
                 if is_reserved(ws) {
                     self.fail(format!("unexpected token '{}'", ws).as_str());
@@ -5870,6 +6110,12 @@ impl PComp {
         self.fns[fnid as usize].fscope = fscope;
         self.f().var_scope = fscope;
         self.cur_scope = fscope;
+        if (flags & F_CTOR) != 0 && (flags & F_DERIVED) != 0 {
+            // `this`, uninitialized until super(…) (never marked inited:
+            // every read is checked)
+            let tb = self.declare(fscope, "%this", K_LET);
+            self.binds[tb as usize].tdz = true;
+        }
         self.emit(PH_ENTER, fscope, 1);
         self.emit(PH_PROLOGUE, fscope, fnid);
         // an async function's parameters' errors reject its promise
@@ -6015,6 +6261,11 @@ impl PComp {
         self.in_generator = (flags & F_GENERATOR) != 0;
         self.in_async = (flags & F_ASYNC) != 0;
         let mut own_strict = false;
+        if name == "__cerxesModuleBody" && !self.module_code {
+            self.module_code = true;
+            self.module_scope = fscope;
+            self.module_depth = self.fs.len();
+        }
         if arrow && !self.is("{") {
             let saved_no_in = self.no_in;
             self.assign();
@@ -6058,6 +6309,7 @@ impl PComp {
                 self.ts_fail();
             }
             self.expect("}");
+            self.ctor_this_check();
             self.op(OP_RETURN_UNDEF);
             if bscope >= 0 {
                 self.leave_block(bscope, fscope);

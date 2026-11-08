@@ -71,6 +71,7 @@ pub fn atom_operand(code: int) -> int {
         || code == OP_INIT_SETTER
         || code == OP_DEFINE_METHOD
         || code == OP_GET_SUPER
+        || code == OP_SET_SUPER
         || code == OP_ADD_PROP_POP
     {
         return 1;
@@ -131,6 +132,25 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
     let base = vm.protos.len() as int;
     for pr in u.protos {
         let mut p = pr;
+        // a direct eval's desc names the caller's private keys: the same ids
+        let mut ci: usize = 0;
+        while ci < p.code.len() {
+            if (p.code[ci].code as int) == OP_CALL_EVAL {
+                // its desc: a constant, the index of its text before linking
+                let kb = p.code[ci].b as usize;
+                let mut si: usize = p.cstrs.len();
+                if kb < p.consts.len() {
+                    if let Val::Str(k) = p.consts[kb] {
+                        si = k as usize;
+                    }
+                }
+                if si < p.cstrs.len() && p.cstrs[si].contains(";p|") {
+                    let t = remap_priv_ids(p.cstrs[si].as_str(), &mut ids, vm);
+                    p.cstrs[si] = Rc::new(t);
+                }
+            }
+            ci += 1;
+        }
         vm.link_strs(&mut p);
         let mut i: usize = 0;
         let n = p.code.len();
@@ -153,6 +173,44 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
         vm.protos.push(p);
     }
     base + u.entry
+}
+
+/// A desc's private entries ("…\u{2}<id>~…") with the ids `ids` maps
+/// them to (a new engine id for one not seen yet).
+fn remap_priv_ids(s: &str, ids: &mut HashMap<String, int>, vm: &mut Vm) -> String {
+    let mut out = String::new();
+    let mut digits = String::new();
+    let mut in_id = false;
+    for c in s.chars() {
+        if in_id {
+            if c >= '0' && c <= '9' {
+                digits.push(c);
+                continue;
+            }
+            if c == '~' {
+                let id = match ids.get(&digits) {
+                    Some(v) => *v,
+                    None => {
+                        vm.priv_seq += 1;
+                        let v = vm.priv_seq;
+                        ids.insert(digits.clone(), v);
+                        v
+                    }
+                };
+                out.push_str(format!("{}", id).as_str());
+            } else {
+                out.push_str(digits.as_str());
+            }
+            digits = String::new();
+            in_id = false;
+        }
+        out.push(c);
+        if c == '\u{2}' {
+            in_id = true;
+        }
+    }
+    out.push_str(digits.as_str());
+    out
 }
 
 // ---- the text

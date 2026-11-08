@@ -298,3 +298,10 @@ pub const OP_HAS_PRIVATE: int = 156;
 /// eval, a direct eval that sees the caller's scope. b: the constant
 /// describing the scopes' environments (pcomp `x_eval_desc`)
 pub const OP_CALL_EVAL: int = 157;
+/// a derived constructor's `super(…)` done: [v] → [v], a ReferenceError
+/// unless v (its `this` binding) is still uninitialized (OP_TDZ's value)
+pub const OP_CHECK_UNINIT: int = 158;
+/// `super.name = v` (a: the name's atom): [v] -> [v]
+pub const OP_SET_SUPER: int = 159;
+/// `super[k] = v`: [k, v] -> [v]
+pub const OP_SET_SUPER_ELEM: int = 160;
