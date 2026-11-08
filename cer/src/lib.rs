@@ -247,7 +247,10 @@ impl Engine {
         if self.vm.throwing {
             return self.uncaught();
         }
+        // the jobs' frames are safe points: the result is held through them
+        self.vm.temp_roots.push(r.clone());
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         self.vm.display(&r)
     }
 
