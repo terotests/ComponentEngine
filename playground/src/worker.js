@@ -19,13 +19,13 @@ export function serve(engine) {
     try {
       const t0 = performance.now();
       const inst = await load();
-      if (fresh && inst.reset) inst.reset();
+      if (fresh && inst.reset) await inst.reset();
       const loadMs = performance.now() - t0;
       const times = [];
       let res = { out: [], error: false };
       for (let i = 0; i < (reps || 1); i++) {
         const t = performance.now();
-        res = inst.run(src);
+        res = await inst.run(src);
         times.push(performance.now() - t);
         if (res.error) break;
       }
