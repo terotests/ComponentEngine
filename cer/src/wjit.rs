@@ -3728,6 +3728,12 @@ impl<'a> Cg<'a> {
                 self.mem(I32_LOAD, 2, l.off_class);
                 self.i32c(C_ARRAY as i64);
                 self.op(I32_NE);
+                // not one with a read-only length (pos 3)
+                self.get(L_T2);
+                self.mem(I32_LOAD, 2, l.off_pos);
+                self.i32c(3);
+                self.op(I32_EQ);
+                self.op(I32_OR);
                 self.get(L_T2);
                 self.mem(I32_LOAD8_U, 0, l.off_ext);
                 self.op(I32_EQZ);

@@ -707,7 +707,15 @@ impl Lexer {
         let mut text = String::new();
         let lead0 = c == '0';
         self.dec_digits(&mut text, lead0);
+        // NonOctalDecimalIntegerLiteral (08, 09): legacy, not in strict code
+        let nonoct = lead0 && nx >= '0' && nx <= '9';
+        if nonoct {
+            raw.push_str("octal");
+        }
         if self.cur() == 'n' {
+            if nonoct {
+                self.fail("Invalid BigInt literal");
+            }
             // a BigInt literal: its decimal text, marked (as CEr's lexer)
             self.pos += 1;
             self.check_after_number();
@@ -818,6 +826,13 @@ impl Lexer {
                 }
             }
             push_code_point(out, v);
+        } else if c == '8' || c == '9' {
+            // NonOctalDecimalEscapeSequence: an error where octal ones are
+            if in_template {
+                self.fail("octal escape in template");
+            }
+            *octal = true;
+            out.push(c);
         } else if c == 'x' {
             let a = hex_val(self.cur());
             let b = hex_val(self.at(self.pos + 1));

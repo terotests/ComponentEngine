@@ -54,12 +54,18 @@ pub const C_TYPED: i32 = 21;
 pub const C_PROXY: i32 = 22;
 /// a BigInt primitive (bigint.rs): its decimal text in prim, interned
 pub const C_BIGINT: i32 = 23;
+/// an arguments object whose elements are own index properties: a
+/// mapped one (sloppy, simple parameters), or one that got attributes,
+/// deletes or a length write (vm.rs slow_args)
+pub const C_SARGS: i32 = 24;
 
 // property attributes
 pub const P_HIDDEN: int = 1;
 pub const P_READONLY: int = 2;
 pub const P_FIXED: int = 4;
 pub const P_ACCESSOR: int = 8;
+/// a mapped arguments element: its value is the parameter's (Cold marks)
+pub const P_MAPPED: int = 16;
 
 /// Past this many properties an object keeps a hash index of its keys.
 pub const INDEX_AT: int = 32;
@@ -294,7 +300,7 @@ pub struct Shape {
     /// of a power-of-two size at least twice the keys, 0 for empty
     pub itab: Vec<int>,
     /// transitions: adding t_atom[i] with t_attr[i] leads to t_to[i];
-    /// past T_LINEAR of them, t_map by atom * 16 + attr
+    /// past T_LINEAR of them, t_map by atom * 32 + attr
     pub t_atom: Vec<int>,
     pub t_attr: Vec<int>,
     pub t_to: Vec<int>,
