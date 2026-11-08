@@ -4653,6 +4653,11 @@ impl PComp {
             }
             self.emit_ref(name.as_str(), M_INIT, decl);
             self.op(OP_POP);
+            if pk == K_PARAM {
+                // a parameter is set as its pattern goes: a later default
+                // in the same pattern reads it (`([a, b = a]) => …`)
+                self.mark_inited(b);
+            }
             return;
         }
         let e = self.lhs();
