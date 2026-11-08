@@ -147,7 +147,10 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
         return finish(engine, msg);
     }
     let av = engine.vm.string_val(arg);
-    let r = engine.vm.call_value(f, Val::Undef, vec![av]);
+    // with safe points (no native code under a host's call): a page calls a
+    // frame function many times a second and never evals in between, so
+    // the frames' garbage has to go while they run
+    let r = engine.vm.call_top(f, Val::Undef, vec![av]);
     let value = if engine.vm.throwing {
         let exc = engine.vm.exc.clone();
         engine.vm.throwing = false;
@@ -160,7 +163,10 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
         engine.error = format!("Uncaught {}", s);
         engine.error.clone()
     } else {
+        // the jobs' frames are safe points too: the result is held through them
+        engine.vm.temp_roots.push(r.clone());
         engine.vm.run_jobs();
+        engine.vm.temp_roots.pop();
         match &r {
             Val::Str(s) => engine.vm.sref(*s).to_string(),
             _ => engine.vm.display(&r),
@@ -368,4 +374,54 @@ pub unsafe extern "C" fn cx_from_snapshot(p: *const u8, n: usize) -> *mut Engine
     }
     e.vm.regs = true;
     Box::into_raw(Box::new(e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(e: *mut Engine, name: &str, arg: &str) -> i32 {
+        unsafe { cx_call(e, name.as_ptr(), name.len(), arg.as_ptr(), arg.len()) }
+    }
+
+    // A page calls a program's frame function many times a second and the
+    // engine is never given an eval in between: cx_call has to run with
+    // safe points (Vm::call_top) or each frame's garbage stays until the
+    // memory runs out (a game drawing 3-D scenes died at ~4 GB in 20 s).
+    #[test]
+    fn frames_called_by_the_host_leave_no_garbage() {
+        let e = cx_new();
+        let src = "var kept = 0; function frame(arg) { var a = JSON.parse(arg); var out = []; \
+                   for (var i = 0; i < 2000; i++) { out.push({ name: 'm' + i, position: [i, a.n, 0], kids: [{ k: i }] }); } \
+                   kept = out.length; return JSON.stringify(out).length; }";
+        assert_eq!(unsafe { cx_eval(e, src.as_ptr(), src.len()) }, 0);
+        call(e, "frame", "{\"n\":0}");
+        let after_one = unsafe { (*e).heap_size() };
+        for n in 1..200 {
+            assert_eq!(call(e, "frame", &format!("{{\"n\":{}}}", n)), 0);
+        }
+        let after_many = unsafe { (*e).heap_size() };
+        assert!(unsafe { (*e).gc_runs() } > 0 || unsafe { (*e).vm.reclaims } > 0);
+        assert!(after_many < after_one * 4, "heap grew from {} to {} objects over 200 frames", after_one, after_many);
+        unsafe { cx_drop(e) };
+    }
+
+    // the result outlives the promise jobs run after the call, which
+    // collect (here at every safe point)
+    #[test]
+    fn the_result_is_kept_through_the_jobs_after_a_call() {
+        let e = cx_new();
+        unsafe { (*e).vm.rc_stress() };
+        let src = "function frame(arg) { var s = 'r:' + arg + ':' + [1, 2, 3].join('-'); \
+                   Promise.resolve(1).then(function () { var t = []; for (var i = 0; i < 500; i++) t.push('x' + i); return t; }); \
+                   return s; }";
+        assert_eq!(unsafe { cx_eval(e, src.as_ptr(), src.len()) }, 0);
+        for n in 0..20 {
+            assert_eq!(call(e, "frame", &n.to_string()), 0);
+            let got = RESULT.with(|b| String::from_utf8(b.borrow().clone()).unwrap());
+            assert_eq!(got, format!("r:{}:1-2-3", n));
+        }
+        assert_eq!(unsafe { (*e).vm.rc_errors }, 0, "{}", unsafe { (*e).vm.rc_log.join("; ") });
+        unsafe { cx_drop(e) };
+    }
 }

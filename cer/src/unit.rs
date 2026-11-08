@@ -45,10 +45,15 @@ impl Unit {
     }
 }
 
-/// 1: the op's `a` is an atom, 2: its `b`, 0: neither.
+/// 1: the op's `a` is an atom, 2: its `b`, 3: `a` and a `b` not
+/// negative, 0: neither.
 pub fn atom_operand(code: int) -> int {
     if code == OP_GET_LOCAL_PROP {
         return 2;
+    }
+    if code == OP_GET_PRIVATE || code == OP_SET_PRIVATE || code == OP_HAS_PRIVATE {
+        // and b when it is not negative (a brand)
+        return 3;
     }
     if code == OP_GET_GLOBAL
         || code == OP_SET_GLOBAL
@@ -60,13 +65,13 @@ pub fn atom_operand(code: int) -> int {
         || code == OP_DEL_PROP
         || code == OP_GET_METHOD
         || code == OP_GET_THIS_PROP
-        || code == OP_GET_PRIVATE
         || code == OP_INIT_PROP
         || code == OP_DEFINE_FIELD
         || code == OP_INIT_GETTER
         || code == OP_INIT_SETTER
         || code == OP_DEFINE_METHOD
         || code == OP_GET_SUPER
+        || code == OP_SET_SUPER
         || code == OP_ADD_PROP_POP
     {
         return 1;
@@ -102,20 +107,61 @@ pub fn compile(ast: Ast, root: int) -> Unit {
 /// as the engine's; answers the program's proto there.
 pub fn link(vm: &mut Vm, u: Unit) -> int {
     let mut map: Vec<int> = Vec::new();
+    // a class's private keys and brand ("…\u{2}<id>"): ids of the engine,
+    // new at each link, so that classes of two scripts never share one
+    let mut ids: HashMap<String, int> = HashMap::new();
     for n in u.atom_names.iter() {
-        map.push(vm.intern(n.as_str()));
+        let cut = crate::jsstr::index_of(n.as_str(), "\u{2}", 0);
+        if cut > 0 && n.starts_with("\u{1}") {
+            let local = crate::jsstr::slice(n.as_str(), cut + 1, crate::jsstr::len(n.as_str()));
+            let id = match ids.get(&local) {
+                Some(v) => *v,
+                None => {
+                    vm.priv_seq += 1;
+                    let v = vm.priv_seq;
+                    ids.insert(local.clone(), v);
+                    v
+                }
+            };
+            let nm = format!("{}\u{2}{}", crate::jsstr::slice(n.as_str(), 0, cut), id);
+            map.push(vm.intern(nm.as_str()));
+        } else {
+            map.push(vm.intern(n.as_str()));
+        }
     }
     let base = vm.protos.len() as int;
     for pr in u.protos {
         let mut p = pr;
+        // a direct eval's desc names the caller's private keys: the same ids
+        let mut ci: usize = 0;
+        while ci < p.code.len() {
+            if (p.code[ci].code as int) == OP_CALL_EVAL {
+                // its desc: a constant, the index of its text before linking
+                let kb = p.code[ci].b as usize;
+                let mut si: usize = p.cstrs.len();
+                if kb < p.consts.len() {
+                    if let Val::Str(k) = p.consts[kb] {
+                        si = k as usize;
+                    }
+                }
+                if si < p.cstrs.len() && p.cstrs[si].contains(";p|") {
+                    let t = remap_priv_ids(p.cstrs[si].as_str(), &mut ids, vm);
+                    p.cstrs[si] = Rc::new(t);
+                }
+            }
+            ci += 1;
+        }
         vm.link_strs(&mut p);
         let mut i: usize = 0;
         let n = p.code.len();
         while i < n {
             let op = p.code[i];
             let k = atom_operand((op.code as int));
-            if k == 1 {
+            if k == 1 || k == 3 {
                 p.code[i].a = (map[op.a as usize] as i32);
+                if k == 3 && op.b >= 0 {
+                    p.code[i].b = (map[op.b as usize] as i32);
+                }
             } else if k == 2 {
                 p.code[i].b = (map[op.b as usize] as i32);
             } else if (op.code as int) == OP_CLOSURE {
@@ -127,6 +173,44 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
         vm.protos.push(p);
     }
     base + u.entry
+}
+
+/// A desc's private entries ("…\u{2}<id>~…") with the ids `ids` maps
+/// them to (a new engine id for one not seen yet).
+fn remap_priv_ids(s: &str, ids: &mut HashMap<String, int>, vm: &mut Vm) -> String {
+    let mut out = String::new();
+    let mut digits = String::new();
+    let mut in_id = false;
+    for c in s.chars() {
+        if in_id {
+            if c >= '0' && c <= '9' {
+                digits.push(c);
+                continue;
+            }
+            if c == '~' {
+                let id = match ids.get(&digits) {
+                    Some(v) => *v,
+                    None => {
+                        vm.priv_seq += 1;
+                        let v = vm.priv_seq;
+                        ids.insert(digits.clone(), v);
+                        v
+                    }
+                };
+                out.push_str(format!("{}", id).as_str());
+            } else {
+                out.push_str(digits.as_str());
+            }
+            digits = String::new();
+            in_id = false;
+        }
+        out.push(c);
+        if c == '\u{2}' {
+            in_id = true;
+        }
+    }
+    out.push_str(digits.as_str());
+    out
 }
 
 // ---- the text
@@ -430,7 +514,7 @@ fn valid(u: &Unit) -> bool {
         let nc = p.consts.len() as int;
         for op in p.code.iter() {
             let k = atom_operand((op.code as int));
-            if (k == 1 && (op.a < 0 || (op.a as int) >= na)) || (k == 2 && (op.b < 0 || (op.b as int) >= na)) {
+            if ((k == 1 || k == 3) && (op.a < 0 || (op.a as int) >= na)) || (k == 2 && (op.b < 0 || (op.b as int) >= na)) || (k == 3 && (op.b as int) >= na) {
                 return false;
             }
             if (op.code as int) == OP_CLOSURE && (op.a < 0 || (op.a as int) >= np) {

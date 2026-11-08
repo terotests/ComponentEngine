@@ -28,6 +28,7 @@ pub mod builtins2;
 pub mod compiler;
 pub mod coroutine;
 pub mod dynamic;
+pub mod esm;
 pub mod emit;
 pub mod intl;
 pub mod intl_data;
@@ -214,6 +215,11 @@ impl Engine {
             if u.error.is_empty() {
                 return u;
             }
+            if !sx.typescript {
+                // JavaScript that has no JSX in it: pcomp's error stands
+                // (the parser does not check every early error)
+                pcomp_error = u.error.clone();
+            }
         }
         if self.vm.pcomp {
             // TypeScript, JSX or a module: the parser writes it as
@@ -381,7 +387,10 @@ impl Engine {
         if self.vm.throwing {
             return self.uncaught();
         }
+        // the jobs' frames are safe points: the result is held through them
+        self.vm.temp_roots.push(r.clone());
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         self.vm.display(&r)
     }
 

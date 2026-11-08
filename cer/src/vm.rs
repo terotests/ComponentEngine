@@ -217,6 +217,9 @@ pub struct Vm {
     pub async_generator_function_proto: int,
     /// the prelude's CreateAsyncFromSyncIterator, for `for await`
     pub async_from_sync: int,
+    /// the prelude's generic Array.prototype methods (an array by native
+    /// id - NF_AP_PUSH), for receivers that are not plain arrays
+    pub array_generic: int,
     /// the prelude's proxy hooks (an array), -1 before
     pub proxy_hooks: int,
     /// %ThrowTypeError%
@@ -347,6 +350,16 @@ pub struct Vm {
     /// some object has a setter or a read-only property: writes that miss
     /// look along the prototype chain
     pub any_setter: bool,
+    /// an element or index property was put on Array.prototype or
+    /// Object.prototype: holes and reads past an array's end look there
+    pub idx_protos: bool,
+    /// a native's frame depth whose failed writes throw as in strict code
+    /// (Object.assign's Set(.., true)); -1 for none
+    pub strict_at: int,
+    /// the BigInt 0n (interned), the one falsy object; -1 until made
+    pub big_zero: int,
+    /// the last class id unit::link gave private keys
+    pub priv_seq: int,
     /// the atoms some object has as a setter or a read-only property (by
     /// atom), and whether a proxy was made: a write that adds a property
     /// looks along the chain only for these
@@ -394,6 +407,16 @@ fn same_str(a: &Rc<String>, b: &Rc<String>) -> bool {
 pub fn is_obj(v: &Val) -> bool {
     match v {
         Val::Obj(_) => true,
+        _ => false,
+    }
+}
+
+/// A value that reference counts track (an object or a string).
+#[inline]
+pub fn is_heap(v: &Val) -> bool {
+    match v {
+        Val::Obj(_) => true,
+        Val::Str(_) => true,
         _ => false,
     }
 }
@@ -453,6 +476,15 @@ pub fn truthy(v: &Val) -> bool {
 }
 
 impl Vm {
+    /// ToBoolean: `truthy`, with 0n false.
+    #[inline]
+    pub fn truthy_v(&self, v: &Val) -> bool {
+        match v {
+            Val::Obj(o) => *o != self.big_zero,
+            _ => truthy(v),
+        }
+    }
+
     pub fn new() -> Vm {
         let mut vm = Vm {
             objs: Vec::new(),
@@ -521,6 +553,7 @@ impl Vm {
             async_generator_proto: -1,
             async_generator_function_proto: -1,
             async_from_sync: -1,
+            array_generic: -1,
             proxy_hooks: -1,
             thrower: -1,
             callee_pair: -1,
@@ -584,6 +617,10 @@ impl Vm {
             prelude_protos: 0,
             temp_roots: Vec::new(),
             any_setter: false,
+            idx_protos: false,
+            strict_at: -1,
+            big_zero: -1,
+            priv_seq: 0,
             setter_atoms: Vec::new(),
             proxy_made: false,
             rng: 42,
@@ -946,7 +983,7 @@ impl Vm {
                 i += 1;
             }
             if next < 0 && !s.t_map.is_empty() {
-                next = match s.t_map.get(&(atom * 16 + attr)) {
+                next = match s.t_map.get(&(atom * 32 + attr)) {
                     Some(t) => *t,
                     None => -1,
                 };
@@ -984,7 +1021,7 @@ impl Vm {
                 s.t_attr.push(attr);
                 s.t_to.push(next);
             } else {
-                s.t_map.insert(atom * 16 + attr, next);
+                s.t_map.insert(atom * 32 + attr, next);
             }
         }
         self.objs[o as usize].shape = next as i32;
@@ -1904,6 +1941,10 @@ impl Vm {
             }
             return r;
         }
+        if !matches!(tp, Val::Undef | Val::Null) {
+            self.throw_type("Symbol.toPrimitive is not a function");
+            return Val::Undef;
+        }
         let order = if hint == "string" { vec![A_TOSTRING, A_VALUEOF] } else { vec![A_VALUEOF, A_TOSTRING] };
         for a in order {
             let f = self.get_obj(o, a, v);
@@ -2227,9 +2268,27 @@ impl Vm {
         p.generator || p.constructible()
     }
 
+    /// A function's built-in `length` / `name` (not stored, function_own)
+    /// was deleted: a hidden private-named marker stands for that.
+    pub fn vgone(&mut self, f: int, atom: int) -> bool {
+        let m = self.vgone_atom(atom);
+        self.find(f, m) >= 0
+    }
+
+    pub fn vgone_atom(&mut self, atom: int) -> int {
+        if atom == A_NAME {
+            self.intern("\u{1}gone:name")
+        } else {
+            self.intern("\u{1}gone:length")
+        }
+    }
+
     /// A function's own `length`, `name`, `prototype` when not stored.
-    fn function_own(&mut self, f: int, atom: int) -> Val {
+    pub fn function_own(&mut self, f: int, atom: int) -> Val {
         let class = self.objs[f as usize].class;
+        if (atom == A_LENGTH || atom == A_NAME) && (class == C_FUNCTION || class == C_BOUND) && self.vgone(f, atom) {
+            return Val::Undef;
+        }
         if class == C_FUNCTION {
             let pi = self.objs[f as usize].func as int;
             if atom == A_LENGTH {
@@ -2270,7 +2329,10 @@ impl Vm {
             let slot = self.find(cur, atom);
             if slot >= 0 {
                 let attr = self.attr_at(cur, slot);
-                if (attr & P_ACCESSOR) != 0 {
+                if (attr & (P_ACCESSOR | P_MAPPED)) != 0 {
+                    if (attr & P_MAPPED) != 0 {
+                        return self.mapped_get(cur, atom, slot);
+                    }
                     let pair = obj_of(&self.objs[cur as usize].get_slot(slot as usize));
                     let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
                     if self.is_callable(&g) {
@@ -2288,10 +2350,13 @@ impl Vm {
                 if (class == C_ARRAY || class == C_ARGUMENTS) && atom == A_LENGTH {
                     return Val::Num(self.evecs[self.objs[cur as usize].elems as usize].v.len() as double);
                 }
+                if class == C_TYPED && self.canon_numeric(atom) {
+                    return Val::Undef;
+                }
                 if class == C_FUNCTION || class == C_BOUND {
                     if atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE {
                         let v = self.function_own(cur, atom);
-                        if !matches!(v, Val::Undef) || atom != A_PROTOTYPE {
+                        if !matches!(v, Val::Undef) {
                             return v;
                         }
                     }
@@ -2345,12 +2410,26 @@ impl Vm {
             Val::Obj(o) => {
                 let ob = &self.objs[*o as usize];
                 if ob.class == C_ARRAY || ob.class == C_ARGUMENTS {
-                    if i < self.evecs[ob.elems as usize].v.len() as int {
+                    let n = self.evecs[ob.elems as usize].v.len() as int;
+                    if i < n && ((ob.pos != 3 && !self.idx_protos) || !self.is_hole(*o, i)) {
                         return self.evecs[ob.elems as usize].v[i as usize].clone();
                     }
-                    // an index far past the end is a property (set_index)
-                    if ob.class == C_ARRAY && ob.shape == 0 {
-                        return Val::Undef;
+                    if ob.class == C_ARRAY {
+                        // a hole or past the end: an own index property (an
+                        // element property, an index far past the end), then
+                        // the prototypes
+                        let has_shape = ob.shape != 0;
+                        let p = ob.proto as int;
+                        if has_shape {
+                            let a = self.index_atom(i);
+                            if self.find(*o, a) >= 0 {
+                                return self.get_obj(*o, a, v);
+                            }
+                        }
+                        if p < 0 || (!self.idx_protos && (p == self.array_proto || p == self.object_proto)) {
+                            return Val::Undef;
+                        }
+                        return self.get_index(&Val::Obj(p), i);
                     }
                 }
                 let class = ob.class;
@@ -2367,6 +2446,23 @@ impl Vm {
                     return self.ta_get(*o, i);
                 }
                 let a = self.index_atom(i);
+                // an element up the chain (an array or string prototype) is
+                // not an atom property
+                let mut cur = *o;
+                loop {
+                    if self.objs[cur as usize].class == C_PROXY || self.find(cur, a) >= 0 {
+                        break;
+                    }
+                    let p = self.objs[cur as usize].proto as int;
+                    if p < 0 {
+                        break;
+                    }
+                    let pc = self.objs[p as usize].class;
+                    if pc == C_ARRAY || pc == C_ARGUMENTS || pc == C_TYPED || pc == C_STRING {
+                        return self.get_index(&Val::Obj(p), i);
+                    }
+                    cur = p;
+                }
                 self.get_obj(*o, a, v)
             }
             Val::Str(s) => {
@@ -2428,6 +2524,14 @@ impl Vm {
                 self.proxy_call(cur, PH_SET, vec![k, v.clone(), receiver.clone()]);
                 return true;
             }
+            if self.objs[cur as usize].class == C_TYPED {
+                // a canonical numeric key (`NaN`, `-0`, `1.5`) on a typed
+                // array is not an element: the write does nothing
+                let n = self.atom_str(atom);
+                if n.as_str() == "-0" || number_to_string(string_to_number(n.as_str())) == n {
+                    return true;
+                }
+            }
             let slot = self.find(cur, atom);
             if slot >= 0 {
                 let attr = self.attr_at(cur, slot);
@@ -2472,6 +2576,11 @@ impl Vm {
                 self.put_slot(o, slot, v);
                 return;
             }
+            if (attr & P_MAPPED) != 0 {
+                self.mapped_put(o, atom, &v);
+                self.put_slot(o, slot, v);
+                return;
+            }
             if (attr & P_ACCESSOR) != 0 {
                 let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
                 let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
@@ -2494,8 +2603,33 @@ impl Vm {
             return;
         }
         let class = self.objs[o as usize].class;
+        if class == C_TYPED && self.canon_numeric(atom) {
+            // not an element: the value is still converted
+            self.ta_set(o, -1, &v);
+            return;
+        }
+        if class == C_STRING && atom == A_LENGTH {
+            // a String object's length is read-only
+            if self.strict_now() {
+                self.throw_type("Cannot assign to read only property 'length' of object '[object String]'");
+            }
+            return;
+        }
+        if class == C_ARGUMENTS && atom == A_LENGTH {
+            // an arguments object's length is its own data property
+            self.slow_args(o);
+            self.set_obj(o, atom, v);
+            return;
+        }
         if class == C_ARRAY && atom == A_LENGTH {
             let n = self.to_number(&v);
+            if self.objs[o as usize].pos == 2 {
+                // a frozen array's length is read-only
+                if self.strict_now() {
+                    self.throw_type("Cannot assign to read only property 'length' of object '[object Array]'");
+                }
+                return;
+            }
             self.set_length(o, n);
             return;
         }
@@ -2516,7 +2650,76 @@ impl Vm {
         self.add_own(o, atom, v, 0);
     }
 
+    /// `super[atom] = v` in a method of `home`: [[Set]] on home's
+    /// prototype with `this` as the receiver (class code: strict).
+    pub fn super_set(&mut self, home: int, atom: int, index: bool, v: Val, this: Val) {
+        let start = self.objs[home as usize].proto as int;
+        if start < 0 {
+            self.throw_type("Cannot set properties of null (super)");
+            return;
+        }
+        let mut o = start;
+        while o >= 0 {
+            if self.objs[o as usize].class == C_PROXY {
+                break;
+            }
+            let slot = self.find(o, atom);
+            if slot >= 0 {
+                let attr = self.attr_at(o, slot);
+                if (attr & P_ACCESSOR) != 0 {
+                    let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
+                    let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
+                    if self.is_callable(&s) {
+                        self.call_fixed(s, this, 1, v, Val::Undef, Val::Undef);
+                    } else {
+                        let n = self.atom_str(atom);
+                        self.throw_type(format!("Cannot set property {} which has only a getter", n).as_str());
+                    }
+                    return;
+                }
+                if (attr & P_READONLY) != 0 {
+                    let n = self.atom_str(atom);
+                    self.throw_type(format!("Cannot assign to read only property '{}' of object", n).as_str());
+                    return;
+                }
+                break;
+            }
+            o = self.objs[o as usize].proto as int;
+        }
+        let r = obj_of(&this);
+        if r < 0 {
+            let n = self.atom_str(atom);
+            self.throw_type(format!("Cannot create property '{}' on a primitive", n).as_str());
+            return;
+        }
+        let class = self.objs[r as usize].class;
+        if class == C_PROXY || class == C_ARRAY || index {
+            self.set_obj(r, atom, v);
+            return;
+        }
+        let slot = self.find(r, atom);
+        if slot >= 0 {
+            let attr = self.attr_at(r, slot);
+            if (attr & (P_ACCESSOR | P_READONLY)) != 0 {
+                let n = self.atom_str(atom);
+                self.throw_type(format!("Cannot assign to read only property '{}' of object", n).as_str());
+                return;
+            }
+            self.put_slot(r, slot, v);
+            return;
+        }
+        if !self.objs[r as usize].extensible {
+            let n = self.atom_str(atom);
+            self.throw_type(format!("Cannot add property {}, object is not extensible", n).as_str());
+            return;
+        }
+        self.add_own(r, atom, v, 0);
+    }
+
     fn strict_now(&self) -> bool {
+        if (self.frames.len() as int) == self.strict_at {
+            return true;
+        }
         if self.frames.is_empty() {
             return false;
         }
@@ -2535,6 +2738,30 @@ impl Vm {
             // elements are stored densely: a length this far out is refused
             self.throw_range("Invalid array length");
             return;
+        }
+        if len < cur && self.objs[o as usize].pos == 3 {
+            // element properties at len.. go too, down to a non-configurable one
+            let mut k = cur - 1;
+            while k >= len {
+                if self.is_hole(o, k) {
+                    let a = self.index_atom(k);
+                    let sl = self.find(o, a);
+                    if sl >= 0 {
+                        if (self.attr_at(o, sl) & P_FIXED) != 0 {
+                            self.cut_elems(o, k + 1);
+                            if self.colds[self.objs[o as usize].cold as usize].elems2.len() > (k + 1) as usize {
+                                self.cut_elems2(o, k + 1);
+                            }
+                            if self.strict_now() {
+                                self.throw_type(format!("Cannot delete property '{}' of [object Array]", k).as_str());
+                            }
+                            return;
+                        }
+                        self.remove_own(o, sl);
+                    }
+                }
+                k -= 1;
+            }
         }
         if len < cur {
             self.cut_elems(o, len);
@@ -2572,8 +2799,29 @@ impl Vm {
         }
     }
 
+    /// A CanonicalNumericIndexString key that is not an array index
+    /// (`-0`, `1.5`, `-1`, `Infinity`, `NaN`): on a typed array it names no
+    /// property.
+    pub fn canon_numeric(&mut self, atom: int) -> bool {
+        let k = self.atom_kind(atom);
+        if k == 3 || k == 4 {
+            return false;
+        }
+        let n = self.atom_str(atom);
+        n.as_str() == "-0" || number_to_string(string_to_number(n.as_str())) == n
+    }
+
+    /// An array whose length was made read-only (defineProperty): it keeps
+    /// an own `length` property then.
+    pub fn len_readonly(&self, o: int) -> bool {
+        self.objs[o as usize].shape != 0 && self.find(o, A_LENGTH) >= 0
+    }
+
     pub fn set_index(&mut self, o: int, i: int, v: Val) {
         let class = self.objs[o as usize].class;
+        if o == self.array_proto || o == self.object_proto {
+            self.idx_protos = true;
+        }
         if class == C_TYPED {
             self.ta_set(o, i, &v);
             return;
@@ -2588,9 +2836,24 @@ impl Vm {
                     }
                     return;
                 }
+                if class == C_ARRAY && self.objs[o as usize].pos == 3 && self.is_hole(o, i) {
+                    // an element kept as a property (attributes, accessor)
+                    let a = self.index_atom(i);
+                    if self.find(o, a) >= 0 {
+                        self.set_obj(o, a, v);
+                        return;
+                    }
+                }
                 self.put_elem(o, i, v);
                 if class == C_ARRAY && !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() {
                     self.clear_hole(o, i);
+                }
+                return;
+            }
+            if class == C_ARRAY && self.objs[o as usize].pos == 3 && self.len_readonly(o) {
+                // past a read-only length: no new element
+                if self.strict_now() {
+                    self.throw_type(format!("Cannot add property {}, object length is read-only", i).as_str());
                 }
                 return;
             }
@@ -2609,6 +2872,10 @@ impl Vm {
                     }
                 }
                 return;
+            }
+            if class == C_ARGUMENTS {
+                // past the end: a property, length stays
+                self.slow_args(o);
             }
         }
         let a = self.index_atom(i);
@@ -2643,6 +2910,85 @@ impl Vm {
     }
 
     /// Defines (or redefines) an own data property.
+    /// The object holding private key `a` for `o`: `o` itself (a field, a
+    /// static member) or, through `o`'s brand, its class's prototype (a
+    /// method, an accessor); -1 when `o` has neither.
+    pub fn priv_holder(&self, o: int, a: int, brand: int) -> int {
+        if self.find(o, a) >= 0 {
+            return o;
+        }
+        if brand >= 0 {
+            let s = self.find(o, brand);
+            if s >= 0 {
+                let home = obj_of(&self.objs[o as usize].get_slot(s as usize));
+                if home >= 0 && self.find(home, a) >= 0 {
+                    return home;
+                }
+            }
+        }
+        -1
+    }
+
+    pub fn throw_private(&mut self, a: int, what: &str) {
+        let n = self.atom_str(a);
+        let mut shown = n.clone();
+        let cut = jsstr::index_of(n.as_str(), "\u{2}", 0);
+        if cut >= 0 {
+            shown = jsstr::slice(n.as_str(), 0, cut);
+        }
+        if shown.starts_with('\u{1}') {
+            shown = jsstr::slice(shown.as_str(), 1, jsstr::len(shown.as_str()));
+        }
+        self.throw_type(format!("Cannot {} private member {} from an object whose class did not declare it", what, shown).as_str());
+    }
+
+    /// obj.#x
+    pub fn priv_get(&mut self, v: &Val, a: int, brand: int) -> Val {
+        let o = obj_of(v);
+        let h = if o >= 0 { self.priv_holder(o, a, brand) } else { -1 };
+        if h < 0 {
+            self.throw_private(a, "read");
+            return Val::Undef;
+        }
+        let slot = self.find(h, a);
+        if (self.attr_at(h, slot) & P_ACCESSOR) != 0 {
+            let pair = obj_of(&self.objs[h as usize].get_slot(slot as usize));
+            let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
+            if !self.is_callable(&g) {
+                self.throw_private(a, "read (no getter)");
+                return Val::Undef;
+            }
+            return self.call_fixed(g, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+        }
+        self.objs[h as usize].get_slot(slot as usize).clone()
+    }
+
+    /// obj.#x = val; kind 1: a method (not writable)
+    pub fn priv_set(&mut self, v: &Val, a: int, brand: int, kind: int, val: Val) {
+        let o = obj_of(v);
+        let h = if o >= 0 { self.priv_holder(o, a, brand) } else { -1 };
+        if h < 0 {
+            self.throw_private(a, "write");
+            return;
+        }
+        let slot = self.find(h, a);
+        if (self.attr_at(h, slot) & P_ACCESSOR) != 0 {
+            let pair = obj_of(&self.objs[h as usize].get_slot(slot as usize));
+            let f = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
+            if !self.is_callable(&f) {
+                self.throw_private(a, "write (no setter)");
+                return;
+            }
+            self.call_fixed(f, v.clone(), 1, val, Val::Undef, Val::Undef);
+            return;
+        }
+        if kind == 1 || h != o {
+            self.throw_private(a, "assign to a private method");
+            return;
+        }
+        self.put_slot(h, slot, val);
+    }
+
     pub fn define(&mut self, o: int, atom: int, v: Val, attr: int) {
         let slot = self.find(o, atom);
         if slot >= 0 {
@@ -2711,8 +3057,19 @@ impl Vm {
                     }
                 }
             }
+            // an own index property, then the prototypes (their elements too)
             let at = self.index_atom(i);
-            return self.has_atom(o, at);
+            if class == C_PROXY {
+                return self.has_atom(o, at);
+            }
+            if self.find(o, at) >= 0 {
+                return true;
+            }
+            let p = self.objs[o as usize].proto as int;
+            if p < 0 {
+                return false;
+            }
+            return self.has_property(p, k);
         }
         self.has_atom(o, a)
     }
@@ -2728,10 +3085,13 @@ impl Vm {
                 return true;
             }
             let class = self.objs[cur as usize].class;
-            if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING || class == C_FUNCTION || class == C_BOUND) {
+            if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING) {
                 return true;
             }
-            if (a == A_NAME) && (class == C_FUNCTION || class == C_BOUND) {
+            if class == C_TYPED && self.canon_numeric(a) {
+                return false;
+            }
+            if (a == A_NAME || a == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) && !self.vgone(cur, a) {
                 return true;
             }
             if a == A_PROTOTYPE && class == C_FUNCTION {
@@ -2769,11 +3129,11 @@ impl Vm {
         if self.find(o, a) >= 0 {
             return true;
         }
-        if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING || class == C_FUNCTION) {
+        if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING) {
             return true;
         }
-        if a == A_NAME && class == C_FUNCTION {
-            return true;
+        if (a == A_NAME || a == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) {
+            return !self.vgone(o, a);
         }
         if a == A_PROTOTYPE && class == C_FUNCTION {
             let v = self.function_own(o, a);
@@ -2795,9 +3155,31 @@ impl Vm {
             }
             return ok;
         }
-        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) {
+        if class == C_TYPED && (i >= 0 || self.canon_numeric(a)) {
+            // an element in range stays; any other numeric key names nothing
+            if i >= 0 && i < self.ta_length(o) {
+                if self.strict_now() {
+                    self.throw_type(format!("Cannot delete property '{}' of [object TypedArray]", i).as_str());
+                }
+                return false;
+            }
+            return true;
+        }
+        if class == C_ARGUMENTS && (i >= 0 || a == A_LENGTH) {
+            self.slow_args(o);
+            return self.delete(o, k);
+        }
+        if i >= 0 && class == C_ARRAY {
             let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
-            if i < len {
+            if class == C_ARRAY && i < len && self.objs[o as usize].pos == 2 && !self.is_hole(o, i) {
+                // a frozen array's elements stay
+                if self.strict_now() {
+                    self.throw_type(format!("Cannot delete property '{}' of [object Array]", i).as_str());
+                }
+                return false;
+            }
+            let as_prop = class == C_ARRAY && i < len && self.objs[o as usize].pos == 3 && self.is_hole(o, i);
+            if i < len && !as_prop {
                 if i == len - 1 && class == C_ARGUMENTS {
                     self.pop_elem(o);
                 } else {
@@ -2807,7 +3189,9 @@ impl Vm {
                     }
                 }
             }
-            return true;
+            if !as_prop {
+                return true;
+            }
         }
         let atom = if i >= 0 { self.index_atom(i) } else { a };
         let slot = self.find(o, atom);
@@ -2821,6 +3205,10 @@ impl Vm {
             }
             self.remove_own(o, slot);
         }
+        if (atom == A_NAME || atom == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) && !self.vgone(o, atom) {
+            let m = self.vgone_atom(atom);
+            self.add_own(o, m, Val::Undef, P_HIDDEN);
+        }
         true
     }
 
@@ -2832,12 +3220,18 @@ impl Vm {
         if class == C_PROXY {
             return self.proxy_keys(o, !include_hidden, symbols);
         }
+        let mixed = class == C_ARRAY && self.objs[o as usize].pos == 3;
+        let mut elem_ix: Vec<int> = Vec::new();
         if class == C_ARRAY || class == C_ARGUMENTS {
             let n = self.evecs[self.objs[o as usize].elems as usize].v.len();
             let mut i: usize = 0;
             while i < n {
                 if !self.is_hole(o, i as int) {
-                    out.push(self.string_val(format!("{}", i)));
+                    if mixed {
+                        elem_ix.push(i as int);
+                    } else {
+                        out.push(self.string_val(format!("{}", i)));
+                    }
                 }
                 i += 1;
             }
@@ -2902,9 +3296,29 @@ impl Vm {
                 i += 1;
             }
         }
-        for a in ints {
-            let v = self.atom_val(a);
-            out.push(v);
+        if mixed {
+            // elements and element properties (pos 3), in index order
+            let mut j: usize = 0;
+            for a in ints {
+                let ix = jsstr::array_index(self.atom_names[a as usize].as_str());
+                while j < elem_ix.len() && (elem_ix[j] as double) < (ix as double) {
+                    let ev = self.string_val(format!("{}", elem_ix[j]));
+                    out.push(ev);
+                    j += 1;
+                }
+                let v = self.atom_val(a);
+                out.push(v);
+            }
+            while j < elem_ix.len() {
+                let ev = self.string_val(format!("{}", elem_ix[j]));
+                out.push(ev);
+                j += 1;
+            }
+        } else {
+            for a in ints {
+                let v = self.atom_val(a);
+                out.push(v);
+            }
         }
         for a in others {
             let v = self.atom_val(a);
@@ -3080,7 +3494,7 @@ impl Vm {
         let hi = self.get_obj(fo, A_HASINSTANCE, f);
         if self.is_callable(&hi) && self.objs[obj_of(&hi) as usize].class != C_NATIVE {
             let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef, Val::Undef);
-            return truthy(&r);
+            return self.truthy_v(&r);
         }
         if !self.is_callable(f) {
             self.throw_type("Right-hand side of 'instanceof' is not callable");
@@ -3418,6 +3832,35 @@ impl Vm {
         r
     }
 
+    /// IsConstructor(v): a function `new` may call.
+    pub fn is_constructor(&mut self, v: &Val) -> bool {
+        let mut o = obj_of(v);
+        let mut hops = 0;
+        while o >= 0 && hops < 10000 {
+            let class = self.objs[o as usize].class;
+            if class == C_FUNCTION {
+                let pi = self.objs[o as usize].func as usize;
+                return self.protos[pi].constructible();
+            }
+            if class == C_NATIVE {
+                // the built-in constructors are the natives with a prototype
+                return self.objs[o as usize].func as int == NF_PROXY || self.find(o, A_PROTOTYPE) >= 0;
+            }
+            if class == C_BOUND {
+                o = self.objs[o as usize].env as int;
+            } else if class == C_PROXY {
+                if self.objs[o as usize].pos != 1 {
+                    return false;
+                }
+                o = self.objs[o as usize].env as int;
+            } else {
+                return false;
+            }
+            hops += 1;
+        }
+        false
+    }
+
     /// `new f(...args)` from native code.
     pub fn construct(&mut self, f: Val, args: Vec<Val>, new_target: Val) -> Val {
         let fo = obj_of(&f);
@@ -3426,6 +3869,10 @@ impl Vm {
             return Val::Undef;
         }
         let class = self.objs[fo as usize].class;
+        if class == C_NATIVE && !self.is_constructor(&f) {
+            self.throw_type("value is not a constructor");
+            return Val::Undef;
+        }
         if class == C_NATIVE {
             let id = self.objs[fo as usize].func as int;
             let this = Val::Undef;
@@ -3531,6 +3978,129 @@ impl Vm {
             }
         }
         args_obj
+    }
+
+    /// Turns a fast arguments object (elements in elems, length from
+    /// them) into C_SARGS: each element an own index property, then an
+    /// own `length`, then the properties it had (callee, iterator).
+    pub fn slow_args(&mut self, o: int) {
+        if self.objs[o as usize].class != C_ARGUMENTS {
+            return;
+        }
+        let keys = self.keys_of(o);
+        let mut vals: Vec<Val> = Vec::new();
+        let mut attrs: Vec<int> = Vec::new();
+        let mut k: usize = 0;
+        while k < keys.len() {
+            let v = self.objs[o as usize].get_slot(k).clone();
+            self.inc(&v);
+            vals.push(v);
+            attrs.push(self.attr_at(o, k as int));
+            k += 1;
+        }
+        let mut r = (keys.len() as int) - 1;
+        while r >= 0 {
+            self.remove_own(o, r);
+            r -= 1;
+        }
+        let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+        let mut items: Vec<Val> = Vec::new();
+        let mut i: int = 0;
+        while i < n {
+            let v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
+            self.inc(&v);
+            items.push(v);
+            i += 1;
+        }
+        i = 0;
+        while i < n {
+            self.pop_elem(o);
+            i += 1;
+        }
+        self.objs[o as usize].class = C_SARGS;
+        i = 0;
+        while i < n {
+            let a = self.index_atom(i);
+            let v = items[i as usize].clone();
+            self.add_own(o, a, v.clone(), 0);
+            self.dec(&v);
+            i += 1;
+        }
+        self.add_own(o, A_LENGTH, Val::Num(n as double), P_HIDDEN);
+        k = 0;
+        while k < keys.len() {
+            let v = vals[k].clone();
+            self.add_own(o, keys[k], v.clone(), attrs[k]);
+            self.dec(&v);
+            k += 1;
+        }
+    }
+
+    /// Maps arguments element j to the parameter in env slot (b >> 8) of
+    /// the env at depth (b & 255) (OP_ARGUMENTS a = 2 + j).
+    pub fn map_arg(&mut self, o: int, j: int, b: int) {
+        self.slow_args(o);
+        let a = self.index_atom(j);
+        let slot = self.find(o, a);
+        if slot < 0 {
+            return;
+        }
+        let env = self.get_env(b & 255);
+        if self.colds[self.objs[o as usize].cold as usize].home != env {
+            self.put_home(o, env);
+        }
+        let c = self.cold_id(o) as usize;
+        self.colds[c].marks.push(a);
+        self.colds[c].marks.push(b >> 8);
+        let at = self.attr_at(o, slot);
+        self.set_attr(o, slot, at | P_MAPPED);
+    }
+
+    /// The env slot a mapped arguments element atom reads, or -1.
+    pub fn mapped_slot(&self, o: int, atom: int) -> int {
+        let m = &self.colds[self.objs[o as usize].cold as usize].marks;
+        let mut k: usize = 0;
+        while k + 1 < m.len() {
+            if m[k] == atom {
+                return m[k + 1];
+            }
+            k += 2;
+        }
+        -1
+    }
+
+    /// A mapped element's value: the parameter's.
+    pub fn mapped_get(&mut self, o: int, atom: int, slot: int) -> Val {
+        let e = self.mapped_slot(o, atom);
+        let home = self.colds[self.objs[o as usize].cold as usize].home;
+        if e < 0 || home < 0 {
+            return self.objs[o as usize].get_slot(slot as usize).clone();
+        }
+        self.evecs[self.objs[home as usize].elems as usize].v[e as usize].clone()
+    }
+
+    /// A write to a mapped element also sets the parameter.
+    pub fn mapped_put(&mut self, o: int, atom: int, v: &Val) {
+        let e = self.mapped_slot(o, atom);
+        let home = self.colds[self.objs[o as usize].cold as usize].home;
+        if e >= 0 && home >= 0 {
+            self.put_elem(home, e, v.clone());
+        }
+    }
+
+    /// Copies a mapped element's parameter value into its property (before
+    /// a descriptor reads or redefines it). Returns whether it is mapped.
+    pub fn mapped_sync(&mut self, o: int, atom: int) -> bool {
+        if self.objs[o as usize].class != C_SARGS {
+            return false;
+        }
+        let slot = self.find(o, atom);
+        if slot < 0 || (self.attr_at(o, slot) & P_MAPPED) == 0 {
+            return false;
+        }
+        let v = self.mapped_get(o, atom, slot);
+        self.put_slot(o, slot, v);
+        true
     }
 
     /// Sets up a frame for the JS function `fo`; the stack holds
@@ -3810,6 +4380,45 @@ impl Vm {
         it
     }
 
+    /// An array iterator's step over an object not an array: its length
+    /// read again (a typed array out of bounds throws), then element i.
+    fn array_like_next(&mut self, o: int, src: int, i: int, kind: int) -> Option<Val> {
+        let len = if self.objs[src as usize].class == C_TYPED {
+            if self.ta_out_of_bounds(src) {
+                self.throw_type("Cannot iterate a typed array out of bounds");
+                return None;
+            }
+            self.ta_length(src)
+        } else {
+            let l = self.get(&Val::Obj(src), A_LENGTH);
+            if self.throwing {
+                return None;
+            }
+            let n = to_integer(self.to_number(&l));
+            if n > 0.0 { n as int } else { 0 }
+        };
+        if self.throwing {
+            return None;
+        }
+        if i >= len {
+            self.put_env(o, -1);
+            return None;
+        }
+        self.objs[o as usize].func = (i + 1) as i32;
+        if kind == 1 {
+            return Some(Val::Num(i as double));
+        }
+        let v = self.get_index(&Val::Obj(src), i);
+        if self.throwing {
+            return None;
+        }
+        if kind == 2 {
+            let pair = self.new_array(vec![Val::Num(i as double), v]);
+            return Some(Val::Obj(pair));
+        }
+        Some(v)
+    }
+
     /// The next value of an iterator made by `iter_values` / ITER_KEYS;
     /// None when done.
     pub fn iter_next(&mut self, it: &Val) -> Option<Val> {
@@ -3824,13 +4433,20 @@ impl Vm {
             if (kind & 3) == 3 {
                 return self.for_in_next(o, src, i, kind >> 2);
             }
+            if (kind & 8) != 0 {
+                return self.array_like_next(o, src, i, kind & 3);
+            }
             let len = self.evecs[self.objs[src as usize].elems as usize].v.len() as int;
             if i >= len {
                 self.put_env(o, -1);
                 return None;
             }
             self.objs[o as usize].func = (i + 1) as i32;
-            let v = self.evecs[self.objs[src as usize].elems as usize].v[i as usize].clone();
+            let v = if self.objs[src as usize].pos == 3 && self.is_hole(src, i) {
+                self.get_index(&Val::Obj(src), i)
+            } else {
+                self.evecs[self.objs[src as usize].elems as usize].v[i as usize].clone()
+            };
             if kind == 1 {
                 return Some(Val::Num(i as double));
             }
@@ -3853,7 +4469,7 @@ impl Vm {
             return None;
         }
         let done = self.get(&r, A_DONE);
-        if truthy(&done) {
+        if self.truthy_v(&done) {
             return None;
         }
         Some(self.get(&r, A_VALUE))
@@ -3861,7 +4477,7 @@ impl Vm {
 
     pub fn iterable_to_vec(&mut self, v: &Val) -> Vec<Val> {
         if let Val::Obj(o) = v {
-            if self.objs[*o as usize].class == C_ARRAY {
+            if self.objs[*o as usize].class == C_ARRAY && (self.objs[*o as usize].pos != 3 && !self.idx_protos || self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty()) {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
@@ -3891,7 +4507,7 @@ impl Vm {
     /// closed (array destructuring without a rest element).
     pub fn iterable_take(&mut self, v: &Val, n: int) -> Vec<Val> {
         if let Val::Obj(o) = v {
-            if self.objs[*o as usize].class == C_ARRAY {
+            if self.objs[*o as usize].class == C_ARRAY && (self.objs[*o as usize].pos != 3 && !self.idx_protos || self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty()) {
                 let f = self.get_obj(*o, A_ITERATOR, v);
                 if obj_of(&f) == self.array_values_fn {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
@@ -4015,7 +4631,7 @@ impl Vm {
                     }
                     OP_NOT => {
                         let v = self.pop();
-                        self.stack.push(Val::Bool(!truthy(&v)));
+                        self.stack.push(Val::Bool(!self.truthy_v(&v)));
                     }
                     OP_NEW_OBJECT => {
                         let o = self.new_object();
@@ -4166,7 +4782,7 @@ impl Vm {
                     }
                     OP_JF => {
                         let v = self.pop();
-                        if !truthy(&v) {
+                        if !self.truthy_v(&v) {
                             if self.slicing && self.brk(fi, (op.a as int)) {
                                 return;
                             }
@@ -4175,7 +4791,7 @@ impl Vm {
                     }
                     OP_JT => {
                         let v = self.pop();
-                        if truthy(&v) {
+                        if self.truthy_v(&v) {
                             if self.slicing && self.brk(fi, (op.a as int)) {
                                 return;
                             }
@@ -4365,7 +4981,7 @@ impl Vm {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n {
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
                                     let r = self.evecs[ob.elems as usize].v[i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
@@ -4390,7 +5006,7 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 2 {
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos < 2 {
                                     old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     self.evecs[ob.elems as usize].v[i as usize] = val.clone();
@@ -4400,7 +5016,7 @@ impl Vm {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.extensible {
+                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.extensible && ob.pos != 3 {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
@@ -4536,6 +5152,11 @@ impl Vm {
     /// An anonymous function stored under a computed key takes the key as
     /// its name (a symbol's as "[description]").
     pub fn name_by_key(&mut self, f: &Val, k: &Val) {
+        self.name_by_key_pre(f, k, "");
+    }
+
+    /// The function named after the key, with `pre` ("get " / "set ") first.
+    pub fn name_by_key_pre(&mut self, f: &Val, k: &Val, pre: &str) {
         let fo = obj_of(f);
         if fo < 0 || self.objs[fo as usize].class != C_FUNCTION || self.find(fo, A_NAME) >= 0 {
             return;
@@ -4554,7 +5175,8 @@ impl Vm {
         } else {
             self.to_string(k)
         };
-        let sv17 = self.string_val(name);
+        let full = if pre.is_empty() { name } else { format!("{}{}", pre, name) };
+        let sv17 = self.string_val(full);
         self.add_prop(fo, A_NAME, sv17, P_HIDDEN | P_READONLY);
     }
 
@@ -4597,6 +5219,55 @@ impl Vm {
         if (i as usize) < n {
             self.put_elem2(o, i, Val::Bool(true));
         }
+    }
+
+    /// Turns array element i into an own property (index atom) so it can
+    /// carry attributes or be an accessor: the element becomes a hole, the
+    /// array is extended to cover i, and pos 3 marks the array so element
+    /// reads and writes look the property up. Returns the element's value
+    /// and whether it was present.
+    pub fn elem_to_prop(&mut self, o: int, i: int) -> (Val, bool) {
+        let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+        let mut v = Val::Undef;
+        let mut present = false;
+        if i < len {
+            if !self.is_hole(o, i) {
+                v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
+                present = true;
+                self.put_elem(o, i, Val::Undef);
+            }
+        } else {
+            let mut k = len;
+            while k <= i {
+                self.push_elem(o, Val::Undef);
+                k += 1;
+            }
+            let mut h = len;
+            while h < i {
+                self.mark_hole(o, h);
+                h += 1;
+            }
+        }
+        self.mark_hole(o, i);
+        self.objs[o as usize].pos = 3;
+        (v, present)
+    }
+
+    /// Whether an array has an element (not a hole) in its elems.
+    pub fn has_plain_elem(&self, o: int) -> bool {
+        let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+        let mut i: int = 0;
+        while i < n {
+            if !self.is_hole(o, i) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    pub fn clear_elem_hole(&mut self, o: int, i: int) {
+        self.clear_hole(o, i);
     }
 
     fn clear_hole(&mut self, o: int, i: int) {
@@ -4748,23 +5419,23 @@ impl Vm {
                 let weak = self.objs[tobj as usize].func == 1;
                 let mut r = Val::Undef;
                 let mut hit = false;
-                if id == crate::builtins::NF_OP_HASOWN {
+                if id == crate::builtins::NF_OP_HASOWN && tclass != C_PROXY {
                     let k = self.stack[bp as usize].clone();
                     r = Val::Bool(self.has_own(tobj, &k));
                     if self.throwing {
                         return true;
                     }
                     hit = true;
-                } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
+                } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.objs[tobj as usize].pos != 3 && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
                     let a = self.stack[bp as usize].clone();
                     self.push_elem(tobj, a);
                     r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
                     hit = true;
                 } else if (tclass == C_MAP || tclass == C_SET) && !weak {
-                    if id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS {
+                    if (tclass == C_MAP && (id == crate::builtins::NF_MP_GET || id == crate::builtins::NF_MP_HAS)) || (tclass == C_SET && id == crate::builtins::NF_SP_HAS) {
                         let k = self.stack[bp as usize].clone();
                         let i = self.map_find(tobj, &k);
-                        r = if id == crate::builtins::NF_MP_HAS {
+                        r = if id != crate::builtins::NF_MP_GET {
                             Val::Bool(i >= 0)
                         } else if i >= 0 {
                             self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
@@ -4772,13 +5443,13 @@ impl Vm {
                             Val::Undef
                         };
                         hit = true;
-                    } else if id == crate::builtins::NF_MP_SET && argc >= 2 {
+                    } else if tclass == C_MAP && id == crate::builtins::NF_MP_SET && argc >= 2 {
                         let k = self.stack[bp as usize].clone();
                         let v = self.stack[(bp + 1) as usize].clone();
                         self.map_set(tobj, k, v);
                         r = Val::Obj(tobj);
                         hit = true;
-                    } else if id == crate::builtins::NF_SETP_ADD {
+                    } else if tclass == C_SET && id == crate::builtins::NF_SETP_ADD {
                         let k = self.stack[bp as usize].clone();
                         self.map_set(tobj, k.clone(), k);
                         r = Val::Obj(tobj);
@@ -4903,7 +5574,7 @@ impl Vm {
             Val::Undef | Val::Null => return out,
             Val::Obj(o) => {
                 let class = self.objs[*o as usize].class;
-                if class == C_ARRAY || class == C_ARGUMENTS {
+                if (class == C_ARRAY && self.objs[*o as usize].pos != 3 && !(self.idx_protos && !self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty())) || class == C_ARGUMENTS {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                 }
                 let l = self.get(v, A_LENGTH);
@@ -5148,6 +5819,15 @@ impl Vm {
                     }
                 }
             }
+            OP_CHECK_UNINIT => {
+                let bound = match self.top() {
+                    Val::Obj(o) => *o != self.tdz_obj,
+                    _ => true,
+                };
+                if bound {
+                    self.throw_ref("Super constructor may only be called once");
+                }
+            }
             OP_BIGINT => {
                 let v = self.pop();
                 let s = self.to_string(&v);
@@ -5214,6 +5894,19 @@ impl Vm {
                         let e = self.pop();
                         self.throw_val(e);
                     }
+                }
+            }
+            OP_ASTAR_CALL => {
+                if self.astar_call() {
+                    *pc = (op.b as int);
+                }
+            }
+            OP_ASTAR_DONE => {
+                let r = self.astar_done();
+                if r == 1 {
+                    *pc = (op.a as int);
+                } else if r == 2 {
+                    *pc = (op.b as int);
                 }
             }
             OP_YIELD_STAR => {
@@ -5289,7 +5982,7 @@ impl Vm {
             OP_DECL_GLOBAL => {
                 let g = self.global;
                 if self.find(g, (op.a as int)) < 0 {
-                    self.add_own(g, (op.a as int), Val::Undef, P_FIXED);
+                    self.add_own(g, (op.a as int), Val::Undef, if op.b == 1 { 0 } else { P_FIXED });
                 }
             }
             OP_TYPEOF_GLOBAL => {
@@ -5336,20 +6029,82 @@ impl Vm {
             }
             OP_GET_PRIVATE => {
                 let v = self.pop();
-                let has = match &v {
-                    Val::Obj(o) => {
-                        let k = self.key_val((op.a as int));
-                        self.has_property(*o, &k)
+                if op.b == -2 {
+                    // the AST compiler's private names: a plain lookup
+                    let has = match &v {
+                        Val::Obj(o) => {
+                            let k = self.key_val((op.a as int));
+                            self.has_property(*o, &k)
+                        }
+                        _ => false,
+                    };
+                    if !has {
+                        self.throw_private(op.a as int, "read");
+                    } else {
+                        let r = self.get(&v, (op.a as int));
+                        self.stack.push(r);
                     }
-                    _ => false,
-                };
-                if !has {
-                    let n = self.atom_str((op.a as int));
-                    let shown = if n.starts_with('\u{1}') { jsstr::slice(n.as_str(), 1, jsstr::len(n.as_str())) } else { n.clone() };
-                    self.throw_type(format!("Cannot read private member {} from an object whose class did not declare it", shown).as_str());
                 } else {
-                    let r = self.get(&v, (op.a as int));
+                    let r = self.priv_get(&v, op.a as int, op.b as int);
+                    if !self.throwing {
+                        self.stack.push(r);
+                    }
+                }
+            }
+            OP_SET_PRIVATE => {
+                let val = self.pop();
+                let v = self.pop();
+                self.priv_set(&v, op.a as int, op.b as int, op.c as int, val.clone());
+                if !self.throwing {
+                    self.stack.push(val);
+                }
+            }
+            OP_CALL_EVAL => {
+                let argc = op.a as usize;
+                let fo = obj_of(&self.stack[self.stack.len() - argc - 2]);
+                let direct = fo >= 0 && self.objs[fo as usize].class == C_NATIVE && (self.objs[fo as usize].func as int) == crate::dynamic::NF_EVAL;
+                if !direct {
+                    // any other callee: as OP_CALL
+                    return self.call_op(argc as int);
+                }
+                let at = self.stack.len() - argc;
+                let mut args: Vec<Val> = Vec::new();
+                let mut ai = at;
+                while ai < self.stack.len() {
+                    args.push(self.stack[ai].clone());
+                    ai += 1;
+                }
+                self.stack.truncate(at);
+                self.pop();
+                self.pop();
+                let r = {
+                    if args.is_empty() {
+                        Val::Undef
+                    } else if let Val::Str(s) = &args[0] {
+                        let src = self.sget(s.clone()).as_ref().clone();
+                        let dv = self.protos[pi].consts[op.b as usize].clone();
+                        let desc = match &dv {
+                            Val::Str(d) => self.sget(d.clone()).as_ref().clone(),
+                            _ => String::new(),
+                        };
+                        self.direct_eval(src.as_str(), desc.as_str())
+                    } else {
+                        args[0].clone()
+                    }
+                };
+                if !self.throwing {
                     self.stack.push(r);
+                }
+            }
+            OP_HAS_PRIVATE => {
+                let v = self.pop();
+                self.pop();
+                let o = obj_of(&v);
+                if o < 0 {
+                    self.throw_type("Cannot use 'in' operator to search for a private field in a non-object");
+                } else {
+                    let h = self.priv_holder(o, op.a as int, op.b as int);
+                    self.stack.push(Val::Bool(h >= 0));
                 }
             }
             OP_IN => {
@@ -5381,8 +6136,12 @@ impl Vm {
                 if let Val::Num(_) = v {
                     self.stack.push(v);
                 } else if self.class_of(&v) == C_BIGINT {
-                    // ToNumeric keeps a BigInt
-                    self.stack.push(v);
+                    // ToNumeric keeps a BigInt; unary + (a = 1) is ToNumber
+                    if op.a == 1 {
+                        self.throw_type("Cannot convert a BigInt value to a number");
+                    } else {
+                        self.stack.push(v);
+                    }
                 } else {
                     let n = self.to_number(&v);
                     self.stack.push(Val::Num(n));
@@ -5390,7 +6149,7 @@ impl Vm {
             }
             OP_NOT => {
                 let v = self.pop();
-                self.stack.push(Val::Bool(!truthy(&v)));
+                self.stack.push(Val::Bool(!self.truthy_v(&v)));
             }
             OP_BNOT => {
                 let v = self.pop();
@@ -5417,6 +6176,22 @@ impl Vm {
                 };
                 self.stack.push(Val::Num(if (op.code as int) == OP_INC { n + 1.0 } else { n - 1.0 }));
             }
+            OP_TO_KEY => {
+                let v = self.pop();
+                let p = if is_obj(&v) && self.class_of(&v) != C_SYMBOL { self.to_primitive(&v, "string") } else { v };
+                if self.throwing {
+                    return false;
+                }
+                if let Val::Str(_) = p {
+                    self.stack.push(p);
+                } else if is_obj(&p) && self.class_of(&p) == C_SYMBOL {
+                    self.stack.push(p);
+                } else {
+                    let s = self.to_str(&p);
+                    let sv = self.rc_val(s);
+                    self.stack.push(sv);
+                }
+            }
             OP_TOSTR => {
                 let v = self.pop();
                 if let Val::Str(_) = v {
@@ -5428,14 +6203,14 @@ impl Vm {
                 }
             }
             OP_JF_KEEP => {
-                if !truthy(self.top()) {
+                if !self.truthy_v(self.top()) {
                     *pc = (op.a as int);
                 } else {
                     self.stack.pop();
                 }
             }
             OP_JT_KEEP => {
-                if truthy(self.top()) {
+                if self.truthy_v(self.top()) {
                     *pc = (op.a as int);
                 } else {
                     self.stack.pop();
@@ -5585,6 +6360,9 @@ impl Vm {
             }
             OP_ARGUMENTS => {
                 let a = self.frames[fi].args_obj;
+                if op.a >= 2 && a >= 0 {
+                    self.map_arg(a, (op.a as int) - 2, op.b as int);
+                }
                 self.stack.push(if a >= 0 { Val::Obj(a) } else { Val::Undef });
             }
             OP_NEW_OBJECT => {
@@ -5615,7 +6393,23 @@ impl Vm {
                 let v = self.pop();
                 let o = obj_of(self.top());
                 if o >= 0 {
-                    self.define(o, (op.a as int), v, 0);
+                    let slot = self.find(o, op.a as int);
+                    if op.b == 1 {
+                        // a private field or brand (PrivateFieldAdd)
+                        if slot >= 0 {
+                            self.throw_private(op.a as int, "initialize twice");
+                        } else if !self.objs[o as usize].extensible {
+                            self.throw_private(op.a as int, "add to a non-extensible object");
+                        } else {
+                            self.add_own(o, (op.a as int), v, 0);
+                        }
+                    } else if (slot >= 0 && (self.attr_at(o, slot) & P_FIXED) != 0) || (slot < 0 && !self.objs[o as usize].extensible && self.objs[o as usize].class == C_OBJECT) {
+                        // CreateDataPropertyOrThrow
+                        let n = self.atom_str(op.a as int);
+                        self.throw_type(format!("Cannot define property {}, object is not extensible", n).as_str());
+                    } else {
+                        self.define(o, (op.a as int), v, 0);
+                    }
                 }
             }
             OP_DEFINE_FIELD_ELEM => {
@@ -5638,6 +6432,7 @@ impl Vm {
                 let o = obj_of(self.top());
                 let (i, a) = self.to_key(&k);
                 let atom = if i >= 0 { self.index_atom(i) } else { a };
+                self.name_by_key_pre(&f, &k, if (op.code as int) == OP_INIT_GETTER_ELEM { "get " } else { "set " });
                 self.put_home(obj_of(&f), o);
                 self.define_accessor(o, atom, f, if (op.code as int) == OP_INIT_GETTER_ELEM { 0 } else { 1 }, op.b == 1);
             }
@@ -5921,8 +6716,36 @@ impl Vm {
             OP_SET_FIELDS => {
                 let f = self.pop();
                 let ctor = obj_of(self.top());
-                self.put_home(obj_of(&f), self.colds[self.objs[ctor as usize].cold as usize].home);
-                self.put_elems2(ctor, vec![f]);
+                if op.a == 1 {
+                    // the static initializer: [ctor, f] with ctor its home
+                    self.put_home(obj_of(&f), ctor);
+                    let n = self.stack.len();
+                    self.stack[n - 1] = f;
+                } else {
+                    self.put_home(obj_of(&f), self.colds[self.objs[ctor as usize].cold as usize].home);
+                    self.put_elems2(ctor, vec![f]);
+                }
+            }
+            OP_SET_SUPER | OP_SET_SUPER_ELEM => {
+                let v = self.pop();
+                let key = if (op.code as int) == OP_SET_SUPER { self.key_val((op.a as int)) } else { self.pop() };
+                let fobj = self.frames[fi].fobj;
+                let home = self.colds[self.objs[fobj as usize].cold as usize].home;
+                let this = self.frames[fi].this_val.clone();
+                if home < 0 {
+                    self.throw_syntax("'super' keyword unexpected here");
+                    return false;
+                }
+                let (i, a) = self.to_key(&key);
+                if self.throwing {
+                    return false;
+                }
+                let atom = if i >= 0 { self.index_atom(i) } else { a };
+                self.super_set(home, atom, i >= 0, v.clone(), this);
+                if self.throwing {
+                    return false;
+                }
+                self.stack.push(v);
             }
             OP_GET_SUPER | OP_GET_SUPER_ELEM => {
                 let key = if (op.code as int) == OP_GET_SUPER { self.key_val((op.a as int)) } else { self.pop() };
@@ -5951,31 +6774,50 @@ impl Vm {
             }
             OP_OBJ_REST => {
                 let n = self.stack.len() as int;
+                // the keys taken already: strings, or symbols (by identity);
+                // a names on top, b computed keys below the source
                 let mut skip: Vec<String> = Vec::new();
-                let mut i = n - (op.a as int);
+                let mut skip_syms: Vec<int> = Vec::new();
+                let below = n - (op.a as int) - 1 - (op.b as int);
+                let mut i = below;
                 while i < n {
-                    let k = self.stack[i as usize].clone();
-                    let s = self.to_string(&k);
-                    skip.push(s);
+                    if i != n - (op.a as int) - 1 {
+                        let k = self.stack[i as usize].clone();
+                        if self.class_of(&k) == C_SYMBOL {
+                            skip_syms.push(obj_of(&k));
+                        } else {
+                            let s = self.to_string(&k);
+                            skip.push(s);
+                        }
+                    }
                     i += 1;
                 }
-                self.stack.truncate((n - (op.a as int)) as usize);
-                let src = self.top().clone();
+                let src = self.stack[(n - (op.a as int) - 1) as usize].clone();
+                self.stack.truncate(below as usize);
+                self.stack.push(src.clone());
                 let r = self.new_object();
-                if let Val::Obj(s) = &src {
-                    let keys = self.own_keys(*s, false, true);
+                let so = if is_obj(&src) { obj_of(&src) } else if matches!(src, Val::Undef) || matches!(src, Val::Null) { -1 } else { self.to_object(&src) };
+                if so >= 0 {
+                    let srcv = Val::Obj(so);
+                    let keys = self.own_keys(so, false, true);
                     for k in keys {
-                        let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else { String::new() };
-                        let mut skipped = false;
-                        for x in skip.iter() {
-                            if x.as_str() == ks.as_str() && !ks.is_empty() {
-                                skipped = true;
+                        let is_sym = self.class_of(&k) == C_SYMBOL;
+                        let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else if is_sym { String::new() } else { self.to_string(&k) };
+                        let mut skipped = is_sym && skip_syms.contains(&obj_of(&k));
+                        if !is_sym {
+                            for x in skip.iter() {
+                                if x.as_str() == ks.as_str() {
+                                    skipped = true;
+                                }
                             }
                         }
                         if skipped {
                             continue;
                         }
-                        let v = self.get_elem(&src, &k);
+                        let v = self.get_elem(&srcv, &k);
+                        if self.throwing {
+                            return false;
+                        }
                         self.define_elem(r, &k, v, 0);
                     }
                 }
@@ -6023,7 +6865,14 @@ impl Vm {
                 }
             }
             OP_CONST_ERROR => {
-                self.throw_type("Assignment to constant variable.");
+                if op.b == 1 {
+                    // a strict write to a `with` binding that went away
+                    let n = self.protos[pi].consts[op.a as usize].clone();
+                    let ns = self.to_string(&n);
+                    self.throw_ref(format!("{} is not defined", ns).as_str());
+                } else {
+                    self.throw_type("Assignment to constant variable.");
+                }
             }
             OP_NOP => {}
             _ => {
@@ -6408,6 +7257,7 @@ impl Vm {
             self.async_generator_proto,
             self.async_generator_function_proto,
             self.async_from_sync,
+            self.array_generic,
             self.proxy_hooks,
             self.thrower,
             self.callee_pair,

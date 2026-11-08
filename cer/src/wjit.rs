@@ -74,6 +74,8 @@ pub struct Layout {
     pub vm_frames_len: u32,
     pub vm_handlers_len: u32,
     pub vm_gc_flag: u32,
+    /// Vm.big_zero (0n, the one falsy object), from the Vm's address
+    pub vm_big_zero: u32,
     pub frame_size: u32,
     pub frame_this: u32,
     /// a Frame's env (low word), a JsObj's elems, Vm.evecs' buffer word
@@ -206,6 +208,7 @@ pub fn probe() -> Layout {
         vm_frames_len: 0,
         vm_handlers_len: 0,
         vm_gc_flag: 0,
+        vm_big_zero: 0,
         frame_size: 0,
         frame_this: 0,
         frame_env: 0,
@@ -381,6 +384,7 @@ pub fn probe() -> Layout {
         l.vm_frames_len = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vl;
         l.vm_handlers_len = std::mem::offset_of!(crate::vm::Vm, handlers) as u32 + vl;
         l.vm_gc_flag = std::mem::offset_of!(crate::vm::Vm, gc_flag) as u32;
+        l.vm_big_zero = std::mem::offset_of!(crate::vm::Vm, big_zero) as u32;
         l.frame_size = std::mem::size_of::<Frame>() as u32;
         l.frame_this = std::mem::offset_of!(Frame, this_val) as u32;
         l.frame_env = std::mem::offset_of!(Frame, env) as u32;
@@ -624,6 +628,11 @@ const L_DB: u32 = 30;
 /// callx: the caller's proto and frame size (CARGS 7, 8)
 const L_CPI: u32 = 31;
 const L_CFS: u32 = 32;
+/// the compiled function's own extra locals (inline_call): the caller's
+/// sp and bp while an inlined callee's body runs, and the callee's scope
+const L_SSP: u32 = 22;
+const L_SBP: u32 = 23;
+const L_SENV: u32 = 24;
 const L_A: u32 = 9; // f64
 const L_B: u32 = 10; // f64
 const L_Q0: u32 = 11; // i64 x4 (R_LOAD2)
@@ -714,6 +723,147 @@ struct Cg<'a> {
     callx: bool,
     /// debug: the kind of the op being written
     cur_kind: u32,
+    /// by pc: the callee a plain call's site always called, when its body
+    /// can be written in place of the call (inline_ok)
+    inl: Vec<Option<Inl>>,
+    /// writing an inlined callee's body: its checks fail to the normal
+    /// call, and what cannot be written that way (a helper, an exit)
+    /// sets inl_bad, which drops the inlined code again
+    inlining: bool,
+    inl_bad: bool,
+    /// in an inlined callee: where its this is, from the caller's sp
+    /// (L_SSP), and whether it is strict
+    inl_this: Option<(u32, bool)>,
+}
+
+/// A callee to write in place of its call (call_op): straight register
+/// code with no call, no helper and no write to its parameters, so that a
+/// failed check can still make the call itself.
+#[derive(Clone)]
+pub struct Inl {
+    pub tp: u32,
+    pub code: Vec<Op>,
+    pub entry: usize,
+    pub nparams: u32,
+    pub nslots: u32,
+    pub fsize: u32,
+    pub rb: u32,
+    /// the callee's own site caches and atoms (site_caches)
+    pub caches: Vec<u32>,
+    pub atoms: Vec<i32>,
+    pub strict: bool,
+    /// per callee pc: a GET_THIS_PROP read as a move from this operand
+    /// (inline_ok), else i32::MIN
+    pub fwd: Vec<i32>,
+}
+
+/// After a write that cannot be undone (a scope slot, a property): only
+/// moves up to the return, which cannot fail and send the call to be made
+/// again. `fwd` (atom word, value operand) is a property just stored on
+/// this: a read of it again from this becomes a move of that value
+/// (written into `out` at its pc).
+fn settles(code: &[Op], from: usize, np: i32, fwd: Option<(i32, i32)>, out: &mut Vec<i32>) -> bool {
+    let mut pc = from;
+    let mut fwd = fwd;
+    while pc < code.len() {
+        let op = code[pc];
+        let k = (op.code & 255) as int;
+        // a write to the forwarded value's register ends the forwarding
+        let kill = |f: Option<(i32, i32)>, w: i32| match f {
+            Some((_, v)) if v == w => None,
+            x => x,
+        };
+        match k {
+            R_RET | R_RET_UNDEF => return true,
+            R_NOP => pc += 1 + (op.code >> 16) as usize,
+            R_MOVE if op.a >= np => {
+                fwd = kill(fwd, op.a);
+                pc += 1
+            }
+            // a scope read has no check that could fail
+            R_GET_ENV if op.a >= np && ((op.code >> 8) & 255) == 0 && op.b >= 0 && op.c >= 0 => {
+                fwd = kill(fwd, op.a);
+                pc += 1
+            }
+            R_GET_THIS_PROP if op.a >= np && ((op.code >> 8) & 255) == 0 && matches!(fwd, Some((c, _)) if c == op.c) => {
+                out[pc] = fwd.unwrap().1;
+                fwd = kill(fwd, op.a);
+                pc += 1
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Most ops an inlined callee may have (its NOPs not counted).
+pub const INL_OPS: usize = 12;
+
+/// The callee's register code from its entry when inline_call can write
+/// it: arithmetic, moves and scope reads up to a return, no jump. Some:
+/// per pc, the operand a GET_THIS_PROP is forwarded from (settles), else
+/// i32::MIN.
+pub fn inline_ok(code: &[Op], entry: usize, nparams: u32) -> Option<Vec<i32>> {
+    let mut out = vec![i32::MIN; code.len()];
+    let mut pc = entry;
+    let mut n = 0usize;
+    let np = nparams as i32;
+    // the registers that hold this (R_THIS), as a bit mask
+    let mut this_regs: u64 = 0;
+    while pc < code.len() {
+        let op = code[pc];
+        let k = (op.code & 255) as int;
+        let skip = (op.code >> 16) as usize;
+        let sub = ((op.code >> 8) & 255) as int;
+        if k == R_NOP {
+            pc += 1 + skip;
+            continue;
+        }
+        if k == R_RET || k == R_RET_UNDEF {
+            return Some(out);
+        }
+        // a skip may only step over NOPs (the ops it skips do nothing)
+        if pc + 1 + skip > code.len() || (pc + 1..pc + 1 + skip).any(|j| (code[j].code & 255) as int != R_NOP) {
+            return None;
+        }
+        n += 1;
+        if n > INL_OPS {
+            return None;
+        }
+        // the registers it writes stay clear of the parameters
+        let w = op.a;
+        let is_this = |r: i32| r >= 0 && r < 64 && this_regs & (1u64 << r) != 0;
+        let ok = match k {
+            R_MOVE | R_ADD | R_SUB | R_MUL => w >= np,
+            R_ARITH => w >= np && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR),
+            R_LOAD2 => w >= np,
+            R_GET_ENV => w >= np && sub <= 1 && op.b >= 0 && op.c >= 0,
+            R_THIS | R_GET_THIS_PROP => w >= np,
+            R_GET_PROP => w >= np && op.b >= 0,
+            R_SET_ENV => op.b >= 0 && op.c >= 0 && return if settles(code, pc + 1, np, None, &mut out) { Some(out) } else { None },
+            R_ADD_ENV => op.a >= 0 && op.c >= 0 && return if settles(code, pc + 1, np, None, &mut out) { Some(out) } else { None },
+            R_SET_PROP => {
+                let f = if is_this(w) && op.c >= 0 { Some((op.c, op.b)) } else { None };
+                return if w >= 0 && sub == 0 && settles(code, pc + 1, np, f, &mut out) { Some(out) } else { None };
+            }
+            _ => false,
+        };
+        if !ok {
+            return None;
+        }
+        if w >= 0 && w < 64 {
+            if k == R_THIS {
+                this_regs |= 1u64 << w;
+            } else {
+                this_regs &= !(1u64 << w);
+            }
+        }
+        if (k == R_LOAD2 || (k == R_GET_ENV && sub == 1)) && w + 1 < 64 {
+            this_regs &= !(1u64 << (w + 1));
+        }
+        pc += 1;
+    }
+    None
 }
 
 impl<'a> Cg<'a> {
@@ -760,6 +910,9 @@ impl<'a> Cg<'a> {
     }
     /// return pc to the interpreter
     fn exit_at(&mut self, pc: i64) {
+        if self.inlining {
+            self.inl_bad = true;
+        }
         self.i32c(pc);
         self.set(L_OUT);
         let d = self.exit_depth();
@@ -858,6 +1011,13 @@ impl<'a> Cg<'a> {
     }
     /// with_slow with another helper for the slow block
     fn with_helper(&mut self, h: u32, pc: i64, next: i64, cmp_result: bool, fast: &dyn Fn(&mut Cg<'a>) -> bool) -> bool {
+        if self.inlining {
+            // an inlined callee: a failed check goes to the normal call
+            if !fast(self) {
+                self.inl_bad = true;
+            }
+            return true;
+        }
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
@@ -975,14 +1135,18 @@ impl<'a> Cg<'a> {
     fn truthy(&mut self, x: i32, pc: i64) {
         if x < 0 {
             let k = (-1 - x) as usize;
-            let t = match self.kvals.get(k) {
-                Some(v) => crate::vm::truthy(v),
-                None => false,
-            };
-            self.i32c(if t { 1 } else { 0 });
-            return;
+            // an object constant may be 0n: tested at run time
+            let obj = matches!(self.kvals.get(k), Some(Val::Obj(_)));
+            if !obj {
+                let t = match self.kvals.get(k) {
+                    Some(v) => crate::vm::truthy(v),
+                    None => false,
+                };
+                self.i32c(if t { 1 } else { 0 });
+                return;
+            }
         }
-        let o = Opnd::Reg(x as u32);
+        let o = self.raw(x);
         let (b, off) = self.place(o);
         self.tag(o);
         self.set(L_TAG);
@@ -1010,6 +1174,13 @@ impl<'a> Cg<'a> {
         self.get(L_TAG);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
+        // an object other than 0n
+        self.get(b);
+        self.mem(I32_LOAD, 2, off + l.off_int);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_big_zero);
+        self.op(I32_NE);
+        self.op(I32_AND);
         self.get(L_TAG);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
@@ -1317,12 +1488,17 @@ impl<'a> Cg<'a> {
     fn env_slot_addr(&mut self, depth: i32, slot: i32) {
         let l = self.lay;
         let cell = cell_addr() as i64;
-        // the frame's env: cell[5] is &frame.this_val
-        self.i32c(cell);
-        self.mem(I32_LOAD, 2, 20);
-        self.i32c(l.frame_this as i64);
-        self.op(I32_SUB);
-        self.mem(I32_LOAD, 2, l.frame_env);
+        if self.inlining {
+            // an inlined callee's scope is its closure's (inline_call)
+            self.get(L_SENV);
+        } else {
+            // the frame's env: cell[5] is &frame.this_val
+            self.i32c(cell);
+            self.mem(I32_LOAD, 2, 20);
+            self.i32c(l.frame_this as i64);
+            self.op(I32_SUB);
+            self.mem(I32_LOAD, 2, l.frame_env);
+        }
         for _ in 0..depth {
             self.obj_addr();
             self.mem(I32_LOAD, 2, l.off_proto);
@@ -1401,6 +1577,11 @@ impl<'a> Cg<'a> {
             self.mem(I32_LOAD, 2, l.off_class);
             self.i32c(C_ARRAY as i64);
             self.op(I32_NE);
+            self.fail_if(pc);
+            self.get(L_T5);
+            self.mem(I32_LOAD, 2, l.off_pos);
+            self.i32c(3);
+            self.op(I32_EQ);
             self.fail_if(pc);
             self.get(L_T5);
             self.mem(I32_LOAD, 2, l.off_elems);
@@ -1663,6 +1844,12 @@ impl<'a> Cg<'a> {
         self.mem(I32_LOAD, 2, l.off_class);
         self.i32c(C_ARRAY as i64);
         self.op(I32_NE);
+        self.fail_if(pc);
+        // pos 3: elements kept as properties (attributes, accessors)
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.i32c(3);
+        self.op(I32_EQ);
         self.fail_if(pc);
         // a whole number 0 <= k < 2^31 in L_T3
         self.num(key);
@@ -2852,6 +3039,172 @@ impl<'a> Cg<'a> {
     /// R_CALL: H_CALL, and when it pushed a compiled callee's frame (6) the
     /// call of its code from here and H_RET for what it returned
     fn call_op(&mut self, pc: i64, next: i64, plain: bool, dst: i32, f: i32, argc: i32, sub: int) {
+        let inl = if plain && dst >= 0 && f >= 0 && argc >= 0 && MASK.with(|m| m.get()) & (1u64 << 43) == 0 {
+            self.inl.get(pc as usize).cloned().flatten()
+        } else {
+            None
+        };
+        if let Some(c) = inl {
+            let (b0, e0, s0, d0) = (self.w.b.len(), self.extra, self.slow_at, self.done);
+            if self.inline_call(&c, pc, next, dst, f, argc, sub) {
+                return;
+            }
+            // not writable after all: as if never tried
+            self.w.b.truncate(b0);
+            self.extra = e0;
+            self.slow_at = s0;
+            self.done = d0;
+            self.inlining = false;
+            self.inl_this = None;
+        }
+        self.call_op_plain(pc, next, plain, dst, f, argc, sub);
+    }
+
+    /// A call to the site's one callee c with its body here (Inl): the
+    /// function object checked to be c's, the callee's registers from the
+    /// call's f + 2 (sp and bp moved there while its ops are written), its
+    /// return value into dst. Any check that fails, before or inside the
+    /// body, goes to the normal call (call_op_plain), which starts the
+    /// callee afresh: the body writes nothing the call would read. False
+    /// when the body cannot be written so.
+    fn inline_call(&mut self, c: &Inl, pc: i64, next: i64, dst: i32, f: i32, argc: i32, sub: int) -> bool {
+        let l = self.lay;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        let done_at = self.extra;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        let saved_slow = self.slow_at;
+        self.slow_at = Some(self.extra);
+        self.inlining = true;
+        self.inl_bad = false;
+        self.get(L_SP);
+        self.set(L_SSP);
+        self.get(L_BP);
+        self.set(L_SBP);
+        if sub == 1 {
+            self.store_undef(f as u32 + 1);
+        }
+        // f: c's function object; room on the stack for its frame
+        let fo = f as u32 * 16;
+        self.need_obj(L_SP, fo, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, fo + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_FUNCTION as i64);
+        self.op(I32_NE);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_func);
+        self.i32c(c.tp as i64);
+        self.op(I32_NE);
+        self.op(I32_OR);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_stack_len);
+        self.get(L_BP);
+        self.i32c(f as i64 + 2 + c.fsize as i64);
+        self.op(I32_ADD);
+        self.op(I32_LT_U);
+        self.op(I32_OR);
+        self.fail_if(pc);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_env);
+        self.set(L_SENV);
+        // the callee's frame: sp and bp at f + 2
+        self.get(L_SP);
+        self.i32c((f as i64 + 2) * 16);
+        self.op(I32_ADD);
+        self.set(L_SP);
+        self.get(L_BP);
+        self.i32c(f as i64 + 2);
+        self.op(I32_ADD);
+        self.set(L_BP);
+        // its locals past the arguments it got start undefined (renter)
+        let keep = if (argc as u32) < c.nparams { argc as u32 } else { c.nparams };
+        for r in keep..c.nslots {
+            self.store_undef(r);
+        }
+        let ctx = (self.pi, self.rb, std::mem::take(&mut self.caches), std::mem::take(&mut self.atoms), self.fsize);
+        self.pi = c.tp;
+        self.rb = c.rb;
+        self.caches = c.caches.clone();
+        self.atoms = c.atoms.clone();
+        self.fsize = c.fsize;
+        self.inl_this = Some(((f as u32 + 1) * 16, c.strict));
+        let mut cp = c.entry;
+        let mut ret = false;
+        while cp < c.code.len() && !self.inl_bad {
+            let ins = c.code[cp];
+            let k = (ins.code & 255) as int;
+            if k == R_RET {
+                let o = self.raw(ins.a);
+                self.load_val(o, L_Q0);
+                ret = true;
+                break;
+            }
+            if k == R_RET_UNDEF {
+                let u = bytes_of(Val::Undef);
+                self.w.byte(I64_CONST);
+                self.w.s(i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]));
+                self.set(L_Q0);
+                self.w.byte(I64_CONST);
+                self.w.s(i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]));
+                self.set(L_Q0 + 1);
+                ret = true;
+                break;
+            }
+            if k == R_GET_THIS_PROP && c.fwd.get(cp).map_or(false, |&v| v != i32::MIN) && ins.a >= 0 {
+                // the property just stored on this: its value
+                let o = self.raw(c.fwd[cp]);
+                self.load_val(o, L_Q0);
+                self.store_val(ins.a as u32, L_Q0);
+                cp += 1;
+                continue;
+            }
+            self.cur_kind = k as u32;
+            if !self.one(cp, ins) {
+                self.inl_bad = true;
+            }
+            cp += 1 + if k == R_NOP { (ins.code >> 16) as usize } else { 0 };
+        }
+        self.cur_kind = R_CALL as u32;
+        self.inl_this = None;
+        self.pi = ctx.0;
+        self.rb = ctx.1;
+        self.caches = ctx.2;
+        self.atoms = ctx.3;
+        self.fsize = ctx.4;
+        if !ret || self.inl_bad {
+            return false;
+        }
+        // back to the caller's frame; the value into dst
+        self.get(L_SSP);
+        self.set(L_SP);
+        self.get(L_SBP);
+        self.set(L_BP);
+        self.store_val(dst as u32, L_Q0);
+        self.inlining = false;
+        self.op(BR);
+        self.w.u((self.extra - done_at) as u64);
+        self.op(END);
+        self.extra -= 1;
+        self.slow_at = saved_slow;
+        // a check failed: the caller's frame again and the call itself
+        self.get(L_SSP);
+        self.set(L_SP);
+        self.get(L_SBP);
+        self.set(L_BP);
+        self.call_op_plain(pc, next, true, dst, f, argc, 0);
+        self.op(END);
+        self.extra -= 1;
+        true
+    }
+
+    fn call_op_plain(&mut self, pc: i64, next: i64, plain: bool, dst: i32, f: i32, argc: i32, sub: int) {
         let cell = cell_addr() as i64;
         let l = self.lay;
         let a = self.caches.get(pc as usize).copied().unwrap_or(0);
@@ -3375,6 +3728,12 @@ impl<'a> Cg<'a> {
                 self.mem(I32_LOAD, 2, l.off_class);
                 self.i32c(C_ARRAY as i64);
                 self.op(I32_NE);
+                // not one with a read-only length (pos 3)
+                self.get(L_T2);
+                self.mem(I32_LOAD, 2, l.off_pos);
+                self.i32c(3);
+                self.op(I32_EQ);
+                self.op(I32_OR);
                 self.get(L_T2);
                 self.mem(I32_LOAD8_U, 0, l.off_ext);
                 self.op(I32_EQZ);
@@ -4137,6 +4496,9 @@ impl<'a> Cg<'a> {
         self.set(L_KV);
     }
     fn helper_raw(&mut self, h: u32, pc: i64) {
+        if self.inlining {
+            self.inl_bad = true;
+        }
         self.get(L_VM);
         self.get(L_BP);
         let (pi, rb) = (self.pi as i64, self.rb as i64);
@@ -4273,11 +4635,27 @@ impl<'a> Cg<'a> {
                 }
             }
             R_THIS if w1 >= 0 => {
-                // the frame's this, through cell[5]
-                let cell = cell_addr() as i64;
-                self.i32c(cell);
-                self.mem(I32_LOAD, 2, 20);
-                self.set(L_T2);
+                if let Some((t, strict)) = self.inl_this {
+                    // an inlined callee's this: the call's slot after f; a
+                    // sloppy one's must be an object already
+                    self.get(L_SSP);
+                    self.i32c(t as i64);
+                    self.op(I32_ADD);
+                    self.set(L_T2);
+                    if !strict {
+                        self.get(L_T2);
+                        self.mem(I32_LOAD8_U, 0, 0);
+                        self.i32c(self.lay.t_obj as i64);
+                        self.op(I32_NE);
+                        self.fail_if(p);
+                    }
+                } else {
+                    // the frame's this, through cell[5]
+                    let cell = cell_addr() as i64;
+                    self.i32c(cell);
+                    self.mem(I32_LOAD, 2, 20);
+                    self.set(L_T2);
+                }
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);
                 self.set(L_Q0);
@@ -4447,6 +4825,41 @@ impl<'a> Cg<'a> {
                     true
                 })
             }
+            R_ADD_ENV if self.lay.obj_ok && w1 >= 0 && w3 >= 0 => {
+                // x += v on a scope slot, both numbers (rvm.rs R_ADD_ENV):
+                // the slot's old value must be an uncounted number or
+                // undefined, else the helper
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| {
+                    let l = cg.lay;
+                    let a = cg.opnd(w1);
+                    let b = cg.opnd(w2);
+                    cg.need_num(a, p);
+                    cg.need_num(b, p);
+                    cg.num(a);
+                    cg.num(b);
+                    cg.op(F64_ADD);
+                    cg.set(L_A);
+                    cg.env_slot_addr(sub as i32, w3);
+                    cg.get(L_T2);
+                    cg.mem(I32_LOAD8_U, 0, 0);
+                    cg.set(L_TAG);
+                    cg.get(L_TAG);
+                    cg.i32c(l.t_num as i64);
+                    cg.op(I32_NE);
+                    cg.get(L_TAG);
+                    cg.i32c(l.t_undef as i64);
+                    cg.op(I32_NE);
+                    cg.op(I32_AND);
+                    cg.fail_if(p);
+                    cg.get(L_T2);
+                    cg.i32c(l.t_num as i64);
+                    cg.mem(I32_STORE8, 0, 0);
+                    cg.get(L_T2);
+                    cg.get(L_A);
+                    cg.mem(F64_STORE, 3, l.off_num);
+                    true
+                })
+            }
             R_GET_GLOBAL if self.lay.obj_ok && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
                 self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| {
@@ -4458,9 +4871,16 @@ impl<'a> Cg<'a> {
             R_GET_THIS_PROP if self.lay.obj_ok && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
                 self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| {
-                    let cell = cell_addr() as i64;
-                    cg.i32c(cell);
-                    cg.mem(I32_LOAD, 2, 20);
+                    if let Some((t, _)) = cg.inl_this {
+                        // an inlined callee's this (not an object: the call)
+                        cg.get(L_SSP);
+                        cg.i32c(t as i64);
+                        cg.op(I32_ADD);
+                    } else {
+                        let cell = cell_addr() as i64;
+                        cg.i32c(cell);
+                        cg.mem(I32_LOAD, 2, 20);
+                    }
                     cg.set(L_T4);
                     cg.pget_ic(w1 as u32, L_T4, 0, a, w3, p)
                 })
@@ -5047,7 +5467,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32) -> Option<Compiled> {
+pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32, inl: Vec<Option<Inl>>) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -5130,8 +5550,13 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
         fsize,
         callx: false,
         cur_kind: 0,
+        inl,
+        inlining: false,
+        inl_bad: false,
+        inl_this: None,
     };
-    // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c, t2..t6 (i32)
+    // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c,
+    // t2..t6, ssp, sbp, senv (i32)
     cg.w.u(4);
     cg.w.u(3);
     cg.w.byte(T_I32);
@@ -5139,7 +5564,7 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
     cg.w.byte(T_F64);
     cg.w.u(4);
     cg.w.byte(T_I64);
-    cg.w.u(7);
+    cg.w.u(10);
     cg.w.byte(T_I32);
     cg.get(L_KEY);
     cg.set(L_ENTRY);
@@ -5381,6 +5806,10 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
         fsize: 0,
         callx: false,
         cur_kind: 0,
+        inl: Vec::new(),
+        inlining: false,
+        inl_bad: false,
+        inl_this: None,
     };
     let hs = cg.hstore_body();
     let cx = cg.callx_body();
@@ -6030,18 +6459,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         let n = vm.protos[pi].code.len();
         let caches = if rb + n <= vm.rcode.len() { site_caches(vm, pi, rb, n) } else { Vec::new() };
         // a property write's atom; R_INIT_PROP's transition cache
-        let atoms: Vec<i32> = (0..n)
-            .map(|i| {
-                let k = if rb + i < vm.rcode.len() { (vm.rcode[rb + i].code & 255) as int } else { -1 };
-                if k == R_SET_PROP {
-                    vm.ratom(pi, i as int) as i32
-                } else if k == R_INIT_PROP {
-                    vm.protos[pi].code[i].c
-                } else {
-                    -1
-                }
-            })
-            .collect();
+        let atoms = site_atoms(vm, pi, rb, n);
         // R_TYPEOF's strings are there before the code reads them
         vm.type_val(&Val::Undef);
         let p = &vm.protos[pi];
@@ -6053,7 +6471,9 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         }
         if rb + n <= vm.rcode.len() {
             let name = format!("{}#{}", p.name, pi);
-            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32) {
+            let inl = inline_sites(vm, pi, rb, n);
+            let p = &vm.protos[pi];
+            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32, inl) {
                 f = PENDING;
                 let full = with_state(vm, |st| {
                     let t = &mut st.batch;
@@ -6567,7 +6987,7 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
         Val::Num(x) => *x,
         _ => return false,
     };
-    if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos == 2 {
+    if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos >= 2 {
         return false;
     }
     let i = n as int;
@@ -6589,7 +7009,7 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
         vm.sdec(old_s);
         return true;
     }
-    if (i as usize) == len && e != 0 && vm.objs[o as usize].extensible {
+    if (i as usize) == len && e != 0 && vm.objs[o as usize].extensible && vm.objs[o as usize].pos != 3 {
         vm.inc(&val);
         vm.evecs[e].v.push(val);
         return true;
@@ -6968,7 +7388,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             if let Val::Num(x) = *vm.rget(bp, w2) {
                 vm.rset((bp + w1) as usize, Val::Num(if neg { -x } else { x }));
             } else {
-                vm.r_unary_slow(bp, fi, pc, if neg { 1 } else { 0 }, w1, w2);
+                vm.r_unary_slow(bp, fi, pc, if neg { 1 } else if sub == 2 { 4 } else { 0 }, w1, w2);
             }
         }
         R_ADD_LOCAL_POP => {
@@ -7549,6 +7969,170 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
 
 /// By pc of a function's code (from rb, n ops): the cache of each property
 /// and method site prop_cache reads, 0 for none.
+/// By pc of the function at rb (n ops): the callee a plain call's site
+/// has always called (call_fill's cache) when inline_ok can write its body
+/// there.
+fn inline_sites(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<Option<Inl>> {
+    let mut out: Vec<Option<Inl>> = vec![None; n];
+    for i in 0..n {
+        if rb + i >= vm.rcode.len() || (vm.rcode[rb + i].code & 255) as int != R_CALL || rb + i >= vm.jit_cache_at.len() || vm.jit_cache_at[rb + i] < 0 {
+            continue;
+        }
+        let mut tp = vm.jit_caches[vm.jit_cache_at[rb + i] as usize][0];
+        if tp < 0 {
+            // not called from compiled code yet: the function object the
+            // last call left in the slot of f of the function's running
+            // frame (a guess; inline_call checks it every time)
+            tp = guess_callee(vm, pi, rb, i);
+        }
+        if tp < 0 || tp as usize >= vm.protos.len() {
+            continue;
+        }
+        let q = &vm.protos[tp as usize];
+        if q.rstate != 1 || q.uses_args || q.rest >= 0 || q.class_ctor || q.generator || q.is_async || q.arrow || q.env_size > 0 {
+            continue;
+        }
+        let qb = q.rbase as usize;
+        let qn = q.code.len();
+        if qb + qn > vm.rcode.len() {
+            continue;
+        }
+        let fwd = match inline_ok(&vm.rcode[qb..qb + qn], q.rentry as usize, q.nparams as u32) {
+            Some(f) => f,
+            None => continue,
+        };
+        let (entry, nparams, nslots, fsize, strict) = (q.rentry as usize, q.nparams as u32, q.nslots as u32, q.fsize as u32, q.strict);
+        let caches = site_caches(vm, tp as usize, qb, qn);
+        let atoms = site_atoms(vm, tp as usize, qb, qn);
+        out[i] = Some(Inl {
+            tp: tp as u32,
+            code: vm.rcode[qb..qb + qn].to_vec(),
+            entry,
+            nparams,
+            nslots,
+            fsize,
+            rb: qb as u32,
+            caches,
+            atoms,
+            strict,
+            fwd,
+        });
+    }
+    out
+}
+
+/// By pc of function pi (at rb, n ops): a property write's atom; R_INIT_PROP's
+/// transition cache; -1 for anything else.
+fn site_atoms(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<i32> {
+    (0..n)
+        .map(|i| {
+            let k = if rb + i < vm.rcode.len() { (vm.rcode[rb + i].code & 255) as int } else { -1 };
+            if k == R_SET_PROP {
+                vm.ratom(pi, i as int) as i32
+            } else if k == R_INIT_PROP {
+                vm.protos[pi].code[i].c
+            } else {
+                -1
+            }
+        })
+        .collect()
+}
+
+/// The proto of the script function a call (pc of the function at rb) is
+/// likely to call (guess_reg of its register f), -1 when none is known.
+/// Only a guess: inline_call checks the function object every time.
+fn guess_callee(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize) -> i32 {
+    if let Val::Obj(o) = guess_reg(vm, pi, rb, pc, vm.rcode[rb + pc].a, 2) {
+        if o >= 0 && (o as usize) < vm.objs.len() && vm.objs[o as usize].class == C_FUNCTION {
+            return vm.objs[o as usize].func;
+        }
+    }
+    -1
+}
+
+/// The value register r likely holds at pc of the function at rb, from
+/// the op before it that loaded r: a global's or a scope slot's value
+/// now, a local of the function's newest frame, or a method (by the
+/// receiver's guess and the site's cache, or its first prototype way).
+fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth: u32) -> Val {
+    if r < 0 {
+        return Val::Undef;
+    }
+    let frame = (0..vm.frames.len()).rev().find(|&k| vm.frames[k].proto as usize == pi);
+    let local = |reg: i32| -> Val {
+        match frame {
+            Some(fi) if reg >= 0 && (reg as int) < vm.protos[pi].nslots => {
+                let at = (vm.frames[fi].bp + reg as int) as usize;
+                if at < vm.stack.len() { vm.stack[at] } else { Val::Undef }
+            }
+            _ => Val::Undef,
+        }
+    };
+    if (r as int) < vm.protos[pi].nslots {
+        // a local: its value in the newest frame
+        return local(r);
+    }
+    let mut k = pc;
+    let mut steps = 0;
+    while k > 0 && steps < 32 {
+        k -= 1;
+        steps += 1;
+        let op = vm.rcode[rb + k];
+        let kind = (op.code & 255) as int;
+        if kind == R_NOP || op.a != r {
+            continue;
+        }
+        return match kind {
+            R_GET_GLOBAL => {
+                let g = vm.global;
+                let slot = vm.find(g, op.c as int);
+                if slot >= 0 { vm.objs[g as usize].get_slot(slot as usize) } else { Val::Undef }
+            }
+            R_GET_ENV => match frame {
+                Some(fi) => {
+                    let mut e = vm.frames[fi].env;
+                    let mut d = op.b;
+                    while d > 0 && e >= 0 {
+                        e = vm.objs[e as usize].proto as int;
+                        d -= 1;
+                    }
+                    let ev = if e >= 0 { vm.objs[e as usize].elems as usize } else { 0 };
+                    if e >= 0 && ev < vm.evecs.len() && (op.c as usize) < vm.evecs[ev].v.len() { vm.evecs[ev].v[op.c as usize] } else { Val::Undef }
+                }
+                None => Val::Undef,
+            },
+            R_MOVE if op.b >= 0 => local(op.b),
+            R_GET_METHOD if depth > 0 => {
+                // an own method: the receiver's guess and the site's cache
+                if op.c >= 65536 {
+                    if let Val::Obj(o) = guess_reg(vm, pi, rb, k, op.b, depth - 1) {
+                        if o >= 0 && (o as usize) < vm.objs.len() && vm.objs[o as usize].shape == (op.c >> 16) {
+                            return vm.objs[o as usize].get_slot((op.c & 65535) as usize);
+                        }
+                    }
+                }
+                // the site's first way: a data method some prototypes up
+                // (rvm.rs PIC_W: depth, slot, accessor, then each
+                // prototype and its shape)
+                let site = rb + k;
+                if site < vm.rpic.len() && vm.rpic[site] >= 0 {
+                    let b = (vm.rpic[site] * (crate::rvm::PIC_W as i32)) as usize;
+                    let d = if b + 4 < vm.pic.len() { vm.pic[b + 2] } else { 0 };
+                    if d >= 1 && d <= crate::rvm::PIC_DEPTH as i32 && b + 6 + 2 * (d as usize) < vm.pic.len() && vm.pic[b + 3] >= 0 && vm.pic[b + 4] == 0 {
+                        let h = vm.pic[b + 5 + 2 * (d as usize - 1)];
+                        if h >= 0 && (h as usize) < vm.objs.len() {
+                            return vm.objs[h as usize].get_slot(vm.pic[b + 3] as usize);
+                        }
+                    }
+                }
+                Val::Undef
+            }
+            _ => Val::Undef,
+        };
+    }
+    Val::Undef
+}
+
 fn site_caches(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<u32> {
     let mut out = vec![0u32; n];
     for i in 0..n {

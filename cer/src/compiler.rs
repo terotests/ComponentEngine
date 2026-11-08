@@ -2572,7 +2572,7 @@ impl Compiler {
                 self.expr(a);
                 self.chain_check(n);
                 let at = self.atom(s.as_str());
-                self.emit(OP_GET_PRIVATE, at, 0);
+                self.emit(OP_GET_PRIVATE, at, -2);
                 return;
             }
             if self.ast.nodes[a as usize].kind == N_THIS && self.ast.nodes[n as usize].d != 1 {
@@ -2894,7 +2894,8 @@ impl Compiler {
         if o == "-" {
             self.op(OP_NEG);
         } else if o == "+" {
-            self.op(OP_TONUM);
+            // a = 1: ToNumber, a BigInt throws
+            self.emit(OP_TONUM, 1, 0);
         } else if o == "!" {
             self.op(OP_NOT);
         } else if o == "~" {

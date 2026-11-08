@@ -26,6 +26,14 @@ use crate::ops::*;
 use crate::parser::{is_reserved, is_strict_reserved};
 use crate::value::*;
 
+/// PComp.ctx: what the code being read may contain (early errors)
+const CX_SUPER_CALL: int = 1;
+const CX_SUPER_PROP: int = 2;
+/// a field initializer or static block: no `arguments`
+const CX_NO_ARGS: int = 4;
+/// a static block: `await` is reserved
+const CX_AWAIT: int = 8;
+
 const K_VAR: int = 0;
 const K_LET: int = 1;
 const K_CONST: int = 2;
@@ -57,6 +65,8 @@ const PH_BODY_VARS: int = 1007;
 const PH_ANNEX: int = 1008;
 /// nothing
 const PH_NOP: int = 1009;
+/// a direct eval's call: `a` its scope, `b` the argument count
+const PH_EVAL: int = 1010;
 
 const M_LOAD: int = 0;
 const M_STORE: int = 1;
@@ -69,6 +79,12 @@ const M_UPD: int = 5;
 /// the add and store (c 1 when v assigns nothing)
 const M_ADDT_LOAD: int = 6;
 const M_ADDT_STORE: int = 7;
+/// inside `with`, a reference taken before the right side: M_WREF pushes
+/// the object that has the name (undefined: the binding), M_WLOAD reads
+/// through it ([base] → [base, v]), M_WSTORE writes ([base, v] → [v])
+const M_WREF: int = 8;
+const M_WLOAD: int = 9;
+const M_WSTORE: int = 10;
 
 const U_PREFIX: int = 1;
 const U_INC: int = 2;
@@ -106,6 +122,14 @@ const E_UPDATE_IDENT: int = 12;
 const E_CHAIN: int = 13;
 const E_PRIVATE: int = 14;
 const E_LITERAL: int = 15;
+/// `#x` before `in`: a its key's atom, b its brand's (-1: none)
+const E_PRIVNAME: int = 16;
+
+/// a private name's kind: a field, a method, an accessor; static added
+const PK_FIELD: int = 0;
+const PK_METHOD: int = 1;
+const PK_ACCESSOR: int = 2;
+const PK_STATIC: int = 4;
 
 /// before every sequence number
 const SEQ_NEVER: int = 2000000000;
@@ -120,6 +144,40 @@ pub struct Ex {
 
 fn ex(k: int) -> Ex {
     Ex { k: k, a: -1, b: -1, c: -1 }
+}
+
+/// `s`'s parts between the bytes `sep` (none for an empty `s`).
+fn split_on(s: &str, sep: int) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let n = s.as_bytes().len();
+    if n == 0 {
+        return out;
+    }
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i <= n {
+        if i == n || (s.as_bytes()[i] as int) == sep {
+            out.push(String::from(&s[start..i]));
+            start = i + 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The decimal digits of `s` as a number.
+fn digits_int(s: &str) -> int {
+    let mut v: int = 0;
+    let n = s.as_bytes().len();
+    let mut i: usize = 0;
+    while i < n {
+        let c = s.as_bytes()[i] as int;
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+        }
+        i += 1;
+    }
+    v
 }
 
 pub struct PBind {
@@ -155,6 +213,17 @@ pub struct PScope {
     /// a `with` statement's scope: its object's binding
     pub with_bind: int,
     pub hoists: Vec<int>,
+    /// the `var` names declared in it or in the blocks inside it (early
+    /// errors: a lexical declaration of the same name)
+    pub vthru: HashMap<String, bool>,
+    /// a function body's scope (parameters with expressions): the scope of
+    /// its parameters
+    pub params_scope: int,
+    /// the async functions and generators declared in it (a block's plain
+    /// functions alone may share a name, in sloppy code)
+    pub odd_fns: HashMap<String, bool>,
+    /// a direct eval inside may name its bindings: all go in its object
+    pub has_eval: bool,
 }
 
 pub struct PRef {
@@ -194,6 +263,9 @@ pub struct PFn {
     pub proto: int,
     pub str_consts: HashMap<String, int>,
     pub num_consts: HashMap<String, int>,
+    /// sloppy with simple parameters: its arguments object's elements
+    /// are the parameters (mapped)
+    pub mapped: bool,
 }
 
 struct PCtl {
@@ -205,6 +277,19 @@ struct PCtl {
     fin: int,
     installed: bool,
     scope: int,
+    /// a `using` region (fin -2): its resource list's binding, and
+    /// whether disposing awaits
+    uname: String,
+    uasync: bool,
+}
+
+/// The statements after a `using` declaration up to the end of its list:
+/// a try whose exits dispose of the list's resources
+struct URegion {
+    list: String,
+    err: String,
+    at: int,
+    is_async: bool,
 }
 
 struct PState {
@@ -224,10 +309,11 @@ struct PState {
     saved_in_async: bool,
     saved_strict: bool,
     saved_scope: int,
+    saved_ctx: int,
 }
 
 fn new_ctl(kind: int) -> PCtl {
-    PCtl { kind: kind, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), fin: -1, installed: false, scope: -1 }
+    PCtl { kind: kind, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), fin: -1, installed: false, scope: -1, uname: String::new(), uasync: false }
 }
 
 fn binary_prec(op: &str) -> int {
@@ -321,6 +407,11 @@ fn is_compare(code: int) -> bool {
     code == OP_LT || code == OP_GT || code == OP_LE || code == OP_GE || code == OP_SEQ || code == OP_SNE || code == OP_EQ || code == OP_NE
 }
 
+/// Whether the op also jumps to `b`.
+fn jumps_b(c: int) -> bool {
+    c == OP_YIELD_STAR || c == OP_ASTAR_CALL || c == OP_ASTAR_DONE
+}
+
 /// Whether the op jumps to `a` (and, for YIELD_STAR, to `b`).
 fn is_jump(op: &Op) -> bool {
     let c = op.code;
@@ -340,6 +431,8 @@ fn is_jump(op: &Op) -> bool {
         || ((c as int) == OP_TEMPLATE_OBJ && op.b >= 0)
         || (c as int) == OP_GEN_RESUME
         || (c as int) == OP_YIELD_STAR
+        || (c as int) == OP_ASTAR_CALL
+        || (c as int) == OP_ASTAR_DONE
         || (c as int) == OP_TRY
 }
 
@@ -407,6 +500,38 @@ pub struct PComp {
     /// a host's script (CErXes `Engine::compile`) may `import` the host's
     /// modules and keep its `export`ed declarations, as the parser reads it
     pub script_imports: bool,
+    /// direct eval code: the caller's environments (`x_eval_desc`)
+    pub outer_desc: String,
+    /// the scopes of direct eval calls
+    eval_sites: Vec<int>,
+    /// a direct eval site's private environment ("p|…" desc parts)
+    eval_privs: HashMap<int, String>,
+    /// `using` regions open, the ones of the list being read from
+    /// `using_mark`; whether the statement being read may be a `using`
+    /// declaration, and the token ending its list
+    usings: Vec<URegion>,
+    using_mark: int,
+    using_here: bool,
+    using_end: int,
+    using_count: int,
+    /// sloppy direct eval code in a function: the caller's environments
+    /// from the innermost to the function's, where its vars may already be
+    eval_var_scopes: Vec<int>,
+    /// sloppy direct eval code in a function: the binding of the object
+    /// that keeps the vars it adds (the function's `%ev`), -1 for none
+    eval_ev: int,
+    /// direct eval code in a function's parameters / where new.target is
+    /// allowed
+    eval_in_params: bool,
+    eval_new_target: bool,
+    /// direct eval code: the caller's CX_* bits; its program scope
+    eval_ctx: int,
+    eval_prog: int,
+    /// strict code (a strict caller's direct eval)
+    pub force_strict: bool,
+    /// the next statement is the body of an if or a loop (labels and
+    /// all): no labelled function there
+    sub_label: bool,
     mex_names: Vec<String>,
     mex_values: Vec<String>,
     mex_stars: Vec<String>,
@@ -429,11 +554,41 @@ pub struct PComp {
 
     // parser state
     no_in: bool,
+    /// compiling a module's body (esm.rs: `function* __cerxesModuleBody`):
+    /// its scope, its depth in fs, and whether its pause (`yield;`) was read
+    module_code: bool,
+    module_scope: int,
+    module_depth: usize,
+    module_yielded: bool,
     in_function: bool,
+    /// the depth of fs inside a class static block (no `return`), else -1
+    static_depth: int,
     in_class: bool,
     in_generator: bool,
     in_async: bool,
     strict: bool,
+    /// CX_* bits for the function being read (arrows inherit them)
+    ctx: int,
+    /// the binary expression read last is a `&&` / `||` one
+    logic_top: bool,
+    /// per class being read: its private names ("g"/"s"/"o" + static
+    /// "1"/"0" + name) and the ones its code refers to
+    priv_decl: Vec<Vec<String>>,
+    priv_refs: Vec<Vec<String>>,
+    /// per class being read: its id in the unit, its private names
+    /// ("\u{1}#x") and their kinds (PK_*, + PK_STATIC); a name's key is
+    /// "\u{1}#x\u{2}<id>" (unit::link renumbers the ids per engine)
+    priv_cls: Vec<int>,
+    priv_nm: Vec<Vec<String>>,
+    priv_kd: Vec<Vec<int>>,
+    pub priv_next: int,
+    /// catch scopes whose parameter is a pattern (Annex B: a block
+    /// function of a name it binds is not copied to the var)
+    catch_patterns: Vec<int>,
+    /// reading a (non-arrow) function's parameters
+    in_params: bool,
+    /// computed field keys so far (their bindings' names)
+    fk_count: int,
     member_start: int,
     /// the statement being read stands directly in a statement list
     list_stmt: bool,
@@ -494,6 +649,22 @@ impl PComp {
             jsx_fragment: String::from(fragment),
             module_path: String::new(),
             script_imports: false,
+            outer_desc: String::new(),
+            eval_sites: Vec::new(),
+            eval_privs: HashMap::new(),
+            usings: Vec::new(),
+            using_mark: 0,
+            using_here: false,
+            using_end: -1,
+            using_count: 0,
+            eval_var_scopes: Vec::new(),
+            eval_ev: -1,
+            eval_in_params: false,
+            eval_new_target: false,
+            eval_ctx: 0,
+            eval_prog: -1,
+            force_strict: false,
+            sub_label: false,
             mex_names: Vec::new(),
             mex_values: Vec::new(),
             mex_stars: Vec::new(),
@@ -512,8 +683,24 @@ impl PComp {
             fs: Vec::new(),
             cur_scope: -1,
             no_in: false,
+            module_code: false,
+            module_scope: -1,
+            module_depth: 0,
+            module_yielded: false,
             in_function: false,
+            static_depth: -1,
             in_class: false,
+            ctx: 0,
+            logic_top: false,
+            priv_decl: Vec::new(),
+            priv_refs: Vec::new(),
+            priv_cls: Vec::new(),
+            priv_nm: Vec::new(),
+            priv_kd: Vec::new(),
+            priv_next: 0,
+            catch_patterns: Vec::new(),
+            in_params: false,
+            fk_count: 0,
             in_generator: false,
             in_async: false,
             strict: false,
@@ -797,10 +984,22 @@ impl PComp {
         String::new()
     }
 
+    /// `yield` / `await` / a strict mode reserved word where it cannot
+    /// name anything.
+    fn bad_ident(&self, w: &str) -> bool {
+        if w == "yield" {
+            return self.in_generator || self.strict;
+        }
+        if w == "await" {
+            return self.in_async || self.module_code || (self.ctx & CX_AWAIT) != 0;
+        }
+        self.strict && !self.ts && w != "eval" && w != "arguments" && is_strict_reserved(w)
+    }
+
     fn binding_ident(&mut self) -> String {
         if self.kind() == T_IDENT {
             let s = self.text();
-            if is_reserved(s.as_str()) || (self.strict && is_strict_reserved(s.as_str())) {
+            if is_reserved(s.as_str()) || (self.strict && is_strict_reserved(s.as_str())) || self.bad_ident(s.as_str()) {
                 self.fail(format!("unexpected reserved word '{}'", s).as_str());
                 return s;
             }
@@ -896,6 +1095,10 @@ impl PComp {
             fnid: fnid,
             with_bind: -1,
             hoists: Vec::new(),
+            vthru: HashMap::new(),
+            params_scope: -1,
+            odd_fns: HashMap::new(),
+            has_eval: false,
         });
         let id = (self.scopes.len() as int) - 1;
         if fnid >= 0 {
@@ -915,7 +1118,34 @@ impl PComp {
             }
             return existing;
         }
-        let global = self.scopes[scope as usize].is_program && !self.local_program;
+        if (kind == K_VAR || kind == K_FUNC) && !self.eval_var_scopes.is_empty() && self.scopes[scope as usize].is_program {
+            // sloppy direct eval: the caller's var of the name
+            if self.eval_in_params && name == "arguments" {
+                self.fail("'arguments' may not be declared by eval code in parameters");
+                return -1;
+            }
+            let vs = self.eval_var_scopes.clone();
+            for es in vs.iter() {
+                let b = match self.scopes[*es as usize].names.get(name) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if b >= 0 {
+                    let bk = self.binds[b as usize].kind;
+                    if bk == K_VAR || bk == K_FUNC || bk == K_PARAM || bk == K_ARGS {
+                        self.scopes[scope as usize].names.insert(String::from(name), b);
+                        return b;
+                    }
+                    if bk == K_LET || bk == K_CONST || bk == K_CLASS {
+                        self.fail(format!("Identifier '{}' has already been declared", name).as_str());
+                        return -1;
+                    }
+                }
+            }
+        }
+        let lexical = kind == K_LET || kind == K_CONST || kind == K_CLASS;
+        // eval code's lexical declarations are its own
+        let global = self.scopes[scope as usize].is_program && !self.local_program && !(self.local_if_strict && lexical);
         self.binds.push(PBind {
             name: String::from(name),
             kind: kind,
@@ -932,6 +1162,279 @@ impl PComp {
         self.scopes[scope as usize].names.insert(String::from(name), id);
         self.scopes[scope as usize].binds.push(id);
         id
+    }
+
+    /// A reference to private name `s` ("\u{1}#x").
+    fn priv_ref(&mut self, s: &str) {
+        let n = self.priv_refs.len();
+        if n == 0 {
+            self.fail("Private field must be declared in an enclosing class");
+            return;
+        }
+        self.priv_refs[n - 1].push(String::from(s));
+    }
+
+    /// The private names a class body declares (from its `{` at open),
+    /// read ahead on the tokens: references may come first.
+    fn priv_scan(&self, open: int) -> (Vec<String>, Vec<int>) {
+        let mut names: Vec<String> = Vec::new();
+        let mut kinds: Vec<int> = Vec::new();
+        let close = self.mate_of(open);
+        let mut k = open + 1;
+        while k < close {
+            if self.tok_is(k, "(") || self.tok_is(k, "[") || self.tok_is(k, "{") {
+                let m = self.mate_of(k);
+                if m <= k {
+                    break;
+                }
+                k = m + 1;
+                continue;
+            }
+            let before = k - 1;
+            let after = k + 1;
+            let member = self.tok_is(before, ".") || self.tok_is(before, "?.");
+            let in_test = self.tok_is(after, "in");
+            if (self.toks[k as usize].kind as int) == T_PRIVATE && !member && !in_test {
+                let mut kind = if self.tok_is(k + 1, "(") { PK_METHOD } else { PK_FIELD };
+                let mut j = k - 1;
+                while self.tok_is(j, "get") || self.tok_is(j, "set") || self.tok_is(j, "async") || self.tok_is(j, "*") {
+                    if self.tok_is(j, "get") || self.tok_is(j, "set") {
+                        kind = PK_ACCESSOR;
+                    }
+                    j -= 1;
+                }
+                if self.tok_is(j, "static") {
+                    kind += PK_STATIC;
+                }
+                names.push(format!("\u{1}#{}", self.tok_text(k)));
+                kinds.push(kind);
+            }
+            k += 1;
+        }
+        (names, kinds)
+    }
+
+    /// Private name `s` ("\u{1}#x"): its key, its brand ("" for none: a
+    /// field, a static member) and its kind; `s` itself when no class
+    /// around declares it (an early error then).
+    fn priv_lookup(&self, s: &str) -> (String, String, int) {
+        let mut d = self.priv_cls.len();
+        while d > 0 {
+            d -= 1;
+            let mut i: usize = 0;
+            while i < self.priv_nm[d].len() {
+                if self.priv_nm[d][i].as_str() == s {
+                    let kind = self.priv_kd[d][i];
+                    let id = self.priv_cls[d];
+                    let brand = if kind == PK_METHOD || kind == PK_ACCESSOR { format!("\u{1}brand\u{2}{}", id) } else { String::new() };
+                    return (format!("{}\u{2}{}", s, id), brand, kind & 3);
+                }
+                i += 1;
+            }
+        }
+        (String::from(s), String::new(), PK_FIELD)
+    }
+
+    /// The private names in scope here, for a direct eval's desc: one
+    /// "p|" part per class, outermost first, each name "\u{1}#x\u{2}<id>~kind".
+    fn priv_env_desc(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut d: usize = 0;
+        while d < self.priv_cls.len() {
+            let mut items: Vec<String> = Vec::new();
+            let mut i: usize = 0;
+            while i < self.priv_nm[d].len() {
+                items.push(format!("{}\u{2}{}~{}", self.priv_nm[d][i], self.priv_cls[d], self.priv_kd[d][i]));
+                i += 1;
+            }
+            parts.push(format!("p|{}", items.join(",")));
+            d += 1;
+        }
+        parts.join(";")
+    }
+
+    /// Direct eval code: the caller's private names (desc "p|" parts) as
+    /// classes around the program, so that `#x` there is the caller's.
+    fn priv_seed(&mut self, parts: &Vec<String>) {
+        for lv in parts.iter() {
+            let n = lv.as_bytes().len();
+            let items = if n > 2 { String::from(&lv[2..n]) } else { String::new() };
+            let mut names: Vec<String> = Vec::new();
+            let mut kinds: Vec<int> = Vec::new();
+            let mut cid: int = -1;
+            for it in split_on(items.as_str(), 44).iter() {
+                let cut = crate::jsstr::index_of(it.as_str(), "\u{2}", 0);
+                let til = crate::jsstr::index_of(it.as_str(), "~", 0);
+                if cut <= 0 || til <= cut {
+                    continue;
+                }
+                names.push(crate::jsstr::slice(it.as_str(), 0, cut));
+                cid = digits_int(crate::jsstr::slice(it.as_str(), cut + 1, til).as_str());
+                kinds.push(digits_int(crate::jsstr::slice(it.as_str(), til + 1, crate::jsstr::len(it.as_str())).as_str()));
+            }
+            self.priv_cls.push(cid);
+            self.priv_nm.push(names);
+            self.priv_kd.push(kinds);
+            self.priv_refs.push(Vec::new());
+        }
+    }
+
+    /// At the end of direct eval code: a `#x` no class declares is an
+    /// early error.
+    fn priv_check_seeded(&mut self) {
+        let mut d: usize = 0;
+        while d < self.priv_refs.len() {
+            let refs = self.priv_refs[d].clone();
+            for r in refs.iter() {
+                let (key, _b, _k) = self.priv_lookup(r.as_str());
+                if key.as_str() == r.as_str() {
+                    self.fail("Private field must be declared in an enclosing class");
+                    return;
+                }
+            }
+            d += 1;
+        }
+    }
+
+    /// `obj.#x` read: OP_GET_PRIVATE key, brand atom (-1: none), kind.
+    fn emit_priv_get(&mut self, s: &str) -> Ex {
+        self.priv_ref(s);
+        let (key, brand, kind) = self.priv_lookup(s);
+        let at = self.atom(key.as_str());
+        let bt = if brand.is_empty() { -1 } else { self.atom(brand.as_str()) };
+        self.emit3(OP_GET_PRIVATE, at, bt, kind);
+        Ex { k: E_PRIVATE, a: at, b: -1, c: -1 }
+    }
+
+    /// The get (or set) of the member read last as `last`: a private
+    /// one's or OP_GET_PROP's (OP_SET_PROP's).
+    fn emit_member_get(&mut self, last: Op) {
+        if (last.code as int) == OP_GET_PRIVATE {
+            self.emit3(OP_GET_PRIVATE, last.a as int, last.b as int, last.c as int);
+        } else {
+            self.emit(OP_GET_PROP, last.a as int, 0);
+        }
+    }
+
+    fn emit_member_set(&mut self, last: Op) {
+        if (last.code as int) == OP_GET_PRIVATE {
+            self.emit3(OP_SET_PRIVATE, last.a as int, last.b as int, last.c as int);
+        } else {
+            self.emit(OP_SET_PROP, last.a as int, 0);
+        }
+    }
+
+    /// A class member's private name `s`; kind 'g', 's' or 'o'.
+    fn priv_declare(&mut self, s: &str, kind: &str, is_static: bool) {
+        let n = self.priv_decl.len();
+        if n == 0 {
+            return;
+        }
+        let st = if is_static { "1" } else { "0" };
+        let mut bad = false;
+        for d in self.priv_decl[n - 1].iter() {
+            if crate::jsstr::slice(d.as_str(), 2, crate::jsstr::len(d.as_str())).as_str() == s {
+                let dk = crate::jsstr::slice(d.as_str(), 0, 1);
+                let ds = crate::jsstr::slice(d.as_str(), 1, 2);
+                let pair = ((dk.as_str() == "g" && kind == "s") || (dk.as_str() == "s" && kind == "g")) && ds.as_str() == st;
+                if !pair {
+                    bad = true;
+                }
+            }
+        }
+        if bad {
+            self.fail("Identifier has already been declared");
+            return;
+        }
+        self.priv_decl[n - 1].push(format!("{}{}{}", kind, st, s));
+    }
+
+    /// The class's private references checked at its end: an undeclared
+    /// one goes to the class around it, or is an early error.
+    fn priv_end(&mut self) {
+        let nd = self.priv_decl.len() - 1;
+        let decl = self.priv_decl[nd].clone();
+        self.priv_decl.remove(nd);
+        let nr = self.priv_refs.len() - 1;
+        let refs = self.priv_refs[nr].clone();
+        self.priv_refs.remove(nr);
+        for r in refs.iter() {
+            let mut found = false;
+            for d in decl.iter() {
+                if crate::jsstr::slice(d.as_str(), 2, crate::jsstr::len(d.as_str())).as_str() == r.as_str() {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                self.priv_ref(r.as_str());
+            }
+        }
+    }
+
+    /// Early error for a lexical declaration (let, const, class, a
+    /// function in a block) of `name` in `scope`: true when it is allowed.
+    fn check_lex(&mut self, scope: int, name: &str, kind: int) -> bool {
+        let existing = match self.scopes[scope as usize].names.get(name) {
+            Some(b) => *b,
+            None => -1,
+        };
+        let mut bad = false;
+        if existing >= 0 {
+            let ek = self.binds[existing as usize].kind;
+            if ek == K_ARGS || ek == K_CALLEE {
+                bad = false;
+            } else if kind == K_FUNC && ek == K_FUNC && !self.strict {
+                bad = false;
+            } else {
+                bad = true;
+            }
+        }
+        if !bad && self.scopes[scope as usize].vthru.contains_key(name) {
+            bad = true;
+        }
+        let ps = self.scopes[scope as usize].params_scope;
+        if !bad && ps >= 0 {
+            if let Some(b) = self.scopes[ps as usize].names.get(name) {
+                if self.binds[*b as usize].kind == K_PARAM {
+                    bad = true;
+                }
+            }
+        }
+        if bad {
+            self.fail(format!("Identifier '{}' has already been declared", name).as_str());
+            return false;
+        }
+        true
+    }
+
+    /// Early error for a `var` (or a function at a body's top) of `name`
+    /// declared from the current scope: true when it is allowed.
+    fn check_var(&mut self, name: &str) -> bool {
+        let vs = self.f().var_scope;
+        let mut s = self.cur_scope;
+        while s >= 0 {
+            let existing = match self.scopes[s as usize].names.get(name) {
+                Some(b) => *b,
+                None => -1,
+            };
+            if existing >= 0 {
+                let ek = self.binds[existing as usize].kind;
+                if ek == K_LET || ek == K_CONST || ek == K_CLASS || (ek == K_FUNC && s != vs) {
+                    self.fail(format!("Identifier '{}' has already been declared", name).as_str());
+                    return false;
+                }
+            }
+            if s == vs {
+                // the var scope's own names say it (no vthru entry)
+                break;
+            }
+            if !self.scopes[s as usize].vthru.contains_key(name) {
+                self.scopes[s as usize].vthru.insert(String::from(name), true);
+            }
+            s = self.scopes[s as usize].parent;
+        }
+        true
     }
 
     /// The binding is initialized from here on (none in a switch, whose
@@ -1046,7 +1549,8 @@ impl PComp {
                 let wb = self.scopes[s as usize].with_bind;
                 if wb >= 0 {
                     let wn = self.binds[wb as usize].name.clone();
-                    let x = self.lookup(scope, wn.as_str());
+                    // a direct eval's vars (`%ev`): that function's own
+                    let x = if wn.as_str() == "%ev" { wb } else { self.lookup(scope, wn.as_str()) };
                     if x >= 0 {
                         list.push(x);
                     }
@@ -1216,6 +1720,51 @@ impl PComp {
         self.emit(OP_CONST, c, 0);
     }
 
+    /// new.target here: inside a function (not an arrow's alone), or in a
+    /// direct eval's code where its caller may name it.
+    fn new_target_ok(&self) -> bool {
+        let mut s = self.cur_scope;
+        while s >= 0 {
+            let sc = &self.scopes[s as usize];
+            if sc.is_program {
+                return self.eval_new_target;
+            }
+            if sc.is_func && !sc.is_arrow {
+                return !(self.module_code && s == self.module_scope);
+            }
+            s = sc.parent;
+        }
+        self.eval_new_target
+    }
+
+    /// In a derived class's constructor (or an arrow in one): `this` is
+    /// its binding `%this`, uninitialized until `super(…)` returns.
+    fn in_derived_ctor(&self) -> bool {
+        let mut i = self.fs.len();
+        while i > 0 && self.fs[i - 1].proto.arrow {
+            i -= 1;
+        }
+        i > 0 && self.fs[i - 1].proto.derived && self.fs[i - 1].proto.class_ctor
+    }
+
+    /// `this` here: OP_THIS, or a derived constructor's checked `%this`.
+    fn emit_this(&mut self) {
+        if self.in_derived_ctor() {
+            self.emit_ref("%this", M_LOAD, false);
+        } else {
+            self.op(OP_THIS);
+        }
+    }
+
+    /// A derived constructor returning undefined: its `this` must be bound.
+    fn ctor_this_check(&mut self) {
+        let i = self.fs.len();
+        if i > 0 && self.fs[i - 1].proto.derived && self.fs[i - 1].proto.class_ctor {
+            self.emit_ref("%this", M_LOAD, false);
+            self.op(OP_POP);
+        }
+    }
+
     fn mark_lexical_ctor(&mut self) {
         let mut i = self.fs.len();
         while i > 0 && self.fs[i - 1].proto.arrow {
@@ -1249,6 +1798,9 @@ impl PComp {
             self.resolve_ref(i);
             i += 1;
         }
+        if !self.eval_sites.is_empty() {
+            self.eval_captures();
+        }
         let nf = self.fns.len() as int;
         let mut f: int = 0;
         while f < nf {
@@ -1262,12 +1814,104 @@ impl PComp {
         }
     }
 
+    /// Direct evals: the bindings of the scopes around them go in the
+    /// scopes' objects, lexical ones start uninitialized, and the
+    /// function's `arguments` is made.
+    fn eval_captures(&mut self) {
+        let sites = self.eval_sites.clone();
+        for site in sites.iter() {
+            self.lookup(*site, "arguments");
+        }
+        let ns = self.scopes.len();
+        let mut s: usize = 0;
+        while s < ns {
+            if self.scopes[s].has_eval && self.scopes[s].fnid >= 0 {
+                let binds = self.scopes[s].binds.clone();
+                for b in binds.iter() {
+                    let bi = *b as usize;
+                    if self.binds[bi].global || self.binds[bi].placed {
+                        continue;
+                    }
+                    self.binds[bi].captured = true;
+                    let k = self.binds[bi].kind;
+                    if k == K_LET || k == K_CONST || k == K_CLASS {
+                        self.binds[bi].tdz = true;
+                    }
+                }
+            }
+            s += 1;
+        }
+    }
+
+    /// A direct eval's view of the environments from scope `site` out:
+    /// "F" (in a function) or "G", then per environment, innermost first,
+    /// ";" + "f" (a function's) or "b" + "|" + its bindings as
+    /// "name:kind:slot", joined by ",".
+    fn x_eval_desc(&self, site: int, flags: int) -> String {
+        let mut levels: Vec<String> = Vec::new();
+        let mut in_fn = false;
+        let mut nt = false;
+        let mut nt_known = false;
+        let mut s = site;
+        while s >= 0 {
+            let si = s as usize;
+            if self.scopes[si].is_func && !self.scopes[si].is_program {
+                in_fn = true;
+            }
+            if !nt_known && self.scopes[si].is_func && (!self.scopes[si].is_arrow || self.scopes[si].is_program) {
+                nt_known = true;
+                nt = !self.scopes[si].is_program;
+            }
+            if self.scopes[si].has_env {
+                let mut items: Vec<String> = Vec::new();
+                for b in self.scopes[si].binds.iter() {
+                    let bi = *b as usize;
+                    if !self.binds[bi].in_env || self.binds[bi].global {
+                        continue;
+                    }
+                    let nm = self.binds[bi].name.as_str();
+                    if nm.is_empty() || nm.contains(",") || nm.contains(":") || nm.contains(";") || nm.contains("|") || (nm.contains("%") && nm != "%ev") || nm.contains("\u{1}") {
+                        continue;
+                    }
+                    items.push(format!("{}:{}:{}", nm, self.binds[bi].kind, self.binds[bi].slot));
+                }
+                let flag = if self.scopes[si].is_func && !self.scopes[si].is_program { "f" } else { "b" };
+                levels.push(format!("{}|{}", flag, items.join(",")));
+            }
+            s = self.scopes[si].parent;
+        }
+        if self.eval_new_target && !nt_known {
+            nt = true;
+        }
+        let head = format!("{}{}{}{}", if in_fn { "F" } else { "G" }, if (flags & 1) != 0 { "P" } else { "" }, if nt { "N" } else { "" }, flags / 2);
+        let pv = match self.eval_privs.get(&site) {
+            Some(v) => v.clone(),
+            None => String::new(),
+        };
+        if !pv.is_empty() {
+            levels.push(pv);
+        }
+        if levels.is_empty() {
+            return head;
+        }
+        format!("{};{}", head, levels.join(";"))
+    }
+
     /// Slots for the function's bindings: parameters first, then each
     /// scope's in turn; a captured one goes in its scope's object.
     fn place(&mut self, f: int) {
         let fi = f as usize;
         let mut next_slot = self.fns[fi].base;
         let pb = self.fns[fi].param_binds.clone();
+        if self.fns[fi].mapped && !pb.is_empty() && self.args_bind(self.fns[fi].fscope) >= 0 {
+            // mapped parameters live in the env, where the arguments
+            // object reads and writes them
+            for b in pb.iter() {
+                if *b >= 0 {
+                    self.binds[*b as usize].captured = true;
+                }
+            }
+        }
         let mut i: int = 0;
         for b in pb.iter() {
             let bi = *b;
@@ -1302,9 +1946,19 @@ impl PComp {
         let pi = self.fns[fi].proto as usize;
         self.protos[pi].nslots = next_slot;
         let fs = self.fns[fi].fscope;
-        if !self.fns[fi].is_program || self.local_program {
+        if !self.fns[fi].is_program || self.local_program || self.local_if_strict {
             self.protos[pi].env_size = self.scopes[fs as usize].env_size;
         }
+    }
+
+    /// The function scope's `arguments` binding, or -1.
+    fn args_bind(&self, fscope: int) -> int {
+        for b in self.scopes[fscope as usize].binds.iter() {
+            if self.binds[*b as usize].kind == K_ARGS {
+                return *b;
+            }
+        }
+        -1
     }
 
     fn env_depth(&self, from: int, target: int) -> int {
@@ -1430,6 +2084,14 @@ impl PComp {
         if self.binds[b as usize].global {
             let nm = self.binds[b as usize].name.clone();
             let a = self.atom(nm.as_str());
+            if self.eval_ev >= 0 && self.binds[b as usize].scope == self.eval_prog {
+                // sloppy direct eval code's var: on the caller's `%ev`
+                let ev = self.eval_ev;
+                self.xload_bind(ev, scope);
+                self.xop(OP_SWAP);
+                self.xemit(OP_SET_PROP, a, 0);
+                return;
+            }
             self.xemit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
             return;
         }
@@ -1524,20 +2186,30 @@ impl PComp {
             return;
         }
         if b < 0 {
+            let ps = if self.eval_prog >= 0 { self.eval_prog } else { 0 };
             let gb = if self.scopes.is_empty() {
                 -1
             } else {
-                match self.scopes[0].names.get(&name) {
+                match self.scopes[ps as usize].names.get(&name) {
                     Some(x) => *x,
                     None => -1,
                 }
             };
+            if gb >= 0 && self.eval_ev >= 0 && self.binds[gb as usize].global && self.binds[gb as usize].scope == ps {
+                self.xstore_bind(gb, init, scope);
+                return;
+            }
             if gb >= 0 && self.binds[gb as usize].kind == K_CONST && !init {
                 let c = self.xstr(name.as_str());
                 self.xemit(OP_CONST_ERROR, c, 0);
                 return;
             }
             let a = self.atom(name.as_str());
+            if gb >= 0 && !init && (self.binds[gb as usize].kind == K_LET || self.binds[gb as usize].kind == K_CLASS) {
+                // the script's own `let` before it runs: not there yet
+                self.xemit(OP_GET_GLOBAL, a, 0);
+                self.xop(OP_POP);
+            }
             self.xemit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
             return;
         }
@@ -1569,6 +2241,83 @@ impl PComp {
         }
         if (mode as int) == M_INIT {
             self.xstore_name(r, true);
+            return;
+        }
+        if (mode as int) == M_WREF {
+            let li = self.refs[r].with_list;
+            if li < 0 {
+                return;
+            }
+            let name = self.refs[r].name.clone();
+            let scope = self.refs[r].scope;
+            let list = self.with_lists[li as usize].clone();
+            let mut ends: Vec<int> = Vec::new();
+            for wb in list.iter() {
+                self.xpush_str(name.as_str());
+                self.xload_bind(*wb, scope);
+                self.xop(OP_IN);
+                let jf = self.xemit(OP_JF, 0, 0);
+                self.xfixed[jf as usize] = true;
+                self.xload_bind(*wb, scope);
+                let j = self.xemit(OP_JUMP, 0, 0);
+                self.xfixed[j as usize] = true;
+                ends.push(j);
+                self.xpatch(jf);
+            }
+            self.xop(OP_UNDEF);
+            for j in ends.iter() {
+                self.xpatch(*j);
+            }
+            return;
+        }
+        if (mode as int) == M_WLOAD {
+            if self.refs[r].with_list < 0 {
+                self.xload_name_here(r);
+                return;
+            }
+            let at = self.atom(self.refs[r].name.clone().as_str());
+            self.xop(OP_DUP);
+            let jf = self.xemit(OP_JF, 0, 0);
+            self.xfixed[jf as usize] = true;
+            self.xop(OP_DUP);
+            self.xemit(OP_GET_PROP, at, 0);
+            let j = self.xemit(OP_JUMP, 0, 0);
+            self.xfixed[j as usize] = true;
+            self.xpatch(jf);
+            self.xload_name_here(r);
+            self.xpatch(j);
+            return;
+        }
+        if (mode as int) == M_WSTORE {
+            if self.refs[r].with_list < 0 {
+                self.xstore_name_here(r, false);
+                return;
+            }
+            let at = self.atom(self.refs[r].name.clone().as_str());
+            self.xop(OP_OVER);
+            let jf = self.xemit(OP_JF, 0, 0);
+            self.xfixed[jf as usize] = true;
+            if op.c == 1 {
+                // strict: the binding must still be there
+                let name = self.refs[r].name.clone();
+                self.xop(OP_OVER);
+                self.xpush_str(name.as_str());
+                self.xop(OP_SWAP);
+                self.xop(OP_IN);
+                let jt = self.xemit(OP_JT, 0, 0);
+                self.xfixed[jt as usize] = true;
+                let c = self.xstr(name.as_str());
+                self.xemit(OP_CONST_ERROR, c, 1);
+                self.xpatch(jt);
+            }
+            self.xemit(OP_SET_PROP, at, 0);
+            let j = self.xemit(OP_JUMP, 0, 0);
+            self.xfixed[j as usize] = true;
+            self.xpatch(jf);
+            self.xop(OP_SWAP);
+            self.xop(OP_POP);
+            self.xstore_name_here(r, false);
+            self.xpatch(j);
             return;
         }
         if (mode as int) == M_TYPEOF {
@@ -1606,6 +2355,28 @@ impl PComp {
             return;
         }
         if (mode as int) == M_DELETE {
+            // inside `with`: the object that has the name loses it
+            let mut ends: Vec<int> = Vec::new();
+            let li = self.refs[r].with_list;
+            if li >= 0 {
+                let name = self.refs[r].name.clone();
+                let scope = self.refs[r].scope;
+                let at = self.atom(name.as_str());
+                let list = self.with_lists[li as usize].clone();
+                for wb in list.iter() {
+                    self.xpush_str(name.as_str());
+                    self.xload_bind(*wb, scope);
+                    self.xop(OP_IN);
+                    let jf = self.xemit(OP_JF, 0, 0);
+                    self.xfixed[jf as usize] = true;
+                    self.xload_bind(*wb, scope);
+                    self.xemit(OP_DEL_PROP, at, 0);
+                    let j = self.xemit(OP_JUMP, 0, 0);
+                    self.xfixed[j as usize] = true;
+                    ends.push(j);
+                    self.xpatch(jf);
+                }
+            }
             if self.refs[r].bind >= 0 {
                 self.xop(OP_FALSE);
             } else {
@@ -1614,6 +2385,9 @@ impl PComp {
                 self.xemit(OP_GET_GLOBAL, g, 0);
                 let at = self.atom(name.as_str());
                 self.xemit(OP_DEL_PROP, at, 0);
+            }
+            for e in ends.iter() {
+                self.xpatch(*e);
             }
             return;
         }
@@ -1711,7 +2485,7 @@ impl PComp {
                 if o.a >= 0 && (o.a as usize) <= n {
                     target[o.a as usize] = true;
                 }
-                if (o.code as int) == OP_YIELD_STAR && o.b >= 0 && (o.b as usize) <= n {
+                if jumps_b((o.code as int)) && o.b >= 0 && (o.b as usize) <= n {
                     target[o.b as usize] = true;
                 }
             }
@@ -1767,14 +2541,17 @@ impl PComp {
             } else if (c as int) == PH_HOIST {
                 self.x_hoist((o.a as int));
             } else if (c as int) == PH_DECL_GLOBALS {
-                if !self.local_program {
+                if !self.local_program && self.eval_ev >= 0 {
+                    self.x_ev_decls((o.a as int));
+                } else if !self.local_program {
                     let binds = self.scopes[o.a as usize].binds.clone();
                     for b in binds.iter() {
                         let k = self.binds[*b as usize].kind;
                         if k == K_VAR || k == K_FUNC {
                             let nm = self.binds[*b as usize].name.clone();
                             let a = self.atom(nm.as_str());
-                            self.xemit(OP_DECL_GLOBAL, a, 0);
+                            // eval code's vars and functions can be deleted
+                            self.xemit(OP_DECL_GLOBAL, a, if self.local_if_strict { 1 } else { 0 });
                         }
                     }
                 }
@@ -1786,11 +2563,15 @@ impl PComp {
                 self.x_annex((o.a as int));
             } else if (c as int) == PH_NOP {
                 // nothing
+            } else if (c as int) == PH_EVAL {
+                let desc = self.x_eval_desc((o.a as int), (o.c as int));
+                let k = self.xstr(desc.as_str());
+                self.xemit(OP_CALL_EVAL, (o.b as int), k);
             } else if (c as int) == OP_POP {
                 self.xop(OP_POP);
             } else {
                 let at = self.xemit((c as int), (o.a as int), (o.b as int));
-                if (c as int) == OP_TEMPLATE_OBJ || (c as int) == OP_YIELD_STAR {
+                if (c as int) == OP_TEMPLATE_OBJ || jumps_b((c as int)) {
                     // not fused: keep both operands
                     self.xo[at as usize] = Op { code: c, a: o.a, b: o.b, c: -1 };
                 }
@@ -1806,7 +2587,7 @@ impl PComp {
                 if a >= 0 && (a as usize) <= n {
                     self.xo[k].a = (map[a as usize] as i32);
                 }
-                if (self.xo[k].code as int) == OP_YIELD_STAR {
+                if jumps_b((self.xo[k].code as int)) {
                     let b = self.xo[k].b;
                     if b >= 0 && (b as usize) <= n {
                         self.xo[k].b = (map[b as usize] as i32);
@@ -1872,10 +2653,66 @@ impl PComp {
                 self.xop(OP_ARGUMENTS);
                 self.xstore_bind(*b, true, fscope);
                 self.xop(OP_POP);
+                if self.fns[f as usize].mapped {
+                    // the last parameter of a name is the mapped one
+                    let mut j = (pb.len() as int) - 1;
+                    while j >= 0 {
+                        let pbj = pb[j as usize];
+                        let mut later = false;
+                        let mut q = j + 1;
+                        while q < (pb.len() as int) {
+                            if pb[q as usize] == pbj {
+                                later = true;
+                            }
+                            q += 1;
+                        }
+                        if pbj >= 0 && !later && self.binds[pbj as usize].in_env {
+                            let depth = self.env_depth(fscope, self.binds[pbj as usize].scope);
+                            let slot = self.binds[pbj as usize].slot;
+                            self.xemit(OP_ARGUMENTS, 2 + j, slot * 256 + depth);
+                            self.xop(OP_POP);
+                        }
+                        j -= 1;
+                    }
+                }
             } else if k == K_CALLEE {
                 self.xop(OP_CALLEE);
                 self.xstore_bind(*b, true, fscope);
                 self.xop(OP_POP);
+            }
+        }
+        let ev = self.scopes[fscope as usize].with_bind;
+        if ev >= 0 && self.binds[ev as usize].name.as_str() == "%ev" {
+            // a direct eval's vars: an object without a prototype
+            self.xop(OP_NEW_OBJECT);
+            self.xop(OP_NULL);
+            let a = self.atom("__proto__");
+            self.xemit(OP_INIT_PROP, a, 1);
+            self.xstore_bind(ev, true, fscope);
+            self.xop(OP_POP);
+        }
+    }
+
+    /// Sloppy direct eval code's new vars: on the caller's `%ev` object
+    /// (undefined unless there).
+    fn x_ev_decls(&mut self, scope: int) {
+        let ev = self.eval_ev;
+        let binds = self.scopes[scope as usize].binds.clone();
+        for b in binds.iter() {
+            let k = self.binds[*b as usize].kind;
+            if (k == K_VAR || k == K_FUNC) && self.binds[*b as usize].global {
+                let nm = self.binds[*b as usize].name.clone();
+                let a = self.atom(nm.as_str());
+                self.xpush_str(nm.as_str());
+                self.xload_bind(ev, scope);
+                self.xop(OP_IN);
+                let jt = self.xemit(OP_JT, 0, 0);
+                self.xfixed[jt as usize] = true;
+                self.xload_bind(ev, scope);
+                self.xop(OP_UNDEF);
+                self.xemit(OP_SET_PROP, a, 0);
+                self.xop(OP_POP);
+                self.xpatch(jt);
             }
         }
     }
@@ -1935,6 +2772,7 @@ impl PComp {
             proto: -1,
             str_consts: HashMap::new(),
             num_consts: HashMap::new(),
+            mapped: false,
         });
         let fnid = (self.fns.len() as int) - 1;
         self.fs.push(PState {
@@ -1951,6 +2789,7 @@ impl PComp {
             saved_in_async: self.in_async,
             saved_strict: self.strict,
             saved_scope: self.cur_scope,
+            saved_ctx: self.ctx,
         });
         fnid
     }
@@ -1963,6 +2802,7 @@ impl PComp {
         self.in_generator = st.saved_in_generator;
         self.in_async = st.saved_in_async;
         self.strict = st.saved_strict;
+        self.ctx = st.saved_ctx;
         let fnid = st.fnid;
         self.protos.push(st.proto);
         let idx = (self.protos.len() as int) - 1;
@@ -1990,6 +2830,40 @@ impl PComp {
                 if ek != K_VAR && ek != K_FUNC {
                     continue;
                 }
+            }
+            // a parameter's name (parameters with expressions have a
+            // scope of their own), or a lexical binding of a block between
+            // the function's block and the var scope: `var f` there would
+            // be an early error, so no copy
+            let fnid = self.f().fnid;
+            let fs = self.fns[fnid as usize].fscope;
+            if fs >= 0 && fs != vs {
+                let pb = match self.scopes[fs as usize].names.get(&nm) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if pb >= 0 && self.binds[pb as usize].kind == K_PARAM {
+                    continue;
+                }
+            }
+            let mut blocked = false;
+            let ascope = self.annexes[*k as usize].scope;
+            let mut sc = self.scopes[ascope as usize].parent;
+            while sc >= 0 && sc != vs && sc != fs {
+                let lb = match self.scopes[sc as usize].names.get(&nm) {
+                    Some(b) => *b,
+                    None => -1,
+                };
+                if lb >= 0 {
+                    let lk = self.binds[lb as usize].kind;
+                    if lk == K_LET || lk == K_CONST || lk == K_CLASS || lk == K_FUNC || (lk == K_CATCH && self.catch_patterns.contains(&sc)) {
+                        blocked = true;
+                    }
+                }
+                sc = self.scopes[sc as usize].parent;
+            }
+            if blocked {
+                continue;
             }
             let b = self.declare(vs, nm.as_str(), K_VAR);
             self.annexes[*k as usize].var_bind = b;
@@ -2081,19 +2955,28 @@ impl PComp {
         if !self.error.is_empty() {
             return -1;
         }
-        let strict = self.directives();
+        let mut strict = self.directives();
+        if self.force_strict {
+            strict = true;
+            self.strict = true;
+        }
         if strict && self.local_if_strict {
             self.local_program = true;
         }
         let mut proto = Proto::new("<script>");
         proto.strict = strict;
+        let outer = if self.outer_desc.is_empty() { -1 } else { self.outer_scopes(strict) };
+        // direct eval code takes its caller's context (eval_ctx); indirect
+        // eval code is global code, where super is an early error
+        self.ctx = if !self.outer_desc.is_empty() { self.eval_ctx & (CX_SUPER_CALL | CX_SUPER_PROP | CX_NO_ARGS) } else { 0 };
         let fnid = self.push_fn(proto, true, 1);
-        let s = self.new_scope(-1, true, false);
+        let s = self.new_scope(outer, true, false);
         self.scopes[s as usize].is_program = true;
         self.fns[fnid as usize].fscope = s;
         self.f().var_scope = s;
         self.cur_scope = s;
-        if self.local_program {
+        self.eval_prog = s;
+        if self.local_program || self.local_if_strict {
             self.emit(PH_ENTER, s, 1);
         }
         self.emit(PH_DECL_GLOBALS, s, 0);
@@ -2108,6 +2991,9 @@ impl PComp {
         self.emit(OP_GET_LOCAL, 0, 0);
         self.op(OP_RETURN);
         self.end_annex();
+        if !self.outer_desc.is_empty() && self.error.is_empty() {
+            self.priv_check_seeded();
+        }
         let entry = self.pop_fn();
         if !self.error.is_empty() {
             return -1;
@@ -2119,8 +3005,113 @@ impl PComp {
         entry
     }
 
+    /// Direct eval code: the caller's environments (`outer_desc`) as
+    /// scopes outside the program's, their bindings placed; the innermost.
+    fn outer_scopes(&mut self, strict: bool) -> int {
+        let desc = self.outer_desc.clone();
+        let parts = split_on(desc.as_str(), 59);
+        let head = if parts.is_empty() { String::new() } else { parts[0].clone() };
+        let in_fn = head.starts_with("F");
+        self.eval_in_params = head.contains("P");
+        self.eval_new_target = head.contains("N");
+        self.eval_ctx = digits_int(head.as_str());
+        let mut ids: Vec<int> = Vec::new();
+        let mut fn_level: Vec<bool> = Vec::new();
+        let mut parent: int = -1;
+        let mut i = parts.len();
+        let mut privs: Vec<String> = Vec::new();
+        while i > 1 {
+            i -= 1;
+            let lv = parts[i].clone();
+            if lv.starts_with("p|") {
+                privs.insert(0, lv);
+                continue;
+            }
+            let s = self.new_scope(parent, false, false);
+            self.scopes[s as usize].has_env = true;
+            fn_level.insert(0, lv.starts_with("f"));
+            let n = lv.as_bytes().len();
+            let items = if n > 2 { String::from(&lv[2..n]) } else { String::new() };
+            let mut size: int = 0;
+            let entries = split_on(items.as_str(), 44);
+            for it in entries.iter() {
+                let f = split_on(it.as_str(), 58);
+                if f.len() != 3 {
+                    continue;
+                }
+                let kind = digits_int(f[1].as_str());
+                let slot = digits_int(f[2].as_str());
+                let lexical = kind == K_LET || kind == K_CONST || kind == K_CLASS;
+                self.binds.push(PBind {
+                    name: f[0].clone(),
+                    kind: kind,
+                    captured: true,
+                    slot: slot,
+                    in_env: true,
+                    scope: s,
+                    global: false,
+                    placed: true,
+                    tdz: lexical,
+                    init_seq: if lexical { SEQ_NEVER } else { 0 },
+                });
+                let b = (self.binds.len() as int) - 1;
+                self.scopes[s as usize].names.insert(f[0].clone(), b);
+                self.scopes[s as usize].binds.push(b);
+                if f[0].as_str() == "%ev" {
+                    self.scopes[s as usize].with_bind = b;
+                    self.has_with = true;
+                    if in_fn && !strict && self.eval_ev < 0 {
+                        self.eval_ev = b;
+                    }
+                }
+                if slot + 1 > size {
+                    size = slot + 1;
+                }
+            }
+            self.scopes[s as usize].env_size = size;
+            ids.insert(0, s);
+            parent = s;
+        }
+        if !privs.is_empty() {
+            self.priv_seed(&privs);
+        }
+        if in_fn && !strict {
+            let mut j: usize = 0;
+            while j < ids.len() {
+                self.eval_var_scopes.push(ids[j]);
+                if fn_level[j] {
+                    break;
+                }
+                j += 1;
+            }
+        }
+        parent
+    }
+
     // =====================================================================
     // statements
+
+    /// Whether an enclosing statement already has label `w`.
+    fn label_taken(&mut self, w: &str) -> bool {
+        let pl = self.f().pending_labels.clone();
+        for l in pl.iter() {
+            if l.as_str() == w {
+                return true;
+            }
+        }
+        let n = self.f().ctl.len();
+        let mut i: usize = 0;
+        while i < n {
+            let ls = self.f().ctl[i].labels.clone();
+            for l in ls.iter() {
+                if l.as_str() == w {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
 
     fn take_labels(&mut self) -> Vec<String> {
         let l = self.f().pending_labels.clone();
@@ -2217,6 +3208,12 @@ impl PComp {
                     let saved = self.split_ctl(i);
                     self.block_at(fin);
                     self.join_ctl(saved);
+                } else if fin == -2 {
+                    let un = self.f().ctl[i as usize].uname.clone();
+                    let ua = self.f().ctl[i as usize].uasync;
+                    let saved = self.split_ctl(i);
+                    self.emit_dispose(un.as_str(), "", ua);
+                    self.join_ctl(saved);
                 }
             } else if kind == CT_ENV && !ret {
                 let s = self.f().ctl[i as usize].scope;
@@ -2247,11 +3244,20 @@ impl PComp {
     fn statement(&mut self) {
         let in_list = self.list_stmt;
         self.list_stmt = false;
+        let using_ok = self.using_here;
+        self.using_here = false;
+        let sub = self.sub_label;
+        self.sub_label = false;
         if !self.error.is_empty() {
             return;
         }
         let word = self.kind() == T_IDENT && !self.escaped();
         let label = word && self.peek_is(1, ":") && !is_reserved(self.text().as_str());
+        if self.kind() == T_IDENT && self.peek_is(1, ":") && (self.bad_ident(self.text().as_str()) || (self.escaped() && is_reserved(self.text().as_str()))) {
+            let t = self.text();
+            self.fail(format!("unexpected reserved word '{}'", t).as_str());
+            return;
+        }
         let looping = word && (self.is("for") || self.is("while") || self.is("do"));
         if !label && !looping {
             self.f().pending_labels.clear();
@@ -2272,7 +3278,19 @@ impl PComp {
         if word {
             let w = self.text();
             let ws = w.as_str();
-            if ws == "var" || ws == "const" || (ws == "let" && self.is_let_decl()) {
+            if ws == "using" || ws == "await" {
+                let u = self.using_kind();
+                if u > 0 {
+                    if !in_list || !using_ok {
+                        self.fail("using declarations are not allowed here");
+                        return;
+                    }
+                    self.using_decl(u == 2);
+                    self.semicolon();
+                    return;
+                }
+            }
+            if ws == "var" || ws == "const" || (ws == "let" && self.is_let_decl() && (in_list || !self.tok_nl(self.pos + 1) || !(self.peek_kind(1) == T_IDENT))) {
                 self.var_decl();
                 self.semicolon();
                 return;
@@ -2307,18 +3325,24 @@ impl PComp {
                 return;
             }
             if ws == "return" {
-                if !self.in_function {
+                if !self.in_function || (self.module_code && self.fs.len() == self.module_depth) || self.static_depth == self.fs.len() as int {
                     self.fail("return outside a function");
                     return;
                 }
                 self.next();
+                let mut bare = false;
                 if !self.is(";") && !self.is("}") && self.kind() != T_EOF && !self.nl_before() {
                     self.expression();
                 } else {
                     self.op(OP_UNDEF);
+                    bare = true;
                 }
                 self.semicolon();
                 self.unwind_to(-1);
+                if bare {
+                    // checked once the body is left: a finally may call super()
+                    self.ctor_this_check();
+                }
                 self.op(OP_RETURN);
                 return;
             }
@@ -2394,8 +3418,21 @@ impl PComp {
                 return;
             }
             if label {
+                if self.label_taken(w.as_str()) {
+                    self.fail(format!("Label '{}' has already been declared", w).as_str());
+                    return;
+                }
                 self.next();
                 self.next();
+                if (self.is("function") && (self.strict || sub || self.peek_is(1, "*"))) || (self.is("async") && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1)) {
+                    self.fail("A labelled function must be a plain function in sloppy mode code");
+                    return;
+                }
+                if self.kind() == T_IDENT && !self.escaped() && self.lexical_here() {
+                    self.fail("Lexical declaration cannot appear in a single-statement context");
+                    return;
+                }
+                self.sub_label = sub;
                 let body_loop = self.kind() == T_IDENT
                     && !self.escaped()
                     && (self.is("for") || self.is("while") || self.is("do") || (self.peek_is(1, ":") && !is_reserved(self.text().as_str())));
@@ -2421,18 +3458,45 @@ impl PComp {
     }
 
     /// The body of an if, a loop: no lexical declaration there.
-    fn sub_statement(&mut self) {
+    /// `if_body`: an `if`'s branch, where sloppy code may declare a plain
+    /// function (Annex B)
+    fn sub_statement(&mut self, if_body: bool) {
         if self.kind() == T_IDENT && !self.escaped() {
             let w = self.text();
-            let lexical = w.as_str() == "const"
-                || w.as_str() == "class"
-                || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1))));
+            let func = (w.as_str() == "function" && (!if_body || self.strict || self.peek_is(1, "*")))
+                || (w.as_str() == "async" && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1));
+            if func {
+                self.fail("In strict mode code or a single-statement context, functions can only be declared at top level or inside a block");
+                return;
+            }
+            let lexical = self.lexical_here();
             if lexical {
                 self.fail("Lexical declaration cannot appear in a single-statement context");
                 return;
             }
+            if if_body && w.as_str() == "function" {
+                // Annex B: `if (x) function f() {}` as if in a block
+                let saved = self.cur_scope;
+                let sc = self.new_scope(saved, false, false);
+                self.enter_block(sc);
+                self.emit(PH_HOIST, sc, 0);
+                self.statement();
+                self.leave_block(sc, saved);
+                return;
+            }
         }
+        self.sub_label = true;
         self.statement();
+        self.sub_label = false;
+    }
+
+    /// At a word: a lexical declaration starts here (const, class, `let`
+    /// before a name or a pattern)
+    fn lexical_here(&self) -> bool {
+        let w = self.text();
+        w.as_str() == "const"
+            || w.as_str() == "class"
+            || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_is(1, "{") && !self.tok_nl(self.pos + 1)) || (self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1))))
     }
 
     /// An expression statement's end: its value dropped, or kept as the
@@ -2485,13 +3549,226 @@ impl PComp {
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
         self.emit(PH_HOIST, s, 0);
+        let end = self.mate_of(self.pos);
         self.expect("{");
+        let (mark, saved_end) = self.using_open(end);
         while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
             self.list_stmt = true;
+            self.using_here = true;
             self.statement();
         }
+        self.using_close(mark, saved_end);
         self.expect("}");
         self.leave_block(s, saved);
+    }
+
+    /// A statement list that may hold `using` declarations starts (`end`
+    /// its closing token): the mark and the end to give `using_close`.
+    fn using_open(&mut self, end: int) -> (int, int) {
+        let mark = self.using_mark;
+        self.using_mark = self.usings.len() as int;
+        let saved_end = self.using_end;
+        self.using_end = end;
+        ((mark), saved_end)
+    }
+
+    /// The list's end: its `using` region, if one started, ends here.
+    fn using_close(&mut self, mark: int, saved_end: int) {
+        while (self.usings.len() as int) > self.using_mark {
+            let n = self.usings.len() - 1;
+            let list = self.usings[n].list.clone();
+            let err = self.usings[n].err.clone();
+            let at = self.usings[n].at;
+            let is_async = self.usings[n].is_async;
+            self.usings.remove(n);
+            self.f().ctl.pop();
+            self.op(OP_END_TRY);
+            self.emit_dispose(list.as_str(), "", is_async);
+            let j = self.emit(OP_JUMP, 0, 0);
+            self.patch(at);
+            self.emit_ref(err.as_str(), M_INIT, true);
+            self.op(OP_POP);
+            self.emit_dispose(list.as_str(), err.as_str(), is_async);
+            self.emit_ref(err.as_str(), M_LOAD, false);
+            self.op(OP_THROW);
+            self.patch(j);
+        }
+        self.using_mark = mark;
+        self.using_end = saved_end;
+    }
+
+    /// `import(specifier[, options])`: __cerxesESM.dynImport(specifier,
+    /// __cerxesRef, options), the promise of the module's namespace
+    /// (`__cerxesRef`: the importing module, or the script's file).
+    fn dyn_import(&mut self) -> Ex {
+        let k = self.pos;
+        if k > 0 && self.tok_is(k - 1, "new") {
+            self.fail("Cannot use new with import");
+            return ex(E_OTHER);
+        }
+        if self.peek_is(1, ".") {
+            self.fail("import.meta may only appear in module code");
+            return ex(E_OTHER);
+        }
+        self.next();
+        if !self.is("(") {
+            self.fail("Unexpected token import");
+            return ex(E_OTHER);
+        }
+        self.next();
+        if self.is(")") || self.is("...") {
+            self.fail("import() requires a specifier");
+            return ex(E_OTHER);
+        }
+        let g = self.atom("__cerxesESM");
+        self.emit(OP_GET_GLOBAL, g, 0);
+        let a = self.atom("dynImport");
+        self.emit(OP_GET_METHOD, a, 0);
+        let saved = self.no_in;
+        self.no_in = false;
+        self.assign();
+        self.emit_ref("__cerxesRef", M_LOAD, false);
+        if self.eat(",") && !self.is(")") {
+            if self.is("...") {
+                self.fail("Unexpected token ...");
+            }
+            self.assign();
+            self.eat(",");
+        } else {
+            self.op(OP_UNDEF);
+        }
+        self.no_in = saved;
+        self.expect(")");
+        self.emit(OP_CALL, 3, 0);
+        ex(E_OTHER)
+    }
+
+    /// [__cerxesUsing[name], __cerxesUsing]
+    fn push_using_api(&mut self, name: &str) {
+        let g = self.atom("__cerxesUsing");
+        self.emit(OP_GET_GLOBAL, g, 0);
+        let a = self.atom(name);
+        self.emit(OP_GET_METHOD, a, 0);
+    }
+
+    /// DisposeResources of the list in binding `list`, after the error in
+    /// binding `err` ("" for none); awaited for `await using`.
+    fn emit_dispose(&mut self, list: &str, err: &str, is_async: bool) {
+        self.push_using_api(if is_async { "disposeAsync" } else { "dispose" });
+        self.emit_ref(list, M_LOAD, false);
+        if err.is_empty() {
+            self.op(OP_FALSE);
+            self.op(OP_UNDEF);
+        } else {
+            self.op(OP_TRUE);
+            self.emit_ref(err, M_LOAD, false);
+        }
+        self.emit(OP_CALL, 3, 0);
+        if is_async {
+            self.emit(OP_YIELD, 2, 0);
+            self.resume_point();
+        }
+        self.op(OP_POP);
+    }
+
+    /// At `using` / `await`: 1 for a `using` declaration, 2 for `await
+    /// using`, 0 for neither.
+    fn using_kind(&self) -> int {
+        if self.escaped() {
+            return 0;
+        }
+        let k = self.pos;
+        if self.is("using") && self.peek_kind(1) == T_IDENT && !self.tok_nl(k + 1) && !self.peek_is(1, "in") && !self.peek_is(1, "instanceof") && !self.peek_is(1, "of") {
+            return 1;
+        }
+        let k2 = k + 2;
+        if self.is("await") && (self.in_async || !self.module_path.is_empty()) && self.peek_is(1, "using") && !self.tok_nl(k + 1) && self.peek_kind(2) == T_IDENT && !self.tok_nl(k2) && !self.peek_is(2, "in") && !self.peek_is(2, "instanceof") {
+            return 2;
+        }
+        0
+    }
+
+    /// `using x = v, …` / `await using x = v, …`, no semicolon.
+    fn using_decl(&mut self, is_async: bool) {
+        if is_async {
+            self.next();
+        }
+        self.next();
+        self.using_begin(is_async);
+        let n = self.usings.len() - 1;
+        let list = self.usings[n].list.clone();
+        loop {
+            if self.kind() != T_IDENT || self.is("let") {
+                self.fail("using declarations bind identifiers");
+                return;
+            }
+            let ts = self.pos;
+            let name = self.text();
+            self.next();
+            self.skip_annotation();
+            if !self.is("=") {
+                self.fail("Missing initializer in using declaration");
+                return;
+            }
+            self.next();
+            self.push_using_api("add");
+            self.emit_ref(list.as_str(), M_LOAD, false);
+            let e = self.assign();
+            self.name_anonymous(e, name.as_str());
+            self.op(if is_async { OP_TRUE } else { OP_FALSE });
+            self.emit(OP_CALL, 3, 0);
+            let after = self.pos;
+            self.goto(ts);
+            self.pattern_target(K_CONST);
+            self.goto(after);
+            self.mark_pending();
+            if !self.eat(",") {
+                break;
+            }
+        }
+    }
+
+    /// The `using` region of the list being read, started here unless it
+    /// has: its resource list made, a try around the rest of the list.
+    fn using_begin(&mut self, is_async: bool) {
+        if (self.usings.len() as int) > self.using_mark {
+            return;
+        }
+        // disposing awaits when the list holds an `await using`
+        let mut awaits = is_async;
+        let mut k = self.pos;
+        while !awaits && k < self.using_end {
+            if self.tok_is(k, "{") || self.tok_is(k, "(") || self.tok_is(k, "[") {
+                let m = self.mate_of(k);
+                if m <= k {
+                    break;
+                }
+                k = m + 1;
+                continue;
+            }
+            if self.tok_is(k, "await") && self.tok_is(k + 1, "using") && (self.toks[(k + 2) as usize].kind as int) == T_IDENT {
+                awaits = true;
+            }
+            k += 1;
+        }
+        let n = self.using_count;
+        self.using_count += 1;
+        let list = format!("%ul{}", n);
+        let err = format!("%ue{}", n);
+        let s = self.cur_scope;
+        self.declare(s, list.as_str(), K_CATCH);
+        self.declare(s, err.as_str(), K_CATCH);
+        self.emit(OP_NEW_ARRAY, 0, 0);
+        self.emit_ref(list.as_str(), M_INIT, true);
+        self.op(OP_POP);
+        let at = self.emit(OP_TRY, 0, 0);
+        let mut c = new_ctl(CT_TRY);
+        c.fin = -2;
+        c.installed = true;
+        c.uname = list.clone();
+        c.uasync = awaits;
+        self.f().ctl.push(c);
+        self.usings.push(URegion { list: list, err: err, at: at, is_async: awaits });
     }
 
     /// `var` / `let` / `const` and its declarators, no semicolon.
@@ -2521,6 +3798,9 @@ impl PComp {
                 self.goto(ts);
                 self.pattern_target(kind);
                 self.goto(after);
+            } else if kind == K_CONST {
+                self.fail("Missing initializer in const declaration");
+                return;
             } else if kind != K_VAR {
                 self.op(OP_UNDEF);
                 let after = self.pos;
@@ -2529,8 +3809,11 @@ impl PComp {
                 self.goto(after);
             } else if single {
                 let nm = self.tok_text(ts);
-                if is_reserved(nm.as_str()) || (self.strict && is_strict_reserved(nm.as_str())) {
+                if is_reserved(nm.as_str()) || (self.strict && is_strict_reserved(nm.as_str())) || self.bad_ident(nm.as_str()) {
                     self.fail(format!("unexpected reserved word '{}'", nm).as_str());
+                    return;
+                }
+                if !self.check_var(nm.as_str()) {
                     return;
                 }
                 let vs = self.f().var_scope;
@@ -2571,12 +3854,12 @@ impl PComp {
         self.expect(")");
         self.cond_jump_false(e);
         let jf = self.pc() - 1;
-        self.sub_statement();
+        self.sub_statement(true);
         if self.is("else") {
             self.next();
             let j = self.emit(OP_JUMP, 0, 0);
             self.patch(jf);
-            self.sub_statement();
+            self.sub_statement(true);
             self.patch(j);
         } else {
             self.patch(jf);
@@ -2593,7 +3876,7 @@ impl PComp {
         self.cond_jump_false(e);
         let jf = self.pc() - 1;
         self.push_loop(labels);
-        self.sub_statement();
+        self.sub_statement(false);
         let ctl = self.f().ctl.pop().unwrap();
         for x in ctl.conts.iter() {
             self.patch_to(*x, top);
@@ -2610,7 +3893,7 @@ impl PComp {
         let labels = self.take_labels();
         let top = self.pc();
         self.push_loop(labels);
-        self.sub_statement();
+        self.sub_statement(false);
         let ctl = self.f().ctl.pop().unwrap();
         for x in ctl.conts.iter() {
             self.patch(*x);
@@ -2628,6 +3911,30 @@ impl PComp {
         for x in ctl.breaks.iter() {
             self.patch(*x);
         }
+    }
+
+    /// Whether token `k` stands between a conditional's `?` and its `:`
+    /// (an `in` there is the operator), from token `from` on.
+    fn in_cond_middle(&self, from: int, k: int) -> bool {
+        let mut open: int = 0;
+        let mut i = from;
+        while i < k {
+            if self.tok_is(i, "(") || self.tok_is(i, "[") || self.tok_is(i, "{") {
+                let a = self.after_mate(i);
+                if a < 0 || a > k {
+                    return false;
+                }
+                i = a;
+                continue;
+            }
+            if self.tok_is(i, "?") {
+                open += 1;
+            } else if self.tok_is(i, ":") && open > 0 {
+                open -= 1;
+            }
+            i += 1;
+        }
+        open > 0
     }
 
     fn for_statement(&mut self) {
@@ -2652,10 +3959,10 @@ impl PComp {
         // a for-in / for-of: `in` or `of` before any `;` (not a declared
         // name `of`)
         let mut k = self.scan_to(head, ";", true);
-        if self.tok_is(k, "of") && k == head + 1 && (self.tok_is(head, "var") || self.tok_is(head, "let") || self.tok_is(head, "const")) {
+        if self.tok_is(k, "of") && k == head + 1 && (self.tok_is(head, "var") || self.tok_is(head, "let") || self.tok_is(head, "const") || (self.tok_is(head, "async") && self.tok_is(k + 1, "=>"))) {
             k = self.scan_to(k + 1, ";", true);
         }
-        if k < close && (self.tok_is(k, "in") || self.tok_is(k, "of")) {
+        if k < close && (self.tok_is(k, "in") || self.tok_is(k, "of")) && !self.in_cond_middle(head, k) {
             self.forin_statement(head, k, close, is_await);
             return;
         }
@@ -2667,10 +3974,14 @@ impl PComp {
         let saved = self.cur_scope;
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
+        let (umark, uend) = self.using_open(-1);
         if !self.is(";") {
             let decl = self.is("var") || self.is("const") || self.is_let_decl();
+            let u = self.using_kind();
             self.no_in = true;
-            if decl {
+            if u > 0 {
+                self.using_decl(u == 2);
+            } else if decl {
                 self.var_decl();
             } else {
                 let e = self.expression();
@@ -2692,7 +4003,7 @@ impl PComp {
         self.goto(close);
         self.expect(")");
         self.push_loop(labels);
-        self.sub_statement();
+        self.sub_statement(false);
         let ctl = self.f().ctl.pop().unwrap();
         for x in ctl.conts.iter() {
             self.patch(*x);
@@ -2715,6 +4026,7 @@ impl PComp {
         for x in ctl.breaks.iter() {
             self.patch(*x);
         }
+        self.using_close(umark, uend);
         self.leave_block(s, saved);
     }
 
@@ -2723,9 +4035,23 @@ impl PComp {
     fn forin_statement(&mut self, head: int, kw: int, close: int, is_await: bool) {
         let of = self.tok_is(kw, "of");
         let labels = self.take_labels();
-        let decl = self.tok_is(head, "var") || self.tok_is(head, "const") || (self.tok_is(head, "let") && head + 1 < kw);
+        // `for (using x of …)` / `for (await using x of …)`
+        let using_sync = of && self.tok_is(head, "using") && kw == head + 2 && (self.toks[(head + 1) as usize].kind as int) == T_IDENT;
+        let using_async = of && self.tok_is(head, "await") && (self.in_async || !self.module_path.is_empty()) && self.tok_is(head + 1, "using") && kw == head + 3 && (self.toks[(head + 2) as usize].kind as int) == T_IDENT;
+        let using = if using_async { 2 } else if using_sync { 1 } else { 0 };
+        let decl = using > 0 || self.tok_is(head, "var") || self.tok_is(head, "const") || (self.tok_is(head, "let") && head + 1 < kw);
+        if of && !decl && !is_await && kw == head + 1 && self.tok_is(head, "async") && !self.tok_escaped(head) {
+            self.fail("The left-hand side of a for-of loop may not be 'async'");
+            return;
+        }
         let mut kind = K_VAR;
-        if decl {
+        if using > 0 {
+            kind = K_CONST;
+            if self.tok_is(kw - 1, "let") {
+                self.fail("let is disallowed as a lexically bound name");
+                return;
+            }
+        } else if decl {
             if self.tok_is(head, "const") {
                 kind = K_CONST;
             } else if self.tok_is(head, "let") {
@@ -2794,8 +4120,13 @@ impl PComp {
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
         self.for_target(head, kw, decl, kind);
+        let (umark, uend) = self.using_open(-1);
+        if decl && (self.tok_is(head, "using") || self.tok_is(head, "await")) {
+            self.for_using(head, kw);
+        }
         self.goto(body);
-        self.sub_statement();
+        self.sub_statement(false);
+        self.using_close(umark, uend);
         self.leave_block(s, saved);
         let ctl = self.f().ctl.pop().unwrap();
         let cont = self.pc();
@@ -2830,12 +4161,31 @@ impl PComp {
         self.f().ctl.pop();
     }
 
+    /// `for (using x of …)`: each step's x is a resource of the step's own
+    /// `using` region.
+    fn for_using(&mut self, head: int, kw: int) {
+        let is_async = self.tok_is(head, "await");
+        self.using_begin(is_async);
+        let n = self.usings.len() - 1;
+        let list = self.usings[n].list.clone();
+        let name = self.tok_text(kw - 1);
+        self.push_using_api("add");
+        self.emit_ref(list.as_str(), M_LOAD, false);
+        self.emit_ref(name.as_str(), M_LOAD, false);
+        self.op(if is_async { OP_TRUE } else { OP_FALSE });
+        self.emit(OP_CALL, 3, 0);
+        self.op(OP_POP);
+    }
+
     /// The loop's target, read from `head`: the value is on the stack.
     fn for_target(&mut self, head: int, kw: int, decl: bool, kind: int) {
         let back = self.pos;
         self.goto(head);
         if decl {
             self.next();
+            if self.tok_is(head, "await") {
+                self.next();
+            }
             self.pattern_target(kind);
             if self.is("=") {
                 self.goto(kw);
@@ -2873,8 +4223,13 @@ impl PComp {
         let s = self.new_scope(saved, false, false);
         self.enter_block(s);
         self.for_target(head, kw, decl, kind);
+        let (umark, uend) = self.using_open(-1);
+        if decl && (self.tok_is(head, "using") || self.tok_is(head, "await")) {
+            self.for_using(head, kw);
+        }
         self.goto(body);
-        self.sub_statement();
+        self.sub_statement(false);
+        self.using_close(umark, uend);
         self.leave_block(s, saved);
         let ctl = self.f().ctl.pop().unwrap();
         let cont = self.pc();
@@ -2945,6 +4300,9 @@ impl PComp {
             let s = self.new_scope(saved, false, false);
             self.enter_block(s);
             if self.eat("(") {
+                if !(self.kind() == T_IDENT && self.peek_is(1, ")")) {
+                    self.catch_patterns.push(s);
+                }
                 self.pattern_target(K_CATCH);
                 self.skip_annotation();
                 self.expect(")");
@@ -2952,11 +4310,15 @@ impl PComp {
                 self.op(OP_POP);
             }
             self.emit(PH_HOIST, s, 0);
+            let cend = self.mate_of(self.pos);
             self.expect("{");
+            let (cmark, csaved) = self.using_open(cend);
             while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
                 self.list_stmt = true;
+                self.using_here = true;
                 self.statement();
             }
+            self.using_close(cmark, csaved);
             self.expect("}");
             self.leave_block(s, saved);
             if fin >= 0 {
@@ -3111,7 +4473,7 @@ impl PComp {
         self.enter_block(s);
         self.emit_bind_init(b);
         self.op(OP_POP);
-        self.sub_statement();
+        self.sub_statement(false);
         self.leave_block(s, saved);
     }
 
@@ -3128,6 +4490,25 @@ impl PComp {
             return;
         }
         if in_list {
+            if at_body_top {
+                if !self.check_var(name.as_str()) {
+                    return;
+                }
+            } else {
+                let plain = (flags & (F_ASYNC | F_GENERATOR)) == 0;
+                if !plain || self.scopes[decl_scope as usize].odd_fns.contains_key(&name) {
+                    if self.scopes[decl_scope as usize].names.contains_key(&name) {
+                        self.fail(format!("Identifier '{}' has already been declared", name).as_str());
+                        return;
+                    }
+                }
+                if !self.check_lex(decl_scope, name.as_str(), K_FUNC) {
+                    return;
+                }
+                if !plain {
+                    self.scopes[decl_scope as usize].odd_fns.insert(name.clone(), true);
+                }
+            }
             self.declare(decl_scope, name.as_str(), K_FUNC);
             self.hoists.push(PHoist { proto: p, name: name.clone() });
             let h = (self.hoists.len() as int) - 1;
@@ -3146,6 +4527,9 @@ impl PComp {
         let scope = self.cur_scope;
         self.class_expr(true);
         if !self.error.is_empty() {
+            return;
+        }
+        if !self.check_lex(scope, name.as_str(), K_CLASS) {
             return;
         }
         let b = self.declare(scope, name.as_str(), K_CLASS);
@@ -3243,6 +4627,22 @@ impl PComp {
                 return;
             }
             let scope = if pk == K_VAR { self.f().var_scope } else { self.cur_scope };
+            if pk == K_VAR {
+                if !self.check_var(name.as_str()) {
+                    return;
+                }
+            } else if pk == K_LET || pk == K_CONST {
+                if name.as_str() == "let" {
+                    self.fail("let is disallowed as a lexically bound name");
+                    return;
+                }
+                if !self.check_lex(scope, name.as_str(), pk) {
+                    return;
+                }
+            } else if pk == K_CATCH && self.scopes[scope as usize].names.contains_key(name.as_str()) {
+                self.fail(format!("Identifier '{}' has already been declared", name).as_str());
+                return;
+            }
             let b = self.declare(scope, name.as_str(), pk);
             let decl = pk == K_LET || pk == K_CONST || pk == K_PARAM;
             if decl {
@@ -3253,6 +4653,11 @@ impl PComp {
             }
             self.emit_ref(name.as_str(), M_INIT, decl);
             self.op(OP_POP);
+            if pk == K_PARAM {
+                // a parameter is set as its pattern goes: a later default
+                // in the same pattern reads it (`([a, b = a]) => …`)
+                self.mark_inited(b);
+            }
             return;
         }
         let e = self.lhs();
@@ -3267,14 +4672,14 @@ impl PComp {
                 return;
             }
             self.pop_op();
-            self.emit3(PH_REF, e.a, if pk == -2 { M_INIT } else { M_STORE }, 0);
+            self.emit3(PH_REF, e.a, M_STORE, 0);
             self.op(OP_POP);
             return;
         }
         if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
             self.op(OP_SWAP);
-            self.emit(OP_SET_PROP, (last.a as int), 0);
+            self.emit_member_set(last);
             self.op(OP_POP);
             return;
         }
@@ -3343,17 +4748,36 @@ impl PComp {
         self.op(OP_POP);
     }
 
+    /// Whether the object pattern at `open` (its `{`) has a `...rest`.
+    fn pattern_has_rest(&mut self, open: int) -> bool {
+        let end = self.mate_of(open);
+        let mut k = open + 1;
+        while k < end && k >= 0 {
+            if self.tok_is(k, "...") {
+                return true;
+            }
+            if self.tok_is(k, "[") || self.tok_is(k, "{") || self.tok_is(k, "(") {
+                k = self.after_mate(k);
+            } else {
+                k += 1;
+            }
+        }
+        false
+    }
+
     fn pattern_object(&mut self, pk: int) {
         self.op(OP_REQUIRE_OBJ);
+        let has_rest = self.pattern_has_rest(self.pos);
         self.next();
         let mut seen: Vec<String> = Vec::new();
+        let mut computed: int = 0;
         while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
             if self.eat("...") {
                 let cnt = seen.len() as int;
                 for s in seen.clone() {
                     self.push_str(s.as_str());
                 }
-                self.emit(OP_OBJ_REST, cnt, 0);
+                self.emit(OP_OBJ_REST, cnt, computed);
                 self.pattern_target(pk);
                 if !self.is("}") {
                     self.expect(",");
@@ -3366,6 +4790,13 @@ impl PComp {
             if self.eat("[") {
                 self.assign();
                 self.expect("]");
+                if has_rest {
+                    // the key stays below the source for the rest
+                    self.op(OP_TO_KEY);
+                    self.op(OP_DUP);
+                    self.op(OP_ROT4);
+                    computed += 1;
+                }
                 self.op(OP_GET_ELEM);
             } else {
                 let name = if self.kind() == T_STR {
@@ -3380,8 +4811,15 @@ impl PComp {
                     self.ident_name()
                 };
                 seen.push(name.clone());
-                let at = self.atom(name.as_str());
-                self.emit(OP_GET_PROP, at, 0);
+                let ix = crate::jsstr::array_index(name.as_str());
+                if ix >= 0 && ix < 2147483647 {
+                    // an index key: an array's element
+                    self.push_num(ix as double);
+                    self.op(OP_GET_ELEM);
+                } else {
+                    let at = self.atom(name.as_str());
+                    self.emit(OP_GET_PROP, at, 0);
+                }
             }
             if self.eat(":") {
                 self.pattern_elem(pk);
@@ -3540,6 +4978,18 @@ impl PComp {
     }
 
     fn yield_expr(&mut self) -> Ex {
+        if self.module_code && self.fs.len() == self.module_depth {
+            // a module's own pause (esm.rs) is its only `yield`
+            if self.module_yielded {
+                self.fail("Unexpected reserved word 'yield'");
+                return ex(E_OTHER);
+            }
+            self.module_yielded = true;
+        }
+        if self.in_params {
+            self.fail("Yield expression not allowed in formal parameter");
+            return ex(E_OTHER);
+        }
         self.next();
         let mut delegate = false;
         let mut has = false;
@@ -3561,6 +5011,29 @@ impl PComp {
             }
             self.emit(OP_YIELD, 0, 0);
             self.resume_point();
+            return ex(E_OTHER);
+        }
+        if self.f().proto.is_async {
+            // [iter, received, mode] → call → await → done? → yield
+            self.op(OP_ASYNC_ITER);
+            self.op(OP_UNDEF);
+            self.emit(OP_INT, 0, 0);
+            let atop = self.pc();
+            let call = self.emit(OP_ASTAR_CALL, 0, 0);
+            self.emit(OP_YIELD, 2, 0);
+            self.resume_point();
+            let dstep = self.emit(OP_ASTAR_DONE, 0, 0);
+            self.emit(OP_YIELD, 0, 0);
+            self.emit(OP_JUMP, atop, 0);
+            let aret = self.pc();
+            self.unwind_to(-1);
+            self.op(OP_RETURN);
+            let adone = self.pc();
+            let j = self.fs.len() - 1;
+            self.fs[j].proto.code[call as usize].a = (adone as i32);
+            self.fs[j].proto.code[call as usize].b = (aret as i32);
+            self.fs[j].proto.code[dstep as usize].a = (adone as i32);
+            self.fs[j].proto.code[dstep as usize].b = (aret as i32);
             return ex(E_OTHER);
         }
         self.op(OP_ITER_VALUES);
@@ -3636,6 +5109,25 @@ impl PComp {
             self.check_strict_target(left);
             let r = left.a;
             let name = self.refs[r as usize].name.clone();
+            if self.has_with && !logical {
+                // the reference is resolved before the right side
+                self.pop_op();
+                self.emit3(PH_REF, r, M_WREF, 0);
+                if o != "=" {
+                    self.emit3(PH_REF, r, M_WLOAD, 0);
+                }
+                let e = self.assign();
+                if o == "=" {
+                    self.name_anonymous(e, name.as_str());
+                } else {
+                    let bop = &o[0..(o.as_bytes().len() - 1)];
+                    let code = binary_code(bop);
+                    self.op(code);
+                }
+                let strict = if self.strict || self.f().proto.strict { 1 } else { 0 };
+                self.emit3(PH_REF, r, M_WSTORE, strict);
+                return ex(E_OTHER);
+            }
             if o == "=" {
                 self.pop_op();
                 let e = self.assign();
@@ -3666,19 +5158,18 @@ impl PComp {
             return ex(E_OTHER);
         }
         if (left.k == E_MEMBER || left.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
-            let at = last.a;
             self.pop_op();
             if o == "=" {
                 self.assign();
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
                 return ex(E_OTHER);
             }
             self.op(OP_DUP);
-            self.emit(OP_GET_PROP, (at as int), 0);
+            self.emit_member_get(last);
             if logical {
                 let j = self.emit(jcode, 0, 0);
                 self.assign();
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
                 let jend = self.emit(OP_JUMP, 0, 0);
                 self.patch(j);
                 self.op(OP_SWAP);
@@ -3690,9 +5181,58 @@ impl PComp {
             let bop = &o[0..(o.as_bytes().len() - 1)];
             let code = binary_code(bop);
             self.op(code);
-            self.emit(OP_SET_PROP, (at as int), 0);
-            if o == "+=" {
-                return Ex { k: E_MEMBER_ADDASSIGN, a: (at as int), b: -1, c: -1 };
+            self.emit_member_set(last);
+            if o == "+=" && (last.code as int) == OP_GET_PROP {
+                return Ex { k: E_MEMBER_ADDASSIGN, a: (last.a as int), b: -1, c: -1 };
+            }
+            return ex(E_OTHER);
+        }
+        if left.k == E_SUPER_MEMBER && ((last.code as int) == OP_GET_SUPER || (last.code as int) == OP_GET_SUPER_ELEM) {
+            let named = (last.code as int) == OP_GET_SUPER;
+            if o == "=" {
+                self.pop_op();
+                if self.in_derived_ctor() {
+                    // the receiver is read first: `this` bound yet?
+                    self.emit_this();
+                    self.op(OP_POP);
+                }
+                self.assign();
+                if named {
+                    self.emit(OP_SET_SUPER, last.a as int, 0);
+                } else {
+                    self.op(OP_SET_SUPER_ELEM);
+                }
+                return ex(E_OTHER);
+            }
+            if !named {
+                self.pop_op();
+                self.op(OP_DUP);
+                self.op(OP_GET_SUPER_ELEM);
+            }
+            if logical {
+                let j = self.emit(jcode, 0, 0);
+                self.assign();
+                if named {
+                    self.emit(OP_SET_SUPER, last.a as int, 0);
+                    self.patch(j);
+                } else {
+                    self.op(OP_SET_SUPER_ELEM);
+                    let jend = self.emit(OP_JUMP, 0, 0);
+                    self.patch(j);
+                    self.op(OP_SWAP);
+                    self.op(OP_POP);
+                    self.patch(jend);
+                }
+                return ex(E_OTHER);
+            }
+            self.assign();
+            let bop = &o[0..(o.as_bytes().len() - 1)];
+            let code = binary_code(bop);
+            self.op(code);
+            if named {
+                self.emit(OP_SET_SUPER, last.a as int, 0);
+            } else {
+                self.op(OP_SET_SUPER_ELEM);
             }
             return ex(E_OTHER);
         }
@@ -3754,6 +5294,9 @@ impl PComp {
 
     fn binary(&mut self, min: int) -> Ex {
         let mut left = self.unary();
+        // `??` mixed with `&&` / `||` without parentheses: an early error
+        let mut had_logic = false;
+        let mut had_coal = false;
         loop {
             if !self.error.is_empty() {
                 break;
@@ -3789,8 +5332,21 @@ impl PComp {
                 } else {
                     OP_JNN_KEEP
                 };
+                if o == "??" {
+                    had_coal = true;
+                } else {
+                    had_logic = true;
+                }
                 let j = self.emit(code, 0, 0);
                 self.binary(prec + 1);
+                if had_logic && (had_coal || (o == "??" && self.logic_top)) {
+                    self.fail("Unexpected token: ?? mixed with && or || needs parentheses");
+                    return ex(E_OTHER);
+                }
+                if o == "??" && self.logic_top {
+                    self.fail("Unexpected token: ?? mixed with && or || needs parentheses");
+                    return ex(E_OTHER);
+                }
                 self.patch(j);
                 left = ex(E_OTHER);
                 continue;
@@ -3802,7 +5358,11 @@ impl PComp {
                 self.binary(prec + 1);
             }
             let code = binary_code(o);
-            self.op(code);
+            if code == OP_IN && left.k == E_PRIVNAME {
+                self.emit(OP_HAS_PRIVATE, left.a, left.b);
+            } else {
+                self.op(code);
+            }
             if is_compare(code) {
                 left = ex(E_CMP);
             } else if o == "+" && left.k == E_IDENT {
@@ -3811,6 +5371,7 @@ impl PComp {
                 left = ex(E_OTHER);
             }
         }
+        self.logic_top = had_logic;
         left
     }
 
@@ -3833,19 +5394,18 @@ impl PComp {
             return Ex { k: E_UPDATE_IDENT, a: e.b, b: -1, c: -1 };
         }
         if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
-            let at = last.a;
             self.pop_op();
             self.op(OP_DUP);
-            self.emit(OP_GET_PROP, (at as int), 0);
+            self.emit_member_get(last);
             self.op(OP_TONUM);
             if prefix {
                 self.op(code);
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
             } else {
                 self.op(OP_DUP);
                 self.op(OP_ROT3);
                 self.op(code);
-                self.emit(OP_SET_PROP, (at as int), 0);
+                self.emit_member_set(last);
                 self.op(OP_POP);
             }
             return ex(E_OTHER);
@@ -3901,7 +5461,8 @@ impl PComp {
                 if s == "-" {
                     self.op(OP_NEG);
                 } else if s == "+" {
-                    self.op(OP_TONUM);
+                    // a = 1: ToNumber (a BigInt throws); ++ / -- use a = 0, ToNumeric
+                    self.emit(OP_TONUM, 1, 0);
                 } else if s == "!" {
                     self.op(OP_NOT);
                     return ex(E_NOT);
@@ -3920,9 +5481,17 @@ impl PComp {
             let op = self.text();
             let s = op.as_str();
             if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_async) {
+                if s == "await" && self.in_params {
+                    self.fail("Illegal await-expression in formal parameters of async function");
+                    return ex(E_OTHER);
+                }
                 self.next();
                 let a = self.unary();
                 if !self.error.is_empty() {
+                    return ex(E_OTHER);
+                }
+                if self.is("**") && s != "await" {
+                    self.fail("unary operator before **");
                     return ex(E_OTHER);
                 }
                 let last = self.last_op();
@@ -3937,6 +5506,10 @@ impl PComp {
                 } else if s == "delete" {
                     if self.strict && a.k == E_IDENT {
                         self.fail("Delete of an unqualified identifier in strict mode.");
+                        return ex(E_OTHER);
+                    }
+                    if a.k == E_PRIVATE || (last.code as int) == OP_GET_PRIVATE {
+                        self.fail("Private fields can not be deleted");
                         return ex(E_OTHER);
                     }
                     if (a.k == E_MEMBER || a.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
@@ -4012,14 +5585,19 @@ impl PComp {
     /// The callee just read becomes a function and its `this`.
     fn callee(&mut self, e: Ex, optional: bool) {
         let last = self.last_op();
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+        if e.k == E_PRIVATE && (last.code as int) == OP_GET_PRIVATE {
+            self.pop_op();
+            self.op(OP_DUP);
+            self.emit3(OP_GET_PRIVATE, last.a as int, last.b as int, last.c as int);
+            self.op(OP_SWAP);
+        } else if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
             self.emit(OP_GET_METHOD, (last.a as int), if optional { 1 } else { 0 });
         } else if e.k == E_INDEX && (last.code as int) == OP_GET_ELEM {
             self.pop_op();
             self.op(OP_GET_METHOD_ELEM);
         } else if e.k == E_SUPER_MEMBER {
-            self.op(OP_THIS);
+            self.emit_this();
         } else {
             self.op(OP_UNDEF);
         }
@@ -4044,6 +5622,32 @@ impl PComp {
         let n = self.call_args();
         if n < 0 {
             self.op(OP_CALL_SPREAD);
+        } else if !optional && e.k == E_IDENT && self.refs[e.a as usize].name.as_str() == "eval" {
+            let site = self.cur_scope;
+            let mut s = site;
+            while s >= 0 {
+                self.scopes[s as usize].has_eval = true;
+                s = self.scopes[s as usize].parent;
+            }
+            self.eval_sites.push(site);
+            if !self.strict {
+                // the function's vars a sloppy eval may add: in `%ev`
+                let mut fs = site;
+                while fs >= 0 && !self.scopes[fs as usize].is_func {
+                    fs = self.scopes[fs as usize].parent;
+                }
+                if fs >= 0 && !self.scopes[fs as usize].is_program && self.scopes[fs as usize].with_bind < 0 {
+                    let b = self.declare(fs, "%ev", K_VAR);
+                    self.scopes[fs as usize].with_bind = b;
+                    self.has_with = true;
+                }
+            }
+            let flags = self.ctx * 2 + if self.in_params { 1 } else { 0 };
+            let pv = self.priv_env_desc();
+            if !pv.is_empty() {
+                self.eval_privs.insert(site, pv);
+            }
+            self.emit3(PH_EVAL, site, n, flags);
         } else {
             self.emit(OP_CALL, n, 0);
         }
@@ -4056,9 +5660,13 @@ impl PComp {
         if self.is("new") && !self.escaped() {
             self.next();
             if self.eat(".") {
+                let esc = self.escaped();
                 let t = self.ident_name();
-                if t.as_str() != "target" {
+                if t.as_str() != "target" || esc {
                     self.fail("new.target expected");
+                }
+                if !self.new_target_ok() {
+                    self.fail("new.target expression is not allowed here");
                 }
                 self.mark_lexical_ctor();
                 self.op(OP_NEW_TARGET);
@@ -4086,6 +5694,14 @@ impl PComp {
             }
         } else if self.is("super") && !self.escaped() {
             self.next();
+            if self.is("(") && (self.ctx & CX_SUPER_CALL) == 0 {
+                self.fail("'super' keyword unexpected here");
+                return ex(E_OTHER);
+            }
+            if !self.is("(") && (self.ctx & CX_SUPER_PROP) == 0 {
+                self.fail("'super' keyword unexpected here");
+                return ex(E_OTHER);
+            }
             if self.is("(") {
                 self.mark_lexical_ctor();
                 let n = self.call_args();
@@ -4093,6 +5709,15 @@ impl PComp {
                     self.op(OP_SUPER_CALL_SPREAD);
                 } else {
                     self.emit(OP_SUPER_CALL, n, 0);
+                }
+                if self.in_derived_ctor() {
+                    // `this` bound once: a second super(…) throws
+                    let r = self.new_ref("%this", true, -1);
+                    self.emit3(PH_REF, r, M_LOAD, 0);
+                    self.op(OP_CHECK_UNINIT);
+                    self.op(OP_POP);
+                    let r2 = self.new_ref("%this", true, -1);
+                    self.emit3(PH_REF, r2, M_INIT, 0);
                 }
                 e = ex(E_OTHER);
             } else if self.eat(".") {
@@ -4122,9 +5747,7 @@ impl PComp {
                 if self.kind() == T_PRIVATE {
                     let s = format!("\u{1}#{}", self.text());
                     self.next();
-                    let at = self.atom(s.as_str());
-                    self.emit(OP_GET_PRIVATE, at, 0);
-                    e = Ex { k: E_PRIVATE, a: at, b: -1, c: -1 };
+                    e = self.emit_priv_get(s.as_str());
                 } else {
                     let name = self.ident_name();
                     let at = self.atom(name.as_str());
@@ -4138,9 +5761,7 @@ impl PComp {
                     let s = format!("\u{1}#{}", self.text());
                     self.next();
                     self.chain_check();
-                    let at = self.atom(s.as_str());
-                    self.emit(OP_GET_PRIVATE, at, 0);
-                    e = Ex { k: E_PRIVATE, a: at, b: -1, c: -1 };
+                    e = self.emit_priv_get(s.as_str());
                 } else if self.is("(") {
                     self.call(e, true);
                     e = ex(E_OTHER);
@@ -4170,6 +5791,10 @@ impl PComp {
                 self.call(e, false);
                 e = ex(E_OTHER);
             } else if self.kind() == T_TEMPLATE {
+                if chain {
+                    self.fail("Invalid tagged template on optional chain");
+                    break;
+                }
                 self.tagged(e);
                 e = ex(E_OTHER);
             } else if self.ts && self.is("!") && !self.nl_before() {
@@ -4280,7 +5905,12 @@ impl PComp {
 
     fn tagged(&mut self, e: Ex) {
         let last = self.last_op();
-        if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
+        if e.k == E_PRIVATE && (last.code as int) == OP_GET_PRIVATE {
+            self.pop_op();
+            self.op(OP_DUP);
+            self.emit3(OP_GET_PRIVATE, last.a as int, last.b as int, last.c as int);
+            self.op(OP_SWAP);
+        } else if (e.k == E_MEMBER || e.k == E_PRIVATE) && ((last.code as int) == OP_GET_PROP || (last.code as int) == OP_GET_PRIVATE) {
             self.pop_op();
             self.emit(OP_GET_METHOD, (last.a as int), 0);
         } else {
@@ -4365,6 +5995,12 @@ impl PComp {
             let s = self.text();
             let fx = self.toks[self.pos as usize].x as int;
             let f = if fx >= 0 { self.xs[fx as usize].flags.clone() } else { String::new() };
+            // a literal that is not a regular expression is an early error
+            let rerr = crate::regex::check(s.as_str(), f.as_str());
+            if !rerr.is_empty() {
+                self.fail(format!("Invalid regular expression: /{}/{}: {}", s, f, rerr).as_str());
+                return ex(E_OTHER);
+            }
             self.next();
             let cs = self.str_const(s.as_str());
             let cf = self.str_const(f.as_str());
@@ -4372,10 +6008,19 @@ impl PComp {
             return ex(E_LITERAL);
         }
         if k == T_PRIVATE {
+            // `#x in obj`
             let s = format!("\u{1}#{}", self.text());
+            self.priv_ref(s.as_str());
             self.next();
-            self.push_str(s.as_str());
-            return ex(E_LITERAL);
+            if !self.is("in") {
+                self.fail("Unexpected private name");
+                return ex(E_OTHER);
+            }
+            let (key, brand, _) = self.priv_lookup(s.as_str());
+            let at = self.atom(key.as_str());
+            let bt = if brand.is_empty() { -1 } else { self.atom(brand.as_str()) };
+            self.op(OP_UNDEF);
+            return Ex { k: E_PRIVNAME, a: at, b: bt, c: -1 };
         }
         if k == T_IDENT {
             let w = self.text();
@@ -4398,7 +6043,7 @@ impl PComp {
                 }
                 if ws == "this" {
                     self.next();
-                    self.op(OP_THIS);
+                    self.emit_this();
                     return ex(E_LITERAL);
                 }
                 if ws == "null" {
@@ -4417,13 +6062,23 @@ impl PComp {
                     return ex(E_LITERAL);
                 }
                 if ws == "import" {
-                    self.fail("modules are not supported");
-                    return ex(E_OTHER);
+                    return self.dyn_import();
                 }
                 if is_reserved(ws) {
                     self.fail(format!("unexpected token '{}'", ws).as_str());
                     return ex(E_OTHER);
                 }
+            } else if is_reserved(ws) {
+                self.fail("Keyword must not contain escaped characters");
+                return ex(E_OTHER);
+            }
+            if self.bad_ident(ws) {
+                self.fail(format!("unexpected reserved word '{}'", ws).as_str());
+                return ex(E_OTHER);
+            }
+            if (self.ctx & CX_NO_ARGS) != 0 && ws == "arguments" {
+                self.fail("'arguments' is not allowed in class field initializer or static initialization block");
+                return ex(E_OTHER);
             }
             self.next();
             let at = self.emit_ref(ws, M_LOAD, false);
@@ -4508,7 +6163,8 @@ impl PComp {
             *key_flags = 2;
             let s = format!("\u{1}#{}", self.text());
             self.next();
-            return s;
+            let (key, _, _) = self.priv_lookup(s.as_str());
+            return key;
         }
         if self.kind() == T_STR {
             let s = self.text();
@@ -4541,7 +6197,7 @@ impl PComp {
             let mut flags = 0;
             let mut fflags = 0;
             let ms = self.pos;
-            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") {
+            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") && !self.tok_nl(self.pos + 1) {
                 self.next();
                 fflags |= F_ASYNC;
             }
@@ -4556,11 +6212,19 @@ impl PComp {
                 }
                 self.next();
             }
+            if self.kind() == T_PRIVATE {
+                self.fail("private names are not allowed in object literals");
+                return;
+            }
             let key_ident = self.kind() == T_IDENT;
             let key_text = self.text();
             let mut kf: int = 0;
             let name = self.prop_key(&mut kf);
             let computed = (kf & 1) != 0;
+            if fflags != 0 && !self.is("(") {
+                self.fail("Unexpected token in object literal: a method needs '('");
+                return;
+            }
             if self.is("(") {
                 self.member_start = ms;
                 let p = self.method(fflags | (flags & (F_GETTER | F_SETTER)), name.as_str());
@@ -4604,7 +6268,7 @@ impl PComp {
                     self.fail("Invalid shorthand property initializer");
                     return;
                 }
-                if is_reserved(key_text.as_str()) {
+                if is_reserved(key_text.as_str()) || self.bad_ident(key_text.as_str()) {
                     self.fail("unexpected reserved word");
                     return;
                 }
@@ -4644,7 +6308,21 @@ impl PComp {
         }
         let mut name = String::new();
         if self.kind() == T_IDENT && !self.is("(") {
-            name = self.binding_ident();
+            if decl {
+                name = self.binding_ident();
+            } else {
+                // an expression's name is read as its body is
+                let sg = self.in_generator;
+                let sa = self.in_async;
+                let sc = self.ctx;
+                self.in_generator = (flags & F_GENERATOR) != 0;
+                self.in_async = (flags & F_ASYNC) != 0;
+                self.ctx = 0;
+                name = self.binding_ident();
+                self.in_generator = sg;
+                self.in_async = sa;
+                self.ctx = sc;
+            }
         } else if decl {
             self.fail("function name expected");
             return -1;
@@ -4666,7 +6344,10 @@ impl PComp {
         ex(E_ANON)
     }
 
-    fn method(&mut self, flags: int, name: &str) -> int {
+    fn method(&mut self, flags: int, name0: &str) -> int {
+        // a private method's name is its `#name`
+        let bare = priv_shown(name0);
+        let name = bare.as_str();
         let full = if (flags & F_GETTER) != 0 && !name.is_empty() {
             format!("get {}", name)
         } else if (flags & F_SETTER) != 0 && !name.is_empty() {
@@ -4693,18 +6374,47 @@ impl PComp {
         proto.is_async = (flags & F_ASYNC) != 0;
         let outer_parser_strict = self.strict;
         let fnid = self.push_fn(proto, false, 0);
+        if !arrow {
+            let mut cx: int = 0;
+            if (flags & F_METHOD) != 0 {
+                cx |= CX_SUPER_PROP;
+            }
+            if (flags & F_CTOR) != 0 && (flags & F_DERIVED) != 0 {
+                cx |= CX_SUPER_CALL;
+            }
+            self.ctx = cx;
+        }
         let parent = self.cur_scope;
         let fscope = self.new_scope(parent, true, arrow);
         self.scopes[fscope as usize].decl_fn = (flags & F_DECL) != 0;
         self.fns[fnid as usize].fscope = fscope;
         self.f().var_scope = fscope;
         self.cur_scope = fscope;
+        if (flags & F_CTOR) != 0 && (flags & F_DERIVED) != 0 {
+            // `this`, uninitialized until super(…) (never marked inited:
+            // every read is checked)
+            let tb = self.declare(fscope, "%this", K_LET);
+            self.binds[tb as usize].tdz = true;
+        }
         self.emit(PH_ENTER, fscope, 1);
         self.emit(PH_PROLOGUE, fscope, fnid);
+        // an async function's parameters' errors reject its promise
+        let async_only = (flags & F_ASYNC) != 0 && (flags & F_GENERATOR) == 0;
+        if async_only {
+            self.op(OP_GEN_START);
+        }
         let saved_names = self.param_names.clone();
         self.param_names = Vec::new();
         let saved_pending = self.pending_inits.clone();
         self.pending_inits = Vec::new();
+        // parameters: no yield / await expressions; a function's own
+        // generator / async kind decides what `yield` / `await` name
+        let saved_in_params = self.in_params;
+        self.in_params = true;
+        if !arrow {
+            self.in_generator = (flags & F_GENERATOR) != 0;
+            self.in_async = (flags & F_ASYNC) != 0;
+        }
         let mut i: int = 0;
         let mut length: int = 0;
         let mut counting = true;
@@ -4806,6 +6516,7 @@ impl PComp {
             self.expect(")");
             self.skip_return_type();
         }
+        self.in_params = false;
         self.f().proto.nparams = i;
         self.f().proto.length = length;
         self.fns[fnid as usize].base = i;
@@ -4815,22 +6526,33 @@ impl PComp {
         if (flags & F_GETTER) != 0 && i != 0 {
             self.fail("Getter must not have any formal parameters");
         }
-        if (flags & (F_GENERATOR | F_ASYNC)) != 0 {
+        if (flags & F_GENERATOR) != 0 {
             self.op(OP_GEN_START);
         }
         if arrow {
             self.expect("=>");
+            // a static block's `await` is reserved in an arrow's
+            // parameters, not in its body
+            if (self.ctx & CX_AWAIT) != 0 {
+                self.ctx -= CX_AWAIT;
+            }
         }
         self.in_function = true;
         self.in_generator = (flags & F_GENERATOR) != 0;
         self.in_async = (flags & F_ASYNC) != 0;
         let mut own_strict = false;
+        if name == "__cerxesModuleBody" && !self.module_code {
+            self.module_code = true;
+            self.module_scope = fscope;
+            self.module_depth = self.fs.len();
+        }
         if arrow && !self.is("{") {
             let saved_no_in = self.no_in;
             self.assign();
             self.no_in = saved_no_in;
             self.op(OP_RETURN);
         } else {
+            let body_end = self.mate_of(self.pos);
             self.expect("{");
             own_strict = self.directives();
             if own_strict {
@@ -4839,6 +6561,7 @@ impl PComp {
             let mut bscope: int = -1;
             if param_exprs {
                 bscope = self.new_scope(fscope, false, false);
+                self.scopes[bscope as usize].params_scope = fscope;
                 self.enter_block(bscope);
                 self.emit(PH_BODY_VARS, bscope, fscope);
                 self.f().var_scope = bscope;
@@ -4849,8 +6572,10 @@ impl PComp {
                 self.param_props(&props);
                 props = Vec::new();
             }
+            let (umark, uend) = self.using_open(body_end);
             while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
                 self.list_stmt = true;
+                self.using_here = true;
                 let st = self.pos;
                 self.statement();
                 if !props.is_empty() && self.tok_is(st, "super") && self.tok_is(st + 1, "(") {
@@ -4859,10 +6584,12 @@ impl PComp {
                     props = Vec::new();
                 }
             }
+            self.using_close(umark, uend);
             if !props.is_empty() {
                 self.ts_fail();
             }
             self.expect("}");
+            self.ctor_this_check();
             self.op(OP_RETURN_UNDEF);
             if bscope >= 0 {
                 self.leave_block(bscope, fscope);
@@ -4872,7 +6599,14 @@ impl PComp {
             self.declare(fscope, name, K_CALLEE);
         }
         self.end_annex();
+        self.in_params = saved_in_params;
         self.check_params(simple, own_strict, flags, outer_parser_strict);
+        if simple && !arrow && !self.f().proto.strict {
+            self.fns[fnid as usize].mapped = true;
+        }
+        if own_strict && !outer_parser_strict && !arrow && (flags & (F_METHOD | F_GETTER | F_SETTER)) == 0 && is_strict_reserved(name) {
+            self.fail("Unexpected eval or arguments in strict mode");
+        }
         self.param_names = saved_names;
         self.pending_inits = saved_pending;
         let p = self.pop_fn();
@@ -4929,6 +6663,7 @@ impl PComp {
             self.cur_scope = fscope;
             self.emit(PH_ENTER, fscope, 1);
             self.emit(PH_PROLOGUE, fscope, fnid);
+            self.ctx = CX_SUPER_PROP | CX_NO_ARGS;
             self.park_count += 1;
             return self.park_count;
         }
@@ -4944,6 +6679,7 @@ impl PComp {
         let fnid = st.fnid;
         self.fs.push(st);
         self.cur_scope = self.fns[fnid as usize].fscope;
+        self.ctx = CX_SUPER_PROP | CX_NO_ARGS;
         id
     }
 
@@ -4954,8 +6690,32 @@ impl PComp {
         self.in_generator = st.saved_in_generator;
         self.in_async = st.saved_in_async;
         self.strict = st.saved_strict;
+        self.ctx = st.saved_ctx;
         self.parked.push(st);
         self.parked_ids.push(id);
+    }
+
+    /// A class static block at its `{`: its own var scope, no `return`.
+    fn static_block(&mut self) {
+        let saved = self.cur_scope;
+        let saved_vs = self.f().var_scope;
+        let saved_in_fn = self.in_function;
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        self.f().var_scope = s;
+        self.emit(PH_HOIST, s, 0);
+        self.expect("{");
+        let saved_depth = self.static_depth;
+        self.static_depth = self.fs.len() as int;
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.static_depth = saved_depth;
+        self.expect("}");
+        self.leave_block(s, saved);
+        self.f().var_scope = saved_vs;
+        self.in_function = saved_in_fn;
     }
 
     fn finish_member_fn(&mut self, id: int, class_scope: int) -> int {
@@ -4965,6 +6725,14 @@ impl PComp {
     }
 
     fn class_expr(&mut self, decl: bool) -> Ex {
+        let saved_strict = self.strict;
+        self.strict = true;
+        let e = self.class_body_expr(decl);
+        self.strict = saved_strict;
+        e
+    }
+
+    fn class_body_expr(&mut self, decl: bool) -> Ex {
         let first = self.pos;
         self.next();
         let mut name = String::new();
@@ -4998,14 +6766,36 @@ impl PComp {
         let saved = self.cur_scope;
         let mut inner: int = -1;
         let mut inner_b: int = -1;
+        // the class's scope: its name, its computed field keys
+        inner = self.new_scope(saved, false, false);
         if !name.is_empty() {
-            inner = self.new_scope(saved, false, false);
             inner_b = self.declare(inner, name.as_str(), K_CONST);
-            self.enter_block(inner);
         }
+        self.enter_block(inner);
         let class_scope = self.cur_scope;
         let saved_in_class = self.in_class;
         self.in_class = true;
+        self.priv_decl.push(Vec::new());
+        self.priv_refs.push(Vec::new());
+        let (pnames, pkinds) = self.priv_scan(self.pos);
+        let cid = self.priv_next;
+        self.priv_next += 1;
+        let mut branded = false;
+        for k in pkinds.iter() {
+            if *k == PK_METHOD || *k == PK_ACCESSOR {
+                branded = true;
+            }
+        }
+        self.priv_cls.push(cid);
+        self.priv_nm.push(pnames);
+        self.priv_kd.push(pkinds);
+        // instances of a class with private methods carry its brand: its
+        // prototype, where those methods are, under a hidden key
+        let home = format!("%home{}", cid);
+        let mut home_b: int = -1;
+        if branded {
+            home_b = self.declare(class_scope, home.as_str(), K_LET);
+        }
         let c_at = self.emit(OP_CLOSURE, -1, 0);
         if derived {
             self.op(OP_SWAP);
@@ -5015,6 +6805,20 @@ impl PComp {
         let mut ctor: int = -1;
         let mut inst_id: int = -1;
         let mut stat_id: int = -1;
+        if branded {
+            self.op(OP_DUP);
+            self.emit_bind_init(home_b);
+            self.op(OP_POP);
+            self.mark_inited(home_b);
+            inst_id = self.resume_member_fn(inst_id, class_scope);
+            self.in_function = true;
+            self.op(OP_THIS);
+            self.emit_ref(home.as_str(), M_LOAD, false);
+            let bt = self.atom(format!("\u{1}brand\u{2}{}", cid).as_str());
+            self.emit(OP_DEFINE_FIELD, bt, 1);
+            self.op(OP_POP);
+            self.park_member_fn(inst_id);
+        }
         while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
             if self.eat(";") {
                 continue;
@@ -5034,7 +6838,8 @@ impl PComp {
                     self.in_function = true;
                     self.in_generator = false;
                     self.in_async = false;
-                    self.block_statement();
+                    self.ctx = CX_SUPER_PROP | CX_NO_ARGS | CX_AWAIT;
+                    self.static_block();
                     self.park_member_fn(stat_id);
                     continue;
                 }
@@ -5091,6 +6896,10 @@ impl PComp {
                         self.fail("Class constructor may not be a generator, an async method or an accessor");
                         return ex(E_OTHER);
                     }
+                    if ctor >= 0 {
+                        self.fail("A class may only have one constructor");
+                        return ex(E_OTHER);
+                    }
                     self.next();
                     let mut mf = fflags | F_CTOR | F_METHOD;
                     if derived {
@@ -5101,6 +6910,10 @@ impl PComp {
                     ctor = p;
                     continue;
                 }
+                if (flags & F_STATIC) != 0 && !computed && (kk == T_IDENT || kk == T_STR) && self.text().as_str() == "prototype" {
+                    self.fail("Classes may not have a static property named 'prototype'");
+                    return ex(E_OTHER);
+                }
                 if (flags & F_STATIC) != 0 {
                     self.op(OP_OVER);
                 } else {
@@ -5108,6 +6921,15 @@ impl PComp {
                 }
                 let mut kf: int = 0;
                 let kname = self.prop_key(&mut kf);
+                if kf == 2 {
+                    let pk = if (flags & F_GETTER) != 0 { "g" } else if (flags & F_SETTER) != 0 { "s" } else { "o" };
+                    let raw = priv_raw(kname.as_str());
+                    self.priv_declare(raw.as_str(), pk, (flags & F_STATIC) != 0);
+                    if raw.as_str() == "\u{1}#constructor" {
+                        self.fail("Classes may not have a private field named '#constructor'");
+                        return ex(E_OTHER);
+                    }
+                }
                 self.member_start = ms;
                 let mf = fflags | (flags & (F_GETTER | F_SETTER | F_STATIC));
                 let p = self.method(mf, kname.as_str());
@@ -5125,6 +6947,28 @@ impl PComp {
             }
             // a field: `this.key = init` in the initializer function
             let st = (flags & F_STATIC) != 0;
+            if !computed && (self.kind() == T_IDENT || self.kind() == T_STR) && (self.text().as_str() == "constructor" || (st && self.text().as_str() == "prototype")) {
+                self.fail("Classes may not have a field named 'constructor' or a static field named 'prototype'");
+                return ex(E_OTHER);
+            }
+            if self.kind() == T_PRIVATE && self.text().as_str() == "constructor" {
+                self.fail("Classes may not have a private field named '#constructor'");
+                return ex(E_OTHER);
+            }
+            // a computed key is read once, as the class is defined
+            let mut fk = String::new();
+            if computed {
+                self.next();
+                self.assign();
+                self.expect("]");
+                self.op(OP_TO_KEY);
+                self.fk_count += 1;
+                fk = format!("%fieldkey{}", self.fk_count);
+                let kb = self.declare(class_scope, fk.as_str(), K_LET);
+                self.emit_bind_init(kb);
+                self.op(OP_POP);
+                self.mark_inited(kb);
+            }
             let id = self.resume_member_fn(if st { stat_id } else { inst_id }, class_scope);
             if st {
                 stat_id = id;
@@ -5134,12 +6978,22 @@ impl PComp {
             self.in_function = true;
             self.op(OP_THIS);
             let mut kf: int = 0;
-            let kname = self.prop_key(&mut kf);
+            let kname = if computed {
+                self.emit_ref(fk.as_str(), M_LOAD, false);
+                String::new()
+            } else {
+                self.prop_key(&mut kf)
+            };
+            if kf == 2 {
+                let raw = priv_raw(kname.as_str());
+                self.priv_declare(raw.as_str(), "o", st);
+            }
             self.skip_annotation();
             if self.eat("=") {
                 let e = self.assign();
                 if !computed {
-                    self.name_anonymous(e, kname.as_str());
+                    let nm = priv_shown(kname.as_str());
+                    self.name_anonymous(e, nm.as_str());
                 }
             } else {
                 self.op(OP_UNDEF);
@@ -5148,7 +7002,7 @@ impl PComp {
                 self.op(OP_DEFINE_FIELD_ELEM);
             } else {
                 let at = self.atom(kname.as_str());
-                self.emit(OP_DEFINE_FIELD, at, 0);
+                self.emit(OP_DEFINE_FIELD, at, if kf == 2 { 1 } else { 0 });
             }
             self.op(OP_POP);
             self.park_member_fn(id);
@@ -5156,6 +7010,13 @@ impl PComp {
         }
         self.expect("}");
         self.in_class = saved_in_class;
+        self.priv_cls.pop();
+        self.priv_nm.pop();
+        self.priv_kd.pop();
+        if !self.error.is_empty() {
+            return ex(E_OTHER);
+        }
+        self.priv_end();
         if !self.error.is_empty() {
             return ex(E_OTHER);
         }
@@ -5190,13 +7051,16 @@ impl PComp {
             self.op(OP_DUP);
             let ps = self.finish_member_fn(stat_id, class_scope);
             self.emit(OP_CLOSURE, ps, 0);
-            self.op(OP_SWAP);
+            self.emit(OP_SET_FIELDS, 1, 0);
+            self.op(OP_OVER);
             self.emit(OP_CALL, 0, 0);
             self.op(OP_POP);
         }
         if inner >= 0 {
             self.leave_block(inner, saved);
-            self.mark_inited(inner_b);
+            if inner_b >= 0 {
+                self.mark_inited(inner_b);
+            }
         }
         if name.is_empty() {
             ex(E_ANON)
@@ -6662,3 +8526,21 @@ fn trim_toks(v: &mut Vec<PTok>) {
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 fn trim_toks(_v: &mut Vec<PTok>) {}
+
+/// A private key ("\u{1}#x\u{2}<id>") as its name ("\u{1}#x").
+fn priv_raw(k: &str) -> String {
+    let i = crate::jsstr::index_of(k, "\u{2}", 0);
+    if i < 0 {
+        return String::from(k);
+    }
+    crate::jsstr::slice(k, 0, i)
+}
+
+/// A name as shown: a private key's `#x`.
+fn priv_shown(k: &str) -> String {
+    let r = priv_raw(k);
+    if r.starts_with("\u{1}") {
+        return crate::jsstr::slice(r.as_str(), 1, crate::jsstr::len(r.as_str()));
+    }
+    r
+}

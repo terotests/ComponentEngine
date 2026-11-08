@@ -185,6 +185,9 @@ pub const NF_RP_TEST: int = 261;
 pub const NF_RP_TOSTRING: int = 262;
 pub const NF_RP_FLAGS: int = 263;
 pub const NF_RP_SOURCE: int = 264;
+/// the flag getters hasIndices, global, ignoreCase, multiline, dotAll,
+/// unicode, unicodeSets, sticky
+pub const NF_RP_FLAG0: int = 1900;
 // Date
 pub const NF_DATE_NOW: int = 270;
 pub const NF_DATE_UTC: int = 271;
@@ -207,6 +210,26 @@ pub const NF_MP_KEYS: int = 337;
 pub const NF_MP_VALUES: int = 338;
 pub const NF_MP_ENTRIES: int = 339;
 pub const NF_SETP_ADD: int = 340;
+// Set / WeakMap / WeakSet methods: own ids so each checks its receiver's
+// brand, then runs as the NF_MP_* method it maps to (coll_base)
+pub const NF_SP_HAS: int = 341;
+pub const NF_SP_DELETE: int = 342;
+pub const NF_SP_CLEAR: int = 343;
+pub const NF_SP_FOREACH: int = 344;
+pub const NF_SP_SIZE: int = 345;
+pub const NF_SP_KEYS: int = 346;
+pub const NF_SP_ENTRIES: int = 347;
+pub const NF_WM_GET: int = 348;
+pub const NF_WM_SET: int = 349;
+pub const NF_WM_HAS: int = 359;
+pub const NF_WM_DELETE: int = 360;
+pub const NF_WS_ADD: int = 361;
+pub const NF_WS_HAS: int = 362;
+pub const NF_WS_DELETE: int = 363;
+pub const NF_MP_GETORINSERT: int = 364;
+pub const NF_MP_GETORINSERTC: int = 365;
+pub const NF_WM_GETORINSERT: int = 366;
+pub const NF_WM_GETORINSERTC: int = 367;
 // Promise
 pub const NF_PR_THEN: int = 350;
 pub const NF_PR_CATCH: int = 351;
@@ -317,7 +340,13 @@ impl Vm {
     }
 
     pub fn getter(&mut self, o: int, name: &str, id: int) {
-        let f = self.native_fn(name, id, 0);
+        // the function's own name is "get size", "get [Symbol.species]"
+        let fname = if name.starts_with("@@") {
+            format!("get [Symbol.{}]", String::from(&name[2..name.as_bytes().len()]))
+        } else {
+            format!("get {}", name)
+        };
+        let f = self.native_fn(fname.as_str(), id, 0);
         let a = self.intern(name);
         self.define_accessor(o, a, Val::Obj(f), 0, true);
     }
@@ -614,7 +643,7 @@ impl Vm {
         self.value_prop(symc, "toStringTag", Val::Obj(tag_sym));
         self.value_prop(symc, "species", Val::Obj(species_sym));
         self.value_prop(symc, "unscopables", Val::Obj(unscop_sym));
-        for (name, desc) in vec![("match", "Symbol.match"), ("matchAll", "Symbol.matchAll"), ("replace", "Symbol.replace"), ("search", "Symbol.search"), ("split", "Symbol.split"), ("isConcatSpreadable", "Symbol.isConcatSpreadable")] {
+        for (name, desc) in vec![("match", "Symbol.match"), ("matchAll", "Symbol.matchAll"), ("replace", "Symbol.replace"), ("search", "Symbol.search"), ("split", "Symbol.split"), ("isConcatSpreadable", "Symbol.isConcatSpreadable"), ("dispose", "Symbol.dispose"), ("asyncDispose", "Symbol.asyncDispose")] {
             let a = self.intern(format!("@@{}", name).as_str());
             let s = self.well_known_symbol(a, desc);
             self.value_prop(symc, name, Val::Obj(s));
@@ -623,12 +652,12 @@ impl Vm {
         self.getter(symp, "description", NF_SYMP_DESCRIPTION);
 
         // Errors
-        let err_names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError"];
+        let err_names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError", "SuppressedError"];
         let mut k: int = 0;
         let mut base_ctor: int = -1;
         for n in err_names {
             let proto = if k == 0 { ep } else { self.alloc(C_OBJECT, ep) };
-            let c = self.ctor(n, NF_ERROR + k, 1, proto);
+            let c = self.ctor(n, NF_ERROR + k, if n == "AggregateError" { 2 } else if n == "SuppressedError" { 3 } else { 1 }, proto);
             if k == 0 {
                 base_ctor = c;
             } else {
@@ -705,6 +734,13 @@ impl Vm {
         self.method(rp, "test", NF_RP_TEST, 1);
         self.method(rp, "toString", NF_RP_TOSTRING, 0);
         self.getter(rp, "flags", NF_RP_FLAGS);
+        self.getter(rp, "source", NF_RP_SOURCE);
+        let rflags: Vec<&str> = vec!["hasIndices", "global", "ignoreCase", "multiline", "dotAll", "unicode", "unicodeSets", "sticky"];
+        let mut rfi: int = 0;
+        while rfi < 8 {
+            self.getter(rp, rflags[rfi as usize], NF_RP_FLAG0 + rfi);
+            rfi += 1;
+        }
 
         // Date
         let dc = self.ctor("Date", NF_DATE, 7, dp);
@@ -752,34 +788,38 @@ impl Vm {
         let me = self.method(mp, "entries", NF_MP_ENTRIES, 0);
         self.add_own(mp, A_ITERATOR, Val::Obj(me), P_HIDDEN);
         self.getter(mp, "size", NF_MP_SIZE);
+        self.method(mp, "getOrInsert", NF_MP_GETORINSERT, 2);
+        self.method(mp, "getOrInsertComputed", NF_MP_GETORINSERTC, 2);
         self.ctor("Set", NF_SET, 0, setp);
         self.method(setp, "add", NF_SETP_ADD, 1);
-        self.method(setp, "has", NF_MP_HAS, 1);
-        self.method(setp, "delete", NF_MP_DELETE, 1);
-        self.method(setp, "clear", NF_MP_CLEAR, 0);
-        self.method(setp, "forEach", NF_MP_FOREACH, 1);
-        self.method(setp, "entries", NF_MP_ENTRIES, 0);
-        let sv = self.method(setp, "values", NF_MP_KEYS, 0);
+        self.method(setp, "has", NF_SP_HAS, 1);
+        self.method(setp, "delete", NF_SP_DELETE, 1);
+        self.method(setp, "clear", NF_SP_CLEAR, 0);
+        self.method(setp, "forEach", NF_SP_FOREACH, 1);
+        self.method(setp, "entries", NF_SP_ENTRIES, 0);
+        let sv = self.method(setp, "values", NF_SP_KEYS, 0);
         let a_keys = self.intern("keys");
         self.add_own(setp, a_keys, Val::Obj(sv), P_HIDDEN);
         self.add_own(setp, A_ITERATOR, Val::Obj(sv), P_HIDDEN);
-        self.getter(setp, "size", NF_MP_SIZE);
+        self.getter(setp, "size", NF_SP_SIZE);
         // WeakMap / WeakSet: a Map / Set underneath, with only the methods a
         // weak collection has (no size, no iteration)
         let op0 = self.object_proto;
         let wmp = self.alloc(C_OBJECT, op0);
         self.roots.push(wmp);
         self.ctor("WeakMap", NF_WEAKMAP, 0, wmp);
-        self.method(wmp, "get", NF_MP_GET, 1);
-        self.method(wmp, "set", NF_MP_SET, 2);
-        self.method(wmp, "has", NF_MP_HAS, 1);
-        self.method(wmp, "delete", NF_MP_DELETE, 1);
+        self.method(wmp, "get", NF_WM_GET, 1);
+        self.method(wmp, "set", NF_WM_SET, 2);
+        self.method(wmp, "has", NF_WM_HAS, 1);
+        self.method(wmp, "delete", NF_WM_DELETE, 1);
+        self.method(wmp, "getOrInsert", NF_WM_GETORINSERT, 2);
+        self.method(wmp, "getOrInsertComputed", NF_WM_GETORINSERTC, 2);
         let wsp = self.alloc(C_OBJECT, op0);
         self.roots.push(wsp);
         self.ctor("WeakSet", NF_WEAKSET, 0, wsp);
-        self.method(wsp, "add", NF_SETP_ADD, 1);
-        self.method(wsp, "has", NF_MP_HAS, 1);
-        self.method(wsp, "delete", NF_MP_DELETE, 1);
+        self.method(wsp, "add", NF_WS_ADD, 1);
+        self.method(wsp, "has", NF_WS_HAS, 1);
+        self.method(wsp, "delete", NF_WS_DELETE, 1);
         let a_tag2 = self.intern("@@toStringTag");
         let sv3 = self.str_val("WeakMap");
         self.add_prop(wmp, a_tag2, sv3, P_HIDDEN | P_READONLY);
@@ -871,7 +911,7 @@ impl Vm {
     }
 
     pub fn error_ctor_proto(&self, kind: int) -> int {
-        let names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError"];
+        let names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError", "SuppressedError"];
         let g = self.global;
         let a = self.atoms[names[kind as usize]];
         let slot = self.find(g, a);
@@ -957,7 +997,7 @@ impl Vm {
         }
         if matches!(self.regex_shown[idx as usize], Val::Undef) {
             let s = self.to_string(&src);
-            let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/") };
+            let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/").replace("\n", "\\n").replace("\r", "\\r").replace("\u{2028}", "\\u2028").replace("\u{2029}", "\\u2029") };
             self.regex_shown[idx as usize] = self.string_val(shown);
             // read-only properties (as add_prop marks them)
             self.mark_setter(A_LASTINDEX);
@@ -979,30 +1019,29 @@ impl Vm {
             // the shape the first one got: no transitions looked up
             self.objs[o as usize].shape = self.regex_shape as i32;
             self.push_val(o, Val::Num(0.0));
-            self.push_val(o, shown);
-            slot_room(&mut self.objs[o as usize], 8);
-            self.push_val(o, Val::Bool(g));
-            self.push_val(o, Val::Bool(ic));
-            self.push_val(o, Val::Bool(m));
-            self.push_val(o, Val::Bool(sa));
-            self.push_val(o, Val::Bool(u));
-            self.push_val(o, Val::Bool(y));
             return Val::Obj(o);
         }
-        self.add_own(o, A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
-        let ro = P_HIDDEN | P_READONLY;
-        self.add_own(o, A_SOURCE, shown, ro);
-        self.add_own(o, A_GLOBAL, Val::Bool(g), ro);
-        self.add_own(o, A_IGNORECASE, Val::Bool(ic), ro);
-        self.add_own(o, A_MULTILINE, Val::Bool(m), ro);
-        self.add_own(o, A_DOTALL, Val::Bool(sa), ro);
-        self.add_own(o, A_UNICODE, Val::Bool(u), ro);
-        self.add_own(o, A_STICKY, Val::Bool(y), ro);
+        // only lastIndex is its own; source and the flags are getters
+        self.add_own(o, A_LASTINDEX, Val::Num(0.0), P_HIDDEN | P_FIXED);
         let sh = self.objs[o as usize].shape as int;
         if !self.shapes[sh as usize].owned {
             self.regex_shape = sh;
         }
         Val::Obj(o)
+    }
+
+    /// Sets a regexp's lastIndex as RegExpBuiltinExec does: a read-only
+    /// one throws whether or not the caller is strict.
+    pub fn set_last_index(&mut self, ro: int, n: double) {
+        let slot = self.find(ro, A_LASTINDEX);
+        if slot >= 0 {
+            let attr = self.attr_at(ro, slot);
+            if (attr & P_READONLY) != 0 && (attr & P_ACCESSOR) == 0 {
+                self.throw_type("Cannot assign to read only property 'lastIndex' of object");
+                return;
+            }
+        }
+        self.set_obj(ro, A_LASTINDEX, Val::Num(n));
     }
 
     pub fn regexp_flags(&self, o: int) -> String {
@@ -1045,23 +1084,33 @@ impl Vm {
         self.rx_cache(s);
         let ulen = self.rx_units.len() as int;
         let mut start: int = 0;
+        let li = self.get_obj(ro, A_LASTINDEX, &Val::Obj(ro));
+        let lin = self.to_number(&li);
+        if self.throwing {
+            return Val::Undef;
+        }
         if global || sticky {
-            let li = self.get_obj(ro, A_LASTINDEX, &Val::Obj(ro));
-            start = to_integer(self.to_number(&li)) as int;
-            if start > ulen || start < 0 {
-                self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
+            let l = to_integer(lin);
+            if l > ulen as double {
+                self.set_last_index(ro, 0.0);
                 return Val::Null;
+            }
+            if l > 0.0 {
+                start = l as int;
             }
         }
         let caps = self.regexes[idx as usize].exec(&self.rx_units, start);
         if caps.is_empty() {
             if global || sticky {
-                self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
+                self.set_last_index(ro, 0.0);
             }
             return Val::Null;
         }
         if global || sticky {
-            self.set_obj(ro, A_LASTINDEX, Val::Num(caps[1] as double));
+            self.set_last_index(ro, caps[1] as double);
+            if self.throwing {
+                return Val::Undef;
+            }
         }
         let mut items: Vec<Val> = Vec::new();
         let mut g: int = 0;
@@ -1085,12 +1134,9 @@ impl Vm {
             self.add_own(arr, A_GROUPS, Val::Undef, 0);
         } else {
             let go = self.alloc(C_OBJECT, -1);
-            let mut i: usize = 0;
-            while i < names.len() {
-                let a = self.intern(names[i].as_str());
-                let v = items[nidx[i] as usize].clone();
-                self.add_own(go, a, v, 0);
-                i += 1;
+            for g in group_pairs(&names, &nidx, &items).iter() {
+                let a = self.intern(g.0.as_str());
+                self.add_own(go, a, g.1, 0);
             }
             self.add_own(arr, A_GROUPS, Val::Obj(go), 0);
         }
@@ -1114,12 +1160,9 @@ impl Vm {
                 self.add_own(ind, A_GROUPS, Val::Undef, 0);
             } else {
                 let gi = self.alloc(C_OBJECT, -1);
-                let mut i: usize = 0;
-                while i < names.len() {
-                    let a = self.intern(names[i].as_str());
-                    let v = pairs[nidx[i] as usize].clone();
-                    self.add_own(gi, a, v, 0);
-                    i += 1;
+                for g in group_pairs(&names, &nidx, &pairs).iter() {
+                    let a = self.intern(g.0.as_str());
+                    self.add_own(gi, a, g.1, 0);
                 }
                 self.add_own(ind, A_GROUPS, Val::Obj(gi), 0);
             }
@@ -1246,12 +1289,7 @@ impl Vm {
                     capv.push(if a < 0 || b < 0 { Val::Undef } else { self.string_val(jsstr::sub_units(s.as_str(), &units, a, b)) });
                     g += 1;
                 }
-                let mut groups: Vec<(String, Val)> = Vec::new();
-                let mut i: usize = 0;
-                while i < names.len() {
-                    groups.push((names[i].clone(), capv[nidx[i] as usize].clone()));
-                    i += 1;
-                }
+                let groups: Vec<(String, Val)> = group_pairs(&names, &nidx, &capv);
                 if fn_repl {
                     let mut args: Vec<Val> = capv.clone();
                     args.push(Val::Num(ms as double));
@@ -1447,6 +1485,38 @@ impl Vm {
     /// odd), which no atom is; anything else is an interned tagged string.
     /// Formatting and interning every number cost more than the rest of
     /// `set` / `get` together, and kept every key ever used as an atom.
+    // CanBeHeldWeakly: an object, or a symbol not made by Symbol.for
+    pub fn held_weakly(&self, v: &Val) -> bool {
+        let o = obj_of(v);
+        if o < 0 {
+            return false;
+        }
+        if self.objs[o as usize].class != C_SYMBOL {
+            return true;
+        }
+        let a = self.objs[o as usize].pos as usize;
+        !self.atom_names[a].starts_with("@@for:")
+    }
+
+    // the Map / Set method a Set / WeakMap / WeakSet method id runs as
+    pub fn coll_base(id: int) -> int {
+        match id {
+            NF_SP_HAS | NF_WM_HAS | NF_WS_HAS => NF_MP_HAS,
+            NF_SP_DELETE | NF_WM_DELETE | NF_WS_DELETE => NF_MP_DELETE,
+            NF_SP_CLEAR => NF_MP_CLEAR,
+            NF_SP_FOREACH => NF_MP_FOREACH,
+            NF_SP_SIZE => NF_MP_SIZE,
+            NF_SP_KEYS => NF_MP_KEYS,
+            NF_SP_ENTRIES => NF_MP_ENTRIES,
+            NF_WM_GET => NF_MP_GET,
+            NF_WM_SET => NF_MP_SET,
+            NF_WS_ADD => NF_SETP_ADD,
+            NF_WM_GETORINSERT => NF_MP_GETORINSERT,
+            NF_WM_GETORINSERTC => NF_MP_GETORINSERTC,
+            _ => id,
+        }
+    }
+
     pub fn map_key(&mut self, k: &Val) -> int {
         match k {
             Val::Num(n) => {
@@ -1586,7 +1656,7 @@ impl Vm {
     pub fn desc_flag(&mut self, d: int, desc: &Val, name: int, bit: int, existing_attr: int) -> int {
         if self.has_atom(d, name) {
             let v = self.get_obj(d, name, desc);
-            if truthy(&v) {
+            if self.truthy_v(&v) {
                 0
             } else {
                 bit
@@ -1598,14 +1668,98 @@ impl Vm {
         }
     }
 
+    /// ObjectDefineProperties: ToObject(props), then each own enumerable
+    /// key's descriptor read before any is defined.
+    pub fn define_props(&mut self, o: int, props: &Val) {
+        let po = self.to_object(props);
+        if self.throwing {
+            return;
+        }
+        let pv = Val::Obj(po);
+        let keys = self.own_keys(po, false, true);
+        let mut descs: Vec<Val> = Vec::new();
+        for k in keys.iter() {
+            if self.throwing {
+                break;
+            }
+            let d = self.get_elem(&pv, k);
+            if self.throwing {
+                break;
+            }
+            let dob = obj_of(&d);
+            if dob < 0 || self.objs[dob as usize].class == C_SYMBOL || self.objs[dob as usize].class == C_BIGINT {
+                self.throw_type("Property description must be an object");
+                break;
+            }
+            self.temp_roots.push(d.clone());
+            descs.push(d);
+        }
+        let mut i: usize = 0;
+        while i < keys.len() && !self.throwing {
+            let d = descs[i].clone();
+            self.to_descriptor(o, &keys[i], &d);
+            i += 1;
+        }
+        i = 0;
+        while i < descs.len() {
+            self.temp_roots.pop();
+            i += 1;
+        }
+    }
+
     pub fn to_descriptor(&mut self, o: int, key: &Val, desc: &Val) {
+        let c = self.objs[o as usize].class;
+        if c != C_ARGUMENTS && c != C_SARGS {
+            self.to_descriptor0(o, key, desc);
+            return;
+        }
+        let (i, a) = self.to_key(key);
+        if self.throwing {
+            return;
+        }
+        let atom = if i >= 0 { self.index_atom(i) } else { a };
+        if c == C_ARGUMENTS && (i >= 0 || atom == A_LENGTH) {
+            self.slow_args(o);
+        }
+        let k = self.key_val(atom);
+        let mapped = self.mapped_sync(o, atom);
+        if mapped {
+            let s0 = self.find(o, atom);
+            let a0 = self.attr_at(o, s0);
+            self.set_attr(o, s0, (a0 | P_MAPPED) - P_MAPPED);
+        }
+        self.to_descriptor0(o, &k, desc);
+        if !mapped {
+            return;
+        }
+        let slot = self.find(o, atom);
+        if slot < 0 {
+            return;
+        }
+        let at = self.attr_at(o, slot);
+        if (at & P_ACCESSOR) != 0 {
+            return;
+        }
+        // the value (given or kept) goes to the parameter; a read-only
+        // element is no longer mapped
+        let v = self.objs[o as usize].get_slot(slot as usize).clone();
+        self.mapped_put(o, atom, &v);
+        if (at & P_READONLY) == 0 {
+            self.set_attr(o, slot, at | P_MAPPED);
+        }
+    }
+
+    pub fn to_descriptor0(&mut self, o: int, key: &Val, desc: &Val) {
         let d = obj_of(desc);
-        if d < 0 {
+        if d < 0 || self.objs[d as usize].class == C_SYMBOL || self.objs[d as usize].class == C_BIGINT {
             self.throw_type("Property description must be an object");
             return;
         }
         let (i, a) = self.to_key(key);
         let atom = if i >= 0 { self.index_atom(i) } else { a };
+        if i >= 0 && (o == self.array_proto || o == self.object_proto) {
+            self.idx_protos = true;
+        }
         if atom == A_PROTOTYPE && self.objs[o as usize].class == C_FUNCTION && self.lazy_prototype(o) {
             // made now, so that a descriptor without a value keeps it
             self.function_prototype(o);
@@ -1624,13 +1778,54 @@ impl Vm {
             self.throw_type("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
             return;
         }
+        if i < 0 && self.objs[o as usize].class == C_TYPED && self.canon_numeric(atom) {
+            self.throw_type("Cannot redefine property: not a typed array index");
+            return;
+        }
+        if i >= 0 && self.objs[o as usize].class == C_TYPED {
+            // a typed array's element (TypedArray [[DefineOwnProperty]])
+            let bad_flag = |vm: &mut Vm, a: int| -> bool {
+                if vm.has_atom(d, a) {
+                    let f = vm.get_obj(d, a, desc);
+                    return !vm.truthy_v(&f);
+                }
+                false
+            };
+            let nc = bad_flag(self, A_CONFIGURABLE);
+            let ne = bad_flag(self, A_ENUMERABLE);
+            let nw = bad_flag(self, A_WRITABLE);
+            if i >= self.ta_length(o) || nc || ne || nw || has_get || has_set {
+                self.throw_type("Cannot redefine property: typed array element");
+                return;
+            }
+            if has_value {
+                self.ta_set(o, i, &value);
+            }
+            return;
+        }
+        if i >= 0 && self.objs[o as usize].class == C_ARRAY && i >= self.evecs[self.objs[o as usize].elems as usize].v.len() as int && self.len_readonly(o) {
+            self.throw_type(format!("Cannot define property {}, array length is read-only", i).as_str());
+            return;
+        }
         let slot = self.find(o, atom);
-        let existing_attr = if slot >= 0 { self.attr_at(o, slot) } else { -1 };
         let in_elems = i >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len();
+        let plain_elem = slot < 0 && in_elems && self.objs[o as usize].class == C_ARRAY && !self.is_hole(o, i);
+        let existing_attr = if slot >= 0 { self.attr_at(o, slot) } else if plain_elem { 0 } else { -1 };
         if slot < 0 && !in_elems && !self.objs[o as usize].extensible && !(self.objs[o as usize].class == C_ARRAY && atom == A_LENGTH) {
             let n = self.atom_str(atom);
             self.throw_type(format!("Cannot define property {}, object is not extensible", n).as_str());
             return;
+        }
+        if has_value && atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && slot >= 0 {
+            // ArraySetLength: an invalid length is a RangeError first
+            let n = self.to_number(&value);
+            if self.throwing {
+                return;
+            }
+            if n != n || n < 0.0 || n > 4294967295.0 || n.floor() != n {
+                self.throw_range("Invalid array length");
+                return;
+            }
         }
         let hidden = self.desc_flag(d, desc, A_ENUMERABLE, P_HIDDEN, existing_attr);
         let fixed = self.desc_flag(d, desc, A_CONFIGURABLE, P_FIXED, existing_attr);
@@ -1663,7 +1858,7 @@ impl Vm {
             }
             if (existing_attr & P_READONLY) != 0 {
                 let wv = self.get_obj(d, A_WRITABLE, desc);
-                if has_writable && truthy(&wv) {
+                if has_writable && self.truthy_v(&wv) {
                     self.throw_type(msg.as_str());
                     return;
                 }
@@ -1674,6 +1869,18 @@ impl Vm {
                 }
                 return;
             }
+        }
+        if (has_get || has_set) && i >= 0 && self.objs[o as usize].class == C_ARRAY && slot < 0 {
+            // an accessor element: kept as a property
+            if has_get && !matches!(get_v, Val::Undef) && !self.is_callable(&get_v) {
+                self.throw_type("Getter must be a function");
+                return;
+            }
+            if has_set && !matches!(set_v, Val::Undef) && !self.is_callable(&set_v) {
+                self.throw_type("Setter must be a function");
+                return;
+            }
+            self.elem_to_prop(o, i);
         }
         if has_get || has_set {
             if has_get {
@@ -1700,27 +1907,64 @@ impl Vm {
             self.set_attr(o, slot, P_ACCESSOR | hidden | fixed);
             return;
         }
-        let readonly = self.desc_flag(d, desc, A_WRITABLE, P_READONLY, existing_attr);
+        let mut readonly = self.desc_flag(d, desc, A_WRITABLE, P_READONLY, existing_attr);
+        if !has_writable && existing_attr >= 0 && (existing_attr & P_ACCESSOR) != 0 {
+            // an accessor turned into a data property: writable defaults to false
+            readonly = P_READONLY;
+        }
         let class = self.objs[o as usize].class;
         if class == C_ARRAY && atom == A_LENGTH {
             if has_value {
                 let n = self.to_number(&value);
                 self.set_length(o, n);
+                if !self.throwing && (self.evecs[self.objs[o as usize].elems as usize].v.len() as double) != n {
+                    self.throw_type("Cannot redefine property: length");
+                    return;
+                }
             }
-            if readonly != 0 {
-                self.objs[o as usize].extensible = false;
+            if self.throwing {
+                return;
+            }
+            if has_writable && readonly != 0 {
+                // an own read-only length; writes go the slow way (pos 3)
+                let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as double;
+                self.add_own(o, A_LENGTH, Val::Num(n), P_HIDDEN | P_READONLY | P_FIXED);
+                if self.objs[o as usize].pos != 2 {
+                    self.objs[o as usize].pos = 3;
+                }
             }
             return;
         }
-        if i >= 0 && class == C_ARRAY && (hidden | readonly | fixed) == 0 {
-            self.set_index(o, i, value);
-            return;
-        }
-        if i >= 0 && class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
-            // an element with attributes: keep it as a property instead
-            let v = if has_value { value.clone() } else { self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone() };
-            self.put_elem(o, i, v.clone());
-            return;
+        if i >= 0 && class == C_ARRAY {
+            if (hidden | readonly | fixed) == 0 {
+                // a plain element (writable, enumerable, configurable)
+                let v = if has_value {
+                    value
+                } else if plain_elem {
+                    self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
+                } else if slot >= 0 && (existing_attr & P_ACCESSOR) == 0 {
+                    self.objs[o as usize].get_slot(slot as usize).clone()
+                } else {
+                    Val::Undef
+                };
+                if slot >= 0 {
+                    self.remove_own(o, slot);
+                    if (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                        self.put_elem(o, i, v);
+                        self.clear_elem_hole(o, i);
+                        return;
+                    }
+                }
+                self.set_index(o, i, v);
+                return;
+            }
+            if slot < 0 {
+                // an element with attributes: kept as a property
+                let (cur, _) = self.elem_to_prop(o, i);
+                let v = if has_value { value } else { cur };
+                self.define(o, atom, v, hidden | readonly | fixed);
+                return;
+            }
         }
         let v = if has_value {
             value
@@ -1735,8 +1979,24 @@ impl Vm {
     pub fn from_descriptor(&mut self, o: int, key: &Val) -> Val {
         let (i, a) = self.to_key(key);
         let class = self.objs[o as usize].class;
+        if class == C_TYPED && (i >= 0 || self.canon_numeric(a)) {
+            if i < 0 || i >= self.ta_length(o) {
+                return Val::Undef;
+            }
+            let v = self.ta_get(o, i);
+            let d = self.new_object();
+            self.add_own(d, A_VALUE, v, 0);
+            self.add_own(d, A_WRITABLE, Val::Bool(true), 0);
+            self.add_own(d, A_ENUMERABLE, Val::Bool(true), 0);
+            self.add_own(d, A_CONFIGURABLE, Val::Bool(true), 0);
+            return Val::Obj(d);
+        }
+        if class == C_SARGS && i >= 0 {
+            let ma = self.index_atom(i);
+            self.mapped_sync(o, ma);
+        }
         let d = self.new_object();
-        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
             let v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
             self.add_own(d, A_VALUE, v, 0);
             self.add_own(d, A_WRITABLE, Val::Bool(true), 0);
@@ -1764,13 +2024,13 @@ impl Vm {
             if (class == C_ARRAY || class == C_STRING) && atom == A_LENGTH {
                 let l = self.get_obj(o, A_LENGTH, &Val::Obj(o));
                 self.add_own(d, A_VALUE, l, 0);
-                self.add_own(d, A_WRITABLE, Val::Bool(class == C_ARRAY), 0);
+                self.add_own(d, A_WRITABLE, Val::Bool(class == C_ARRAY && self.objs[o as usize].pos != 2), 0);
                 self.add_own(d, A_ENUMERABLE, Val::Bool(false), 0);
                 self.add_own(d, A_CONFIGURABLE, Val::Bool(false), 0);
                 return Val::Obj(d);
             }
-            if class == C_FUNCTION && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
-                let v = self.get_obj(o, atom, &Val::Obj(o));
+            if (class == C_FUNCTION || class == C_BOUND) && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
+                let v = self.function_own(o, atom);
                 if matches!(v, Val::Undef) {
                     return Val::Undef;
                 }
@@ -2745,16 +3005,153 @@ impl Vm {
 
     // ---- the dispatch
 
+    /// Whether an Array.prototype method takes the prelude's generic path:
+    /// a receiver that is not a plain array (an array-like, a proxy, a
+    /// frozen array or one with element properties, holes over indexed
+    /// prototypes), or a species constructor for the methods that make an
+    /// array.
+    fn ap_generic(&mut self, id: int, this: &Val) -> bool {
+        let o = obj_of(this);
+        if o < 0 {
+            return true;
+        }
+        let ob = &self.objs[o as usize];
+        let class = ob.class;
+        if class == C_ARGUMENTS || class == C_TYPED {
+            return false;
+        }
+        if class != C_ARRAY {
+            return true;
+        }
+        if ob.pos == 3 {
+            return true;
+        }
+        if ob.pos == 2 {
+            // frozen: the methods that write
+            return id == NF_AP_PUSH || id == NF_AP_POP || id == NF_AP_SHIFT || id == NF_AP_UNSHIFT || id == NF_AP_SPLICE || id == NF_AP_REVERSE || id == NF_AP_SORT || id == NF_AP_FILL || id == NF_AP_COPYWITHIN;
+        }
+        if self.idx_protos && !self.colds[ob.cold as usize].elems2.is_empty() {
+            return true;
+        }
+        if ob.shape != 0 && self.find(o, A_LENGTH) >= 0 {
+            // a read-only length (defineProperty): the spec's steps
+            return true;
+        }
+        if id == NF_AP_MAP || id == NF_AP_FILTER || id == NF_AP_SLICE || id == NF_AP_SPLICE || id == NF_AP_CONCAT || id == NF_AP_FLAT || id == NF_AP_FLATMAP {
+            // ArraySpeciesCreate: a constructor other than Array
+            if ob.proto as int != self.array_proto {
+                return true;
+            }
+            if ob.shape != 0 && self.find(o, A_CONSTRUCTOR) >= 0 {
+                return true;
+            }
+            let ap = self.array_proto;
+            let sl = self.find(ap, A_CONSTRUCTOR);
+            let g = self.array_generic;
+            let arr_ctor = if self.evecs[self.objs[g as usize].elems as usize].v.len() > 36 { obj_of(&self.evecs[self.objs[g as usize].elems as usize].v[36]) } else { -1 };
+            if sl < 0 || (self.attr_at(ap, sl) & P_ACCESSOR) != 0 || obj_of(&self.objs[ap as usize].get_slot(sl as usize)) != arr_ctor {
+                return true;
+            }
+        }
+        if id == NF_AP_CONCAT || id == NF_AP_FLAT || id == NF_AP_FLATMAP {
+            // holes stay holes; Symbol.isConcatSpreadable on the receiver
+            if !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// concat's arguments the native path cannot take: an object with
+    /// Symbol.isConcatSpreadable, a proxy, an array with holes or its own
+    /// properties.
+    fn concat_generic(&mut self, this: &Val, args: &Vec<Val>) -> bool {
+        let sa = match self.atoms.get("@@isConcatSpreadable") {
+            Some(a) => *a,
+            None => return false,
+        };
+        let o = obj_of(this);
+        if o >= 0 && self.objs[o as usize].shape != 0 && self.find(o, sa) >= 0 {
+            return true;
+        }
+        let ap = self.array_proto;
+        if self.has_atom(ap, sa) {
+            return true;
+        }
+        for a in args.iter() {
+            let x = obj_of(a);
+            if x < 0 {
+                continue;
+            }
+            let class = self.objs[x as usize].class;
+            if class == C_PROXY {
+                return true;
+            }
+            if class == C_ARRAY {
+                if !self.colds[self.objs[x as usize].cold as usize].elems2.is_empty() || self.objs[x as usize].pos == 3 {
+                    return true;
+                }
+                if self.objs[x as usize].shape != 0 && self.find(x, sa) >= 0 {
+                    return true;
+                }
+                if self.objs[x as usize].proto as int != ap {
+                    return self.has_atom(x, sa);
+                }
+                continue;
+            }
+            if self.has_atom(x, sa) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && (matches!(this, Val::Undef) || matches!(this, Val::Null)) {
             self.throw_type("Array.prototype method called on null or undefined");
             return Val::Undef;
         }
+        if id >= NF_AP_PUSH && id <= NF_AP_WITH && self.array_generic >= 0 && (self.ap_generic(id, &this) || (id == NF_AP_CONCAT && self.concat_generic(&this, args))) {
+            let g = self.array_generic;
+            let k = (id - NF_AP_PUSH) as usize;
+            if k < self.evecs[self.objs[g as usize].elems as usize].v.len() {
+                let f = self.evecs[self.objs[g as usize].elems as usize].v[k].clone();
+                if !matches!(f, Val::Undef) {
+                    return self.call_value(f, this, args.clone());
+                }
+            }
+        }
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && !(id == NF_AP_FOREACH || id == NF_AP_MAP || id == NF_AP_FILTER || id == NF_AP_SOME || id == NF_AP_EVERY || id == NF_AP_REDUCE || id == NF_AP_REDUCERIGHT || id == NF_AP_INDEXOF || id == NF_AP_LASTINDEXOF) {
             // the rest read and write `elems` directly: holes become undefined
             let t = obj_of(&this);
             if t >= 0 && self.objs[t as usize].class == C_ARRAY && !self.colds[self.objs[t as usize].cold as usize].elems2.is_empty() {
-                self.put_elems2(t, Vec::new());
+                let mutates = id == NF_AP_PUSH || id == NF_AP_POP || id == NF_AP_SHIFT || id == NF_AP_UNSHIFT || id == NF_AP_SPLICE || id == NF_AP_REVERSE || id == NF_AP_SORT || id == NF_AP_FILL || id == NF_AP_COPYWITHIN;
+                if mutates {
+                    // holes and element properties become plain elements
+                    let n = self.evecs[self.objs[t as usize].elems as usize].v.len() as int;
+                    if self.objs[t as usize].pos == 3 || self.idx_protos {
+                        let mut k: int = 0;
+                        while k < n {
+                            if self.is_hole(t, k) {
+                                let v = self.get_index(&this, k);
+                                if self.throwing {
+                                    return Val::Undef;
+                                }
+                                let a = self.index_atom(k);
+                                let sl = self.find(t, a);
+                                if sl >= 0 {
+                                    self.remove_own(t, sl);
+                                }
+                                self.put_elem(t, k, v);
+                            }
+                            k += 1;
+                        }
+                        if self.objs[t as usize].pos == 3 {
+                            self.objs[t as usize].pos = 0;
+                        }
+                    }
+                    self.put_elems2(t, Vec::new());
+                }
             }
         }
         if id == NF_HOST_SYNC {
@@ -2774,6 +3171,9 @@ impl Vm {
         }
         if id >= 960 && id < 970 {
             return self.call_native_intl(id, args);
+        }
+        if id == crate::dynamic::NF_ESM_COMPILE {
+            return self.call_native_esm(args);
         }
         if id >= 950 && id < 960 {
             return self.call_native_bigint(id, this, args, construct);
@@ -2822,7 +3222,7 @@ impl Vm {
                 }
             }
         }
-        if id >= NF_ERROR && id < NF_ERROR + 8 {
+        if id >= NF_ERROR && id < NF_ERROR + 9 {
             let kind = id - NF_ERROR;
             let dflt = self.error_ctor_proto(kind);
             let proto = if construct { self.proto_from(&new_target, dflt) } else { dflt };
@@ -2835,13 +3235,26 @@ impl Vm {
                 self.add_own(e, A_ERRORS, Val::Obj(arr), P_HIDDEN);
                 mi = 1;
             }
+            if kind == 8 {
+                mi = 2;
+            }
             let m = arg(&args, mi);
             if !matches!(m, Val::Undef) {
                 let ms = self.to_str(&m);
+                if self.throwing {
+                    return Val::Undef;
+                }
                 let sv4 = self.rc_val(ms);
                 self.add_own(e, A_MESSAGE, sv4, P_HIDDEN);
             }
-            let opts = arg(&args, mi + 1);
+            if kind == 8 {
+                // SuppressedError(error, suppressed, message)
+                let a_err = self.intern("error");
+                let a_sup = self.intern("suppressed");
+                self.add_own(e, a_err, arg(&args, 0), P_HIDDEN);
+                self.add_own(e, a_sup, arg(&args, 1), P_HIDDEN);
+            }
+            let opts = if kind == 8 { Val::Undef } else { arg(&args, mi + 1) };
             if let Val::Obj(oo) = &opts {
                 if self.has_atom(*oo, A_CAUSE) {
                     let c = self.get(&opts, A_CAUSE);
@@ -3093,7 +3506,7 @@ impl Vm {
                 Val::Num(n)
             }
             NF_BOOLEAN => {
-                let b = truthy(&a0);
+                let b = self.truthy_v(&a0);
                 if construct {
                     let proto = self.proto_from(&new_target, self.boolean_proto);
                     let o = self.alloc(C_BOOLEAN, proto);
@@ -3341,7 +3754,14 @@ impl Vm {
                         let keys = self.own_keys(*so, false, true);
                         for k in keys {
                             let v = self.get_elem(&src, &k);
+                            if self.throwing {
+                                return Val::Undef;
+                            }
+                            // Set(to, key, value, true): a failed write throws
+                            let saved = self.strict_at;
+                            self.strict_at = self.frames.len() as int;
                             self.set_elem(&Val::Obj(t), &k, v);
+                            self.strict_at = saved;
                             if self.throwing {
                                 return Val::Undef;
                             }
@@ -3372,11 +3792,10 @@ impl Vm {
                 };
                 let o = self.alloc(C_OBJECT, proto);
                 let props = arg(&args, 1);
-                if let Val::Obj(po) = &props {
-                    let keys = self.own_keys(*po, false, true);
-                    for k in keys {
-                        let d = self.get_elem(&props, &k);
-                        self.to_descriptor(o, &k, &d);
+                if !matches!(props, Val::Undef) {
+                    self.define_props(o, &props);
+                    if self.throwing {
+                        return Val::Undef;
                     }
                 }
                 Val::Obj(o)
@@ -3444,15 +3863,9 @@ impl Vm {
                     return Val::Undef;
                 }
                 let props = arg(&args, 1);
-                if let Val::Obj(po) = &props {
-                    let keys = self.own_keys(*po, false, true);
-                    for k in keys {
-                        let d = self.get_elem(&props, &k);
-                        self.to_descriptor(o, &k, &d);
-                        if self.throwing {
-                            return Val::Undef;
-                        }
-                    }
+                self.define_props(o, &props);
+                if self.throwing {
+                    return Val::Undef;
                 }
                 a0
             }
@@ -3463,15 +3876,15 @@ impl Vm {
                 }
                 let mut keys = self.own_keys(o, true, id != NF_O_OWNNAMES);
                 let class = self.objs[o as usize].class;
-                if id != NF_O_OWNSYMBOLS && (class == C_ARRAY || class == C_STRING) {
+                if id != NF_O_OWNSYMBOLS && (class == C_ARRAY || class == C_STRING) && self.find(o, A_LENGTH) < 0 {
                     keys.push(self.str_val("length"));
                 }
-                if id != NF_O_OWNSYMBOLS && class == C_FUNCTION {
+                if id != NF_O_OWNSYMBOLS && (class == C_FUNCTION || class == C_BOUND) {
                     let mut extra: Vec<Val> = Vec::new();
-                    if self.find(o, A_LENGTH) < 0 {
+                    if self.find(o, A_LENGTH) < 0 && !self.vgone(o, A_LENGTH) {
                         extra.push(self.str_val("length"));
                     }
-                    if self.find(o, A_NAME) < 0 {
+                    if self.find(o, A_NAME) < 0 && !self.vgone(o, A_NAME) {
                         extra.push(self.str_val("name"));
                     }
                     for k in keys {
@@ -3515,13 +3928,37 @@ impl Vm {
             NF_O_FREEZE | NF_O_SEAL | NF_O_PREVENTEXT => {
                 if let Val::Obj(o) = &a0 {
                     let o = *o;
+                    if id != NF_O_PREVENTEXT && self.objs[o as usize].class == C_ARRAY && (id == NF_O_SEAL || self.objs[o as usize].pos == 3) {
+                        // sealed elements (or frozen ones beside element
+                        // properties) become properties with attributes
+                        let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+                        let mut k: int = 0;
+                        while k < n {
+                            if !self.is_hole(o, k) {
+                                let (v, _) = self.elem_to_prop(o, k);
+                                let a = self.index_atom(k);
+                                self.define(o, a, v, 0);
+                            }
+                            k += 1;
+                        }
+                    }
+                    if id != NF_O_PREVENTEXT && self.objs[o as usize].class == C_ARGUMENTS {
+                        self.slow_args(o);
+                    }
                     self.objs[o as usize].extensible = false;
                     if id != NF_O_PREVENTEXT {
                         let n = self.nkeys(o);
                         let mut i: int = 0;
                         while i < n {
-                            let at = self.attr_at(o, i);
+                            let mut at = self.attr_at(o, i);
                             let acc = (at & P_ACCESSOR) != 0;
+                            if id == NF_O_FREEZE && (at & P_MAPPED) != 0 {
+                                // a frozen element keeps the parameter's
+                                // value and is no longer mapped
+                                let ma = self.key_at(o, i);
+                                self.mapped_sync(o, ma);
+                                at = at - P_MAPPED;
+                            }
                             if id == NF_O_FREEZE && !acc {
                                 self.set_attr(o, i, at | P_FIXED | P_READONLY);
                                 let a = self.key_at(o, i);
@@ -3535,7 +3972,7 @@ impl Vm {
                         if id == NF_O_FREEZE {
                             // frozen elements: kept as read-only properties
                             let class = self.objs[o as usize].class;
-                            if class == C_ARRAY {
+                            if class == C_ARRAY && self.objs[o as usize].pos != 3 {
                                 self.objs[o as usize].pos = 2;
                             }
                         }
@@ -3550,7 +3987,10 @@ impl Vm {
                         return Val::Bool(false);
                     }
                     let class = self.objs[o as usize].class;
-                    if id == NF_O_ISFROZEN && class == C_ARRAY && !self.evecs[self.objs[o as usize].elems as usize].v.is_empty() && self.objs[o as usize].pos != 2 {
+                    if class == C_ARRAY && self.objs[o as usize].pos == 3 && self.has_plain_elem(o) {
+                        return Val::Bool(false);
+                    }
+                    if id == NF_O_ISFROZEN && class == C_ARRAY && self.objs[o as usize].pos < 2 && self.has_plain_elem(o) {
                         return Val::Bool(false);
                     }
                     let sh = self.objs[o as usize].shape as int;
@@ -3692,7 +4132,7 @@ impl Vm {
                                 C_ERROR => "Error",
                                 C_REGEXP => "RegExp",
                                 C_DATE => "Date",
-                                C_ARGUMENTS => "Arguments",
+                                C_ARGUMENTS | C_SARGS => "Arguments",
                                 C_BOOLEAN => "Boolean",
                                 C_NUMBER => "Number",
                                 C_STRING => "String",
@@ -3738,12 +4178,16 @@ impl Vm {
                 self.call_value(a0, t, items)
             }
             NF_REFLECT_CONSTRUCT => {
+                let nt = if args.len() > 2 { args[2].clone() } else { a0.clone() };
+                if !self.is_constructor(&a0) || !self.is_constructor(&nt) {
+                    self.throw_type("Reflect.construct: target and newTarget must be constructors");
+                    return Val::Undef;
+                }
                 let a1 = arg(&args, 1);
                 let items = self.array_like_to_vec(&a1);
                 if self.throwing {
                     return Val::Undef;
                 }
-                let nt = if args.len() > 2 { args[2].clone() } else { a0.clone() };
                 self.construct(a0, items, nt)
             }
             NF_REFLECT_HAS => {
@@ -4029,4 +4473,34 @@ fn date_digits(cs: &Vec<char>, i: usize, count: usize) -> int {
         k += 1;
     }
     v
+}
+
+/// A match's named groups in order, each name once: a duplicate name
+/// (in another alternative) takes the value of the group that matched.
+fn group_pairs(names: &Vec<String>, nidx: &Vec<int>, vals: &Vec<Val>) -> Vec<(String, Val)> {
+    let mut out: Vec<(String, Val)> = Vec::new();
+    let mut i: usize = 0;
+    while i < names.len() {
+        let mut seen = false;
+        let mut j: usize = 0;
+        while j < i {
+            if names[j].as_str() == names[i].as_str() {
+                seen = true;
+            }
+            j += 1;
+        }
+        if !seen {
+            let mut v = vals[nidx[i] as usize].clone();
+            let mut k: usize = i + 1;
+            while k < names.len() {
+                if names[k].as_str() == names[i].as_str() && matches!(v, Val::Undef) {
+                    v = vals[nidx[k] as usize].clone();
+                }
+                k += 1;
+            }
+            out.push((names[i].clone(), v));
+        }
+        i += 1;
+    }
+    out
 }

@@ -21,12 +21,35 @@ impl Vm {
         }
     }
 
+    /// HasProperty(o, k) for an index: an element in place, else the
+    /// generic lookup (element properties, prototypes, proxies).
+    pub fn has_elem_or_prop(&mut self, o: int, k: int) -> bool {
+        if self.objs[o as usize].class == C_ARRAY && (k as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, k) {
+            return true;
+        }
+        let kv = Val::Num(k as double);
+        self.has_property(o, &kv)
+    }
+
     /// The elements of an array-like `this` (arrays directly).
     fn elems_of(&mut self, o: int) -> Vec<Val> {
         if o < 0 {
             return Vec::new();
         }
         let class = self.objs[o as usize].class;
+        if class == C_ARRAY && !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() && (self.objs[o as usize].pos == 3 || self.idx_protos) {
+            // holes read through element properties and the prototypes
+            let n = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+            let mut out: Vec<Val> = Vec::with_capacity(n as usize);
+            let ov = Val::Obj(o);
+            let mut k: int = 0;
+            while k < n {
+                let v = self.get_index(&ov, k);
+                out.push(v);
+                k += 1;
+            }
+            return out;
+        }
         if class == C_ARRAY || class == C_ARGUMENTS {
             return self.evecs[self.objs[o as usize].elems as usize].v.clone();
         }
@@ -102,6 +125,20 @@ impl Vm {
     pub fn call_native2(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         let a0 = arg(&args, 0);
         let a1 = arg(&args, 1);
+        if id >= NF_RP_FLAG0 && id < NF_RP_FLAG0 + 8 {
+            let ro = obj_of(&this);
+            if ro >= 0 && self.objs[ro as usize].class == C_REGEXP {
+                let re = &self.regexes[self.objs[ro as usize].func as usize];
+                let k = id - NF_RP_FLAG0;
+                let b = if k == 0 { re.has_indices } else if k == 1 { re.global } else if k == 2 { re.ignore_case } else if k == 3 { re.multiline } else if k == 4 { re.dot_all } else if k == 5 { re.unicode && !re.unicode_sets } else if k == 6 { re.unicode_sets } else { re.sticky };
+                return Val::Bool(b);
+            }
+            if ro >= 0 && ro == self.regexp_proto {
+                return Val::Undef;
+            }
+            self.throw_type("RegExp.prototype flag getter called on incompatible receiver");
+            return Val::Undef;
+        }
         match id {
             // ---- Array
             NF_A_ISARRAY => Val::Bool(self.class_of(&a0) == C_ARRAY),
@@ -299,13 +336,28 @@ impl Vm {
             }
             NF_AP_INDEXOF | NF_AP_LASTINDEXOF | NF_AP_INCLUDES => {
                 let o = self.this_array(&this);
-                let items = self.elems_of(o);
-                let len = items.len() as int;
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let ov = Val::Obj(o);
+                let len = self.len_of(&ov);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let none = if id == NF_AP_INCLUDES { Val::Bool(false) } else { Val::Num(-1.0) };
+                if len == 0 {
+                    return none;
+                }
+                // a plain array: its elements read in place
+                let plain = self.objs[o as usize].class == C_ARRAY && self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() && self.objs[o as usize].pos != 3;
                 if id == NF_AP_LASTINDEXOF {
                     let mut i = if args.len() > 1 {
                         let n = to_integer(self.to_number(&a1));
+                        if self.throwing {
+                            return Val::Undef;
+                        }
                         if n < 0.0 {
-                            len + (n as int)
+                            if len as double + n < 0.0 { -1 } else { len + (n as int) }
                         } else if n >= len as double {
                             len - 1
                         } else {
@@ -315,26 +367,49 @@ impl Vm {
                         len - 1
                     };
                     while i >= 0 {
-                        if self.strict_equals(&items[i as usize], &a0) {
+                        let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                            self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
+                        } else {
+                            if !self.has_elem_or_prop(o, i) {
+                                i -= 1;
+                                continue;
+                            }
+                            self.get_index(&ov, i)
+                        };
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        if self.strict_equals(&v, &a0) {
                             return Val::Num(i as double);
                         }
                         i -= 1;
                     }
-                    return Val::Num(-1.0);
+                    return none;
                 }
                 let mut i = self.rel_index(&a1, len, 0);
+                if self.throwing {
+                    return Val::Undef;
+                }
                 while i < len {
-                    let hit = if id == NF_AP_INCLUDES { self.same_value_zero(&items[i as usize], &a0) } else { self.strict_equals(&items[i as usize], &a0) };
+                    let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                        self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
+                    } else {
+                        if id != NF_AP_INCLUDES && !self.has_elem_or_prop(o, i) {
+                            i += 1;
+                            continue;
+                        }
+                        self.get_index(&ov, i)
+                    };
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    let hit = if id == NF_AP_INCLUDES { self.same_value_zero(&v, &a0) } else { self.strict_equals(&v, &a0) };
                     if hit {
                         return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(i as double) };
                     }
                     i += 1;
                 }
-                if id == NF_AP_INCLUDES {
-                    Val::Bool(false)
-                } else {
-                    Val::Num(-1.0)
-                }
+                none
             }
             NF_AP_FOREACH | NF_AP_MAP | NF_AP_FILTER | NF_AP_SOME | NF_AP_EVERY | NF_AP_FIND | NF_AP_FINDINDEX | NF_AP_FINDLAST | NF_AP_FINDLASTINDEX | NF_AP_FLATMAP => {
                 let o = self.this_array(&this);
@@ -354,8 +429,8 @@ impl Vm {
                     // holes are skipped by forEach / map / filter / some / every
                     let present = if id == NF_AP_FIND || id == NF_AP_FINDINDEX || back {
                         true
-                    } else if self.objs[o as usize].class == C_ARRAY {
-                        (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i)
+                    } else if self.objs[o as usize].class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
+                        true
                     } else {
                         let kv = Val::Num(i as double);
                         self.has_property(o, &kv)
@@ -385,27 +460,27 @@ impl Vm {
                             out.push(r);
                         }
                         NF_AP_FILTER => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 out.push(v);
                             }
                         }
                         NF_AP_SOME => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 return Val::Bool(true);
                             }
                         }
                         NF_AP_EVERY => {
-                            if !truthy(&r) {
+                            if !self.truthy_v(&r) {
                                 return Val::Bool(false);
                             }
                         }
                         NF_AP_FIND | NF_AP_FINDLAST => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 return v;
                             }
                         }
                         NF_AP_FINDINDEX | NF_AP_FINDLASTINDEX => {
-                            if truthy(&r) {
+                            if self.truthy_v(&r) {
                                 return Val::Num(i as double);
                             }
                         }
@@ -426,42 +501,61 @@ impl Vm {
             }
             NF_AP_REDUCE | NF_AP_REDUCERIGHT => {
                 let o = self.this_array(&this);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let ov = Val::Obj(o);
+                let len = self.len_of(&ov);
+                if self.throwing {
+                    return Val::Undef;
+                }
                 if !self.callback(&a0, "reducer") {
                     return Val::Undef;
                 }
-                let items = self.elems_of(o);
-                let len = items.len() as int;
                 let right = id == NF_AP_REDUCERIGHT;
-                // the indices present (holes skipped)
-                let mut present: Vec<int> = Vec::new();
-                let mut q: int = 0;
-                while q < len {
-                    let i = if right { len - 1 - q } else { q };
-                    if self.has_index(o, i) {
-                        present.push(i);
-                    }
-                    q += 1;
-                }
-                let mut k: usize = 0;
-                let mut acc: Val;
+                let mut k: int = if right { len - 1 } else { 0 };
+                let mut acc: Val = Val::Undef;
                 if args.len() >= 2 {
                     acc = a1.clone();
                 } else {
-                    if present.is_empty() {
+                    let mut found = false;
+                    while (right && k >= 0) || (!right && k < len) {
+                        let here = self.has_elem_or_prop(o, k);
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        let i = k;
+                        k = if right { k - 1 } else { k + 1 };
+                        if here {
+                            acc = self.get_index(&ov, i);
+                            if self.throwing {
+                                return Val::Undef;
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
                         self.throw_type("Reduce of empty array with no initial value");
                         return Val::Undef;
                     }
-                    acc = items[present[0] as usize].clone();
-                    k = 1;
                 }
-                while k < present.len() {
-                    let i = present[k];
-                    let v = items[i as usize].clone();
-                    acc = self.call_value(a0.clone(), Val::Undef, vec![acc, v, Val::Num(i as double), Val::Obj(o)]);
+                while (right && k >= 0) || (!right && k < len) {
+                    let here = self.has_elem_or_prop(o, k);
                     if self.throwing {
                         return Val::Undef;
                     }
-                    k += 1;
+                    if here {
+                        let v = self.get_index(&ov, k);
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        acc = self.call_value(a0.clone(), Val::Undef, vec![acc, v, Val::Num(k as double), ov.clone()]);
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                    }
+                    k = if right { k - 1 } else { k + 1 };
                 }
                 acc
             }
@@ -579,15 +673,12 @@ impl Vm {
                 let ip = self.iter_proto;
                 let it = self.alloc(C_ITER, ip);
                 let class = self.objs[o as usize].class;
-                if class == C_ARRAY || class == C_ARGUMENTS {
-                    self.put_env(it, o);
-                } else {
-                    let items = self.array_like_to_vec(&Val::Obj(o));
-                    let a = self.new_array(items);
-                    self.put_env(it, a);
-                }
+                self.put_env(it, o);
                 self.objs[it as usize].func = 0;
-                self.objs[it as usize].pos = if id == NF_AP_KEYS {
+                // another object than an array is read as the iterator
+                // goes (its length and elements each step): + 8
+                let generic = if class == C_ARRAY || class == C_ARGUMENTS { 0 } else { 8 };
+                self.objs[it as usize].pos = generic + if id == NF_AP_KEYS {
                     1
                 } else if id == NF_AP_ENTRIES {
                     2
@@ -1048,7 +1139,7 @@ impl Vm {
             NF_BP_TOSTRING | NF_BP_VALUEOF => {
                 let b = match &this {
                     Val::Bool(b) => *b,
-                    Val::Obj(o) if self.objs[*o as usize].class == C_BOOLEAN => truthy(&self.colds[self.objs[*o as usize].cold as usize].prim.clone()),
+                    Val::Obj(o) if self.objs[*o as usize].class == C_BOOLEAN => self.truthy_v(&self.colds[self.objs[*o as usize].cold as usize].prim.clone()),
                     _ => {
                         self.throw_type("Boolean.prototype method called on incompatible receiver");
                         return Val::Undef;
@@ -1127,7 +1218,7 @@ impl Vm {
                     if self.throwing {
                         return Val::Undef;
                     }
-                    is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { truthy(&m) };
+                    is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
                 }
                 if !construct && is_re && matches!(a1, Val::Undef) {
                     let pc = self.get(&a0, A_CONSTRUCTOR);
@@ -1163,6 +1254,16 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
+                // the pattern's ToString before the flags'
+                let src = if is_obj(&src) {
+                    let t = self.to_str(&src);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    self.str_val(t.as_str())
+                } else {
+                    src
+                };
                 let r = self.new_regexp(&src, &fl);
                 if construct && !self.throwing {
                     let rp = self.regexp_proto;
@@ -1192,6 +1293,21 @@ impl Vm {
                 let fl = self.get(&this, self.atoms["flags"]);
                 let fs = self.to_string(&fl);
                 self.string_val(format!("/{}/{}", ss, fs))
+            }
+            NF_RP_SOURCE => {
+                let ro = obj_of(&this);
+                if ro >= 0 && self.objs[ro as usize].class == C_REGEXP {
+                    let ix = self.objs[ro as usize].func as usize;
+                    if ix < self.regex_shown.len() {
+                        return self.regex_shown[ix].clone();
+                    }
+                    return self.colds[self.objs[ro as usize].cold as usize].prim.clone();
+                }
+                if ro >= 0 && ro == self.regexp_proto {
+                    return self.str_val("(?:)");
+                }
+                self.throw_type("RegExp.prototype.source getter called on incompatible receiver");
+                Val::Undef
             }
             NF_RP_FLAGS => {
                 let ro = obj_of(&this);
@@ -1313,7 +1429,7 @@ impl Vm {
                         return Val::Undef;
                     }
                     let ao = obj_of(&adder);
-                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET as i32 || self.objs[ao as usize].func == NF_SETP_ADD as i32);
+                    let native_adder = self.objs[ao as usize].class == C_NATIVE && (self.objs[ao as usize].func == NF_MP_SET as i32 || self.objs[ao as usize].func == NF_SETP_ADD as i32 || self.objs[ao as usize].func == NF_WM_SET as i32 || self.objs[ao as usize].func == NF_WS_ADD as i32);
                     let plain = self.class_of(&a0) == C_ARRAY && obj_of(&self.get(&a0, A_ITERATOR)) == self.array_values_fn;
                     if !native_adder || !plain {
                         self.temp_roots.push(Val::Obj(m));
@@ -1338,13 +1454,13 @@ impl Vm {
                             }
                             let k = self.get_index(&it, 0);
                             let v = self.get_index(&it, 1);
-                            if id == NF_WEAKMAP && !is_obj(&k) {
+                            if id == NF_WEAKMAP && !self.held_weakly(&k) {
                                 self.throw_type("Invalid value used as weak map key");
                                 return Val::Undef;
                             }
                             self.map_set(m, k, v);
                         } else {
-                            if id == NF_WEAKSET && !is_obj(&it) {
+                            if id == NF_WEAKSET && !self.held_weakly(&it) {
                                 self.throw_type("Invalid value used in weak set");
                                 return Val::Undef;
                             }
@@ -1354,13 +1470,49 @@ impl Vm {
                 }
                 Val::Obj(m)
             }
-            NF_MP_GET | NF_MP_SET | NF_MP_HAS | NF_MP_DELETE | NF_MP_CLEAR | NF_MP_SIZE | NF_MP_FOREACH | NF_MP_KEYS | NF_MP_VALUES | NF_MP_ENTRIES | NF_SETP_ADD => {
+            NF_MP_GET | NF_MP_SET | NF_MP_HAS | NF_MP_DELETE | NF_MP_CLEAR | NF_MP_SIZE | NF_MP_FOREACH | NF_MP_KEYS | NF_MP_VALUES | NF_MP_ENTRIES | NF_SETP_ADD | NF_SP_HAS | NF_SP_DELETE | NF_SP_CLEAR | NF_SP_FOREACH | NF_SP_SIZE | NF_SP_KEYS | NF_SP_ENTRIES | NF_WM_GET | NF_WM_SET | NF_WM_HAS | NF_WM_DELETE | NF_WS_ADD | NF_WS_HAS | NF_WS_DELETE | NF_MP_GETORINSERT | NF_MP_GETORINSERTC | NF_WM_GETORINSERT | NF_WM_GETORINSERTC => {
                 let o = obj_of(&this);
-                if o < 0 || (self.objs[o as usize].class != C_MAP && self.objs[o as usize].class != C_SET) {
+                // brand check: a Map method takes only a Map, a WeakSet
+                // method only a WeakSet...
+                let want_set = id == NF_SETP_ADD || id == NF_WS_ADD || id == NF_WS_HAS || id == NF_WS_DELETE || (id >= NF_SP_HAS && id <= NF_SP_ENTRIES);
+                let want_weak = (id >= NF_WM_GET && id <= NF_WM_SET) || (id >= NF_WM_HAS && id <= NF_WS_DELETE) || id == NF_WM_GETORINSERT || id == NF_WM_GETORINSERTC;
+                if o < 0 || self.objs[o as usize].class != (if want_set { C_SET } else { C_MAP }) || (self.objs[o as usize].func == 1) != want_weak {
                     self.throw_type("Map/Set method called on incompatible receiver");
                     return Val::Undef;
                 }
+                let id = Vm::coll_base(id);
+                if want_weak && (id == NF_MP_SET || id == NF_SETP_ADD || id == NF_MP_GETORINSERT || id == NF_MP_GETORINSERTC) && !self.held_weakly(&a0) {
+                    self.throw_type("Invalid value used as weak collection key");
+                    return Val::Undef;
+                }
                 match id {
+                    NF_MP_GETORINSERT | NF_MP_GETORINSERTC => {
+                        if id == NF_MP_GETORINSERTC && !self.callback(&a1, "callbackfn") {
+                            return Val::Undef;
+                        }
+                        // canonical key: -0 is +0
+                        let mut k = a0.clone();
+                        if let Val::Num(n) = k {
+                            if n == 0.0 {
+                                k = Val::Num(0.0);
+                            }
+                        }
+                        let i = self.map_find(o, &k);
+                        if i >= 0 {
+                            return self.colds[self.objs[o as usize].cold as usize].elems2[i as usize].clone();
+                        }
+                        let v = if id == NF_MP_GETORINSERTC {
+                            let r = self.call_fixed(a1.clone(), Val::Undef, 1, k.clone(), Val::Undef, Val::Undef);
+                            if self.throwing {
+                                return Val::Undef;
+                            }
+                            r
+                        } else {
+                            a1.clone()
+                        };
+                        self.map_set(o, k, v.clone());
+                        v
+                    }
                     NF_MP_GET => {
                         let i = self.map_find(o, &a0);
                         if i < 0 {

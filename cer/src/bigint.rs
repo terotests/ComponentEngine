@@ -416,6 +416,78 @@ pub fn to_radix(x: &str, radix: int) -> String {
     s
 }
 
+/// A magnitude's bytes, least significant first.
+fn mag_bytes(a: &Vec<int>) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    let mut m = a.clone();
+    while !m.is_empty() {
+        let (q, r) = divmod_mag(&m, &vec![256]);
+        out.push(if r.is_empty() { 0 } else { r[0] });
+        m = q;
+    }
+    out
+}
+
+fn bytes_mag(b: &Vec<int>) -> Vec<int> {
+    let mut acc: Vec<int> = Vec::new();
+    let mut i = (b.len() as int) - 1;
+    while i >= 0 {
+        acc = mul_small(&acc, 256);
+        if b[i as usize] != 0 {
+            acc = add_mag(&acc, &vec![b[i as usize]]);
+        }
+        i -= 1;
+    }
+    trim(&mut acc);
+    acc
+}
+
+/// The two's complement bytes of a value, `n` of them.
+fn twos(neg: bool, a: &Vec<int>, n: usize) -> Vec<int> {
+    let m = if neg { sub_mag(a, &vec![1]) } else { a.clone() };
+    let mut b = mag_bytes(&m);
+    while b.len() < n {
+        b.push(0);
+    }
+    if neg {
+        let mut i: usize = 0;
+        while i < b.len() {
+            b[i] = 255 - b[i];
+            i += 1;
+        }
+    }
+    b
+}
+
+/// `&` (0), `|` (1) or `^` (2) of two BigInts, as two's complement does.
+pub fn bitop(op: int, x: &str, y: &str) -> String {
+    let (an, a) = parse(x);
+    let (bn, b) = parse(y);
+    let la = mag_bytes(&a).len();
+    let lb = mag_bytes(&b).len();
+    let n = (if la > lb { la } else { lb }) + 1;
+    let xa = twos(an, &a, n);
+    let xb = twos(bn, &b, n);
+    let mut r: Vec<int> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        let (p, q) = (xa[i], xb[i]);
+        r.push(if op == 0 { p & q } else if op == 1 { p | q } else { p ^ q });
+        i += 1;
+    }
+    let neg = if op == 0 { an && bn } else if op == 1 { an || bn } else { an != bn };
+    if !neg {
+        return result(false, bytes_mag(&r));
+    }
+    let mut j: usize = 0;
+    while j < r.len() {
+        r[j] = 255 - r[j];
+        j += 1;
+    }
+    let m = add_mag(&bytes_mag(&r), &vec![1]);
+    result(true, m)
+}
+
 /// 2^bits as a decimal string.
 pub fn pow2(bits: int) -> String {
     let mut acc: Vec<int> = vec![1];
@@ -544,6 +616,9 @@ impl Vm {
         let sv0 = self.str_val(s);
         self.put_prim(o, sv0);
         self.bigints.insert(String::from(s), o);
+        if s == "0" {
+            self.big_zero = o;
+        }
         self.symbols.push(o);
         Val::Obj(o)
     }
@@ -637,6 +712,9 @@ impl Vm {
                     }
                 }
             }
+            OP_BAND => bitop(0, x.as_str(), y.as_str()),
+            OP_BOR => bitop(1, x.as_str(), y.as_str()),
+            OP_BXOR => bitop(2, x.as_str(), y.as_str()),
             _ => {
                 self.throw_type("BigInts have no unsigned right shift, use >> instead");
                 return Val::Undef;
