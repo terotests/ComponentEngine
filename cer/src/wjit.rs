@@ -7003,7 +7003,7 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
         vm.sdec(old_s);
         return true;
     }
-    if (i as usize) == len && e != 0 && vm.objs[o as usize].extensible {
+    if (i as usize) == len && e != 0 && vm.objs[o as usize].extensible && vm.objs[o as usize].pos != 3 {
         vm.inc(&val);
         vm.evecs[e].v.push(val);
         return true;

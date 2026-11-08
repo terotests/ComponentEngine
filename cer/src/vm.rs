@@ -2339,6 +2339,9 @@ impl Vm {
                 if (class == C_ARRAY || class == C_ARGUMENTS) && atom == A_LENGTH {
                     return Val::Num(self.evecs[self.objs[cur as usize].elems as usize].v.len() as double);
                 }
+                if class == C_TYPED && self.canon_numeric(atom) {
+                    return Val::Undef;
+                }
                 if class == C_FUNCTION || class == C_BOUND {
                     if atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE {
                         let v = self.function_own(cur, atom);
@@ -2584,6 +2587,11 @@ impl Vm {
             return;
         }
         let class = self.objs[o as usize].class;
+        if class == C_TYPED && self.canon_numeric(atom) {
+            // not an element: the value is still converted
+            self.ta_set(o, -1, &v);
+            return;
+        }
         if class == C_STRING && atom == A_LENGTH {
             // a String object's length is read-only
             if self.strict_now() {
@@ -2766,6 +2774,24 @@ impl Vm {
         }
     }
 
+    /// A CanonicalNumericIndexString key that is not an array index
+    /// (`-0`, `1.5`, `-1`, `Infinity`, `NaN`): on a typed array it names no
+    /// property.
+    pub fn canon_numeric(&mut self, atom: int) -> bool {
+        let k = self.atom_kind(atom);
+        if k == 3 || k == 4 {
+            return false;
+        }
+        let n = self.atom_str(atom);
+        n.as_str() == "-0" || number_to_string(string_to_number(n.as_str())) == n
+    }
+
+    /// An array whose length was made read-only (defineProperty): it keeps
+    /// an own `length` property then.
+    pub fn len_readonly(&self, o: int) -> bool {
+        self.objs[o as usize].shape != 0 && self.find(o, A_LENGTH) >= 0
+    }
+
     pub fn set_index(&mut self, o: int, i: int, v: Val) {
         let class = self.objs[o as usize].class;
         if o == self.array_proto || o == self.object_proto {
@@ -2796,6 +2822,13 @@ impl Vm {
                 self.put_elem(o, i, v);
                 if class == C_ARRAY && !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty() {
                     self.clear_hole(o, i);
+                }
+                return;
+            }
+            if class == C_ARRAY && self.objs[o as usize].pos == 3 && self.len_readonly(o) {
+                // past a read-only length: no new element
+                if self.strict_now() {
+                    self.throw_type(format!("Cannot add property {}, object length is read-only", i).as_str());
                 }
                 return;
             }
@@ -3026,6 +3059,9 @@ impl Vm {
             if a == A_LENGTH && (class == C_ARRAY || class == C_ARGUMENTS || class == C_STRING) {
                 return true;
             }
+            if class == C_TYPED && self.canon_numeric(a) {
+                return false;
+            }
             if (a == A_NAME || a == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) && !self.vgone(cur, a) {
                 return true;
             }
@@ -3089,6 +3125,16 @@ impl Vm {
                 self.throw_type(format!("'deleteProperty' on proxy: trap returned falsish for property '{}'", n).as_str());
             }
             return ok;
+        }
+        if class == C_TYPED && (i >= 0 || self.canon_numeric(a)) {
+            // an element in range stays; any other numeric key names nothing
+            if i >= 0 && i < self.ta_length(o) {
+                if self.strict_now() {
+                    self.throw_type(format!("Cannot delete property '{}' of [object TypedArray]", i).as_str());
+                }
+                return false;
+            }
+            return true;
         }
         if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) {
             let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
@@ -4814,7 +4860,7 @@ impl Vm {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.extensible {
+                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.extensible && ob.pos != 3 {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
