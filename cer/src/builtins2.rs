@@ -1179,7 +1179,7 @@ impl Vm {
                 let mut out = String::new();
                 let mut stack: Vec<int> = Vec::new();
                 let sv1 = self.str_val("");
-                let ok = self.json_str(&Val::Obj(holder), &sv1, a0, &a1, &allow, gap.as_str(), "", &mut stack, &mut out);
+                let ok = self.json_str(&Val::Obj(holder), &sv1, -1, a0, &a1, &allow, gap.as_str(), "", &mut stack, &mut out);
                 if self.throwing || !ok {
                     return Val::Undef;
                 }
