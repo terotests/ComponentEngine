@@ -6212,7 +6212,7 @@ impl PComp {
                 }
                 self.next();
             }
-            if self.text().starts_with("#") || self.kind() == T_PRIVATE {
+            if self.kind() == T_PRIVATE {
                 self.fail("private names are not allowed in object literals");
                 return;
             }
