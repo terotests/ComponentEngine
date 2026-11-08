@@ -714,6 +714,10 @@ struct Cg<'a> {
     slow_at: Option<u32>,
     /// by pc: the address of a property site's cache (prop_cache), or 0
     caches: Vec<u32>,
+    /// by pc * 4: a method or property one prototype up that the
+    /// interpreter's site cache saw when this was compiled (site_pics):
+    /// receiver shape, prototype, its shape, slot; -1 for none
+    pics: Vec<i32>,
     /// the function's frame size (Proto.fsize)
     fsize: u32,
     /// by pc: a property write's atom, -1 for none; R_INIT_PROP's
@@ -2553,6 +2557,112 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
         self.pget(dst, b, off, a, 0, pc);
+        self.extra -= 1;
+        self.op(END);
+        true
+    }
+    /// A read whose site's interpreter cache knew a data property one
+    /// prototype up (Cg.pics): the receiver's shape, its prototype and the
+    /// prototype's shape checked here and the slot read, any other case
+    /// through pget_ic (ic >= 0, a property) or pget
+    fn pget_pic(&mut self, dst: u32, b: u32, off: u32, a: u32, flags: i64, ic: i32, pc: i64) -> bool {
+        let at = pc as usize * 4;
+        let fallback = |cg: &mut Self| if flags == 0 { cg.pget_ic(dst, b, off, a, ic, pc) } else { cg.pget(dst, b, off, a, flags, pc) };
+        if at + 3 >= self.pics.len() || self.pics[at] < 0 || MASK.with(|m| m.get()) & (1u64 << 44) != 0 {
+            return fallback(self);
+        }
+        let (sh, pr, ps, slot) = (self.pics[at], self.pics[at + 1], self.pics[at + 2], self.pics[at + 3] as u32);
+        let l = self.lay;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(b);
+        self.mem(I32_LOAD8_U, 0, off);
+        self.i32c(l.t_obj as i64);
+        self.op(I32_NE);
+        self.op(BR_IF);
+        self.w.u(0);
+        self.get(b);
+        self.mem(I32_LOAD, 2, off + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_shape);
+        self.i32c(sh as i64);
+        self.op(I32_NE);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_proto);
+        self.i32c(pr as i64);
+        self.op(I32_NE);
+        self.op(I32_OR);
+        self.op(BR_IF);
+        self.w.u(0);
+        self.i32c(pr as i64);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_shape);
+        self.i32c(ps as i64);
+        self.op(I32_NE);
+        self.op(BR_IF);
+        self.w.u(0);
+        let vat = if slot < 2 {
+            l.off_inl0 + slot * 16
+        } else {
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_vals);
+            self.set(L_T2);
+            (slot - 2) * 16
+        };
+        self.get(L_T2);
+        self.mem(I64_LOAD, 3, vat);
+        self.set(L_Q0);
+        self.get(L_T2);
+        self.mem(I64_LOAD, 3, vat + 8);
+        self.set(L_Q0 + 1);
+        if flags == 1 {
+            // a script or native function (prop_cache's check)
+            self.get(L_T2);
+            self.mem(I32_LOAD8_U, 0, vat);
+            self.i32c(l.t_obj as i64);
+            self.op(I32_NE);
+            self.op(BR_IF);
+            self.w.u(0);
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, vat + l.off_int);
+            self.obj_addr();
+            self.mem(I32_LOAD, 2, l.off_class);
+            self.set(L_T3);
+            self.get(L_T3);
+            self.i32c(C_FUNCTION as i64);
+            self.op(I32_NE);
+            self.get(L_T3);
+            self.i32c(C_NATIVE as i64);
+            self.op(I32_NE);
+            self.op(I32_AND);
+            self.op(BR_IF);
+            self.w.u(0);
+        }
+        if flags != 0 {
+            self.get(b);
+            self.mem(I64_LOAD, 3, off);
+            self.set(L_Q2);
+            self.get(b);
+            self.mem(I64_LOAD, 3, off + 8);
+            self.set(L_Q2 + 1);
+        }
+        self.store_val(dst, L_Q0);
+        if flags != 0 {
+            self.store_val(dst + 1, L_Q2);
+        }
+        self.op(BR);
+        self.w.u(1);
+        self.extra -= 1;
+        self.op(END);
+        fallback(self);
         self.extra -= 1;
         self.op(END);
         true
@@ -4916,7 +5026,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_METHOD if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.pget(w1 as u32, L_SP, w2 as u32 * 16, a, if sub == 0 { 1 } else { 2 }, p))
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * 16, a, if sub == 0 { 1 } else { 2 }, -1, p))
             }
             R_GET_ELEM if self.lay.obj_ok && w1 >= 0 && w2 >= 0 => {
                 let key = self.opnd(w3);
@@ -4932,7 +5042,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_ic(w1 as u32, L_SP, w2 as u32 * 16, a, w3, p))
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * 16, a, 0, w3, p))
             }
             R_CMP_JF | R_CMP_JT | R_LOOP | R_CMP_JFK | R_CMP_JTK => {
                 let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w2, w3) } else { (w1, w2) };
@@ -5467,7 +5577,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], atoms: &[i32], fsize: u32, inl: Vec<Option<Inl>>) -> Option<Compiled> {
+pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], pics: &[i32], atoms: &[i32], fsize: u32, inl: Vec<Option<Inl>>) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -5546,6 +5656,7 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
         rb,
         slow_at: None,
         caches: caches.to_vec(),
+        pics: pics.to_vec(),
         atoms: atoms.to_vec(),
         fsize,
         callx: false,
@@ -5802,6 +5913,7 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
         rb: 0,
         slow_at: None,
         caches: Vec::new(),
+        pics: Vec::new(),
         atoms: Vec::new(),
         fsize: 0,
         callx: false,
@@ -6460,6 +6572,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         let caches = if rb + n <= vm.rcode.len() { site_caches(vm, pi, rb, n) } else { Vec::new() };
         // a property write's atom; R_INIT_PROP's transition cache
         let atoms = site_atoms(vm, pi, rb, n);
+        let pics = if rb + n <= vm.rcode.len() { site_pics(vm, rb, n) } else { Vec::new() };
         // R_TYPEOF's strings are there before the code reads them
         vm.type_val(&Val::Undef);
         let p = &vm.protos[pi];
@@ -6473,7 +6586,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             let name = format!("{}#{}", p.name, pi);
             let inl = inline_sites(vm, pi, rb, n);
             let p = &vm.protos[pi];
-            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &atoms, p.fsize as u32, inl) {
+            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &pics, &atoms, p.fsize as u32, inl) {
                 f = PENDING;
                 let full = with_state(vm, |st| {
                     let t = &mut st.batch;
@@ -8147,6 +8260,43 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
         };
     }
     Val::Undef
+}
+
+/// Cg.pics: by pc * 4, the first way of an R_GET_METHOD's or R_GET_PROP's
+/// interpreter cache (rvm.rs PIC_W) that finds a data property on the
+/// receiver's prototype, when neither shape is a dictionary's (shapes that
+/// are not owned never change, so the code needs no epoch check)
+fn site_pics(vm: &crate::vm::Vm, rb: usize, n: usize) -> Vec<i32> {
+    let mut out = vec![-1i32; n * 4];
+    let w = crate::rvm::PIC_W as usize;
+    for i in 0..n {
+        let k = (vm.rcode[rb + i].code & 255) as int;
+        if k != R_GET_METHOD && k != R_GET_PROP {
+            continue;
+        }
+        let site = rb + i;
+        if site >= vm.rpic.len() || vm.rpic[site] < 0 {
+            continue;
+        }
+        let mut way = 0;
+        while way < crate::rvm::PIC_WAYS as usize {
+            let b = (vm.rpic[site] as usize + way) * w;
+            way += 1;
+            if b + 7 > vm.pic.len() || vm.pic[b + 1] != vm.shape_epoch as i32 || vm.pic[b + 2] != 1 || vm.pic[b + 3] < 0 || vm.pic[b + 4] != 0 {
+                continue;
+            }
+            let (sh, p, ps) = (vm.pic[b], vm.pic[b + 5], vm.pic[b + 6]);
+            if sh < 0 || p < 0 || ps < 0 || sh as usize >= vm.shapes.len() || ps as usize >= vm.shapes.len() || vm.shapes[sh as usize].owned || vm.shapes[ps as usize].owned {
+                continue;
+            }
+            out[i * 4] = sh;
+            out[i * 4 + 1] = p;
+            out[i * 4 + 2] = ps;
+            out[i * 4 + 3] = vm.pic[b + 3];
+            break;
+        }
+    }
+    out
 }
 
 fn site_caches(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<u32> {

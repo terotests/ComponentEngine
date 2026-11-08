@@ -684,6 +684,20 @@ impl Vm {
         self.rx_units = jsstr::units(s.as_str());
     }
 
+    /// `s`'s UTF-16 units out of the rx cache (computed when it holds
+    /// others), for a caller that may run code that uses the cache; rx_put
+    /// gives them back.
+    pub fn rx_take(&mut self, s: &Rc<String>) -> Vec<int> {
+        self.rx_cache(s);
+        self.rx_s = Rc::new(String::new());
+        std::mem::take(&mut self.rx_units)
+    }
+
+    pub fn rx_put(&mut self, s: &Rc<String>, units: Vec<int>) {
+        self.rx_s = s.clone();
+        self.rx_units = units;
+    }
+
     /// The UTF-16 unit at `i`, -1 out of range.
     pub fn str_at(&mut self, s: &Rc<String>, i: int) -> int {
         if s.as_bytes().len() < 256 {

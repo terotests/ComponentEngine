@@ -945,8 +945,9 @@ impl Vm {
                 let idx = self.objs[ro as usize].func as int;
                 let global = self.regexes[idx as usize].global;
                 if id == NF_SP_SEARCH {
-                    let units = jsstr::units(s.as_str());
+                    let units = self.rx_take(&s);
                     let caps = self.regexes[idx as usize].exec(&units, 0);
+                    self.rx_put(&s, units);
                     return Val::Num(if caps.is_empty() { -1.0 } else { caps[0] as double });
                 }
                 if id == NF_SP_MATCHALL {
@@ -984,7 +985,7 @@ impl Vm {
                 if !global {
                     return self.regexp_exec(ro, &s);
                 }
-                let units = jsstr::units(s.as_str());
+                let units = self.rx_take(&s);
                 let mut out: Vec<Val> = Vec::new();
                 let mut start: int = 0;
                 while start <= units.len() as int {
@@ -995,6 +996,7 @@ impl Vm {
                     out.push(self.string_val(jsstr::from_units(&units, caps[0], caps[1])));
                     start = if caps[1] == caps[0] { caps[1] + 1 } else { caps[1] };
                 }
+                self.rx_put(&s, units);
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
                 if out.is_empty() {
                     return Val::Null;

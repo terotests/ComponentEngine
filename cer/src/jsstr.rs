@@ -13,6 +13,12 @@ pub fn is_ascii(s: &str) -> bool {
     r
 }
 
+#[ranger::target(rust)]
+fn ascii_scan(s: &str) -> bool {
+    s.is_ascii()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 fn ascii_scan(s: &str) -> bool {
     for b in s.bytes() {
         if b >= 128 {
@@ -27,14 +33,26 @@ pub fn units(s: &str) -> Vec<int> {
     r
 }
 
-fn units_of(s: &str) -> Vec<int> {
+/// Rust: an ASCII string's bytes in one go (vectorised)
+#[ranger::target(rust)]
+fn ascii_units(s: &str) -> Vec<int> {
+    s.bytes().map(|b| b as int).collect()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn ascii_units(s: &str) -> Vec<int> {
     let mut out: Vec<int> = Vec::with_capacity(s.as_bytes().len());
-    if is_ascii(s) {
-        for b in s.bytes() {
-            out.push(b as int);
-        }
-        return out;
+    for b in s.bytes() {
+        out.push(b as int);
     }
+    out
+}
+
+fn units_of(s: &str) -> Vec<int> {
+    if is_ascii(s) {
+        return ascii_units(s);
+    }
+    let mut out: Vec<int> = Vec::with_capacity(s.as_bytes().len());
     for c in s.chars() {
         let cp = c as int;
         if cp >= 0x10000 {

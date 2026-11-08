@@ -93,6 +93,8 @@ pub struct Regex {
     fset: Vec<bool>,
     /// a unit past ASCII can start a match (with fset)
     fhi: bool,
+    /// cmap[class * 256 + ic * 128 + u]: class_has for an ASCII unit u
+    cmap: Vec<bool>,
 }
 
 struct RParser {
@@ -1598,6 +1600,7 @@ fn new_regex() -> Regex {
         first: -1,
         fset: Vec::new(),
         fhi: false,
+        cmap: Vec::new(),
     }
 }
 
@@ -1935,6 +1938,7 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
     if re.first < 0 && !re.sticky {
         re.start_set();
     }
+    re.class_maps();
     re
 }
 
@@ -2012,7 +2016,33 @@ impl Regex {
         self.fhi = hi;
     }
 
+    /// cmap from the classes
+    fn class_maps(&mut self) {
+        let mut m: Vec<bool> = Vec::new();
+        let mut ci: int = 0;
+        while ci < self.classes.len() as int {
+            let mut k: int = 0;
+            while k < 256 {
+                let v = self.class_slow(ci, k & 127, k >= 128);
+                m.push(v);
+                k += 1;
+            }
+            ci += 1;
+        }
+        self.cmap = m;
+    }
+
     fn class_has(&self, ci: int, c: int, ic: bool) -> bool {
+        if c >= 0 && c < 128 {
+            let at = ci * 256 + (if ic { 128 } else { 0 }) + c;
+            if (at as usize) < self.cmap.len() {
+                return self.cmap[at as usize];
+            }
+        }
+        self.class_slow(ci, c, ic)
+    }
+
+    fn class_slow(&self, ci: int, c: int, ic: bool) -> bool {
         let cl = &self.classes[ci as usize];
         let mut hit = in_ranges(&cl.ranges, c);
         if !hit && ic {
@@ -2074,11 +2104,6 @@ impl Regex {
         let mut pos = start;
         let mut steps: int = 0;
         loop {
-            steps += 1;
-            if steps > 50000000 {
-                stack.truncate(base);
-                return -1;
-            }
             let ins = self.code[pc as usize];
             let mut ok = true;
             match ins.op {
@@ -2143,6 +2168,13 @@ impl Regex {
                     }
                 }
                 I_SPLIT => {
+                    // a run without splits ends (no loop goes back without
+                    // one): the step budget is counted here
+                    steps += 1;
+                    if steps > 50000000 {
+                        stack.truncate(base);
+                        return -1;
+                    }
                     stack.push((0, ins.b, pos));
                     pc = ins.a;
                 }
