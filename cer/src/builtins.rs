@@ -2909,6 +2909,10 @@ impl Vm {
         if self.idx_protos && !self.colds[ob.cold as usize].elems2.is_empty() {
             return true;
         }
+        if ob.shape != 0 && self.find(o, A_LENGTH) >= 0 {
+            // a read-only length (defineProperty): the spec's steps
+            return true;
+        }
         if id == NF_AP_MAP || id == NF_AP_FILTER || id == NF_AP_SLICE || id == NF_AP_SPLICE || id == NF_AP_CONCAT || id == NF_AP_FLAT || id == NF_AP_FLATMAP {
             // ArraySpeciesCreate: a constructor other than Array
             if ob.proto as int != self.array_proto {
