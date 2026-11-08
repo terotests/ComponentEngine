@@ -7665,7 +7665,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
     let tp = if fo >= 0 && vm.objs[fo as usize].class == C_FUNCTION { vm.objs[fo as usize].func as usize } else { usize::MAX };
     let plain = tp != usize::MAX && {
         let p = &vm.protos[tp];
-        !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
+        p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
     };
     if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
         // debug: OPCOUNT 220 native/other, 221 plain compiled, 222 plain
@@ -8183,7 +8183,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
     // sets them
     let (plain, cls) = {
         let p = &vm.protos[tp];
-        (!p.uses_args && p.rest < 0 && (!p.class_ctor || !p.derived) && (p.class_ctor || p.constructible()), p.class_ctor)
+        (p.rest < 0 && (!p.class_ctor || !p.derived) && (p.class_ctor || p.constructible()), p.class_ctor)
     };
     if !plain {
         return new_win(vm, bp, fi, pc, w0, w3, want);
@@ -8202,11 +8202,19 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
     let f = vm.stack[fpos as usize];
     let this = vm.make_this(&f);
     vm.stack[(fpos + 1) as usize] = this;
-    if !vm.renter(fo, fpos, argc, fpos) {
+    // a forwarder's m in its place (Vm::fwd_target)
+    let m = if !cls && vm.protos[tp].fwd_atom >= 0 { vm.fwd_target(tp, &this) } else { -1 };
+    let tp = if m >= 0 {
+        vm.stack[fpos as usize] = Val::Obj(m);
+        vm.objs[m as usize].func as usize
+    } else {
+        tp
+    };
+    if !vm.renter(if m >= 0 { m } else { fo }, fpos, argc, fpos) {
         return settle(vm, fi, pc);
     }
     vm.frames[nf].construct = true;
-    vm.frames[nf].new_target = f;
+    vm.frames[nf].new_target = if m >= 0 { Val::Undef } else { f };
     if cls {
         vm.run_fields(fo, &this);
         if vm.throwing {
@@ -8277,7 +8285,7 @@ fn call_fill(vm: &mut crate::vm::Vm, ri: usize, tp: usize, f: i64) {
         return;
     }
     let p = &vm.protos[tp];
-    if p.arrow || p.env_size > 0 {
+    if p.arrow || p.env_size > 0 || p.uses_args {
         return;
     }
     let w = [tp as i32, f as i32, p.nparams as i32, p.nslots as i32, p.fsize as i32, p.rentry as i32, if p.strict { 1 } else { 0 }];

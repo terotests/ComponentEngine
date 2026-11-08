@@ -3332,6 +3332,7 @@ impl PComp {
                 self.next();
                 let mut bare = false;
                 if !self.is(";") && !self.is("}") && self.kind() != T_EOF && !self.nl_before() {
+                    self.f().proto.void_ret = false;
                     self.expression();
                 } else {
                     self.op(OP_UNDEF);
@@ -6558,6 +6559,11 @@ impl PComp {
             if own_strict {
                 self.f().proto.strict = true;
             }
+            // void_ret until a `return` with a value
+            self.f().proto.void_ret = true;
+            if i == 0 && (flags & (F_GENERATOR | F_ASYNC | F_CTOR | F_GETTER | F_SETTER | F_METHOD)) == 0 {
+                self.fwd_check(body_end);
+            }
             let mut bscope: int = -1;
             if param_exprs {
                 bscope = self.new_scope(fscope, false, false);
@@ -6614,6 +6620,25 @@ impl PComp {
             self.set_span(p, first);
         }
         p
+    }
+
+    /// A body that is just `this.m.apply(this, arguments);`: Proto.fwd_atom
+    /// is m's atom (the tokens from the body's first to its `}` at end).
+    fn fwd_check(&mut self, end: int) {
+        let p = self.pos;
+        let semi = if self.tok_is(p + 10, ";") { 1 } else { 0 };
+        if p + 10 + semi != end {
+            return;
+        }
+        if !(self.tok_is(p, "this") && self.tok_is(p + 1, ".") && self.toks[(p + 2) as usize].kind as int == T_IDENT && self.tok_is(p + 3, ".") && self.tok_is(p + 4, "apply")) {
+            return;
+        }
+        if !(self.tok_is(p + 5, "(") && self.tok_is(p + 6, "this") && self.tok_is(p + 7, ",") && self.tok_is(p + 8, "arguments") && self.tok_is(p + 9, ")")) {
+            return;
+        }
+        let m = self.tok_text(p + 2);
+        let a = self.atom(m.as_str());
+        self.f().proto.fwd_atom = a;
     }
 
     /// Early errors of a parameter list.
