@@ -121,6 +121,8 @@ struct RParser {
     vmode: bool,
     /// the ranges of the class escape v_char read last
     v_pending: Vec<int>,
+    /// the strings (not one code point) of the v-mode operand read last
+    v_ostrs: Vec<Vec<int>>,
     /// a syntax check only (`check`): property escapes are not decoded
     check_only: bool,
 }
@@ -465,8 +467,9 @@ impl RParser {
             let n = self.node(R_LOOK);
             self.nodes[n as usize].list = vec![inner];
             self.nodes[n as usize].c = (if neg { 1 } else { 0 }) + (if behind { 2 } else { 0 });
-            // a lookahead may take a quantifier (Annex B); a lookbehind not
-            if behind {
+            // a lookahead may take a quantifier (Annex B, not under u); a
+            // lookbehind not
+            if behind || self.unicode {
                 return n;
             }
             atom = n;
@@ -552,8 +555,8 @@ impl RParser {
         } else if c == 42 || c == 43 || c == 63 {
             self.fail("Invalid regular expression: nothing to repeat");
             return -1;
-        } else if c == 123 && self.unicode {
-            self.fail("Invalid regular expression: lone quantifier brackets");
+        } else if c == 123 && (self.unicode || self.braced_quantifier()) {
+            self.fail("Invalid regular expression: nothing to repeat");
             return -1;
         } else if c == 41 {
             self.fail("Invalid regular expression: unmatched )");
@@ -570,6 +573,27 @@ impl RParser {
             self.nodes[atom as usize].c = cp;
         }
         self.quantifier(atom)
+    }
+
+    /// `{n}`, `{n,}` or `{n,m}` at the position (Annex B keeps any other
+    /// `{` a literal).
+    fn braced_quantifier(&self) -> bool {
+        let mut k: int = 1;
+        let mut digits = 0;
+        while is_digit(self.peek(k)) {
+            k += 1;
+            digits += 1;
+        }
+        if digits == 0 {
+            return false;
+        }
+        if self.peek(k) == 44 {
+            k += 1;
+            while is_digit(self.peek(k)) {
+                k += 1;
+            }
+        }
+        self.peek(k) == 125
     }
 
     fn quantifier(&mut self, atom: int) -> int {
@@ -790,6 +814,10 @@ impl RParser {
                 self.pos += 1;
                 return l % 32;
             }
+            if self.unicode {
+                self.fail("Invalid unicode escape");
+                return 0;
+            }
             self.pos -= 1;
             return 92;
         }
@@ -800,20 +828,30 @@ impl RParser {
                 self.pos += 2;
                 return a * 16 + b;
             }
+            if self.unicode {
+                self.fail("Invalid escape");
+                return 0;
+            }
             return 120;
         }
         if c == 117 {
             if self.cur() == 123 && self.unicode {
                 self.pos += 1;
                 let mut v: int = 0;
+                let mut digits: int = 0;
                 while self.cur() >= 0 && self.cur() != 125 {
                     let h = hexv(self.cur());
-                    if h < 0 {
+                    if h < 0 || v > 0x10ffff {
                         self.fail("Invalid Unicode escape");
                         return 0;
                     }
                     v = v * 16 + h;
+                    digits += 1;
                     self.pos += 1;
+                }
+                if digits == 0 || v > 0x10ffff || self.cur() != 125 {
+                    self.fail("Invalid Unicode escape");
+                    return 0;
                 }
                 self.pos += 1;
                 return v;
@@ -823,6 +861,10 @@ impl RParser {
             while k < 4 {
                 let h = hexv(self.peek(k));
                 if h < 0 {
+                    if self.unicode {
+                        self.fail("Invalid Unicode escape");
+                        return 0;
+                    }
                     return 117;
                 }
                 v = v * 16 + h;
@@ -849,6 +891,10 @@ impl RParser {
             }
             return v;
         }
+        if is_digit(c) && self.unicode {
+            self.fail("Invalid decimal escape");
+            return 0;
+        }
         if is_digit(c) && (in_class || !self.unicode) {
             // a legacy octal escape (up to \377); \8 and \9 are the digits
             let mut v = c - 48;
@@ -860,6 +906,11 @@ impl RParser {
                 return v;
             }
             return c;
+        }
+        // an identity escape: under u only a syntax character or `/`
+        if self.unicode && !(c == 94 || c == 36 || c == 92 || c == 46 || c == 42 || c == 43 || c == 63 || c == 40 || c == 41 || c == 91 || c == 93 || c == 123 || c == 125 || c == 124 || c == 47 || (in_class && c == 45) || (in_class && self.vmode && v_punct(c))) {
+            self.fail("Invalid escape");
+            return 0;
         }
         c
     }
@@ -889,12 +940,20 @@ impl RParser {
                 if e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83 {
                     self.pos += 1;
                     self.add_class_escape(&mut ranges, e);
+                    if self.unicode && self.cur() == 45 && self.peek(1) != 93 && self.peek(1) >= 0 {
+                        self.fail("Invalid character class");
+                        break;
+                    }
                     continue;
                 }
                 if (e == 112 || e == 80) && self.unicode && self.peek(1) == 123 {
                     let pr = self.property_escape();
                     for x in pr {
                         ranges.push(x);
+                    }
+                    if self.cur() == 45 && self.peek(1) != 93 && self.peek(1) >= 0 {
+                        self.fail("Invalid character class");
+                        break;
                     }
                     continue;
                 }
@@ -913,6 +972,10 @@ impl RParser {
                 if self.cur() == 92 {
                     self.pos += 1;
                     let e = self.cur();
+                    if (e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83 || ((e == 112 || e == 80) && self.peek(1) == 123)) && self.unicode {
+                        self.fail("Invalid character class");
+                        break;
+                    }
                     if e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83 {
                         // [a-\d]: a, -, and the class
                         self.pos += 1;
@@ -952,10 +1015,50 @@ impl RParser {
     /// A v-mode class as a node.
     fn class_v_node(&mut self) -> int {
         let r = self.class_v();
+        let strs = self.v_ostrs.clone();
         self.classes.push(RClass { ranges: r, negate: false });
         let n = self.node(R_CLASS);
         self.nodes[n as usize].c = (self.classes.len() as int) - 1;
-        n
+        if strs.is_empty() {
+            return n;
+        }
+        // a class of strings: the longest strings first, then the class
+        let mut order: Vec<int> = Vec::new();
+        let mut i: int = 0;
+        while i < strs.len() as int {
+            let mut j: int = 0;
+            while j < order.len() as int && strs[order[j as usize] as usize].len() >= strs[i as usize].len() {
+                j += 1;
+            }
+            order.insert(j as usize, i);
+            i += 1;
+        }
+        let alt = self.node(R_ALT);
+        let mut alts: Vec<int> = Vec::new();
+        let mut empty = false;
+        for k in order {
+            let st = strs[k as usize].clone();
+            if st.is_empty() {
+                empty = true;
+                continue;
+            }
+            let seq = self.node(R_SEQ);
+            let mut items: Vec<int> = Vec::new();
+            for ch in st {
+                let cn = self.node(R_CHAR);
+                self.nodes[cn as usize].c = ch;
+                items.push(cn);
+            }
+            self.nodes[seq as usize].list = items;
+            alts.push(seq);
+        }
+        alts.push(n);
+        if empty {
+            let e = self.node(R_SEQ);
+            alts.push(e);
+        }
+        self.nodes[alt as usize].list = alts;
+        alt
     }
 
     /// A v-mode class at its `[`: operands joined by union, `&&` or `--`,
@@ -968,25 +1071,49 @@ impl RParser {
             self.pos += 1;
         }
         let mut acc: Vec<int> = Vec::new();
+        let mut strs: Vec<Vec<int>> = Vec::new();
         if self.cur() != 93 {
             acc = self.v_operand();
+            strs = self.v_ostrs.clone();
             if self.cur() == 38 && self.peek(1) == 38 {
                 while self.cur() == 38 && self.peek(1) == 38 && self.error.is_empty() {
                     self.pos += 2;
                     let o = self.v_operand();
+                    let os = self.v_ostrs.clone();
                     acc = intersect(&acc, &o);
+                    let mut keep: Vec<Vec<int>> = Vec::new();
+                    for x in strs {
+                        if has_seq(&os, &x) {
+                            keep.push(x);
+                        }
+                    }
+                    strs = keep;
                 }
             } else if self.cur() == 45 && self.peek(1) == 45 {
                 while self.cur() == 45 && self.peek(1) == 45 && self.error.is_empty() {
                     self.pos += 2;
                     let o = self.v_operand();
+                    let os = self.v_ostrs.clone();
                     acc = intersect(&acc, &complement(&o));
+                    let mut keep: Vec<Vec<int>> = Vec::new();
+                    for x in strs {
+                        if !has_seq(&os, &x) {
+                            keep.push(x);
+                        }
+                    }
+                    strs = keep;
                 }
             } else {
                 while self.cur() >= 0 && self.cur() != 93 && self.error.is_empty() {
                     let o = self.v_operand();
                     for x in o {
                         acc.push(x);
+                    }
+                    let os = self.v_ostrs.clone();
+                    for x in os {
+                        if !has_seq(&strs, &x) {
+                            strs.push(x);
+                        }
                     }
                 }
                 acc = norm_ranges(&acc);
@@ -998,14 +1125,22 @@ impl RParser {
         }
         self.pos += 1;
         if neg {
+            if !strs.is_empty() {
+                self.fail("Invalid regular expression: negated character class may contain strings");
+                return Vec::new();
+            }
+            self.v_ostrs = Vec::new();
             return complement(&acc);
         }
+        self.v_ostrs = strs;
         acc
     }
 
-    /// One operand of a v-mode class: a nested class, a class escape, or a
-    /// character or character range.
+    /// One operand of a v-mode class: a nested class, a class escape, a
+    /// class string disjunction, or a character or character range; its
+    /// strings are left in `v_ostrs`.
     fn v_operand(&mut self) -> Vec<int> {
+        self.v_ostrs = Vec::new();
         let c = self.cur();
         if c < 0 {
             self.fail("Invalid regular expression: missing /");
@@ -1013,6 +1148,9 @@ impl RParser {
         }
         if c == 91 {
             return self.class_v();
+        }
+        if c == 92 && self.peek(1) == 113 && self.peek(2) == 123 {
+            return self.class_strings();
         }
         let lo = self.v_char();
         if lo < -1 {
@@ -1029,6 +1167,44 @@ impl RParser {
             return vec![lo, hi];
         }
         vec![lo, lo]
+    }
+
+    /// `\q{a|bc|}` at its `\`: one code point strings as ranges, the
+    /// others in `v_ostrs`.
+    fn class_strings(&mut self) -> Vec<int> {
+        self.pos += 3;
+        let mut ranges: Vec<int> = Vec::new();
+        let mut strs: Vec<Vec<int>> = Vec::new();
+        let mut cur: Vec<int> = Vec::new();
+        loop {
+            let c = self.cur();
+            if c < 0 {
+                self.fail("Invalid regular expression: unterminated class string");
+                return Vec::new();
+            }
+            if c == 124 || c == 125 {
+                self.pos += 1;
+                if cur.len() == 1 {
+                    ranges.push(cur[0]);
+                    ranges.push(cur[0]);
+                } else if !has_seq(&strs, &cur) {
+                    strs.push(cur.clone());
+                }
+                cur = Vec::new();
+                if c == 125 {
+                    break;
+                }
+                continue;
+            }
+            let ch = self.v_char();
+            if ch < -1 || !self.error.is_empty() {
+                self.fail("Invalid escape");
+                return Vec::new();
+            }
+            cur.push(ch);
+        }
+        self.v_ostrs = strs;
+        norm_ranges(&ranges)
     }
 
     /// One character of a v-mode class; -2 when it was a class escape,
@@ -1090,6 +1266,10 @@ impl RParser {
             while is_digit(self.cur()) {
                 v = v * 10 + (self.cur() - 48);
                 self.pos += 1;
+            }
+            if v > self.total_groups && self.unicode {
+                self.fail("Invalid escape");
+                return -1;
             }
             if v > self.total_groups && !self.unicode {
                 // no such group: an octal escape (Annex B)
@@ -1521,6 +1701,7 @@ fn empty_parser() -> RParser {
         ignore_case: false,
         vmode: false,
         v_pending: Vec::new(),
+        v_ostrs: Vec::new(),
         check_only: false,
     }
 }
@@ -2248,6 +2429,30 @@ fn norm_ranges(r: &Vec<int>) -> Vec<int> {
 }
 
 /// The code points in both (normalized) range lists.
+/// Whether `list` holds the code point string `x`.
+fn has_seq(list: &Vec<Vec<int>>, x: &Vec<int>) -> bool {
+    let mut i: usize = 0;
+    while i < list.len() {
+        let y = &list[i];
+        if y.len() == x.len() {
+            let mut j: usize = 0;
+            while j < x.len() && y[j] == x[j] {
+                j += 1;
+            }
+            if j == x.len() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// A ClassSetReservedPunctuator: `& - ! # % , : ; < = > @ ` ~`
+fn v_punct(c: int) -> bool {
+    c == 38 || c == 45 || c == 33 || c == 35 || c == 37 || c == 44 || c == 58 || c == 59 || c == 60 || c == 61 || c == 62 || c == 64 || c == 96 || c == 126
+}
+
 fn intersect(a: &Vec<int>, b: &Vec<int>) -> Vec<int> {
     let mut out: Vec<int> = Vec::new();
     let mut i: usize = 0;

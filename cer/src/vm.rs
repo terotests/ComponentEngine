@@ -2493,6 +2493,14 @@ impl Vm {
                 self.proxy_call(cur, PH_SET, vec![k, v.clone(), receiver.clone()]);
                 return true;
             }
+            if self.objs[cur as usize].class == C_TYPED {
+                // a canonical numeric key (`NaN`, `-0`, `1.5`) on a typed
+                // array is not an element: the write does nothing
+                let n = self.atom_str(atom);
+                if n.as_str() == "-0" || number_to_string(string_to_number(n.as_str())) == n {
+                    return true;
+                }
+            }
             let slot = self.find(cur, atom);
             if slot >= 0 {
                 let attr = self.attr_at(cur, slot);
@@ -4922,6 +4930,11 @@ impl Vm {
     /// An anonymous function stored under a computed key takes the key as
     /// its name (a symbol's as "[description]").
     pub fn name_by_key(&mut self, f: &Val, k: &Val) {
+        self.name_by_key_pre(f, k, "");
+    }
+
+    /// The function named after the key, with `pre` ("get " / "set ") first.
+    pub fn name_by_key_pre(&mut self, f: &Val, k: &Val, pre: &str) {
         let fo = obj_of(f);
         if fo < 0 || self.objs[fo as usize].class != C_FUNCTION || self.find(fo, A_NAME) >= 0 {
             return;
@@ -4940,7 +4953,8 @@ impl Vm {
         } else {
             self.to_string(k)
         };
-        let sv17 = self.string_val(name);
+        let full = if pre.is_empty() { name } else { format!("{}{}", pre, name) };
+        let sv17 = self.string_val(full);
         self.add_prop(fo, A_NAME, sv17, P_HIDDEN | P_READONLY);
     }
 
@@ -6193,6 +6207,7 @@ impl Vm {
                 let o = obj_of(self.top());
                 let (i, a) = self.to_key(&k);
                 let atom = if i >= 0 { self.index_atom(i) } else { a };
+                self.name_by_key_pre(&f, &k, if (op.code as int) == OP_INIT_GETTER_ELEM { "get " } else { "set " });
                 self.put_home(obj_of(&f), o);
                 self.define_accessor(o, atom, f, if (op.code as int) == OP_INIT_GETTER_ELEM { 0 } else { 1 }, op.b == 1);
             }
@@ -6476,8 +6491,15 @@ impl Vm {
             OP_SET_FIELDS => {
                 let f = self.pop();
                 let ctor = obj_of(self.top());
-                self.put_home(obj_of(&f), self.colds[self.objs[ctor as usize].cold as usize].home);
-                self.put_elems2(ctor, vec![f]);
+                if op.a == 1 {
+                    // the static initializer: [ctor, f] with ctor its home
+                    self.put_home(obj_of(&f), ctor);
+                    let n = self.stack.len();
+                    self.stack[n - 1] = f;
+                } else {
+                    self.put_home(obj_of(&f), self.colds[self.objs[ctor as usize].cold as usize].home);
+                    self.put_elems2(ctor, vec![f]);
+                }
             }
             OP_SET_SUPER | OP_SET_SUPER_ELEM => {
                 let v = self.pop();
@@ -6527,38 +6549,50 @@ impl Vm {
             }
             OP_OBJ_REST => {
                 let n = self.stack.len() as int;
-                // the keys taken already: strings, or symbols (by identity)
+                // the keys taken already: strings, or symbols (by identity);
+                // a names on top, b computed keys below the source
                 let mut skip: Vec<String> = Vec::new();
                 let mut skip_syms: Vec<int> = Vec::new();
-                let mut i = n - (op.a as int);
+                let below = n - (op.a as int) - 1 - (op.b as int);
+                let mut i = below;
                 while i < n {
-                    let k = self.stack[i as usize].clone();
-                    if self.class_of(&k) == C_SYMBOL {
-                        skip_syms.push(obj_of(&k));
-                    } else {
-                        let s = self.to_string(&k);
-                        skip.push(s);
+                    if i != n - (op.a as int) - 1 {
+                        let k = self.stack[i as usize].clone();
+                        if self.class_of(&k) == C_SYMBOL {
+                            skip_syms.push(obj_of(&k));
+                        } else {
+                            let s = self.to_string(&k);
+                            skip.push(s);
+                        }
                     }
                     i += 1;
                 }
-                self.stack.truncate((n - (op.a as int)) as usize);
-                let src = self.top().clone();
+                let src = self.stack[(n - (op.a as int) - 1) as usize].clone();
+                self.stack.truncate(below as usize);
+                self.stack.push(src.clone());
                 let r = self.new_object();
-                if let Val::Obj(s) = &src {
-                    let keys = self.own_keys(*s, false, true);
+                let so = if is_obj(&src) { obj_of(&src) } else if matches!(src, Val::Undef) || matches!(src, Val::Null) { -1 } else { self.to_object(&src) };
+                if so >= 0 {
+                    let srcv = Val::Obj(so);
+                    let keys = self.own_keys(so, false, true);
                     for k in keys {
                         let is_sym = self.class_of(&k) == C_SYMBOL;
                         let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else if is_sym { String::new() } else { self.to_string(&k) };
                         let mut skipped = is_sym && skip_syms.contains(&obj_of(&k));
-                        for x in skip.iter() {
-                            if x.as_str() == ks.as_str() && !ks.is_empty() {
-                                skipped = true;
+                        if !is_sym {
+                            for x in skip.iter() {
+                                if x.as_str() == ks.as_str() {
+                                    skipped = true;
+                                }
                             }
                         }
                         if skipped {
                             continue;
                         }
-                        let v = self.get_elem(&src, &k);
+                        let v = self.get_elem(&srcv, &k);
+                        if self.throwing {
+                            return false;
+                        }
                         self.define_elem(r, &k, v, 0);
                     }
                 }
@@ -6606,7 +6640,14 @@ impl Vm {
                 }
             }
             OP_CONST_ERROR => {
-                self.throw_type("Assignment to constant variable.");
+                if op.b == 1 {
+                    // a strict write to a `with` binding that went away
+                    let n = self.protos[pi].consts[op.a as usize].clone();
+                    let ns = self.to_string(&n);
+                    self.throw_ref(format!("{} is not defined", ns).as_str());
+                } else {
+                    self.throw_type("Assignment to constant variable.");
+                }
             }
             OP_NOP => {}
             _ => {

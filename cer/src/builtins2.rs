@@ -125,6 +125,20 @@ impl Vm {
     pub fn call_native2(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         let a0 = arg(&args, 0);
         let a1 = arg(&args, 1);
+        if id >= NF_RP_FLAG0 && id < NF_RP_FLAG0 + 8 {
+            let ro = obj_of(&this);
+            if ro >= 0 && self.objs[ro as usize].class == C_REGEXP {
+                let re = &self.regexes[self.objs[ro as usize].func as usize];
+                let k = id - NF_RP_FLAG0;
+                let b = if k == 0 { re.has_indices } else if k == 1 { re.global } else if k == 2 { re.ignore_case } else if k == 3 { re.multiline } else if k == 4 { re.dot_all } else if k == 5 { re.unicode && !re.unicode_sets } else if k == 6 { re.unicode_sets } else { re.sticky };
+                return Val::Bool(b);
+            }
+            if ro >= 0 && ro == self.regexp_proto {
+                return Val::Undef;
+            }
+            self.throw_type("RegExp.prototype flag getter called on incompatible receiver");
+            return Val::Undef;
+        }
         match id {
             // ---- Array
             NF_A_ISARRAY => Val::Bool(self.class_of(&a0) == C_ARRAY),
@@ -1240,6 +1254,16 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
+                // the pattern's ToString before the flags'
+                let src = if is_obj(&src) {
+                    let t = self.to_str(&src);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    self.str_val(t.as_str())
+                } else {
+                    src
+                };
                 let r = self.new_regexp(&src, &fl);
                 if construct && !self.throwing {
                     let rp = self.regexp_proto;
@@ -1269,6 +1293,21 @@ impl Vm {
                 let fl = self.get(&this, self.atoms["flags"]);
                 let fs = self.to_string(&fl);
                 self.string_val(format!("/{}/{}", ss, fs))
+            }
+            NF_RP_SOURCE => {
+                let ro = obj_of(&this);
+                if ro >= 0 && self.objs[ro as usize].class == C_REGEXP {
+                    let ix = self.objs[ro as usize].func as usize;
+                    if ix < self.regex_shown.len() {
+                        return self.regex_shown[ix].clone();
+                    }
+                    return self.colds[self.objs[ro as usize].cold as usize].prim.clone();
+                }
+                if ro >= 0 && ro == self.regexp_proto {
+                    return self.str_val("(?:)");
+                }
+                self.throw_type("RegExp.prototype.source getter called on incompatible receiver");
+                Val::Undef
             }
             NF_RP_FLAGS => {
                 let ro = obj_of(&this);

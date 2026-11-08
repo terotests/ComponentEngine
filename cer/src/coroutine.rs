@@ -352,13 +352,39 @@ impl Vm {
         Val::Obj(r)
     }
 
+    /// The `yield*` slot on top of the stack as a pair [iter, next]: the
+    /// iterator's `next` is read once, when the slot is first used; -1
+    /// when reading it threw.
+    pub fn star_pair(&mut self) -> int {
+        let n = self.stack.len();
+        let s = self.stack[n - 1].clone();
+        let so = obj_of(&s);
+        if so >= 0 && self.objs[so as usize].class == C_ENV {
+            return so;
+        }
+        let a = self.intern("next");
+        let m = self.get(&s, a);
+        if self.throwing {
+            return -1;
+        }
+        let p = self.alloc(C_ENV, -1);
+        self.push_elem(p, s);
+        self.push_elem(p, m);
+        self.stack[n - 1] = Val::Obj(p);
+        p
+    }
+
     /// One `yield*` step: [iter, received, mode]; see OP_YIELD_STAR. Answers
     /// 0 to yield the result now on the stack, 1 when done (the value
     /// replaces the iterator), 2 to return with the value.
     pub fn yield_star_step(&mut self) -> int {
         let mode = num_of(&self.stack.pop().unwrap());
         let received = self.stack.pop().unwrap();
-        let it = self.stack[self.stack.len() - 1].clone();
+        let pr = self.star_pair();
+        if pr < 0 {
+            return 0;
+        }
+        let it = self.evecs[self.objs[pr as usize].elems as usize].v[0].clone();
         let name = if mode == GM_THROW {
             "throw"
         } else if mode == GM_RETURN {
@@ -366,8 +392,11 @@ impl Vm {
         } else {
             "next"
         };
-        let a = self.intern(name);
-        let m = self.get(&it, a);
+        let mut m = self.evecs[self.objs[pr as usize].elems as usize].v[1].clone();
+        if mode != GM_NEXT {
+            let a = self.intern(name);
+            m = self.get(&it, a);
+        }
         if self.throwing {
             return 0;
         }
@@ -415,7 +444,11 @@ impl Vm {
     pub fn astar_call(&mut self) -> bool {
         let mode = num_of(&self.stack.pop().unwrap());
         let received = self.stack.pop().unwrap();
-        let it = self.stack[self.stack.len() - 1].clone();
+        let pr = self.star_pair();
+        if pr < 0 {
+            return false;
+        }
+        let it = self.evecs[self.objs[pr as usize].elems as usize].v[0].clone();
         let name = if mode == GM_THROW {
             "throw"
         } else if mode == GM_RETURN {
@@ -423,8 +456,11 @@ impl Vm {
         } else {
             "next"
         };
-        let a = self.intern(name);
-        let m = self.get(&it, a);
+        let mut m = self.evecs[self.objs[pr as usize].elems as usize].v[1].clone();
+        if mode != GM_NEXT {
+            let a = self.intern(name);
+            m = self.get(&it, a);
+        }
         if self.throwing {
             return false;
         }

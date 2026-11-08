@@ -185,6 +185,9 @@ pub const NF_RP_TEST: int = 261;
 pub const NF_RP_TOSTRING: int = 262;
 pub const NF_RP_FLAGS: int = 263;
 pub const NF_RP_SOURCE: int = 264;
+/// the flag getters hasIndices, global, ignoreCase, multiline, dotAll,
+/// unicode, unicodeSets, sticky
+pub const NF_RP_FLAG0: int = 1900;
 // Date
 pub const NF_DATE_NOW: int = 270;
 pub const NF_DATE_UTC: int = 271;
@@ -731,6 +734,13 @@ impl Vm {
         self.method(rp, "test", NF_RP_TEST, 1);
         self.method(rp, "toString", NF_RP_TOSTRING, 0);
         self.getter(rp, "flags", NF_RP_FLAGS);
+        self.getter(rp, "source", NF_RP_SOURCE);
+        let rflags: Vec<&str> = vec!["hasIndices", "global", "ignoreCase", "multiline", "dotAll", "unicode", "unicodeSets", "sticky"];
+        let mut rfi: int = 0;
+        while rfi < 8 {
+            self.getter(rp, rflags[rfi as usize], NF_RP_FLAG0 + rfi);
+            rfi += 1;
+        }
 
         // Date
         let dc = self.ctor("Date", NF_DATE, 7, dp);
@@ -987,7 +997,7 @@ impl Vm {
         }
         if matches!(self.regex_shown[idx as usize], Val::Undef) {
             let s = self.to_string(&src);
-            let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/") };
+            let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/").replace("\n", "\\n").replace("\r", "\\r").replace("\u{2028}", "\\u2028").replace("\u{2029}", "\\u2029") };
             self.regex_shown[idx as usize] = self.string_val(shown);
             // read-only properties (as add_prop marks them)
             self.mark_setter(A_LASTINDEX);
@@ -1009,30 +1019,29 @@ impl Vm {
             // the shape the first one got: no transitions looked up
             self.objs[o as usize].shape = self.regex_shape as i32;
             self.push_val(o, Val::Num(0.0));
-            self.push_val(o, shown);
-            slot_room(&mut self.objs[o as usize], 8);
-            self.push_val(o, Val::Bool(g));
-            self.push_val(o, Val::Bool(ic));
-            self.push_val(o, Val::Bool(m));
-            self.push_val(o, Val::Bool(sa));
-            self.push_val(o, Val::Bool(u));
-            self.push_val(o, Val::Bool(y));
             return Val::Obj(o);
         }
-        self.add_own(o, A_LASTINDEX, Val::Num(0.0), P_HIDDEN);
-        let ro = P_HIDDEN | P_READONLY;
-        self.add_own(o, A_SOURCE, shown, ro);
-        self.add_own(o, A_GLOBAL, Val::Bool(g), ro);
-        self.add_own(o, A_IGNORECASE, Val::Bool(ic), ro);
-        self.add_own(o, A_MULTILINE, Val::Bool(m), ro);
-        self.add_own(o, A_DOTALL, Val::Bool(sa), ro);
-        self.add_own(o, A_UNICODE, Val::Bool(u), ro);
-        self.add_own(o, A_STICKY, Val::Bool(y), ro);
+        // only lastIndex is its own; source and the flags are getters
+        self.add_own(o, A_LASTINDEX, Val::Num(0.0), P_HIDDEN | P_FIXED);
         let sh = self.objs[o as usize].shape as int;
         if !self.shapes[sh as usize].owned {
             self.regex_shape = sh;
         }
         Val::Obj(o)
+    }
+
+    /// Sets a regexp's lastIndex as RegExpBuiltinExec does: a read-only
+    /// one throws whether or not the caller is strict.
+    pub fn set_last_index(&mut self, ro: int, n: double) {
+        let slot = self.find(ro, A_LASTINDEX);
+        if slot >= 0 {
+            let attr = self.attr_at(ro, slot);
+            if (attr & P_READONLY) != 0 && (attr & P_ACCESSOR) == 0 {
+                self.throw_type("Cannot assign to read only property 'lastIndex' of object");
+                return;
+            }
+        }
+        self.set_obj(ro, A_LASTINDEX, Val::Num(n));
     }
 
     pub fn regexp_flags(&self, o: int) -> String {
@@ -1075,23 +1084,33 @@ impl Vm {
         self.rx_cache(s);
         let ulen = self.rx_units.len() as int;
         let mut start: int = 0;
+        let li = self.get_obj(ro, A_LASTINDEX, &Val::Obj(ro));
+        let lin = self.to_number(&li);
+        if self.throwing {
+            return Val::Undef;
+        }
         if global || sticky {
-            let li = self.get_obj(ro, A_LASTINDEX, &Val::Obj(ro));
-            start = to_integer(self.to_number(&li)) as int;
-            if start > ulen || start < 0 {
-                self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
+            let l = to_integer(lin);
+            if l > ulen as double {
+                self.set_last_index(ro, 0.0);
                 return Val::Null;
+            }
+            if l > 0.0 {
+                start = l as int;
             }
         }
         let caps = self.regexes[idx as usize].exec(&self.rx_units, start);
         if caps.is_empty() {
             if global || sticky {
-                self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
+                self.set_last_index(ro, 0.0);
             }
             return Val::Null;
         }
         if global || sticky {
-            self.set_obj(ro, A_LASTINDEX, Val::Num(caps[1] as double));
+            self.set_last_index(ro, caps[1] as double);
+            if self.throwing {
+                return Val::Undef;
+            }
         }
         let mut items: Vec<Val> = Vec::new();
         let mut g: int = 0;
