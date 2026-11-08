@@ -209,6 +209,23 @@ fn host_calls_reclaim_checked() {
 }
 
 #[test]
+fn host_call_result_outlives_its_jobs() {
+    // Engine::call runs the promise jobs after the call with safe points;
+    // the result it returns is held through them
+    let mut e = Engine::new();
+    e.vm.rc_stress();
+    e.eval(
+        "var n = 0; function f() { n++; var s = 'r' + n + ':' + [1, 2, 3].join('-'); \
+         Promise.resolve(1).then(function () { var t = []; for (var i = 0; i < 500; i++) t.push('x' + i); return t; }); \
+         return s; }",
+    );
+    for k in 1..20 {
+        assert_eq!(e.call("f"), format!("r{}:1-2-3", k));
+    }
+    assert_eq!(e.vm.rc_errors, 0, "{}", e.vm.rc_log.join("; "));
+}
+
+#[test]
 fn prelude_snapshot_is_current() {
     // Engine::new restores src/prelude_snap.rs instead of compiling the
     // prelude; after a change to the prelude or the built-ins, write it
