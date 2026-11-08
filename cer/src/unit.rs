@@ -152,6 +152,9 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
             ci += 1;
         }
         vm.link_strs(&mut p);
+        if p.fwd_atom >= 0 {
+            p.fwd_atom = map[p.fwd_atom as usize];
+        }
         let mut i: usize = 0;
         let n = p.code.len();
         while i < n {

@@ -22,7 +22,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const CRATE = path.join(REPO, "playground/cerxes-wasm");
 const TARGET = path.join(CRATE, "target-jit");
-const WASM = path.join(TARGET, "wasm32-wasip1/release/cerxes_wasm.wasm");
+const WASM = process.env.WJIT_WASM || path.join(TARGET, "wasm32-wasip1/release/cerxes_wasm.wasm");
 const args = process.argv.slice(2);
 const opt = (name, def) => args.find((a) => a.startsWith("--" + name + "="))?.slice(name.length + 3) ?? def;
 const doCases = args.includes("--cases") || !args.includes("--bench");
@@ -162,9 +162,9 @@ if (args.includes("--octane")) {
   // the Octane suites (cer/bench/octane.mjs --dump, which needs a Ranger
   // checkout: RANGER_DIR or ../Ranger), JIT off and on: scores, and a
   // failure when a suite reports an error with the JIT on
-  const dir = fs.mkdtempSync("/tmp/wjit-octane-");
-  const d = spawnSync("node", [path.join(REPO, "cer/bench/octane.mjs"), "--dump=" + dir], { stdio: "inherit" });
-  if (d.status !== 0) process.exit(1);
+  const dir = process.env.OCTANE_DIR || fs.mkdtempSync("/tmp/wjit-octane-");
+  if (!process.env.OCTANE_DIR) { const d = spawnSync("node", [path.join(REPO, "cer/bench/octane.mjs"), "--dump=" + dir], { stdio: "inherit" });
+  if (d.status !== 0) process.exit(1); }
   const only = opt("only", "");
   console.log("suite\toff\ton\tspeedup");
   for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".js")).sort()) {

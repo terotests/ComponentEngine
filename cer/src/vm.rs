@@ -298,6 +298,13 @@ pub struct Vm {
     pub mcache: Vec<i32>,
     pub pic: Vec<i32>,
     pub shape_epoch: int,
+    /// instanceof: Function.prototype's and Object.prototype's shapes and
+    /// shape_epoch when neither had @@hasInstance (-1 none yet)
+    pub hi_fp: int,
+    pub hi_op: int,
+    pub hi_epoch: int,
+    /// the atom of "apply" (fwd_target), -1 before its first use
+    pub a_apply: int,
     /// a collection or reclaim is due at the next safe point (gc_due)
     pub gc_flag: bool,
     /// where in pic the last pic_get hit or filled
@@ -592,6 +599,10 @@ impl Vm {
             mcache: Vec::new(),
             pic: Vec::new(),
             shape_epoch: 0,
+            hi_fp: -1,
+            hi_op: -1,
+            hi_epoch: -1,
+            a_apply: -1,
             gc_flag: false,
             pic_way: 0,
             alloc_count: 0,
@@ -675,6 +686,21 @@ impl Vm {
         }
         self.rx_s = s.clone();
         self.rx_units = jsstr::units(s.as_str());
+    }
+
+    /// `s`'s UTF-16 units out of the rx cache (computed when it holds
+    /// others), for a caller that may run code that uses the cache; rx_put
+    /// gives them back.
+    pub fn rx_take(&mut self, s: &Rc<String>) -> Vec<int> {
+        self.rx_cache(s);
+        self.rx_s = Rc::new(String::new());
+        let mut spare: Vec<int> = Vec::new();
+        take_ints(&mut self.rx_units, &mut spare)
+    }
+
+    pub fn rx_put(&mut self, s: &Rc<String>, units: Vec<int>) {
+        self.rx_s = s.clone();
+        self.rx_units = units;
     }
 
     /// The UTF-16 unit at `i`, -1 out of range.
@@ -3491,7 +3517,19 @@ impl Vm {
             return false;
         }
         let fo = obj_of(f);
-        let hi = self.get_obj(fo, A_HASINSTANCE, f);
+        // a function straight on Function.prototype, no own @@hasInstance,
+        // and Function.prototype and Object.prototype as they were when
+        // neither had one (same shapes, same shape_epoch): no lookup
+        let fp = self.function_proto;
+        let op = self.object_proto;
+        let direct = fp >= 0 && op >= 0 && self.objs[fo as usize].proto as int == fp && self.objs[fp as usize].proto as int == op && self.find(fo, A_HASINSTANCE) < 0;
+        let plain = direct && self.hi_epoch == self.shape_epoch && self.hi_fp == self.objs[fp as usize].shape as int && self.hi_op == self.objs[op as usize].shape as int;
+        let hi = if plain { Val::Undef } else { self.get_obj(fo, A_HASINSTANCE, f) };
+        if direct && !plain && matches!(hi, Val::Undef) && self.find(fp, A_HASINSTANCE) < 0 && self.find(op, A_HASINSTANCE) < 0 {
+            self.hi_epoch = self.shape_epoch;
+            self.hi_fp = self.objs[fp as usize].shape as int;
+            self.hi_op = self.objs[op as usize].shape as int;
+        }
         if self.is_callable(&hi) && self.objs[obj_of(&hi) as usize].class != C_NATIVE {
             let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef, Val::Undef);
             return self.truthy_v(&r);
@@ -3508,7 +3546,13 @@ impl Vm {
             Val::Obj(o) => *o,
             _ => return false,
         };
-        let p = self.get_obj(target, A_PROTOTYPE, &Val::Obj(target));
+        // a script function's own data `prototype` read from its slot
+        let ps = if self.objs[target as usize].class == C_FUNCTION { self.find(target, A_PROTOTYPE) } else { -1 };
+        let p = if ps >= 0 && (self.attr_at(target, ps) & (P_ACCESSOR | P_MAPPED)) == 0 {
+            self.objs[target as usize].get_slot(ps as usize)
+        } else {
+            self.get_obj(target, A_PROTOTYPE, &Val::Obj(target))
+        };
         let proto = match p {
             Val::Obj(p) => p,
             _ => {
@@ -3928,6 +3972,65 @@ impl Vm {
         }
         let o = self.alloc(C_OBJECT, proto);
         Val::Obj(o)
+    }
+
+    /// `new f(…)` of a forwarder f (Proto.fwd_atom: its body is just
+    /// `this.m.apply(this, arguments)`) whose new object is `this`: m when
+    /// that call can be m's own frame (a construct frame of m: m returns
+    /// nothing, so the object is the result either way), else -1. Only
+    /// data properties are looked at (no getter runs here): m on this's
+    /// prototypes, and apply on m's the built-in one.
+    pub fn fwd_target(&mut self, fp: usize, this: &Val) -> int {
+        let atom = self.protos[fp].fwd_atom;
+        let o = obj_of(this);
+        if atom < 0 || o < 0 {
+            return -1;
+        }
+        let m = self.data_obj(self.objs[o as usize].proto as int, atom);
+        if m < 0 || self.objs[m as usize].class != C_FUNCTION {
+            return -1;
+        }
+        {
+            let q = &self.protos[self.objs[m as usize].func as usize];
+            if !q.void_ret || q.rest >= 0 || q.class_ctor || q.generator || q.is_async || q.arrow {
+                return -1;
+            }
+        }
+        if self.a_apply < 0 {
+            self.a_apply = self.intern("apply");
+        }
+        let ap = self.data_obj(m, self.a_apply);
+        if ap < 0 || self.objs[ap as usize].class != C_NATIVE || (self.objs[ap as usize].func as int) != crate::builtins::NF_APPLY {
+            return -1;
+        }
+        m
+    }
+
+    /// The object in data property `atom` of o or of its prototypes, -1
+    /// when it is not an object, is absent, or the walk meets an accessor
+    /// or an object whose properties are not only its own slots.
+    fn data_obj(&self, o: int, atom: int) -> int {
+        let mut cur = o;
+        let mut hops = 0;
+        while cur >= 0 && hops < 64 {
+            let class = self.objs[cur as usize].class;
+            if class != C_OBJECT && class != C_FUNCTION && class != C_NATIVE {
+                return -1;
+            }
+            let slot = self.find(cur, atom);
+            if slot >= 0 {
+                if (self.attr_at(cur, slot) & (P_ACCESSOR | P_MAPPED)) != 0 {
+                    return -1;
+                }
+                return obj_of(&self.objs[cur as usize].get_slot(slot as usize));
+            }
+            if class == C_FUNCTION && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
+                return -1;
+            }
+            cur = self.objs[cur as usize].proto as int;
+            hops += 1;
+        }
+        -1
     }
 
     /// The arguments object of a call of `fo` whose argc arguments lie
