@@ -752,22 +752,44 @@ pub struct Inl {
     pub caches: Vec<u32>,
     pub atoms: Vec<i32>,
     pub strict: bool,
+    /// per callee pc: a GET_THIS_PROP read as a move from this operand
+    /// (inline_ok), else i32::MIN
+    pub fwd: Vec<i32>,
 }
 
 /// After a write that cannot be undone (a scope slot, a property): only
 /// moves up to the return, which cannot fail and send the call to be made
-/// again.
-fn settles(code: &[Op], from: usize, np: i32) -> bool {
+/// again. `fwd` (atom word, value operand) is a property just stored on
+/// this: a read of it again from this becomes a move of that value
+/// (written into `out` at its pc).
+fn settles(code: &[Op], from: usize, np: i32, fwd: Option<(i32, i32)>, out: &mut Vec<i32>) -> bool {
     let mut pc = from;
+    let mut fwd = fwd;
     while pc < code.len() {
         let op = code[pc];
         let k = (op.code & 255) as int;
+        // a write to the forwarded value's register ends the forwarding
+        let kill = |f: Option<(i32, i32)>, w: i32| match f {
+            Some((_, v)) if v == w => None,
+            x => x,
+        };
         match k {
             R_RET | R_RET_UNDEF => return true,
             R_NOP => pc += 1 + (op.code >> 16) as usize,
-            R_MOVE if op.a >= np => pc += 1,
+            R_MOVE if op.a >= np => {
+                fwd = kill(fwd, op.a);
+                pc += 1
+            }
             // a scope read has no check that could fail
-            R_GET_ENV if op.a >= np && ((op.code >> 8) & 255) == 0 && op.b >= 0 && op.c >= 0 => pc += 1,
+            R_GET_ENV if op.a >= np && ((op.code >> 8) & 255) == 0 && op.b >= 0 && op.c >= 0 => {
+                fwd = kill(fwd, op.a);
+                pc += 1
+            }
+            R_GET_THIS_PROP if op.a >= np && ((op.code >> 8) & 255) == 0 && matches!(fwd, Some((c, _)) if c == op.c) => {
+                out[pc] = fwd.unwrap().1;
+                fwd = kill(fwd, op.a);
+                pc += 1
+            }
             _ => return false,
         }
     }
@@ -778,10 +800,16 @@ fn settles(code: &[Op], from: usize, np: i32) -> bool {
 pub const INL_OPS: usize = 12;
 
 /// The callee's register code from its entry when inline_call can write
-/// it: arithmetic, moves and scope reads up to a return, no jump.
-pub fn inline_ok(code: &[Op], entry: usize, nparams: u32) -> bool {
+/// it: arithmetic, moves and scope reads up to a return, no jump. Some:
+/// per pc, the operand a GET_THIS_PROP is forwarded from (settles), else
+/// i32::MIN.
+pub fn inline_ok(code: &[Op], entry: usize, nparams: u32) -> Option<Vec<i32>> {
+    let mut out = vec![i32::MIN; code.len()];
     let mut pc = entry;
     let mut n = 0usize;
+    let np = nparams as i32;
+    // the registers that hold this (R_THIS), as a bit mask
+    let mut this_regs: u64 = 0;
     while pc < code.len() {
         let op = code[pc];
         let k = (op.code & 255) as int;
@@ -792,19 +820,19 @@ pub fn inline_ok(code: &[Op], entry: usize, nparams: u32) -> bool {
             continue;
         }
         if k == R_RET || k == R_RET_UNDEF {
-            return true;
+            return Some(out);
         }
         // a skip may only step over NOPs (the ops it skips do nothing)
         if pc + 1 + skip > code.len() || (pc + 1..pc + 1 + skip).any(|j| (code[j].code & 255) as int != R_NOP) {
-            return false;
+            return None;
         }
         n += 1;
         if n > INL_OPS {
-            return false;
+            return None;
         }
         // the registers it writes stay clear of the parameters
         let w = op.a;
-        let np = nparams as i32;
+        let is_this = |r: i32| r >= 0 && r < 64 && this_regs & (1u64 << r) != 0;
         let ok = match k {
             R_MOVE | R_ADD | R_SUB | R_MUL => w >= np,
             R_ARITH => w >= np && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR),
@@ -812,16 +840,30 @@ pub fn inline_ok(code: &[Op], entry: usize, nparams: u32) -> bool {
             R_GET_ENV => w >= np && sub <= 1 && op.b >= 0 && op.c >= 0,
             R_THIS | R_GET_THIS_PROP => w >= np,
             R_GET_PROP => w >= np && op.b >= 0,
-            R_SET_ENV => op.b >= 0 && op.c >= 0 && settles(code, pc + 1, np),
-            R_SET_PROP => w >= 0 && sub == 0 && settles(code, pc + 1, np),
+            R_SET_ENV => op.b >= 0 && op.c >= 0 && return if settles(code, pc + 1, np, None, &mut out) { Some(out) } else { None },
+            R_ADD_ENV => op.a >= 0 && op.c >= 0 && return if settles(code, pc + 1, np, None, &mut out) { Some(out) } else { None },
+            R_SET_PROP => {
+                let f = if is_this(w) && op.c >= 0 { Some((op.c, op.b)) } else { None };
+                return if w >= 0 && sub == 0 && settles(code, pc + 1, np, f, &mut out) { Some(out) } else { None };
+            }
             _ => false,
         };
         if !ok {
-            return false;
+            return None;
+        }
+        if w >= 0 && w < 64 {
+            if k == R_THIS {
+                this_regs |= 1u64 << w;
+            } else {
+                this_regs &= !(1u64 << w);
+            }
+        }
+        if (k == R_LOAD2 || (k == R_GET_ENV && sub == 1)) && w + 1 < 64 {
+            this_regs &= !(1u64 << (w + 1));
         }
         pc += 1;
     }
-    false
+    None
 }
 
 impl<'a> Cg<'a> {
@@ -3115,6 +3157,14 @@ impl<'a> Cg<'a> {
                 ret = true;
                 break;
             }
+            if k == R_GET_THIS_PROP && c.fwd.get(cp).map_or(false, |&v| v != i32::MIN) && ins.a >= 0 {
+                // the property just stored on this: its value
+                let o = self.raw(c.fwd[cp]);
+                self.load_val(o, L_Q0);
+                self.store_val(ins.a as u32, L_Q0);
+                cp += 1;
+                continue;
+            }
             self.cur_kind = k as u32;
             if !self.one(cp, ins) {
                 self.inl_bad = true;
@@ -4766,6 +4816,41 @@ impl<'a> Cg<'a> {
                 self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| {
                     cg.env_slot_addr(w2, w3);
                     cg.heap_store(b, off, p);
+                    true
+                })
+            }
+            R_ADD_ENV if self.lay.obj_ok && w1 >= 0 && w3 >= 0 => {
+                // x += v on a scope slot, both numbers (rvm.rs R_ADD_ENV):
+                // the slot's old value must be an uncounted number or
+                // undefined, else the helper
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| {
+                    let l = cg.lay;
+                    let a = cg.opnd(w1);
+                    let b = cg.opnd(w2);
+                    cg.need_num(a, p);
+                    cg.need_num(b, p);
+                    cg.num(a);
+                    cg.num(b);
+                    cg.op(F64_ADD);
+                    cg.set(L_A);
+                    cg.env_slot_addr(sub as i32, w3);
+                    cg.get(L_T2);
+                    cg.mem(I32_LOAD8_U, 0, 0);
+                    cg.set(L_TAG);
+                    cg.get(L_TAG);
+                    cg.i32c(l.t_num as i64);
+                    cg.op(I32_NE);
+                    cg.get(L_TAG);
+                    cg.i32c(l.t_undef as i64);
+                    cg.op(I32_NE);
+                    cg.op(I32_AND);
+                    cg.fail_if(p);
+                    cg.get(L_T2);
+                    cg.i32c(l.t_num as i64);
+                    cg.mem(I32_STORE8, 0, 0);
+                    cg.get(L_T2);
+                    cg.get(L_A);
+                    cg.mem(F64_STORE, 3, l.off_num);
                     true
                 })
             }
@@ -7903,9 +7988,13 @@ fn inline_sites(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<O
         }
         let qb = q.rbase as usize;
         let qn = q.code.len();
-        if qb + qn > vm.rcode.len() || !inline_ok(&vm.rcode[qb..qb + qn], q.rentry as usize, q.nparams as u32) {
+        if qb + qn > vm.rcode.len() {
             continue;
         }
+        let fwd = match inline_ok(&vm.rcode[qb..qb + qn], q.rentry as usize, q.nparams as u32) {
+            Some(f) => f,
+            None => continue,
+        };
         let (entry, nparams, nslots, fsize, strict) = (q.rentry as usize, q.nparams as u32, q.nslots as u32, q.fsize as u32, q.strict);
         let caches = site_caches(vm, tp as usize, qb, qn);
         let atoms = site_atoms(vm, tp as usize, qb, qn);
@@ -7920,6 +8009,7 @@ fn inline_sites(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<O
             caches,
             atoms,
             strict,
+            fwd,
         });
     }
     out
@@ -8015,12 +8105,15 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
                         }
                     }
                 }
-                // the site's first way: a method one prototype up
+                // the site's first way: a data method some prototypes up
+                // (rvm.rs PIC_W: depth, slot, accessor, then each
+                // prototype and its shape)
                 let site = rb + k;
                 if site < vm.rpic.len() && vm.rpic[site] >= 0 {
                     let b = (vm.rpic[site] * (crate::rvm::PIC_W as i32)) as usize;
-                    if b + 6 < vm.pic.len() && vm.pic[b + 2] == 1 && vm.pic[b + 3] >= 0 && vm.pic[b + 4] == 0 {
-                        let h = vm.pic[b + 5];
+                    let d = if b + 4 < vm.pic.len() { vm.pic[b + 2] } else { 0 };
+                    if d >= 1 && d <= crate::rvm::PIC_DEPTH as i32 && b + 6 + 2 * (d as usize) < vm.pic.len() && vm.pic[b + 3] >= 0 && vm.pic[b + 4] == 0 {
+                        let h = vm.pic[b + 5 + 2 * (d as usize - 1)];
                         if h >= 0 && (h as usize) < vm.objs.len() {
                             return vm.objs[h as usize].get_slot(vm.pic[b + 3] as usize);
                         }
