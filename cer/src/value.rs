@@ -620,6 +620,11 @@ pub struct Proto {
     pub env_size: int,
     /// a rest parameter's slot, -1 for none
     pub rest: int,
+    /// `function() { this.m.apply(this, arguments) }` (pcomp): m's atom,
+    /// -1 for any other function; `new` of it enters m itself
+    pub fwd_atom: int,
+    /// no `return` with a value (pcomp; false when not known)
+    pub void_ret: bool,
     pub uses_args: bool,
     pub arrow: bool,
     pub strict: bool,
@@ -666,6 +671,8 @@ impl Proto {
             nslots: 0,
             env_size: 0,
             rest: -1,
+            fwd_atom: -1,
+            void_ret: false,
             uses_args: false,
             arrow: false,
             strict: false,

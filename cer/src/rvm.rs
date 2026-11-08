@@ -868,7 +868,7 @@ impl Vm {
                             let fp = self.ob(fo).func as usize;
                             let plain = {
                                 let p = proto_at(&self.protos, fp);
-                                !p.uses_args && p.rest < 0 && !p.class_ctor
+                                p.rest < 0 && !p.class_ctor
                             };
                             // the result goes to the slot of f, or to w3 - 1
                             let dst = if w3 > 0 { bp + (w3 as int) - 1 } else { fpos };
@@ -916,7 +916,7 @@ impl Vm {
                         let mut plain = false;
                         if fo >= 0 && self.ob(fo).class == C_FUNCTION {
                             let p = &self.protos[self.ob(fo).func as usize];
-                            plain = !p.uses_args && p.rest < 0 && !p.class_ctor && p.constructible();
+                            plain = p.rest < 0 && !p.class_ctor && p.constructible();
                         }
                         if plain {
                             self.frames[fi].pc = (pc + 1 + ((w0 >> 16) as int));
@@ -935,12 +935,17 @@ impl Vm {
                             let f = self.stack[fpos as usize];
                             let this = self.make_this(&f);
                             self.stack[(fpos + 1) as usize] = this;
-                            if !self.renter(fo, fpos, argc, fpos) {
+                            // a forwarder's m in its place
+                            let m = if self.ob(fo).func >= 0 && self.protos[self.ob(fo).func as usize].fwd_atom >= 0 { self.fwd_target(self.ob(fo).func as usize, &this) } else { -1 };
+                            if m >= 0 {
+                                self.stack[fpos as usize] = Val::Obj(m);
+                            }
+                            if !self.renter(if m >= 0 { m } else { fo }, fpos, argc, fpos) {
                                 continue 'frames;
                             }
                             fi = self.frames.len() - 1;
                             self.frames[fi].construct = true;
-                            self.frames[fi].new_target = f;
+                            self.frames[fi].new_target = if m >= 0 { Val::Undef } else { f };
                             pi = self.frames[fi].proto as usize;
                             bp = fpos + 2;
                             pc = self.frames[fi].pc;
@@ -1353,7 +1358,7 @@ impl Vm {
                     let gp = self.objs[go as usize].func as usize;
                     let plain = {
                         let p = &self.protos[gp];
-                        !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
+                        p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
                     };
                     if plain {
                         let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
@@ -1409,7 +1414,7 @@ impl Vm {
         }
         let plain = {
             let q = &self.protos[self.objs[go as usize].func as usize];
-            !q.uses_args && q.rest < 0 && !q.class_ctor && !q.generator && !q.is_async
+            q.rest < 0 && !q.class_ctor && !q.generator && !q.is_async
         };
         if !plain {
             return false;
@@ -1851,11 +1856,34 @@ impl Vm {
             fpos += 1;
             argc -= 1;
         }
+        if fo >= 0 && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_APPLY {
+            // f.apply(this, arr) of a plain JS f: [apply, f, this, arr] as
+            // [f, this, a…] one slot on, so f is entered in place below
+            let g = obj_of(&self.stack[(fpos + 1) as usize]);
+            if g >= 0 && self.ob(g).class == C_FUNCTION && fpos + 1 != dst {
+                let arr = if argc >= 2 { self.stack[(fpos + 3) as usize] } else { Val::Undef };
+                if argc < 1 {
+                    self.stack.push(Val::Undef);
+                }
+                let items = self.array_like_to_vec(&arr);
+                if self.throwing {
+                    return false;
+                }
+                self.stack.truncate((fpos + 3) as usize);
+                let n = items.len() as int;
+                for x in items {
+                    self.stack.push(x);
+                }
+                fo = g;
+                fpos += 1;
+                argc = n;
+            }
+        }
         if fo >= 0 && self.ob(fo).class == C_FUNCTION && fpos != dst {
             let tp = self.ob(fo).func as usize;
             let plain = {
                 let p = &self.protos[tp];
-                !p.uses_args && p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
+                p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
             };
             if plain {
                 self.renter(fo, fpos, argc, dst);
@@ -1900,7 +1928,7 @@ impl Vm {
     /// R_NEW_ARRAY: the n items from slot w1 on into a new array, which
     /// goes to slot w1.
     #[inline(never)]
-    fn r_new_array(&mut self, bp: int, w1: int, n: int) {
+    pub fn r_new_array(&mut self, bp: int, w1: int, n: int) {
         let p = self.array_proto;
         let a = self.alloc(C_ARRAY, p);
         let e = self.elems_id(a);
@@ -2010,11 +2038,14 @@ impl Vm {
         if proto_at(&self.protos, pi).rstate == 0 && !self.renter_translate(pi) {
             return false;
         }
-        let (nparams, nslots, fsize, env_size, arrow, strict, entry) = {
+        let (nparams, nslots, fsize, env_size, arrow, strict, entry, uses_args) = {
             let p = proto_at(&self.protos, pi);
-            (p.nparams, p.nslots, p.fsize, p.env_size, p.arrow, p.strict, p.rentry)
+            (p.nparams, p.nslots, p.fsize, p.env_size, p.arrow, p.strict, p.rentry, p.uses_args)
         };
         let bp = fpos + 2;
+        // `arguments`: made from the arguments as they came, before the
+        // locals past the parameters are cleared
+        let args_obj = if uses_args { self.make_args(fo, bp, argc, strict) } else { -1 };
         let end = (bp + fsize) as usize;
         // the parameters that came stay and the other locals start
         // undefined; the slots after them are written before they are read.
@@ -2063,7 +2094,7 @@ impl Vm {
             env: env,
             this_val: this_val,
             new_target: nt,
-            args_obj: -1,
+            args_obj: args_obj,
             construct: false,
             gen: -1,
             ret: ret,
