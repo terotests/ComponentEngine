@@ -2432,6 +2432,23 @@ impl Vm {
                     return self.ta_get(*o, i);
                 }
                 let a = self.index_atom(i);
+                // an element up the chain (an array or string prototype) is
+                // not an atom property
+                let mut cur = *o;
+                loop {
+                    if self.objs[cur as usize].class == C_PROXY || self.find(cur, a) >= 0 {
+                        break;
+                    }
+                    let p = self.objs[cur as usize].proto as int;
+                    if p < 0 {
+                        break;
+                    }
+                    let pc = self.objs[p as usize].class;
+                    if pc == C_ARRAY || pc == C_ARGUMENTS || pc == C_TYPED || pc == C_STRING {
+                        return self.get_index(&Val::Obj(p), i);
+                    }
+                    cur = p;
+                }
                 self.get_obj(*o, a, v)
             }
             Val::Str(s) => {
@@ -2567,6 +2584,13 @@ impl Vm {
             return;
         }
         let class = self.objs[o as usize].class;
+        if class == C_STRING && atom == A_LENGTH {
+            // a String object's length is read-only
+            if self.strict_now() {
+                self.throw_type("Cannot assign to read only property 'length' of object '[object String]'");
+            }
+            return;
+        }
         if class == C_ARRAY && atom == A_LENGTH {
             let n = self.to_number(&v);
             if self.objs[o as usize].pos == 2 {
@@ -2960,21 +2984,6 @@ impl Vm {
             if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                 return true;
             }
-            if class == C_ARRAY {
-                // an own index property, then the prototypes (their elements too)
-                let at = self.index_atom(i);
-                if self.find(o, at) >= 0 {
-                    return true;
-                }
-                let p = self.objs[o as usize].proto as int;
-                if p < 0 {
-                    return false;
-                }
-                if self.objs[p as usize].class == C_ARRAY || self.objs[p as usize].class == C_PROXY {
-                    return self.has_property(p, k);
-                }
-                return self.has_atom(p, at);
-            }
             if class == C_TYPED {
                 return i < self.ta_length(o);
             }
@@ -2986,8 +2995,19 @@ impl Vm {
                     }
                 }
             }
+            // an own index property, then the prototypes (their elements too)
             let at = self.index_atom(i);
-            return self.has_atom(o, at);
+            if class == C_PROXY {
+                return self.has_atom(o, at);
+            }
+            if self.find(o, at) >= 0 {
+                return true;
+            }
+            let p = self.objs[o as usize].proto as int;
+            if p < 0 {
+                return false;
+            }
+            return self.has_property(p, k);
         }
         self.has_atom(o, a)
     }
@@ -4759,7 +4779,7 @@ impl Vm {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 3 {
+                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
                                     let r = self.evecs[ob.elems as usize].v[i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
@@ -5352,7 +5372,7 @@ impl Vm {
             Val::Undef | Val::Null => return out,
             Val::Obj(o) => {
                 let class = self.objs[*o as usize].class;
-                if (class == C_ARRAY && self.objs[*o as usize].pos != 3) || class == C_ARGUMENTS {
+                if (class == C_ARRAY && self.objs[*o as usize].pos != 3 && !(self.idx_protos && !self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty())) || class == C_ARGUMENTS {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                 }
                 let l = self.get(v, A_LENGTH);

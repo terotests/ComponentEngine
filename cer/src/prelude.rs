@@ -2494,7 +2494,9 @@ hide(Object, 'getOwnPropertyDescriptors', function getOwnPropertyDescriptors(o) 
 // includes on array-likes reads only what it looks at
 var nativeIncludes = AP.includes;
 hide(AP, 'includes', setLength(function includes(x, from) {
+  'use strict';
   if (Array.isArray(this)) return nativeIncludes.call(this, x, from);
+  if (this === undefined || this === null) throw new TypeError('Array.prototype.includes called on null or undefined');
   var O = Object(this), n = toLength(O.length);
   if (n === 0) return false;
   for (var i = relIndex(from, n, 0); i < n; i++) { var v = O[i]; if (v === x || (v !== v && x !== x)) return true; }
