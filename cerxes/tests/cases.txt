@@ -701,3 +701,10 @@ function run() {
 run()
 ----
 s1111111111111111111,30xxxxxxxxxx,26,7,29,o,1 1 14 7 26 7 26 7
+
+# a parameter pattern's default reads an earlier binding of the same
+# pattern; mapped arguments follow the parameters (sloppy, simple list)
+==== js
+var h = ([s, t, u = t]) => s + t + u; var g = ({ a, b = a }) => a + b; function m(a, b) { a = 9; arguments[1] = 7; return a + ',' + b + ',' + arguments[0]; } [h(['a', 'b']), g({ a: 2 }), m(1, 2), { '#N/A': 1 }['#N/A']].join(' ')
+----
+abb 4 9,7,9 1

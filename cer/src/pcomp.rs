@@ -4653,6 +4653,11 @@ impl PComp {
             }
             self.emit_ref(name.as_str(), M_INIT, decl);
             self.op(OP_POP);
+            if pk == K_PARAM {
+                // a parameter is set as its pattern goes: a later default
+                // in the same pattern reads it (`([a, b = a]) => …`)
+                self.mark_inited(b);
+            }
             return;
         }
         let e = self.lhs();
@@ -6207,7 +6212,7 @@ impl PComp {
                 }
                 self.next();
             }
-            if self.text().starts_with("#") || self.kind() == T_PRIVATE {
+            if self.kind() == T_PRIVATE {
                 self.fail("private names are not allowed in object literals");
                 return;
             }
