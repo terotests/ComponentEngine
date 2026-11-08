@@ -3541,7 +3541,13 @@ impl Vm {
             Val::Obj(o) => *o,
             _ => return false,
         };
-        let p = self.get_obj(target, A_PROTOTYPE, &Val::Obj(target));
+        // a script function's own data `prototype` read from its slot
+        let ps = if self.objs[target as usize].class == C_FUNCTION { self.find(target, A_PROTOTYPE) } else { -1 };
+        let p = if ps >= 0 && (self.attr_at(target, ps) & (P_ACCESSOR | P_MAPPED)) == 0 {
+            self.objs[target as usize].get_slot(ps as usize)
+        } else {
+            self.get_obj(target, A_PROTOTYPE, &Val::Obj(target))
+        };
         let proto = match p {
             Val::Obj(p) => p,
             _ => {
