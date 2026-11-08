@@ -2226,12 +2226,13 @@ hide(Array, 'of', function of() {
 });
 
 var RP = RegExp.prototype, SP = String.prototype;
+function named0(f, n) { return defineProperty(f, 'name', { value: n, configurable: true }); }
 var sMatch = SP.match, sReplace = SP.replace, sSearch = SP.search, sSplit = SP.split, sMatchAll = SP.matchAll, sReplaceAll = SP.replaceAll;
 function needRegExp(r, what) { if (!isObject(r)) throw new TypeError('RegExp.prototype[' + what + '] called on incompatible receiver'); }
 
 // ---- RegExp.prototype's Symbol methods on objects that are not RegExps
 // (a proxy, an object with its own exec), in the specification's steps
-var nativeExec = RP.exec;
+var nativeExec = RP.exec, sCodeAt = SP.charCodeAt, sCharAt = SP.charAt, sSlice = SP.slice, sIndexOf = SP.indexOf, fApply = Function.prototype.apply;
 function regExpExec(R, S) {
   var exec = R.exec;
   if (isCallable(exec)) {
@@ -2244,14 +2245,16 @@ function regExpExec(R, S) {
 }
 function advance(S, i, u) {
   if (!u || i + 1 >= S.length) return i + 1;
-  var c = S.charCodeAt(i);
+  var c = sCodeAt.call(S, i);
   if (c < 0xD800 || c > 0xDBFF) return i + 1;
-  var d = S.charCodeAt(i + 1);
+  var d = sCodeAt.call(S, i + 1);
   return d >= 0xDC00 && d <= 0xDFFF ? i + 2 : i + 1;
 }
 function genMatch(R, S) {
-  if (!R.global) return regExpExec(R, S);
-  var u = !!R.unicode;
+  'use strict';
+  var flags = String(R.flags);
+  if (sIndexOf.call(flags, 'g') < 0) return regExpExec(R, S);
+  var u = sIndexOf.call(flags, 'u') >= 0 || sIndexOf.call(flags, 'v') >= 0;
   R.lastIndex = 0;
   var A = [], n = 0;
   for (;;) {
@@ -2263,6 +2266,7 @@ function genMatch(R, S) {
   }
 }
 function genSearch(R, S) {
+  'use strict';
   var prev = R.lastIndex;
   if (!Object.is(prev, 0)) R.lastIndex = 0;
   var r = regExpExec(R, S);
@@ -2273,63 +2277,70 @@ function genSearch(R, S) {
 function substitution(m, S, pos, caps, groups, t) {
   var out = '', tail = pos + m.length, n = caps.length;
   for (var i = 0; i < t.length; i++) {
-    var c = t.charAt(i);
+    var c = sCharAt.call(t, i);
     if (c !== '$' || i + 1 >= t.length) { out += c; continue; }
-    var d = t.charAt(i + 1);
+    var d = sCharAt.call(t, i + 1);
     if (d === '$') { out += '$'; i++; }
     else if (d === '&') { out += m; i++; }
-    else if (d === '`') { out += S.slice(0, pos); i++; }
-    else if (d === "'") { out += tail >= S.length ? '' : S.slice(tail); i++; }
+    else if (d === '`') { out += sSlice.call(S, 0, pos); i++; }
+    else if (d === "'") { out += tail >= S.length ? '' : sSlice.call(S, tail); i++; }
     else if (d >= '0' && d <= '9') {
-      var k = +d, used = 1, e = t.charAt(i + 2);
+      var k = +d, used = 1, e = sCharAt.call(t, i + 2);
       if (e >= '0' && e <= '9' && k * 10 + (+e) >= 1 && k * 10 + (+e) <= n) { k = k * 10 + (+e); used = 2; }
       if (k >= 1 && k <= n) { var cv = caps[k - 1]; out += cv === undefined ? '' : cv; i += used; }
       else out += '$';
     } else if (d === '<' && groups !== undefined) {
-      var close = t.indexOf('>', i + 2);
+      var close = sIndexOf.call(t, '>', i + 2);
       if (close < 0) out += '$';
-      else { var gv = groups[t.slice(i + 2, close)]; out += gv === undefined ? '' : String(gv); i = close; }
+      else { var gv = groups[sSlice.call(t, i + 2, close)]; out += gv === undefined ? '' : String(gv); i = close; }
     } else out += '$';
   }
   return out;
 }
 function genReplace(R, S, rep) {
+  'use strict';
   var fn = isCallable(rep);
   if (!fn) rep = String(rep);
-  var global = !!R.global, u = false;
-  if (global) { u = !!R.unicode; R.lastIndex = 0; }
-  var results = [];
+  var flags = String(R.flags);
+  var global = sIndexOf.call(flags, 'g') >= 0, u = false;
+  if (global) { u = sIndexOf.call(flags, 'u') >= 0 || sIndexOf.call(flags, 'v') >= 0; R.lastIndex = 0; }
+  var results = create(null), rn = 0;
   for (;;) {
     var r = regExpExec(R, S);
     if (r === null) break;
-    results.push(r);
+    results[rn++] = r;
     if (!global) break;
     if (String(r[0]) === '') R.lastIndex = advance(S, toLength(R.lastIndex), u);
   }
   var out = '', next = 0;
-  for (var i = 0; i < results.length; i++) {
+  for (var i = 0; i < rn; i++) {
     var res = results[i];
     var nc = Math.max(toLength(res.length) - 1, 0);
     var matched = String(res[0]);
     var pos = Math.max(Math.min(toIntegerOrInfinity(res.index), S.length), 0);
-    var caps = [];
-    for (var j = 1; j <= nc; j++) { var cj = res[j]; caps.push(cj === undefined ? undefined : String(cj)); }
+    var caps = create(null);
+    caps.length = nc;
+    for (var j = 1; j <= nc; j++) { var cj = res[j]; caps[j - 1] = cj === undefined ? undefined : String(cj); }
     var groups = res.groups, s;
     if (fn) {
-      var args = [matched];
-      for (var a = 0; a < caps.length; a++) args.push(caps[a]);
-      args.push(pos, S);
-      if (groups !== undefined) args.push(groups);
-      s = String(rep.apply(undefined, args));
+      var args = create(null), an = 0;
+      args[an++] = matched;
+      for (var a = 0; a < nc; a++) args[an++] = caps[a];
+      args[an++] = pos;
+      args[an++] = S;
+      if (groups !== undefined) args[an++] = groups;
+      args.length = an;
+      s = String(fApply.call(rep, undefined, args));
     } else {
       if (groups !== undefined) groups = Object(groups);
       s = substitution(matched, S, pos, caps, groups, rep);
     }
-    if (pos >= next) { out += S.slice(next, pos) + s; next = pos + matched.length; }
+    if (pos >= next) { out += sSlice.call(S, next, pos) + s; next = pos + matched.length; }
   }
-  return next >= S.length ? out : out + S.slice(next);
+  return next >= S.length ? out : out + sSlice.call(S, next);
 }
 function genSplit(R, S, lim) {
+  'use strict';
   var C = speciesOf(R, RegExp);
   var flags = String(R.flags);
   var u = flags.indexOf('u') >= 0 || flags.indexOf('v') >= 0;
@@ -2355,23 +2366,61 @@ function genSplit(R, S, lim) {
   A.push(S.slice(p, size));
   return A;
 }
-hide(RP, Symbol.match, function (s) { needRegExp(this, 'Symbol.match'); if (!isRegExpObj(this)) return genMatch(this, String(s)); return sMatch.call(String(s), this); });
-hide(RP, Symbol.matchAll, function (s) { needRegExp(this, 'Symbol.matchAll'); return sMatchAll.call(String(s), this); });
-hide(RP, Symbol.replace, function (s, r) { needRegExp(this, 'Symbol.replace'); if (!isRegExpObj(this)) return genReplace(this, String(s), r); return sReplace.call(String(s), this, r); });
-hide(RP, Symbol.search, function (s) { needRegExp(this, 'Symbol.search'); if (!isRegExpObj(this)) return genSearch(this, String(s)); return sSearch.call(String(s), this); });
-var nativeTest = RP.test;
-hide(RP, 'test', setLength(function test(s) {
-  needRegExp(this, 'test');
-  if (!isRegExpObj(this)) return regExpExec(this, String(s)) !== null;
-  return nativeTest.call(this, s);
-}, 1));
-hide(RP, Symbol.split, function (s, lim) { needRegExp(this, 'Symbol.split'); return sSplit.call(String(s), this, lim); });
-[['match', Symbol.match, sMatch, 1], ['matchAll', Symbol.matchAll, sMatchAll, 1], ['replace', Symbol.replace, sReplace, 2],
+function symMethod(sym, name, f) {
+  defineProperty(f, 'name', { value: '[Symbol.' + name + ']', writable: false, enumerable: false, configurable: true });
+  hide(RP, sym, f);
+}
+// as the specification writes them, on any object (String.prototype's
+// methods take the native path for a plain RegExp themselves)
+symMethod(Symbol.match, 'match', function (s) { 'use strict'; needRegExp(this, 'Symbol.match'); return genMatch(this, String(s)); });
+symMethod(Symbol.replace, 'replace', function (s, r) { 'use strict'; needRegExp(this, 'Symbol.replace'); return genReplace(this, String(s), r); });
+symMethod(Symbol.search, 'search', function (s) { 'use strict'; needRegExp(this, 'Symbol.search'); return genSearch(this, String(s)); });
+symMethod(Symbol.split, 'split', function (s, lim) { 'use strict'; needRegExp(this, 'Symbol.split'); return genSplit(this, String(s), lim); });
+var RSIP = create(getPrototypeOf(getPrototypeOf([][Symbol.iterator]()))), rsiState = new WeakMap();
+defineProperty(RSIP, Symbol.toStringTag, { value: 'RegExp String Iterator', writable: false, enumerable: false, configurable: true });
+hide(RSIP, 'next', function next() {
+  'use strict';
+  var st = isObject(this) ? rsiState.get(this) : undefined;
+  if (st === undefined) throw new TypeError('%RegExpStringIteratorPrototype%.next called on incompatible receiver');
+  if (st.done) return { value: undefined, done: true };
+  var r = regExpExec(st.R, st.S);
+  if (r === null) { st.done = true; return { value: undefined, done: true }; }
+  if (!st.g) { st.done = true; return { value: r, done: false }; }
+  if (String(r[0]) === '') st.R.lastIndex = advance(st.S, toLength(st.R.lastIndex), st.u);
+  return { value: r, done: false };
+});
+symMethod(Symbol.matchAll, 'matchAll', function (s) {
+  'use strict';
+  needRegExp(this, 'Symbol.matchAll');
+  var S = String(s), C = speciesOf(this, RegExp), flags = String(this.flags);
+  var matcher = new C(this, flags);
+  matcher.lastIndex = toLength(this.lastIndex);
+  var it = create(RSIP);
+  rsiState.set(it, { R: matcher, S: S, g: flags.indexOf('g') >= 0, u: flags.indexOf('u') >= 0 || flags.indexOf('v') >= 0, done: false });
+  return it;
+});
+hide(SP, 'matchAll', setLength(named0(function matchAll(x) {
+  'use strict';
+  if (this === undefined || this === null) throw new TypeError('String.prototype.matchAll called on null or undefined');
+  if (isObject(x)) {
+    if (isRegExpLike(x)) {
+      var fl = x.flags;
+      if (fl === undefined || fl === null) throw new TypeError('String.prototype.matchAll called with a RegExp without flags');
+      if (String(fl).indexOf('g') < 0) throw new TypeError('String.prototype.matchAll called with a non-global RegExp argument');
+    }
+    var m = x[Symbol.matchAll];
+    if (m !== undefined && m !== null) return m.call(x, this);
+  }
+  var S = String(this), rx = new RegExp(x, 'g');
+  return rx[Symbol.matchAll](S);
+}, 'matchAll'), 1));
+[['match', Symbol.match, sMatch, 1], ['replace', Symbol.replace, sReplace, 2],
  ['replaceAll', Symbol.replaceAll, sReplaceAll, 2], ['search', Symbol.search, sSearch, 1], ['split', Symbol.split, sSplit, 2]].forEach(function (e) {
   var name = e[0], sym = e[1], nat = e[2];
   var f = function (x, y) {
+    'use strict';
     if (this === undefined || this === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
-    if (x !== undefined && x !== null && typeof x !== 'string' && !(x instanceof RegExp && getPrototypeOf(x) === RP)) {
+    if (isObject(x) && !(x instanceof RegExp && getPrototypeOf(x) === RP)) {
       var m = x[name === 'replaceAll' ? Symbol.replace : sym];
       if (m !== undefined && m !== null) {
         if (name === 'replaceAll' && isObject(x) && x instanceof RegExp && String(x.flags).indexOf('g') < 0) throw new TypeError('replaceAll must be called with a global RegExp');
@@ -2392,6 +2441,8 @@ function isRegExpLike(x) {
 ['startsWith', 'endsWith', 'includes'].forEach(function (name) {
   var nat = SP[name];
   var f = function (s, pos) {
+    'use strict';
+    if (this === undefined || this === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
     if (isRegExpLike(s)) throw new TypeError('First argument to String.prototype.' + name + ' must not be a regular expression');
     return nat.call(this, isObject(s) ? String(s) : s, pos);
   };
@@ -2419,6 +2470,7 @@ hide(Number, 'parseFloat', parseFloat);
 hide(Number, 'parseInt', parseInt);
 function html(tag, attr) {
   return function (v) {
+    'use strict';
     if (this === undefined || this === null) throw new TypeError('String.prototype method called on null or undefined');
     var s = String(this), open = '<' + tag;
     if (attr) open += ' ' + attr + '="' + String(v).replace(/"/g, '&quot;') + '"';
@@ -2453,12 +2505,14 @@ var flagNames = [['hasIndices', 'd'], ['global', 'g'], ['ignoreCase', 'i'], ['mu
 flagNames.forEach(function (e) {
   if (gopd(RP, e[0]) !== undefined) return;
   getter(RP, e[0], function () {
+    'use strict';
     if (this === RP) return undefined;
-    if (!(this instanceof RegExp)) throw new TypeError('RegExp.prototype.' + e[0] + ' getter called on non-RegExp');
-    return String(nativeFlags.call(this)).indexOf(e[1]) >= 0;
+    if (!isRegExpObj(this)) throw new TypeError('RegExp.prototype.' + e[0] + ' getter called on non-RegExp');
+    return sIndexOf.call(String(nativeFlags.call(this)), e[1]) >= 0;
   });
 });
 getter(RP, 'flags', function () {
+  'use strict';
   if (!isObject(this)) throw new TypeError('RegExp.prototype.flags getter called on non-object');
   var r = '';
   for (var i = 0; i < flagNames.length; i++) if (this[flagNames[i][0]]) r += flagNames[i][1];
@@ -2651,6 +2705,7 @@ if (typeof BigInt === 'function') hide(BigInt.prototype, 'toLocaleString', funct
   return intl().numberLocale(x, locales, options);
 });
 hide(String.prototype, 'localeCompare', function localeCompare(that, locales, options) {
+  'use strict';
   if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
   if (locales === undefined && options === undefined) return intlCollate(String(this), String(that), '', 3);
   return intl().collate(String(this), String(that), locales, options);

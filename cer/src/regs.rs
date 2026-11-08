@@ -173,7 +173,8 @@ pub fn net_effect(op: &Op) -> int {
         OP_YIELD => 1,
         OP_CALL | OP_CALL_EVAL => ((-op.a - 1) as int),
         OP_NEW => (-op.a as int),
-        OP_SUPER_CALL | OP_NEW_ARRAY | OP_OBJ_REST => (1 - op.a as int),
+        OP_SUPER_CALL | OP_NEW_ARRAY => (1 - op.a as int),
+        OP_OBJ_REST => (1 - op.a as int - op.b as int),
         OP_CLASS => {
             if op.a == 1 {
                 0

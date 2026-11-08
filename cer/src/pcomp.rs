@@ -79,6 +79,12 @@ const M_UPD: int = 5;
 /// the add and store (c 1 when v assigns nothing)
 const M_ADDT_LOAD: int = 6;
 const M_ADDT_STORE: int = 7;
+/// inside `with`, a reference taken before the right side: M_WREF pushes
+/// the object that has the name (undefined: the binding), M_WLOAD reads
+/// through it ([base] → [base, v]), M_WSTORE writes ([base, v] → [v])
+const M_WREF: int = 8;
+const M_WLOAD: int = 9;
+const M_WSTORE: int = 10;
 
 const U_PREFIX: int = 1;
 const U_INC: int = 2;
@@ -549,6 +555,8 @@ pub struct PComp {
     module_depth: usize,
     module_yielded: bool,
     in_function: bool,
+    /// the depth of fs inside a class static block (no `return`), else -1
+    static_depth: int,
     in_class: bool,
     in_generator: bool,
     in_async: bool,
@@ -673,6 +681,7 @@ impl PComp {
             module_depth: 0,
             module_yielded: false,
             in_function: false,
+            static_depth: -1,
             in_class: false,
             ctx: 0,
             logic_top: false,
@@ -2170,6 +2179,11 @@ impl PComp {
                 return;
             }
             let a = self.atom(name.as_str());
+            if gb >= 0 && !init && (self.binds[gb as usize].kind == K_LET || self.binds[gb as usize].kind == K_CLASS) {
+                // the script's own `let` before it runs: not there yet
+                self.xemit(OP_GET_GLOBAL, a, 0);
+                self.xop(OP_POP);
+            }
             self.xemit(OP_SET_GLOBAL, a, if init { 1 } else { 0 });
             return;
         }
@@ -2201,6 +2215,83 @@ impl PComp {
         }
         if (mode as int) == M_INIT {
             self.xstore_name(r, true);
+            return;
+        }
+        if (mode as int) == M_WREF {
+            let li = self.refs[r].with_list;
+            if li < 0 {
+                return;
+            }
+            let name = self.refs[r].name.clone();
+            let scope = self.refs[r].scope;
+            let list = self.with_lists[li as usize].clone();
+            let mut ends: Vec<int> = Vec::new();
+            for wb in list.iter() {
+                self.xpush_str(name.as_str());
+                self.xload_bind(*wb, scope);
+                self.xop(OP_IN);
+                let jf = self.xemit(OP_JF, 0, 0);
+                self.xfixed[jf as usize] = true;
+                self.xload_bind(*wb, scope);
+                let j = self.xemit(OP_JUMP, 0, 0);
+                self.xfixed[j as usize] = true;
+                ends.push(j);
+                self.xpatch(jf);
+            }
+            self.xop(OP_UNDEF);
+            for j in ends.iter() {
+                self.xpatch(*j);
+            }
+            return;
+        }
+        if (mode as int) == M_WLOAD {
+            if self.refs[r].with_list < 0 {
+                self.xload_name_here(r);
+                return;
+            }
+            let at = self.atom(self.refs[r].name.clone().as_str());
+            self.xop(OP_DUP);
+            let jf = self.xemit(OP_JF, 0, 0);
+            self.xfixed[jf as usize] = true;
+            self.xop(OP_DUP);
+            self.xemit(OP_GET_PROP, at, 0);
+            let j = self.xemit(OP_JUMP, 0, 0);
+            self.xfixed[j as usize] = true;
+            self.xpatch(jf);
+            self.xload_name_here(r);
+            self.xpatch(j);
+            return;
+        }
+        if (mode as int) == M_WSTORE {
+            if self.refs[r].with_list < 0 {
+                self.xstore_name_here(r, false);
+                return;
+            }
+            let at = self.atom(self.refs[r].name.clone().as_str());
+            self.xop(OP_OVER);
+            let jf = self.xemit(OP_JF, 0, 0);
+            self.xfixed[jf as usize] = true;
+            if op.c == 1 {
+                // strict: the binding must still be there
+                let name = self.refs[r].name.clone();
+                self.xop(OP_OVER);
+                self.xpush_str(name.as_str());
+                self.xop(OP_SWAP);
+                self.xop(OP_IN);
+                let jt = self.xemit(OP_JT, 0, 0);
+                self.xfixed[jt as usize] = true;
+                let c = self.xstr(name.as_str());
+                self.xemit(OP_CONST_ERROR, c, 1);
+                self.xpatch(jt);
+            }
+            self.xemit(OP_SET_PROP, at, 0);
+            let j = self.xemit(OP_JUMP, 0, 0);
+            self.xfixed[j as usize] = true;
+            self.xpatch(jf);
+            self.xop(OP_SWAP);
+            self.xop(OP_POP);
+            self.xstore_name_here(r, false);
+            self.xpatch(j);
             return;
         }
         if (mode as int) == M_TYPEOF {
@@ -2238,6 +2329,28 @@ impl PComp {
             return;
         }
         if (mode as int) == M_DELETE {
+            // inside `with`: the object that has the name loses it
+            let mut ends: Vec<int> = Vec::new();
+            let li = self.refs[r].with_list;
+            if li >= 0 {
+                let name = self.refs[r].name.clone();
+                let scope = self.refs[r].scope;
+                let at = self.atom(name.as_str());
+                let list = self.with_lists[li as usize].clone();
+                for wb in list.iter() {
+                    self.xpush_str(name.as_str());
+                    self.xload_bind(*wb, scope);
+                    self.xop(OP_IN);
+                    let jf = self.xemit(OP_JF, 0, 0);
+                    self.xfixed[jf as usize] = true;
+                    self.xload_bind(*wb, scope);
+                    self.xemit(OP_DEL_PROP, at, 0);
+                    let j = self.xemit(OP_JUMP, 0, 0);
+                    self.xfixed[j as usize] = true;
+                    ends.push(j);
+                    self.xpatch(jf);
+                }
+            }
             if self.refs[r].bind >= 0 {
                 self.xop(OP_FALSE);
             } else {
@@ -2246,6 +2359,9 @@ impl PComp {
                 self.xemit(OP_GET_GLOBAL, g, 0);
                 let at = self.atom(name.as_str());
                 self.xemit(OP_DEL_PROP, at, 0);
+            }
+            for e in ends.iter() {
+                self.xpatch(*e);
             }
             return;
         }
@@ -2926,6 +3042,28 @@ impl PComp {
     // =====================================================================
     // statements
 
+    /// Whether an enclosing statement already has label `w`.
+    fn label_taken(&mut self, w: &str) -> bool {
+        let pl = self.f().pending_labels.clone();
+        for l in pl.iter() {
+            if l.as_str() == w {
+                return true;
+            }
+        }
+        let n = self.f().ctl.len();
+        let mut i: usize = 0;
+        while i < n {
+            let ls = self.f().ctl[i].labels.clone();
+            for l in ls.iter() {
+                if l.as_str() == w {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
     fn take_labels(&mut self) -> Vec<String> {
         let l = self.f().pending_labels.clone();
         self.f().pending_labels.clear();
@@ -3136,7 +3274,7 @@ impl PComp {
                 return;
             }
             if ws == "return" {
-                if !self.in_function || (self.module_code && self.fs.len() == self.module_depth) {
+                if !self.in_function || (self.module_code && self.fs.len() == self.module_depth) || self.static_depth == self.fs.len() as int {
                     self.fail("return outside a function");
                     return;
                 }
@@ -3229,6 +3367,10 @@ impl PComp {
                 return;
             }
             if label {
+                if self.label_taken(w.as_str()) {
+                    self.fail(format!("Label '{}' has already been declared", w).as_str());
+                    return;
+                }
                 self.next();
                 self.next();
                 if (self.is("function") && (self.strict || self.peek_is(1, "*"))) || (self.is("async") && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1)) {
@@ -4446,7 +4588,7 @@ impl PComp {
                 return;
             }
             self.pop_op();
-            self.emit3(PH_REF, e.a, if pk == -2 { M_INIT } else { M_STORE }, 0);
+            self.emit3(PH_REF, e.a, M_STORE, 0);
             self.op(OP_POP);
             return;
         }
@@ -4522,17 +4664,36 @@ impl PComp {
         self.op(OP_POP);
     }
 
+    /// Whether the object pattern at `open` (its `{`) has a `...rest`.
+    fn pattern_has_rest(&mut self, open: int) -> bool {
+        let end = self.mate_of(open);
+        let mut k = open + 1;
+        while k < end && k >= 0 {
+            if self.tok_is(k, "...") {
+                return true;
+            }
+            if self.tok_is(k, "[") || self.tok_is(k, "{") || self.tok_is(k, "(") {
+                k = self.after_mate(k);
+            } else {
+                k += 1;
+            }
+        }
+        false
+    }
+
     fn pattern_object(&mut self, pk: int) {
         self.op(OP_REQUIRE_OBJ);
+        let has_rest = self.pattern_has_rest(self.pos);
         self.next();
         let mut seen: Vec<String> = Vec::new();
+        let mut computed: int = 0;
         while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
             if self.eat("...") {
                 let cnt = seen.len() as int;
                 for s in seen.clone() {
                     self.push_str(s.as_str());
                 }
-                self.emit(OP_OBJ_REST, cnt, 0);
+                self.emit(OP_OBJ_REST, cnt, computed);
                 self.pattern_target(pk);
                 if !self.is("}") {
                     self.expect(",");
@@ -4545,6 +4706,13 @@ impl PComp {
             if self.eat("[") {
                 self.assign();
                 self.expect("]");
+                if has_rest {
+                    // the key stays below the source for the rest
+                    self.op(OP_TO_KEY);
+                    self.op(OP_DUP);
+                    self.op(OP_ROT4);
+                    computed += 1;
+                }
                 self.op(OP_GET_ELEM);
             } else {
                 let name = if self.kind() == T_STR {
@@ -4857,6 +5025,25 @@ impl PComp {
             self.check_strict_target(left);
             let r = left.a;
             let name = self.refs[r as usize].name.clone();
+            if self.has_with && !logical {
+                // the reference is resolved before the right side
+                self.pop_op();
+                self.emit3(PH_REF, r, M_WREF, 0);
+                if o != "=" {
+                    self.emit3(PH_REF, r, M_WLOAD, 0);
+                }
+                let e = self.assign();
+                if o == "=" {
+                    self.name_anonymous(e, name.as_str());
+                } else {
+                    let bop = &o[0..(o.as_bytes().len() - 1)];
+                    let code = binary_code(bop);
+                    self.op(code);
+                }
+                let strict = if self.strict || self.f().proto.strict { 1 } else { 0 };
+                self.emit3(PH_REF, r, M_WSTORE, strict);
+                return ex(E_OTHER);
+            }
             if o == "=" {
                 self.pop_op();
                 let e = self.assign();
@@ -6412,6 +6599,29 @@ impl PComp {
         self.parked_ids.push(id);
     }
 
+    /// A class static block at its `{`: its own var scope, no `return`.
+    fn static_block(&mut self) {
+        let saved = self.cur_scope;
+        let saved_vs = self.f().var_scope;
+        let saved_in_fn = self.in_function;
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        self.f().var_scope = s;
+        self.emit(PH_HOIST, s, 0);
+        self.expect("{");
+        let saved_depth = self.static_depth;
+        self.static_depth = self.fs.len() as int;
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.statement();
+        }
+        self.static_depth = saved_depth;
+        self.expect("}");
+        self.leave_block(s, saved);
+        self.f().var_scope = saved_vs;
+        self.in_function = saved_in_fn;
+    }
+
     fn finish_member_fn(&mut self, id: int, class_scope: int) -> int {
         self.resume_member_fn(id, class_scope);
         self.op(OP_RETURN_UNDEF);
@@ -6533,7 +6743,7 @@ impl PComp {
                     self.in_generator = false;
                     self.in_async = false;
                     self.ctx = CX_SUPER_PROP | CX_NO_ARGS | CX_AWAIT;
-                    self.block_statement();
+                    self.static_block();
                     self.park_member_fn(stat_id);
                     continue;
                 }
@@ -6745,7 +6955,8 @@ impl PComp {
             self.op(OP_DUP);
             let ps = self.finish_member_fn(stat_id, class_scope);
             self.emit(OP_CLOSURE, ps, 0);
-            self.op(OP_SWAP);
+            self.emit(OP_SET_FIELDS, 1, 0);
+            self.op(OP_OVER);
             self.emit(OP_CALL, 0, 0);
             self.op(OP_POP);
         }
