@@ -295,6 +295,11 @@ pub struct Vm {
     pub ic2: Vec<i32>,
     pub pic: Vec<i32>,
     pub shape_epoch: int,
+    /// instanceof: Function.prototype's and Object.prototype's shapes and
+    /// shape_epoch when neither had @@hasInstance (-1 none yet)
+    pub hi_fp: int,
+    pub hi_op: int,
+    pub hi_epoch: int,
     /// a collection or reclaim is due at the next safe point (gc_due)
     pub gc_flag: bool,
     /// where in pic the last pic_get hit or filled
@@ -588,6 +593,9 @@ impl Vm {
             ic2: Vec::new(),
             pic: Vec::new(),
             shape_epoch: 0,
+            hi_fp: -1,
+            hi_op: -1,
+            hi_epoch: -1,
             gc_flag: false,
             pic_way: 0,
             alloc_count: 0,
@@ -3487,7 +3495,19 @@ impl Vm {
             return false;
         }
         let fo = obj_of(f);
-        let hi = self.get_obj(fo, A_HASINSTANCE, f);
+        // a function straight on Function.prototype, no own @@hasInstance,
+        // and Function.prototype and Object.prototype as they were when
+        // neither had one (same shapes, same shape_epoch): no lookup
+        let fp = self.function_proto;
+        let op = self.object_proto;
+        let direct = fp >= 0 && op >= 0 && self.objs[fo as usize].proto as int == fp && self.objs[fp as usize].proto as int == op && self.find(fo, A_HASINSTANCE) < 0;
+        let plain = direct && self.hi_epoch == self.shape_epoch && self.hi_fp == self.objs[fp as usize].shape as int && self.hi_op == self.objs[op as usize].shape as int;
+        let hi = if plain { Val::Undef } else { self.get_obj(fo, A_HASINSTANCE, f) };
+        if direct && !plain && matches!(hi, Val::Undef) && self.find(fp, A_HASINSTANCE) < 0 && self.find(op, A_HASINSTANCE) < 0 {
+            self.hi_epoch = self.shape_epoch;
+            self.hi_fp = self.objs[fp as usize].shape as int;
+            self.hi_op = self.objs[op as usize].shape as int;
+        }
         if self.is_callable(&hi) && self.objs[obj_of(&hi) as usize].class != C_NATIVE {
             let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef, Val::Undef);
             return self.truthy_v(&r);
