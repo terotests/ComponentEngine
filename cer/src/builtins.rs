@@ -2164,6 +2164,18 @@ impl Vm {
 
     pub fn json_quote(&self, s: &str, out: &mut String) {
         out.push('"');
+        let mut plain = true;
+        for c in s.chars() {
+            if c == '"' || c == '\\' || (c as int) < 32 {
+                plain = false;
+                break;
+            }
+        }
+        if plain {
+            out.push_str(s);
+            out.push('"');
+            return;
+        }
         for c in s.chars() {
             match c {
                 '"' => out.push_str("\\\""),
@@ -2187,21 +2199,31 @@ impl Vm {
         out.push('"');
     }
 
-    pub fn json_str(&mut self, holder: &Val, key: &Val, v0: Val, replacer: &Val, allow: &Vec<String>, gap: &str, indent: &str, stack: &mut Vec<int>, out: &mut String) -> bool {
+    /// SerializeJSONProperty steps 1-4: toJSON, the replacer and unwrapping of
+    /// Number/String/Boolean objects. `kidx` >= 0 is an array index whose key
+    /// string is made only when toJSON or the replacer needs it.
+    pub fn json_val(&mut self, holder: &Val, key0: &Val, kidx: int, v0: Val, replacer: &Val) -> Val {
         let mut v = v0;
+        // an array index key is made only when toJSON or a replacer needs it
+        let tj = if is_obj(&v) { self.get(&v, A_TOJSON) } else { Val::Undef };
+        let has_tj = self.is_callable(&tj);
+        let mut key = key0.clone();
+        if kidx >= 0 && (has_tj || self.is_callable(replacer)) {
+            key = self.string_val(format!("{}", kidx));
+        }
+        let key = &key;
         if is_obj(&v) || matches!(v, Val::Num(_)) {
-            let tj = if is_obj(&v) { self.get(&v, A_TOJSON) } else { Val::Undef };
-            if self.is_callable(&tj) {
+            if has_tj {
                 v = self.call_fixed(tj, v.clone(), 1, key.clone(), Val::Undef, Val::Undef);
                 if self.throwing {
-                    return false;
+                    return Val::Undef;
                 }
             }
         }
         if self.is_callable(replacer) {
             v = self.call_fixed(replacer.clone(), holder.clone(), 2, key.clone(), v.clone(), Val::Undef);
             if self.throwing {
-                return false;
+                return Val::Undef;
             }
         }
         if let Val::Obj(o) = &v {
@@ -2218,6 +2240,28 @@ impl Vm {
                 };
             }
         }
+        v
+    }
+
+    /// true when the value is left out of the output (undefined, a function or a symbol)
+    pub fn json_skip(&self, v: &Val) -> bool {
+        match v {
+            Val::Undef => true,
+            Val::Obj(o) => self.is_callable(v) || self.objs[*o as usize].class == C_SYMBOL,
+            _ => false,
+        }
+    }
+
+    pub fn json_str(&mut self, holder: &Val, key0: &Val, kidx: int, v0: Val, replacer: &Val, allow: &Vec<String>, gap: &str, indent: &str, stack: &mut Vec<int>, out: &mut String) -> bool {
+        let v = self.json_val(holder, key0, kidx, v0, replacer);
+        if self.throwing || self.json_skip(&v) {
+            return false;
+        }
+        self.json_write(v, replacer, allow, gap, indent, stack, out)
+    }
+
+    /// writes a value json_skip does not leave out; false only when throwing
+    pub fn json_write(&mut self, v: Val, replacer: &Val, allow: &Vec<String>, gap: &str, indent: &str, stack: &mut Vec<int>, out: &mut String) -> bool {
         match &v {
             Val::Null => {
                 out.push_str("null");
@@ -2257,7 +2301,7 @@ impl Vm {
                     }
                 }
                 stack.push(o);
-                let inner = format!("{}{}", indent, gap);
+                let inner = if gap.is_empty() { String::new() } else { format!("{}{}", indent, gap) };
                 let class = self.objs[o as usize].class;
                 if class == C_ARRAY || (class == C_PROXY && self.is_array_val(&v)) {
                     let n = self.len_of(&v);
@@ -2272,16 +2316,14 @@ impl Vm {
                             out.push_str(inner.as_str());
                         }
                         let item = self.get_index(&v, i);
-                        let k = self.string_val(format!("{}", i));
-                        let mut part = String::new();
-                        let ok = self.json_str(&v, &k, item, replacer, allow, gap, inner.as_str(), stack, &mut part);
+                        let iv = self.json_val(&v, &Val::Undef, i, item, replacer);
                         if self.throwing {
                             return false;
                         }
-                        if ok {
-                            out.push_str(part.as_str());
-                        } else {
+                        if self.json_skip(&iv) {
                             out.push_str("null");
+                        } else if !self.json_write(iv, replacer, allow, gap, inner.as_str(), stack, out) {
+                            return false;
                         }
                         i += 1;
                     }
@@ -2307,12 +2349,11 @@ impl Vm {
                         if self.throwing {
                             return false;
                         }
-                        let mut part = String::new();
-                        let ok = self.json_str(&v, &k, item, replacer, allow, gap, inner.as_str(), stack, &mut part);
+                        let iv = self.json_val(&v, &k, -1, item, replacer);
                         if self.throwing {
                             return false;
                         }
-                        if !ok {
+                        if self.json_skip(&iv) {
                             continue;
                         }
                         if !first {
@@ -2329,7 +2370,9 @@ impl Vm {
                         if !gap.is_empty() {
                             out.push(' ');
                         }
-                        out.push_str(part.as_str());
+                        if !self.json_write(iv, replacer, allow, gap, inner.as_str(), stack, out) {
+                            return false;
+                        }
                     }
                     if !first && !gap.is_empty() {
                         out.push('\n');
