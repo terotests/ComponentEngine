@@ -5047,7 +5047,7 @@ impl<'a> Cg<'a> {
                 }
             }
             R_GET_GLOBAL | R_GET_ENV | R_SET_ENV | R_THIS | R_TYPEOF | R_CHECK | R_STEP_PUSH | R_STEP_K | R_STEP0 | R_GET_METHOD
-            | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_CLOSURE | R_INIT_PROP | R_WIN => {
+            | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_NEW_ARRAY | R_SET_GLOBAL | R_CLOSURE | R_INIT_PROP | R_WIN => {
                 let next = p + 1 + ((w0 >> 16) as i64);
                 self.helper(H_OP, p, next);
                 true
@@ -6808,7 +6808,9 @@ fn run_at(vm: &mut crate::vm::Vm, f: i64, pi: usize, bp: i64, pc: i64, budget: i
                 let mut t = s.get();
                 t.dropped += 1;
                 if MASK.with(|m| m.get()) & (1u64 << 62) != 0 {
-                    eprintln!("dropped {} {} at pc {} r {}", pi, vm.protos[pi].name, pc, r);
+                    let rbx = vm.protos[pi].rbase as usize;
+                    let rr = (r & 0x0fffffff) as usize;
+                    eprintln!("dropped {} {} at pc {} r {} op {} -> op {}", pi, vm.protos[pi].name, pc, r, vm.rcode[rbx + pc as usize].code & 255, if rbx + rr < vm.rcode.len() { vm.rcode[rbx + rr].code & 255 } else { -1 });
                 }
                 s.set(t);
             });
@@ -7566,6 +7568,20 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         R_NEW_OBJECT => {
             let o = vm.new_object();
             vm.rset((bp + w1) as usize, Val::Obj(o));
+        }
+        R_NEW_ARRAY => vm.r_new_array(bp, w1, w2),
+        R_SET_GLOBAL => {
+            // as rrun's R_SET_GLOBAL
+            let g = vm.global;
+            let c = vm.protos[pi].code[pc as usize].c;
+            let v = *vm.rget(bp, w1);
+            let slot = vm.ic_slot(g, w3, c as int, true);
+            if slot >= 0 {
+                vm.put_slot(g, slot, v);
+            } else {
+                vm.frames[fi].pc = pc + 1;
+                vm.set_global(w3, v, sub, pi, pc + 1);
+            }
         }
         R_CLOSURE => {
             let f = vm.closure(w2);
@@ -8421,7 +8437,10 @@ fn h_ret(vm: i32, bp: i32, r: i32, _pc: i32, _ri: i32) -> i32 {
     while vm.jit_miss.len() <= ri {
         vm.jit_miss.push(0);
     }
-    vm.jit_miss[ri] += 4;
+    // left just after a call of its own (a callee the interpreter runs):
+    // its code goes on there when that returns (jit_res), not a miss
+    let resumes = ((rb + at) as usize) < vm.jit_res.len() && vm.jit_res[(rb + at) as usize];
+    vm.jit_miss[ri] += if resumes { 0 } else { 4 };
     if vm.jit_miss[ri] > crate::rvm::JIT_MISS_MAX && tp * 8 + 1 < vm.jit_calls.len() {
         // callx calls it no more either
         vm.jit_calls[tp * 8 + 1] = -1;

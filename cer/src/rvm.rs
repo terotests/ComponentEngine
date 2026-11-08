@@ -1928,7 +1928,7 @@ impl Vm {
     /// R_NEW_ARRAY: the n items from slot w1 on into a new array, which
     /// goes to slot w1.
     #[inline(never)]
-    fn r_new_array(&mut self, bp: int, w1: int, n: int) {
+    pub fn r_new_array(&mut self, bp: int, w1: int, n: int) {
         let p = self.array_proto;
         let a = self.alloc(C_ARRAY, p);
         let e = self.elems_id(a);
