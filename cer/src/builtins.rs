@@ -1668,9 +1668,90 @@ impl Vm {
         }
     }
 
+    /// ObjectDefineProperties: ToObject(props), then each own enumerable
+    /// key's descriptor read before any is defined.
+    pub fn define_props(&mut self, o: int, props: &Val) {
+        let po = self.to_object(props);
+        if self.throwing {
+            return;
+        }
+        let pv = Val::Obj(po);
+        let keys = self.own_keys(po, false, true);
+        let mut descs: Vec<Val> = Vec::new();
+        for k in keys.iter() {
+            if self.throwing {
+                break;
+            }
+            let d = self.get_elem(&pv, k);
+            if self.throwing {
+                break;
+            }
+            let dob = obj_of(&d);
+            if dob < 0 || self.objs[dob as usize].class == C_SYMBOL || self.objs[dob as usize].class == C_BIGINT {
+                self.throw_type("Property description must be an object");
+                break;
+            }
+            self.temp_roots.push(d.clone());
+            descs.push(d);
+        }
+        let mut i: usize = 0;
+        while i < keys.len() && !self.throwing {
+            let d = descs[i].clone();
+            self.to_descriptor(o, &keys[i], &d);
+            i += 1;
+        }
+        i = 0;
+        while i < descs.len() {
+            self.temp_roots.pop();
+            i += 1;
+        }
+    }
+
     pub fn to_descriptor(&mut self, o: int, key: &Val, desc: &Val) {
+        let c = self.objs[o as usize].class;
+        if c != C_ARGUMENTS && c != C_SARGS {
+            self.to_descriptor0(o, key, desc);
+            return;
+        }
+        let (i, a) = self.to_key(key);
+        if self.throwing {
+            return;
+        }
+        let atom = if i >= 0 { self.index_atom(i) } else { a };
+        if c == C_ARGUMENTS && (i >= 0 || atom == A_LENGTH) {
+            self.slow_args(o);
+        }
+        let k = self.key_val(atom);
+        let mapped = self.mapped_sync(o, atom);
+        if mapped {
+            let s0 = self.find(o, atom);
+            let a0 = self.attr_at(o, s0);
+            self.set_attr(o, s0, (a0 | P_MAPPED) - P_MAPPED);
+        }
+        self.to_descriptor0(o, &k, desc);
+        if !mapped {
+            return;
+        }
+        let slot = self.find(o, atom);
+        if slot < 0 {
+            return;
+        }
+        let at = self.attr_at(o, slot);
+        if (at & P_ACCESSOR) != 0 {
+            return;
+        }
+        // the value (given or kept) goes to the parameter; a read-only
+        // element is no longer mapped
+        let v = self.objs[o as usize].get_slot(slot as usize).clone();
+        self.mapped_put(o, atom, &v);
+        if (at & P_READONLY) == 0 {
+            self.set_attr(o, slot, at | P_MAPPED);
+        }
+    }
+
+    pub fn to_descriptor0(&mut self, o: int, key: &Val, desc: &Val) {
         let d = obj_of(desc);
-        if d < 0 {
+        if d < 0 || self.objs[d as usize].class == C_SYMBOL || self.objs[d as usize].class == C_BIGINT {
             self.throw_type("Property description must be an object");
             return;
         }
@@ -1909,6 +1990,10 @@ impl Vm {
             self.add_own(d, A_ENUMERABLE, Val::Bool(true), 0);
             self.add_own(d, A_CONFIGURABLE, Val::Bool(true), 0);
             return Val::Obj(d);
+        }
+        if class == C_SARGS && i >= 0 {
+            let ma = self.index_atom(i);
+            self.mapped_sync(o, ma);
         }
         let d = self.new_object();
         if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
@@ -3669,7 +3754,14 @@ impl Vm {
                         let keys = self.own_keys(*so, false, true);
                         for k in keys {
                             let v = self.get_elem(&src, &k);
+                            if self.throwing {
+                                return Val::Undef;
+                            }
+                            // Set(to, key, value, true): a failed write throws
+                            let saved = self.strict_at;
+                            self.strict_at = self.frames.len() as int;
                             self.set_elem(&Val::Obj(t), &k, v);
+                            self.strict_at = saved;
                             if self.throwing {
                                 return Val::Undef;
                             }
@@ -3700,11 +3792,10 @@ impl Vm {
                 };
                 let o = self.alloc(C_OBJECT, proto);
                 let props = arg(&args, 1);
-                if let Val::Obj(po) = &props {
-                    let keys = self.own_keys(*po, false, true);
-                    for k in keys {
-                        let d = self.get_elem(&props, &k);
-                        self.to_descriptor(o, &k, &d);
+                if !matches!(props, Val::Undef) {
+                    self.define_props(o, &props);
+                    if self.throwing {
+                        return Val::Undef;
                     }
                 }
                 Val::Obj(o)
@@ -3772,15 +3863,9 @@ impl Vm {
                     return Val::Undef;
                 }
                 let props = arg(&args, 1);
-                if let Val::Obj(po) = &props {
-                    let keys = self.own_keys(*po, false, true);
-                    for k in keys {
-                        let d = self.get_elem(&props, &k);
-                        self.to_descriptor(o, &k, &d);
-                        if self.throwing {
-                            return Val::Undef;
-                        }
-                    }
+                self.define_props(o, &props);
+                if self.throwing {
+                    return Val::Undef;
                 }
                 a0
             }
@@ -3857,13 +3942,23 @@ impl Vm {
                             k += 1;
                         }
                     }
+                    if id != NF_O_PREVENTEXT && self.objs[o as usize].class == C_ARGUMENTS {
+                        self.slow_args(o);
+                    }
                     self.objs[o as usize].extensible = false;
                     if id != NF_O_PREVENTEXT {
                         let n = self.nkeys(o);
                         let mut i: int = 0;
                         while i < n {
-                            let at = self.attr_at(o, i);
+                            let mut at = self.attr_at(o, i);
                             let acc = (at & P_ACCESSOR) != 0;
+                            if id == NF_O_FREEZE && (at & P_MAPPED) != 0 {
+                                // a frozen element keeps the parameter's
+                                // value and is no longer mapped
+                                let ma = self.key_at(o, i);
+                                self.mapped_sync(o, ma);
+                                at = at - P_MAPPED;
+                            }
                             if id == NF_O_FREEZE && !acc {
                                 self.set_attr(o, i, at | P_FIXED | P_READONLY);
                                 let a = self.key_at(o, i);
@@ -4037,7 +4132,7 @@ impl Vm {
                                 C_ERROR => "Error",
                                 C_REGEXP => "RegExp",
                                 C_DATE => "Date",
-                                C_ARGUMENTS => "Arguments",
+                                C_ARGUMENTS | C_SARGS => "Arguments",
                                 C_BOOLEAN => "Boolean",
                                 C_NUMBER => "Number",
                                 C_STRING => "String",

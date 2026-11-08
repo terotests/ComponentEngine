@@ -263,6 +263,9 @@ pub struct PFn {
     pub proto: int,
     pub str_consts: HashMap<String, int>,
     pub num_consts: HashMap<String, int>,
+    /// sloppy with simple parameters: its arguments object's elements
+    /// are the parameters (mapped)
+    pub mapped: bool,
 }
 
 struct PCtl {
@@ -526,6 +529,9 @@ pub struct PComp {
     eval_prog: int,
     /// strict code (a strict caller's direct eval)
     pub force_strict: bool,
+    /// the next statement is the body of an if or a loop (labels and
+    /// all): no labelled function there
+    sub_label: bool,
     mex_names: Vec<String>,
     mex_values: Vec<String>,
     mex_stars: Vec<String>,
@@ -658,6 +664,7 @@ impl PComp {
             eval_ctx: 0,
             eval_prog: -1,
             force_strict: false,
+            sub_label: false,
             mex_names: Vec::new(),
             mex_values: Vec::new(),
             mex_stars: Vec::new(),
@@ -1896,6 +1903,15 @@ impl PComp {
         let fi = f as usize;
         let mut next_slot = self.fns[fi].base;
         let pb = self.fns[fi].param_binds.clone();
+        if self.fns[fi].mapped && !pb.is_empty() && self.args_bind(self.fns[fi].fscope) >= 0 {
+            // mapped parameters live in the env, where the arguments
+            // object reads and writes them
+            for b in pb.iter() {
+                if *b >= 0 {
+                    self.binds[*b as usize].captured = true;
+                }
+            }
+        }
         let mut i: int = 0;
         for b in pb.iter() {
             let bi = *b;
@@ -1933,6 +1949,16 @@ impl PComp {
         if !self.fns[fi].is_program || self.local_program || self.local_if_strict {
             self.protos[pi].env_size = self.scopes[fs as usize].env_size;
         }
+    }
+
+    /// The function scope's `arguments` binding, or -1.
+    fn args_bind(&self, fscope: int) -> int {
+        for b in self.scopes[fscope as usize].binds.iter() {
+            if self.binds[*b as usize].kind == K_ARGS {
+                return *b;
+            }
+        }
+        -1
     }
 
     fn env_depth(&self, from: int, target: int) -> int {
@@ -2627,6 +2653,28 @@ impl PComp {
                 self.xop(OP_ARGUMENTS);
                 self.xstore_bind(*b, true, fscope);
                 self.xop(OP_POP);
+                if self.fns[f as usize].mapped {
+                    // the last parameter of a name is the mapped one
+                    let mut j = (pb.len() as int) - 1;
+                    while j >= 0 {
+                        let pbj = pb[j as usize];
+                        let mut later = false;
+                        let mut q = j + 1;
+                        while q < (pb.len() as int) {
+                            if pb[q as usize] == pbj {
+                                later = true;
+                            }
+                            q += 1;
+                        }
+                        if pbj >= 0 && !later && self.binds[pbj as usize].in_env {
+                            let depth = self.env_depth(fscope, self.binds[pbj as usize].scope);
+                            let slot = self.binds[pbj as usize].slot;
+                            self.xemit(OP_ARGUMENTS, 2 + j, slot * 256 + depth);
+                            self.xop(OP_POP);
+                        }
+                        j -= 1;
+                    }
+                }
             } else if k == K_CALLEE {
                 self.xop(OP_CALLEE);
                 self.xstore_bind(*b, true, fscope);
@@ -2724,6 +2772,7 @@ impl PComp {
             proto: -1,
             str_consts: HashMap::new(),
             num_consts: HashMap::new(),
+            mapped: false,
         });
         let fnid = (self.fns.len() as int) - 1;
         self.fs.push(PState {
@@ -3197,6 +3246,8 @@ impl PComp {
         self.list_stmt = false;
         let using_ok = self.using_here;
         self.using_here = false;
+        let sub = self.sub_label;
+        self.sub_label = false;
         if !self.error.is_empty() {
             return;
         }
@@ -3373,10 +3424,15 @@ impl PComp {
                 }
                 self.next();
                 self.next();
-                if (self.is("function") && (self.strict || self.peek_is(1, "*"))) || (self.is("async") && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1)) {
+                if (self.is("function") && (self.strict || sub || self.peek_is(1, "*"))) || (self.is("async") && self.peek_is(1, "function") && !self.tok_nl(self.pos + 1)) {
                     self.fail("A labelled function must be a plain function in sloppy mode code");
                     return;
                 }
+                if self.kind() == T_IDENT && !self.escaped() && self.lexical_here() {
+                    self.fail("Lexical declaration cannot appear in a single-statement context");
+                    return;
+                }
+                self.sub_label = sub;
                 let body_loop = self.kind() == T_IDENT
                     && !self.escaped()
                     && (self.is("for") || self.is("while") || self.is("do") || (self.peek_is(1, ":") && !is_reserved(self.text().as_str())));
@@ -3413,9 +3469,7 @@ impl PComp {
                 self.fail("In strict mode code or a single-statement context, functions can only be declared at top level or inside a block");
                 return;
             }
-            let lexical = w.as_str() == "const"
-                || w.as_str() == "class"
-                || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1))));
+            let lexical = self.lexical_here();
             if lexical {
                 self.fail("Lexical declaration cannot appear in a single-statement context");
                 return;
@@ -3431,7 +3485,18 @@ impl PComp {
                 return;
             }
         }
+        self.sub_label = true;
         self.statement();
+        self.sub_label = false;
+    }
+
+    /// At a word: a lexical declaration starts here (const, class, `let`
+    /// before a name or a pattern)
+    fn lexical_here(&self) -> bool {
+        let w = self.text();
+        w.as_str() == "const"
+            || w.as_str() == "class"
+            || (w.as_str() == "let" && (self.peek_is(1, "[") || (self.peek_is(1, "{") && !self.tok_nl(self.pos + 1)) || (self.peek_kind(1) == T_IDENT && !self.tok_nl(self.pos + 1))))
     }
 
     /// An expression statement's end: its value dropped, or kept as the
@@ -3733,6 +3798,9 @@ impl PComp {
                 self.goto(ts);
                 self.pattern_target(kind);
                 self.goto(after);
+            } else if kind == K_CONST {
+                self.fail("Missing initializer in const declaration");
+                return;
             } else if kind != K_VAR {
                 self.op(OP_UNDEF);
                 let after = self.pos;
@@ -3972,6 +4040,10 @@ impl PComp {
         let using_async = of && self.tok_is(head, "await") && (self.in_async || !self.module_path.is_empty()) && self.tok_is(head + 1, "using") && kw == head + 3 && (self.toks[(head + 2) as usize].kind as int) == T_IDENT;
         let using = if using_async { 2 } else if using_sync { 1 } else { 0 };
         let decl = using > 0 || self.tok_is(head, "var") || self.tok_is(head, "const") || (self.tok_is(head, "let") && head + 1 < kw);
+        if of && !decl && !is_await && kw == head + 1 && self.tok_is(head, "async") && !self.tok_escaped(head) {
+            self.fail("The left-hand side of a for-of loop may not be 'async'");
+            return;
+        }
         let mut kind = K_VAR;
         if using > 0 {
             kind = K_CONST;
@@ -4560,9 +4632,16 @@ impl PComp {
                     return;
                 }
             } else if pk == K_LET || pk == K_CONST {
+                if name.as_str() == "let" {
+                    self.fail("let is disallowed as a lexically bound name");
+                    return;
+                }
                 if !self.check_lex(scope, name.as_str(), pk) {
                     return;
                 }
+            } else if pk == K_CATCH && self.scopes[scope as usize].names.contains_key(name.as_str()) {
+                self.fail(format!("Identifier '{}' has already been declared", name).as_str());
+                return;
             }
             let b = self.declare(scope, name.as_str(), pk);
             let decl = pk == K_LET || pk == K_CONST || pk == K_PARAM;
@@ -5576,8 +5655,9 @@ impl PComp {
         if self.is("new") && !self.escaped() {
             self.next();
             if self.eat(".") {
+                let esc = self.escaped();
                 let t = self.ident_name();
-                if t.as_str() != "target" {
+                if t.as_str() != "target" || esc {
                     self.fail("new.target expected");
                 }
                 if !self.new_target_ok() {
@@ -5706,6 +5786,10 @@ impl PComp {
                 self.call(e, false);
                 e = ex(E_OTHER);
             } else if self.kind() == T_TEMPLATE {
+                if chain {
+                    self.fail("Invalid tagged template on optional chain");
+                    break;
+                }
                 self.tagged(e);
                 e = ex(E_OTHER);
             } else if self.ts && self.is("!") && !self.nl_before() {
@@ -6123,7 +6207,7 @@ impl PComp {
                 }
                 self.next();
             }
-            if self.text().starts_with("#") {
+            if self.text().starts_with("#") || self.kind() == T_PRIVATE {
                 self.fail("private names are not allowed in object literals");
                 return;
             }
@@ -6132,6 +6216,10 @@ impl PComp {
             let mut kf: int = 0;
             let name = self.prop_key(&mut kf);
             let computed = (kf & 1) != 0;
+            if fflags != 0 && !self.is("(") {
+                self.fail("Unexpected token in object literal: a method needs '('");
+                return;
+            }
             if self.is("(") {
                 self.member_start = ms;
                 let p = self.method(fflags | (flags & (F_GETTER | F_SETTER)), name.as_str());
@@ -6508,6 +6596,9 @@ impl PComp {
         self.end_annex();
         self.in_params = saved_in_params;
         self.check_params(simple, own_strict, flags, outer_parser_strict);
+        if simple && !arrow && !self.f().proto.strict {
+            self.fns[fnid as usize].mapped = true;
+        }
         if own_strict && !outer_parser_strict && !arrow && (flags & (F_METHOD | F_GETTER | F_SETTER)) == 0 && is_strict_reserved(name) {
             self.fail("Unexpected eval or arguments in strict mode");
         }
