@@ -8,6 +8,7 @@
 //                      way; the register-VM and stack-VM engines share it
 //   wasm/cerxes-small.wasm  the same crate at opt-level s
 //   wasm/cerxes-jit.wasm    the same crate with the baseline JIT (--features wjit)
+//   wasm/hermes.wasm        Facebook Hermes (static_h) via Emscripten, optional
 //   workers/<id>.js    one worker per engine (esbuild): the browser's own
 //                      engine, CEr, QuickJS, and CEr compiled by rgrc to
 //                      JavaScript (cer/bin/Cer.cjs) as a curiosity
@@ -39,10 +40,10 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "quickjs", "cer-js"];
+const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "hermes-wasm", "quickjs", "cer-js"];
 // the WebAssembly file each engine loads, for its size; the CErXes variants
 // stand on the step that builds their file
-const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm" };
+const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm", "hermes-wasm": "hermes.wasm" };
 const STEP = { "cerxes-stack": "cerxes-wasm" };
 const status = {}; // id -> { available, reason, size }
 
@@ -124,14 +125,32 @@ step("cerxes-small", () => {
   fs.copyFileSync(path.join(target, "wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(DIST, "wasm/cerxes-small.wasm"));
 });
 
+// Facebook Hermes (static_h) as WebAssembly: the Emscripten build lives in
+// playground/hermes-wasm/prebuilt (copied into dist). Rebuild with
+// playground/hermes-wasm/build.sh; override the copy with HERMES_WASM_DIR.
+step("hermes-wasm", () => {
+  const dirs = [
+    process.env.HERMES_WASM_DIR,
+    path.join(HERE, "hermes-wasm/prebuilt"),
+    path.join(os.tmpdir(), "hermes-ws/build-wasm/bin"),
+  ].filter(Boolean);
+  const dir = dirs.find((d) => fs.existsSync(path.join(d, "hermes.js")) && fs.existsSync(path.join(d, "hermes.wasm")));
+  if (!dir) throw new Error("missing hermes.js/wasm (run playground/hermes-wasm/build.sh)");
+  fs.copyFileSync(path.join(dir, "hermes.wasm"), path.join(DIST, "wasm/hermes.wasm"));
+  fs.copyFileSync(path.join(dir, "hermes.js"), path.join(DIST, "wasm/hermes.mjs"));
+});
+
 // With the baseline JIT (cerxes::wjit): the compiled modules call back into
 // the engine through its function table, which has to be exported and
 // growable (see cerxes/bench/wjit.mjs, which builds the same into target-jit).
 step("cerxes-jit", () => {
   const crate = path.join(HERE, "cerxes-wasm");
   const target = path.join(crate, "target-jit");
+  const rustcWrap = path.join(crate, "rustc-wasm.sh");
   run("cargo", ["build", "--release", "--quiet", "--target", "wasm32-wasip1", "--features", "wjit", "--manifest-path", path.join(crate, "Cargo.toml"), "--target-dir", target], {
-    env: { ...process.env, RUSTFLAGS: "-Awarnings -C link-arg=--export-table -C link-arg=--growable-table" },
+    // RUSTFLAGS=-Awarnings makes cargo 1.83's wasm32-wasip1 probe fail to
+    // parse rustc --print=file-names; the wrapper adds the table exports.
+    env: { ...process.env, RUSTC_WRAPPER: rustcWrap },
   });
   fs.copyFileSync(path.join(target, "wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(DIST, "wasm/cerxes-jit.wasm"));
 });

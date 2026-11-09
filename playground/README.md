@@ -16,6 +16,7 @@ your own script in all of them.
 | CErXes · stack VM | the same `cerxes.wasm` on the older stack machine, to compare the two interpreters |
 | CErXes · small build | `cerxes-wasm/` at `opt-level = "s"`: a smaller download for some speed |
 | CErXes · JIT | `cerxes-wasm/` with the `wjit` feature: hot register code (64 runs) is compiled to WebAssembly modules the page instantiates; the engine falls back to the interpreter wherever the JIT exits |
+| Hermes · C++ → WASM | Facebook Hermes (`static_h`) compiled by Emscripten (`playground/hermes-wasm/prebuilt`); optional to tick, like the JIT |
 | QuickJS · C → WASM | Fabrice Bellard's QuickJS, from `quickjs-emscripten` (MIT) |
 | CEr · Rust → Ranger → JS | a curiosity: the same `cer/src/lib.rs` read by the Ranger compiler as a strict Rust module and written out as JavaScript |
 
@@ -143,7 +144,8 @@ npx serve playground/dist          # or any static server
 `build.mjs` needs `rustup target add wasm32-wasip1` for CEr · WASM, and
 ranger-compiler 4.0.1 or later (the devDependency) for CEr · JS. An engine
 whose build fails is greyed out on the page with the reason; `--strict` (CI)
-fails instead.
+fails instead. Hermes WASM is the Emscripten build in
+`playground/hermes-wasm/prebuilt/` (see that directory to rebuild it).
 
 ## Publishing
 
