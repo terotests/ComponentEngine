@@ -65,3 +65,18 @@ for (var k in ops) {
   var a = t1-t0, b = t2-t1;
   out(k + " " + a.toFixed(1) + " " + b.toFixed(1) + " " + (b/Math.max(a,0.05)).toFixed(1) + " " + r1 + "/" + r2);
 }
+
+// ---- promise jobs: N and 4N in flight at once, timed to the last callback
+(function () {
+  if (typeof Promise === "undefined") return;
+  async function w(i) { await null; await i; return i; }
+  function once(n, done) {
+    var t0 = now(), ps = [];
+    for (var i = 0; i < n; i++) ps.push(w(i));
+    Promise.all(ps).then(function (v) { done(now() - t0, v.length); });
+  }
+  if (ONLY && ONLY !== "async-parallel") return;
+  once(N / 4, function (a, r1) {
+    once(N, function (b, r2) { out("async-parallel " + a.toFixed(1) + " " + b.toFixed(1) + " " + (b / Math.max(a, 0.05)).toFixed(1) + " " + r1 + "/" + r2); });
+  });
+})();
