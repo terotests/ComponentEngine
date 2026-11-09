@@ -293,6 +293,9 @@ pub struct Vm {
     /// (shape * 65536 + slot) for a property read or write that sees two
     /// shapes; the site's c and this swap on a hit
     pub ic2: Vec<i32>,
+    /// R_GET_METHOD's method cache (rcode c <= -100000, entry -100000 - c):
+    /// receiver shape, shape epoch, prototype, its shape, slot; 5 ints each
+    pub mcache: Vec<i32>,
     pub pic: Vec<i32>,
     pub shape_epoch: int,
     /// instanceof: Function.prototype's and Object.prototype's shapes and
@@ -593,6 +596,7 @@ impl Vm {
             sempty: Rc::new(String::new()),
             rpic: Vec::new(),
             ic2: Vec::new(),
+            mcache: Vec::new(),
             pic: Vec::new(),
             shape_epoch: 0,
             hi_fp: -1,
