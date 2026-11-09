@@ -125,23 +125,20 @@ step("cerxes-small", () => {
   fs.copyFileSync(path.join(target, "wasm32-wasip1/release/cerxes_wasm.wasm"), path.join(DIST, "wasm/cerxes-small.wasm"));
 });
 
-// Facebook Hermes (static_h) as WebAssembly, when playground/hermes-wasm/build.sh
-// (or HERMES_WASM_DIR) has already produced hermes.js + hermes.wasm. CI does
-// not build it: missing files leave the engine greyed out even under --strict.
-{
-  const dir = process.env.HERMES_WASM_DIR || path.join(os.tmpdir(), "hermes-ws/build-wasm/bin");
-  const js = path.join(dir, "hermes.js");
-  const wasm = path.join(dir, "hermes.wasm");
-  if (!fs.existsSync(js) || !fs.existsSync(wasm)) {
-    status["hermes-wasm"] = { available: false, reason: "not built (run playground/hermes-wasm/build.sh)" };
-    log("-- hermes-wasm: not built (run playground/hermes-wasm/build.sh)");
-  } else {
-    step("hermes-wasm", () => {
-      fs.copyFileSync(wasm, path.join(DIST, "wasm/hermes.wasm"));
-      fs.copyFileSync(js, path.join(DIST, "wasm/hermes.mjs"));
-    });
-  }
-}
+// Facebook Hermes (static_h) as WebAssembly: the Emscripten build lives in
+// playground/hermes-wasm/prebuilt (copied into dist). Rebuild with
+// playground/hermes-wasm/build.sh; override the copy with HERMES_WASM_DIR.
+step("hermes-wasm", () => {
+  const dirs = [
+    process.env.HERMES_WASM_DIR,
+    path.join(HERE, "hermes-wasm/prebuilt"),
+    path.join(os.tmpdir(), "hermes-ws/build-wasm/bin"),
+  ].filter(Boolean);
+  const dir = dirs.find((d) => fs.existsSync(path.join(d, "hermes.js")) && fs.existsSync(path.join(d, "hermes.wasm")));
+  if (!dir) throw new Error("missing hermes.js/wasm (run playground/hermes-wasm/build.sh)");
+  fs.copyFileSync(path.join(dir, "hermes.wasm"), path.join(DIST, "wasm/hermes.wasm"));
+  fs.copyFileSync(path.join(dir, "hermes.js"), path.join(DIST, "wasm/hermes.mjs"));
+});
 
 // With the baseline JIT (cerxes::wjit): the compiled modules call back into
 // the engine through its function table, which has to be exported and

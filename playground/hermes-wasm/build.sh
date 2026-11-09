@@ -8,7 +8,8 @@
 #
 # Needs cmake, ninja, a host C++ compiler, and emsdk (EMSDK, or ~/emsdk).
 # Writes hermes.js / hermes.wasm under $HERMES_WS/build-wasm/bin (default
-# /tmp/hermes-ws). playground/build.mjs copies them when they are there.
+# /tmp/hermes-ws) and copies them into playground/hermes-wasm/prebuilt for
+# the playground build.
 
 set -eu
 HERMES_WS="${HERMES_WS:-/tmp/hermes-ws}"
@@ -57,4 +58,8 @@ cmake -G Ninja \
 
 cmake --build "${WASM}" --target hermes --parallel "${JOBS}"
 ls -l "${WASM}/bin/hermes.js" "${WASM}/bin/hermes.wasm"
-echo "Hermes WASM ready at ${WASM}/bin"
+
+PREBUILT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/prebuilt"
+mkdir -p "${PREBUILT}"
+cp "${WASM}/bin/hermes.js" "${WASM}/bin/hermes.wasm" "${PREBUILT}/"
+echo "Hermes WASM ready at ${WASM}/bin (copied to ${PREBUILT})"

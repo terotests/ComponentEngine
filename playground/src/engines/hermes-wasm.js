@@ -20,7 +20,7 @@ function exitOk(e) {
 export default {
   id: "hermes-wasm",
   name: "Hermes · C++ → WASM",
-  about: "Facebook Hermes (static_h) compiled by Emscripten to WebAssembly: the same interpreter zoo.js.org measures natively, running in this tab.",
+  about: "Facebook Hermes (static_h) compiled by Emscripten to WebAssembly and shipped with this page: the same interpreter zoo.js.org measures natively, running in this tab.",
   optional: true,
   async load(base) {
     const wasmBinary = await (await fetch(base + "wasm/hermes.wasm")).arrayBuffer();
