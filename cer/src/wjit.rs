@@ -7746,6 +7746,8 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                         OP_SHL => crate::vm::wrap32(p << (q & 31)) as double,
                         _ => (p >> (q & 31)) as double,
                     }
+                } else if code >= OP_BAND && code <= OP_USHR {
+                    crate::rvm::bit_num(code, a, b)
                 } else {
                     crate::vm::arith_num(code, a, b)
                 };

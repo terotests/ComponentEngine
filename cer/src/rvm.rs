@@ -414,6 +414,8 @@ impl Vm {
                                     OP_SHL => wrap32(p << (q & 31)) as double,
                                     _ => (p >> (q & 31)) as double,
                                 });
+                            } else if code >= OP_BAND && code <= OP_USHR {
+                                r = Val::Num(bit_num(code, a, b));
                             } else {
                                 r = Val::Num(arith_num(code, a, b));
                             }
@@ -779,8 +781,7 @@ impl Vm {
                                 if (i as double) == *n {
                                     let s = self.ta_slot(*o, i);
                                     if s >= 0 {
-                                        let bc = self.objs[ob.env as usize].cold as usize;
-                                        r = Val::Num(self.colds[bc].nums[s as usize]);
+                                        r = Val::Num(cold_at(&self.colds, obj_at(&self.objs, ob.env as usize).cold as usize).nums[s as usize]);
                                         done = true;
                                     }
                                 }
@@ -2598,3 +2599,21 @@ pub fn jit_flush(_vm: &mut Vm) {}
 /// back edge this often (4 per such entry, 1 back per good one) is no
 /// longer entered.
 pub const JIT_MISS_MAX: int = 1024;
+
+/// A bit operation on two numbers outside rrun's int32 fast path (`>>>`,
+/// uint32s): below 2^53 ToInt32 truncates and keeps the low 32 bits.
+#[inline(never)]
+pub fn bit_num(code: int, a: double, b: double) -> double {
+    if !(a > -9007199254740992.0 && a < 9007199254740992.0 && b > -9007199254740992.0 && b < 9007199254740992.0) {
+        return arith_num(code, a, b);
+    }
+    let (p, q) = (wrap32(a as int), wrap32(b as int));
+    match code {
+        OP_BAND => (p & q) as double,
+        OP_BOR => (p | q) as double,
+        OP_BXOR => (p ^ q) as double,
+        OP_SHL => wrap32(p << (q & 31)) as double,
+        OP_SHR => (p >> (q & 31)) as double,
+        _ => ((p & 4294967295) >> (q & 31)) as double,
+    }
+}
