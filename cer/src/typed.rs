@@ -53,6 +53,23 @@ pub const NF_BUF_RESIZE: int = 929;
 pub const NF_TA_LEN: int = 970;
 pub const NF_TA_SET: int = 971;
 
+/// n zeros (a new buffer's contents). Rust: one zeroed allocation.
+#[ranger::target(rust)]
+pub fn zeros(n: int) -> Vec<double> {
+    vec![0.0; n.max(0) as usize]
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn zeros(n: int) -> Vec<double> {
+    let mut z: Vec<double> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        z.push(0.0);
+        i += 1;
+    }
+    z
+}
+
 /// log2 of kind_size.
 pub fn kind_shift(kind: int) -> int {
     if kind == TK_FLOAT16 {
@@ -867,7 +884,7 @@ impl Vm {
             a.push(Val::Undef);
         }
         if id == NF_BUF_NEW {
-            // (byteLength, prototype, shared)
+            // (byteLength, prototype, shared, maxByteLength, kind)
             let n = num(&a[0]) as int;
             if n > 1000000000 {
                 self.throw_range("Array buffer allocation failed");
@@ -875,15 +892,19 @@ impl Vm {
             }
             let proto = obj_of(&a[1]);
             let b = self.alloc(C_ARRAYBUFFER, proto);
-            let mut bytes: Vec<double> = Vec::with_capacity(n as usize);
-            let mut i = 0;
-            while i < n {
-                bytes.push(0.0);
-                i += 1;
+            // (…, kind): the buffer of a new typed array of that kind, made
+            // holding its elements at once (zeros, no bytes to convert)
+            let mut home = -1;
+            if let Val::Num(k) = &a[4] {
+                let kind = *k as int;
+                if !is_big(kind) && n % kind_size(kind) == 0 {
+                    home = kind;
+                }
             }
+            let bytes = zeros(if home >= 0 { n / kind_size(home) } else { n });
             { let c = self.cold_id(b) as usize; self.colds[c].nums = bytes; }
             let cid = self.cold_id(b) as usize;
-            self.colds[cid].home = -1;
+            self.colds[cid].home = home;
             if truthy(&a[2]) {
                 self.objs[b as usize].pos = 2;
             }
@@ -1006,12 +1027,7 @@ impl Vm {
             if ms > TK_UINT8 || ms == TK_INT8 {
                 let size = kind_size(ms);
                 if md < 0 && ts == 0 && n == self.buf_size(d) && n % size == 0 {
-                    let mut z: Vec<double> = Vec::new();
-                    let mut j = 0;
-                    while j < n / size {
-                        z.push(0.0);
-                        j += 1;
-                    }
+                    let z = zeros(n / size);
                     { let c = self.cold_id(d) as usize; self.colds[c].nums = z; }
                     let cid = self.cold_id(d) as usize;
                     self.colds[cid].home = ms;
@@ -1075,12 +1091,7 @@ impl Vm {
                 let cid = self.cold_id(b) as usize;
                 self.colds[cid].home = kind;
             } else if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
-                let mut z: Vec<double> = Vec::new();
-                let mut j = 0;
-                while j < len {
-                    z.push(0.0);
-                    j += 1;
-                }
+                let z = zeros(len);
                 { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
                 let cid = self.cold_id(b) as usize;
                 self.colds[cid].home = kind;
