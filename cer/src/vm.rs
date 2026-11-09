@@ -7624,6 +7624,30 @@ impl Vm {
         ob.marked = false;
     }
 
+    /// release() for reclaim's loop: an object with no owned shape and no
+    /// Cold (most) is emptied here, the rest by release().
+    #[inline(always)]
+    fn release_fast(&mut self, o: int) {
+        let (sh, c, e) = {
+            let ob = crate::rvm::obj_at(&self.objs, o as usize);
+            (ob.shape, ob.cold, ob.elems)
+        };
+        if c > 0 || (sh != 0 && self.shapes[sh as usize].owned) {
+            self.release(o);
+            return;
+        }
+        if e > 0 {
+            clear_elems(&mut crate::rvm::evec_mut(&mut self.evecs, e as usize).v);
+            self.efree.push(e);
+        }
+        let ob = crate::rvm::obj_mut(&mut self.objs, o as usize);
+        ob.elems = 0;
+        ob.clear();
+        ob.free = true;
+        ob.zct = false;
+        ob.marked = false;
+    }
+
     /// Frees the objects of `zct` that no root holds, and what only they
     /// held. The slots freed are reused after the next reclaim: an id of a
     /// dead object may still be compared somewhere (the host's ids).
@@ -7675,7 +7699,7 @@ impl Vm {
                     }
                 }
                 self.drop_refs(x, &mut work);
-                self.release(x);
+                self.release_fast(x);
                 self.freed.push(x);
                 self.live -= 1;
                 self.alloc_count -= 1;
