@@ -4553,7 +4553,8 @@ impl Vm {
             }
             self.ta_length(src)
         } else {
-            let l = self.get(&Val::Obj(src), A_LENGTH);
+            let srcv = Val::Obj(src);
+            let l = self.get(&srcv, A_LENGTH);
             if self.throwing {
                 return None;
             }
