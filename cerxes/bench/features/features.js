@@ -369,6 +369,211 @@ add("recursion-fib", function () {
   return fib(25);
 });
 
+// ---- more arrays
+add("array-indexof-includes", function () {
+  var a = []; for (var i = 0; i < 1000; i++) a.push(i);
+  var n = 0;
+  for (var i = 0; i < 20000; i++) { n += a.indexOf(i % 1000); if (a.includes(i % 1500)) n++; }
+  return n;
+});
+add("array-slice-concat", function () {
+  var a = []; for (var i = 0; i < 100; i++) a.push(i);
+  var n = 0;
+  for (var i = 0; i < 50000; i++) n += a.slice(10, 60).concat([1, 2]).length;
+  return n;
+});
+add("array-splice", function () {
+  var n = 0;
+  for (var r = 0; r < 2000; r++) { var a = []; for (var i = 0; i < 100; i++) a.push(i); while (a.length > 10) a.splice(a.length >> 1, 3); n += a[5]; }
+  return n;
+});
+add("array-shift-unshift", function () {
+  var n = 0;
+  for (var r = 0; r < 200; r++) { var a = []; for (var i = 0; i < 1000; i++) a.unshift(i); while (a.length) n += a.shift(); }
+  return n;
+});
+add("array-foreach-find", function () {
+  var a = []; for (var i = 0; i < 1000; i++) a.push(i);
+  var n = 0;
+  for (var r = 0; r < 300; r++) { a.forEach(function (x) { n += x & 1; }); n += a.find(function (x) { return x > 500; }); if (a.some(function (x) { return x === 999; })) n++; }
+  return n;
+});
+add("array-from-fill", function () {
+  var n = 0;
+  for (var i = 0; i < 20000; i++) { var a = new Array(50).fill(i); var b = Array.from(a); n += b[3] + a.length; }
+  return n;
+});
+add("array-sort-strings", function () {
+  var n = 0;
+  for (var r = 0; r < 20; r++) { var a = []; for (var i = 0; i < 5000; i++) a.push("s" + ((i * 7919) % 5000)); a.sort(); n += a[100].length; }
+  return n;
+});
+add("array-spread-call", function () {
+  function f(a, b, c, d) { return a + b + c + d; }
+  var arr = [1, 2, 3, 4], n = 0;
+  for (var i = 0; i < 200000; i++) { n += f(...arr); var b = [...arr, i]; n += b.length; }
+  return n;
+});
+add("array-holes", function () {
+  var n = 0;
+  for (var r = 0; r < 100; r++) { var a = []; for (var i = 0; i < 2000; i += 2) a[i] = i; for (var i = 0; i < a.length; i++) if (a[i] !== undefined) n += a[i]; }
+  return n;
+});
+add("array-numeric-object", function () {
+  var o = {}, n = 0;
+  for (var i = 0; i < 1000; i++) o[i] = i;
+  for (var r = 0; r < 300; r++) for (var i = 0; i < 1000; i++) n += o[i];
+  return n;
+});
+
+// ---- more strings
+add("string-replaceall-pad", function () {
+  var n = 0;
+  for (var i = 0; i < 60000; i++) n += "a-b-c-d".replaceAll("-", "+").length + String(i).padStart(8, "0").length;
+  return n;
+});
+add("string-startswith-includes", function () {
+  var t = "https://example.com/path/to/resource?x=1", n = 0;
+  for (var i = 0; i < 300000; i++) { if (t.startsWith("https")) n++; if (t.includes("resource")) n++; if (t.endsWith("=1")) n++; }
+  return n;
+});
+add("string-upper-repeat", function () {
+  var n = 0;
+  for (var i = 0; i < 100000; i++) n += "hello world".toUpperCase().length + "ab".repeat(5).length;
+  return n;
+});
+add("string-charat-index", function () {
+  var t = "abcdefghijklmnopqrstuvwxyz".repeat(10), n = 0;
+  for (var r = 0; r < 300; r++) for (var i = 0; i < t.length; i++) if (t[i] === "e" || t.charAt(i) === "q") n++;
+  return n;
+});
+add("string-for-of", function () {
+  var t = "abcdefghij".repeat(100), n = 0;
+  for (var r = 0; r < 300; r++) for (var ch of t) n += ch.length;
+  return n;
+});
+add("string-match-split-regex", function () {
+  var t = "one two  three   four five", n = 0;
+  for (var i = 0; i < 50000; i++) { n += t.split(/\s+/).length; var m = t.match(/t\w+/g); n += m.length; }
+  return n;
+});
+add("string-localecompare", function () {
+  var a = ["banana", "apple", "cherry", "date"], n = 0;
+  for (var i = 0; i < 200000; i++) n += a[i & 3].localeCompare(a[(i + 1) & 3]);
+  return n;
+});
+add("string-number-concat", function () {
+  var n = 0;
+  for (var i = 0; i < 300000; i++) n += ("x" + i + ":" + (i & 255)).length;
+  return n;
+});
+add("encode-uri", function () {
+  var n = 0;
+  for (var i = 0; i < 50000; i++) n += encodeURIComponent("a b&c=d/é" + i).length + decodeURIComponent("a%20b%26c").length;
+  return n;
+});
+
+// ---- objects and functions
+add("call-apply-bind", function () {
+  function f(a, b) { return this.k + a + b; }
+  var o = { k: 1 }, g = f.bind(o, 2), n = 0;
+  for (var i = 0; i < 300000; i++) n += f.call(o, 1, 2) + f.apply(o, [1, 2]) + g(3);
+  return n;
+});
+add("define-property-freeze", function () {
+  var n = 0;
+  for (var i = 0; i < 50000; i++) { var o = {}; Object.defineProperty(o, "x", { value: i, enumerable: true }); Object.freeze(o); n += o.x + Object.getOwnPropertyDescriptor(o, "x").value; }
+  return n;
+});
+add("has-own-in", function () {
+  var o = { a: 1, b: 2, c: 3 }, n = 0;
+  for (var i = 0; i < 500000; i++) { if (o.hasOwnProperty("b")) n++; if ("c" in o) n++; if (Object.hasOwn(o, "z")) n--; }
+  return n;
+});
+add("private-fields", function () {
+  class P { #x = 0; inc() { this.#x++; return this.#x; } }
+  var p = new P(), n = 0;
+  for (var i = 0; i < 500000; i++) n += p.inc() & 1;
+  return n;
+});
+add("let-closure-loop", function () {
+  var n = 0;
+  for (var r = 0; r < 300; r++) { var fs = []; for (let i = 0; i < 300; i++) fs.push(function () { return i; }); for (var j = 0; j < fs.length; j++) n += fs[j](); }
+  return n;
+});
+add("optional-nullish", function () {
+  var xs = [{ a: { b: 1 } }, { a: null }, {}, null], n = 0;
+  for (var i = 0; i < 500000; i++) { var x = xs[i & 3]; n += (x?.a?.b ?? 2); }
+  return n;
+});
+add("symbol-weakmap", function () {
+  var s = Symbol("k"), wm = new WeakMap(), objs = [], n = 0;
+  for (var i = 0; i < 1000; i++) { var o = {}; o[s] = i; objs.push(o); wm.set(o, i); }
+  for (var r = 0; r < 100; r++) for (var i = 0; i < objs.length; i++) n += objs[i][s] + wm.get(objs[i]);
+  return n;
+});
+add("map-delete", function () {
+  var n = 0;
+  for (var r = 0; r < 30; r++) { var m = new Map(); for (var i = 0; i < 5000; i++) m.set(i, i); for (var i = 0; i < 5000; i += 2) m.delete(i); n += m.size; }
+  return n;
+});
+add("arguments-sloppy", function () {
+  function f() { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; }
+  var n = 0;
+  for (var i = 0; i < 200000; i++) n += f(1, 2, 3, 4);
+  return n;
+});
+add("array-destructure-swap", function () {
+  var a = 1, b = 2, n = 0;
+  for (var i = 0; i < 500000; i++) { [a, b] = [b, a]; n += a; }
+  return n;
+});
+
+// ---- numbers, BigInt, Date, JSON
+add("bigint-arith", function () {
+  var x = 1n, n = 0;
+  for (var i = 0; i < 100000; i++) { x = (x * 3n + 1n) % 1000000007n; }
+  return Number(x);
+});
+add("date-ops", function () {
+  var n = 0;
+  for (var i = 0; i < 50000; i++) { var d = new Date(2020, 0, 1 + (i % 365)); n += d.getMonth() + d.getDate() + d.getDay(); }
+  return n;
+});
+add("date-iso", function () {
+  var n = 0;
+  for (var i = 0; i < 30000; i++) n += new Date(1600000000000 + i * 86400000).toISOString().length;
+  return n;
+});
+add("json-parse-big", function () {
+  var a = []; for (var i = 0; i < 2000; i++) a.push({ id: i, name: "item" + i, tags: ["a", "b"], v: i * 0.5 });
+  var t = JSON.stringify(a), n = 0;
+  for (var r = 0; r < 20; r++) n += JSON.parse(t).length;
+  return n;
+});
+add("json-stringify-big", function () {
+  var a = []; for (var i = 0; i < 2000; i++) a.push({ id: i, name: "item" + i, tags: ["a", "b"], v: i * 0.5 });
+  var n = 0;
+  for (var r = 0; r < 20; r++) n += JSON.stringify(a).length;
+  return n;
+});
+add("number-isinteger-tofixed0", function () {
+  var n = 0;
+  for (var i = 0; i < 300000; i++) { if (Number.isInteger(i / 2)) n++; if (Number.isFinite(i)) n++; n += Math.trunc(i / 3) & 1; }
+  return n;
+});
+add("intl-number-format", function () {
+  if (typeof Intl === "undefined") return -1;
+  var f = new Intl.NumberFormat("en-US"), n = 0;
+  for (var i = 0; i < 20000; i++) n += f.format(i * 1234.5).length;
+  return n;
+});
+add("tolocalestring", function () {
+  var n = 0;
+  for (var i = 0; i < 20000; i++) n += (i * 1234.5).toLocaleString("en-US").length;
+  return n;
+});
+
 for (var c = 0; c < cases.length; c++) {
   var name = cases[c][0];
   if (ONLY && ONLY !== name) continue;
@@ -381,3 +586,17 @@ for (var c = 0; c < cases.length; c++) {
   }
   out(name + " " + best.toFixed(1) + " " + sum);
 }
+
+// ---- promises: timed from the first to the last callback
+(function () {
+  if (ONLY && ONLY !== "promise-then" && ONLY !== "async-await") return;
+  var t0 = now(), p = Promise.resolve(0);
+  for (var i = 0; i < 100000; i++) p = p.then(function (x) { return x + 1; });
+  p.then(function (v) {
+    if (!ONLY || ONLY === "promise-then") out("promise-then " + (now() - t0).toFixed(1) + " " + v);
+    async function f(x) { return x + 1; }
+    async function run() { var s = 0; for (var i = 0; i < 100000; i++) s = await f(s); return s; }
+    var t1 = now();
+    run().then(function (s) { if (!ONLY || ONLY === "async-await") out("async-await " + (now() - t1).toFixed(1) + " " + s); });
+  });
+})();

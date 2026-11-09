@@ -277,7 +277,11 @@ impl Engine {
         if self.vm.throwing {
             return self.uncaught();
         }
+        // the completion value lives through the jobs: a reclaim there
+        // must not free it
+        self.vm.temp_roots.push(r);
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -347,7 +351,9 @@ impl Engine {
             let u = self.uncaught();
             return format!("t:{}", u);
         }
+        self.vm.temp_roots.push(r);
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         match &r {
             Val::Undef => String::from("u"),
             Val::Null => String::from("l"),

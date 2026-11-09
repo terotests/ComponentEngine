@@ -576,6 +576,57 @@ pub fn from_string(s: &str) -> String {
     v
 }
 
+/// The digits of a canonical decimal (without its sign); 0 when it is not
+/// one.
+pub fn digit_count(s: &str) -> int {
+    let n = s.as_bytes().len() as int;
+    if s.starts_with("-") {
+        return n - 1;
+    }
+    n
+}
+
+/// How many digits big_arith does in ints: 18 where int is 64 bits (the
+/// Rust build); the other targets' ints may be narrower, so none there.
+#[ranger::target(rust)]
+pub fn small_digits() -> int {
+    18
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn small_digits() -> int {
+    0
+}
+
+/// A canonical decimal of up to 18 digits as an int.
+pub fn small_int(s: &str) -> int {
+    let mut v: int = 0;
+    let mut neg = false;
+    for c in s.chars() {
+        if c == '-' {
+            neg = true;
+        } else {
+            v = v * 10 + ((c as int) - 48);
+        }
+    }
+    if neg {
+        -v
+    } else {
+        v
+    }
+}
+
+/// An int's decimal text.
+#[ranger::target(rust)]
+pub fn int_text(v: int) -> String {
+    v.to_string()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn int_text(v: int) -> String {
+    format!("{}", v)
+}
+
 // ---- the VM's side: a BigInt is an interned C_BIGINT object whose `prim`
 // is its decimal text, so === and SameValue compare them by identity
 
@@ -616,11 +667,25 @@ impl Vm {
         let sv0 = self.str_val(s);
         self.put_prim(o, sv0);
         self.bigints.insert(String::from(s), o);
+        // the table is weak: a BigInt nothing holds is freed like any object
+        // and leaves the table then (release); 0n stays, the JIT reads it
         if s == "0" {
             self.big_zero = o;
+            self.roots.push(o);
         }
-        self.symbols.push(o);
         Val::Obj(o)
+    }
+
+    /// A BigInt being freed leaves the table (when it is the one there).
+    pub fn forget_bigint(&mut self, o: int) {
+        let t = self.big_text(&Val::Obj(o));
+        let mine = match self.bigints.get(t.as_str()) {
+            Some(x) => *x == o,
+            None => false,
+        };
+        if mine {
+            self.bigints.remove(t.as_str());
+        }
     }
 
     pub fn is_bigint(&self, v: &Val) -> bool {
@@ -687,6 +752,35 @@ impl Vm {
         }
         let x = self.big_text(a);
         let y = self.big_text(b);
+        // small operands in machine integers: up to 9 digits each nothing
+        // overflows; add, sub, div and rem stay inside up to 18
+        let nx = digit_count(x.as_str());
+        let ny = digit_count(y.as_str());
+        let lim = small_digits();
+        if nx > 0 && ny > 0 && nx <= lim && ny <= lim {
+            let small = match code {
+                OP_ADD | OP_SUB => true,
+                OP_MUL => nx + ny <= 18,
+                OP_DIV | OP_MOD => y != "0",
+                _ => false,
+            };
+            if small {
+                let p = small_int(x.as_str());
+                let q = small_int(y.as_str());
+                let v = if code == OP_ADD {
+                    p + q
+                } else if code == OP_SUB {
+                    p - q
+                } else if code == OP_MUL {
+                    p * q
+                } else if code == OP_DIV {
+                    p / q
+                } else {
+                    p % q
+                };
+                return self.bigint_val(int_text(v).as_str());
+            }
+        }
         let r = match code {
             OP_ADD => add(x.as_str(), y.as_str()),
             OP_SUB => sub(x.as_str(), y.as_str()),

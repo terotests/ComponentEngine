@@ -7486,9 +7486,6 @@ impl Vm {
             self.mark_obj(x, work);
         }
         let mut held: Vec<int> = Vec::new();
-        for (_, v) in self.bigints.iter() {
-            held.push(*v);
-        }
         for (_, v) in self.symbol_registry.iter() {
             held.push(*v);
         }
@@ -7633,6 +7630,19 @@ impl Vm {
         let mut work: Vec<int> = Vec::new();
         self.mark_roots(&mut work);
         self.trace(&mut work, true);
+        // BigInts no one holds leave the (weak) table while their text is
+        // still there
+        if !self.bigints.is_empty() {
+            let mut dead: Vec<String> = Vec::new();
+            for (k, v) in self.bigints.iter() {
+                if !self.objs[*v as usize].marked {
+                    dead.push(k.clone());
+                }
+            }
+            for k in dead {
+                self.bigints.remove(k.as_str());
+            }
+        }
         if !self.strs.is_empty() {
             self.mark_strs();
         }
@@ -7845,6 +7855,10 @@ impl Vm {
         };
         let primv = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).prim;
         let prim = obj_of(&primv);
+        if crate::rvm::obj_at(&self.objs, x as usize).class == C_BIGINT {
+            // out of the weak table before its text goes
+            self.forget_bigint(x);
+        }
         self.sdec(str_of(&primv));
         self.drop_ref(proto as int, work);
         self.drop_ref(env as int, work);
