@@ -2451,17 +2451,7 @@ function isRegExpLike(x) {
   if (m !== undefined) return !!m;
   return x instanceof RegExp;
 }
-['startsWith', 'endsWith', 'includes'].forEach(function (name) {
-  var nat = SP[name];
-  var f = function (s, pos) {
-    'use strict';
-    if (this === undefined || this === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
-    if (isRegExpLike(s)) throw new TypeError('First argument to String.prototype.' + name + ' must not be a regular expression');
-    return nat.call(this, isObject(s) ? String(s) : s, pos);
-  };
-  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
-  hide(SP, name, setLength(f, 1));
-});
+// startsWith, endsWith and includes are the natives: they do IsRegExp
 
 // ---- smaller pieces: unscopables, Date's @@toPrimitive, Number.parseFloat,
 // the Annex B String HTML methods, RegExp flags and RegExp.escape
@@ -2721,8 +2711,12 @@ if (typeof BigInt === 'function') hide(BigInt.prototype, 'toLocaleString', funct
 });
 hide(String.prototype, 'localeCompare', function localeCompare(that, locales, options) {
   'use strict';
+  if (locales === undefined && options === undefined) {
+    if (typeof this === 'string' && typeof that === 'string') return intlCollate(this, that, '', 3);
+    if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
+    return intlCollate(String(this), String(that), '', 3);
+  }
   if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
-  if (locales === undefined && options === undefined) return intlCollate(String(this), String(that), '', 3);
   return intl().collate(String(this), String(that), locales, options);
 });
 hide(DP, 'toLocaleString', function toLocaleString(locales, options) { return intl().dateLocale(this, locales, options, 'all'); });
