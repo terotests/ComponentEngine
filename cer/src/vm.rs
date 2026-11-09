@@ -391,6 +391,9 @@ pub struct Vm {
     pub symbol_registry: HashMap<String, int>,
     /// promise jobs, four values each
     pub jobs: Vec<Val>,
+    /// the next job's index in `jobs` (run_jobs takes them from the front
+    /// without moving the rest down; the ones taken are undefined)
+    pub job_head: int,
     pub regexes: Vec<crate::regex::Regex>,
     pub regex_cache: HashMap<String, int>,
     /// a regex's `source` as shown (make_regexp), by its index
@@ -659,6 +662,7 @@ impl Vm {
             symbols: Vec::new(),
             symbol_registry: HashMap::new(),
             jobs: Vec::new(),
+            job_head: 0,
             regexes: Vec::new(),
             regex_cache: HashMap::new(),
             regex_shown: Vec::new(),

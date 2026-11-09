@@ -2910,15 +2910,42 @@ impl Vm {
         self.jobs.push(derived);
     }
 
+    /// The queued jobs not run yet, in order.
+    pub fn pending_jobs(&self) -> Vec<Val> {
+        let mut out: Vec<Val> = Vec::new();
+        let mut i = self.job_head as usize;
+        while i < self.jobs.len() {
+            out.push(self.jobs[i]);
+            i += 1;
+        }
+        out
+    }
+
     /// Runs queued promise jobs until none are left.
     pub fn run_jobs(&mut self) {
         let mut guard: int = 0;
-        while !self.jobs.is_empty() && guard < 10000000 {
+        while (self.job_head as usize) < self.jobs.len() && guard < 10000000 {
             guard += 1;
-            let a = self.jobs.remove(0);
-            let b = self.jobs.remove(0);
-            let c = self.jobs.remove(0);
-            let d = self.jobs.remove(0);
+            // from the front, each job's four values taken out in place:
+            // a queue of n jobs costs n, not n * n moves
+            let h = self.job_head as usize;
+            let a = self.jobs[h];
+            let b = self.jobs[h + 1];
+            let c = self.jobs[h + 2];
+            let d = self.jobs[h + 3];
+            self.jobs[h] = Val::Undef;
+            self.jobs[h + 1] = Val::Undef;
+            self.jobs[h + 2] = Val::Undef;
+            self.jobs[h + 3] = Val::Undef;
+            self.job_head = (h + 4) as int;
+            if (self.job_head as usize) >= self.jobs.len() {
+                self.jobs.clear();
+                self.job_head = 0;
+            } else if self.job_head >= 4096 && (self.job_head as usize) * 2 >= self.jobs.len() {
+                let rest = self.pending_jobs();
+                self.jobs = rest;
+                self.job_head = 0;
+            }
             // from the host (native_depth 0) the jobs' frames are safe
             // points: what the loop still needs after a call is rooted
             let top = self.native_depth == 0;

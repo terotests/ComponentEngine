@@ -338,7 +338,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
     }
-    put_vals(&mut b, &mut st, vm, &vm.jobs);
+    put_vals(&mut b, &mut st, vm, &vm.pending_jobs());
     // the regular expressions by their cache key ("source/flags"), in order
     let mut keys: Vec<String> = Vec::new();
     let mut i: usize = 0;
@@ -651,6 +651,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.jobs = get_vals(&mut r, &strs);
+    vm.job_head = 0;
     vm.regexes = Vec::new();
     vm.regex_cache = HashMap::new();
     vm.regex_shown = Vec::new();
