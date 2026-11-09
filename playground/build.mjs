@@ -39,10 +39,10 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "quickjs", "cer-js"];
+const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "quickjs", "hermes", "cer-js"];
 // the WebAssembly file each engine loads, for its size; the CErXes variants
 // stand on the step that builds their file
-const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm" };
+const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm", hermes: "hermes.wasm" };
 const STEP = { "cerxes-stack": "cerxes-wasm" };
 const status = {}; // id -> { available, reason, size }
 
@@ -168,6 +168,22 @@ step("evg-host", () => {
   fs.copyFileSync(path.join(pkg, "html/evg-html.js"), path.join(vendor, "evg-html.js"));
   fs.copyFileSync(path.join(pkg, "gl/evg-measure.js"), path.join(vendor, "evg-measure.js"));
 });
+
+// ---- Hermes as WebAssembly -------------------------------------------------
+// playground/hermes/build.sh makes it (emscripten, about half an hour; CI
+// caches it). Without it the page lists Hermes as not in this build.
+
+const HERMES_DIST = path.join(HERE, "hermes/dist");
+if (skip.has("hermes")) {
+  status.hermes = { available: false, reason: "skipped in this build" };
+} else if (!fs.existsSync(path.join(HERMES_DIST, "hermes.wasm"))) {
+  status.hermes = { available: false, reason: "not built (playground/hermes/build.sh)" };
+  log("-- hermes: not built (playground/hermes/build.sh)");
+} else {
+  step("hermes", () => {
+    for (const f of ["hermes.mjs", "hermes.wasm"]) fs.copyFileSync(path.join(HERMES_DIST, f), path.join(DIST, "wasm", f));
+  });
+}
 
 // ---- the page and one worker per engine -----------------------------------
 
