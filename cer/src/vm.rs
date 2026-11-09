@@ -1099,6 +1099,7 @@ impl Vm {
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
+    #[inline]
     pub fn free_shape(&mut self, o: int) {
         let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
@@ -7603,6 +7604,7 @@ impl Vm {
     }
 
     /// Empties slot `o` (garbage): its shape and Cold go back.
+    #[inline]
     fn release(&mut self, o: int) {
         // shape 0 (arrays, scopes, most functions) is never owned
         if self.objs[o as usize].shape != 0 {
