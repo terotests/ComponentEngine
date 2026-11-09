@@ -163,6 +163,9 @@ pub struct Vm {
     pub atom_cache: Vec<int>,
     /// atom names as string values, made on first use (atom_val)
     pub atom_vals: Vec<Val>,
+    /// the one-unit strings of ASCII, shared (unit_val), pinned like
+    /// atom_vals
+    pub char_vals: Vec<Val>,
     /// "undefined", "object", … as string values for typeof (type_val)
     pub type_vals: Vec<Val>,
     /// atoms that are symbols (their description is the name)
@@ -529,6 +532,7 @@ impl Vm {
             atom_cache: Vec::new(),
             atom_names: Vec::new(),
             atom_vals: Vec::new(),
+            char_vals: Vec::new(),
             atom_kinds: Vec::new(),
             tostr_vals: Vec::new(),
             a_tostringtag: -1,
@@ -1746,6 +1750,22 @@ impl Vm {
         self.atom_vals[a as usize].clone()
     }
 
+    /// The string of one UTF-16 unit `c`; ASCII ones are shared.
+    pub fn unit_val(&mut self, c: int) -> Val {
+        if c >= 128 {
+            return self.string_val(jsstr::from_unit(c));
+        }
+        if self.char_vals.is_empty() {
+            let mut k: int = 0;
+            while k < 128 {
+                let v = self.pin_rc(Rc::new(jsstr::from_unit(k)));
+                self.char_vals.push(v);
+                k += 1;
+            }
+        }
+        self.char_vals[c as usize].clone()
+    }
+
     /// `typeof v` as a string value, shared.
     pub fn type_val(&mut self, v: &Val) -> Val {
         if self.type_vals.is_empty() {
@@ -2503,7 +2523,7 @@ impl Vm {
                         let s = self.sget(s.clone());
                         let c = self.str_at(&s, i);
                         if c >= 0 {
-                            return self.string_val(jsstr::from_unit(c));
+                            return self.unit_val(c);
                         }
                     }
                 }
@@ -2534,7 +2554,7 @@ impl Vm {
                 let s = self.sget(s.clone());
                 let c = self.str_at(&s, i);
                 if c >= 0 {
-                    return self.string_val(jsstr::from_unit(c));
+                    return self.unit_val(c);
                 }
                 Val::Undef
             }
