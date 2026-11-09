@@ -37,7 +37,12 @@ export default {
           code = m.callMain(["-w", "/script.js"]);
         } catch (e) {
           if (e && typeof e.status === "number") code = e.status;
-          else (code = 1), err.push(String(e && e.message ? e.message : e));
+          else {
+            code = 1;
+            err.push(String(e && e.message ? e.message : e));
+            // where it aborted, by function name (--profiling-funcs)
+            if (e && e.stack) err.push(String(e.stack).split("\n").slice(1, 12).map((l) => l.trim()).join(" < "));
+          }
         }
         if (code !== 0) {
           const lines = err.filter((l) => l.trim());

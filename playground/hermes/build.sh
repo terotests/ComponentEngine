@@ -36,7 +36,7 @@ cmake --build "$WORK/host" --target hermesc --target hermes --target shermes --p
 # and the hermes command would link NAPI with -rdynamic.
 LINK="-sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1MB -sMODULARIZE=1 -sEXPORT_ES6=1"
 LINK="$LINK -sEXPORT_NAME=HermesModule -sINVOKE_RUN=0 -sEXIT_RUNTIME=0"
-LINK="$LINK -sFORCE_FILESYSTEM=1 -sENVIRONMENT=web,worker -sEXPORTED_RUNTIME_METHODS=callMain,FS"
+LINK="$LINK --profiling-funcs -sFORCE_FILESYSTEM=1 -sENVIRONMENT=web,worker -sEXPORTED_RUNTIME_METHODS=callMain,FS"
 cmake -G Ninja -S "$WORK/src" -B "$WORK/wasm" \
   -DCMAKE_TOOLCHAIN_FILE="$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
