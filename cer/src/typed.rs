@@ -71,6 +71,61 @@ pub const NF_DV_SET: int = 974;
 pub const NF_TA_KIND: int = 975;
 pub const NF_TA_SUB: int = 976;
 pub const NF_TA_NEW: int = 977;
+/// __taSort(view): sorts a number-kind view as the default comparator
+/// does (NaN last, -0 before +0) and gives true; false for anything
+/// __taKind refuses or a BigInt kind (the prelude sorts those).
+pub const NF_TA_SORT: int = 978;
+
+/// The default typed array order: NaN last, -0 before +0.
+pub fn num_before(a: double, b: double) -> bool {
+    if a != a {
+        return false;
+    }
+    if b != b {
+        return true;
+    }
+    if a < b {
+        return true;
+    }
+    if a == 0.0 && b == 0.0 {
+        return 1.0 / a < 0.0 && 1.0 / b > 0.0;
+    }
+    false
+}
+
+/// `v` sorted by num_before (a merge sort: stable, n log n).
+pub fn sort_nums(v: &mut Vec<double>) {
+    let n = v.len();
+    let mut tmp: Vec<double> = v.clone();
+    let mut w: usize = 1;
+    while w < n {
+        let mut lo: usize = 0;
+        while lo < n {
+            let mid = if lo + w < n { lo + w } else { n };
+            let hi = if lo + 2 * w < n { lo + 2 * w } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            while k < hi {
+                if i < mid && (j >= hi || !num_before(v[j], v[i])) {
+                    tmp[k] = v[i];
+                    i += 1;
+                } else {
+                    tmp[k] = v[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            lo = hi;
+        }
+        let mut q: usize = 0;
+        while q < n {
+            v[q] = tmp[q];
+            q += 1;
+        }
+        w = w * 2;
+    }
+}
 
 /// n zeros (a new buffer's contents). Rust: one zeroed allocation.
 #[ranger::target(rust)]
@@ -803,6 +858,7 @@ impl Vm {
         self.method(g, "__taKind", NF_TA_KIND, 1);
         self.method(g, "__taSub", NF_TA_SUB, 4);
         self.method(g, "__taNew", NF_TA_NEW, 4);
+        self.method(g, "__taSort", NF_TA_SORT, 1);
         self.method(g, "__bufMax", NF_BUF_MAX, 1);
         self.method(g, "__bufResize", NF_BUF_RESIZE, 2);
     }
@@ -822,6 +878,32 @@ impl Vm {
 
     /// NF_TA_KIND / NF_TA_SUB / NF_TA_NEW (see there).
     pub fn call_native_ta2(&mut self, id: int, args: &Vec<Val>) -> Val {
+        if id == NF_TA_SORT {
+            let t = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            if t < 0 || !self.ta_plain_view(t) || is_big(self.objs[t as usize].pos as int) {
+                return Val::Bool(false);
+            }
+            let n = self.ta_length(t);
+            let mut v: Vec<double> = Vec::new();
+            let mut i: int = 0;
+            while i < n {
+                let x = self.ta_get_fast(t, i);
+                v.push(match x {
+                    Val::Num(d) => d,
+                    _ => 0.0 / 0.0,
+                });
+                i += 1;
+            }
+            sort_nums(&mut v);
+            i = 0;
+            while i < n {
+                if !self.ta_put_num(t, i, v[i as usize]) {
+                    self.ta_set(t, i, &Val::Num(v[i as usize]));
+                }
+                i += 1;
+            }
+            return Val::Bool(true);
+        }
         if id == NF_TA_KIND {
             let t = if args.is_empty() { -1 } else { obj_of(&args[0]) };
             if t < 0 || !self.ta_plain_view(t) {
@@ -1038,7 +1120,7 @@ impl Vm {
         if id == NF_DV_MAKE || id == NF_DV_GET || id == NF_DV_SET {
             return self.call_native_dv(id, args);
         }
-        if id == NF_TA_KIND || id == NF_TA_SUB || id == NF_TA_NEW {
+        if id == NF_TA_KIND || id == NF_TA_SUB || id == NF_TA_NEW || id == NF_TA_SORT {
             return self.call_native_ta2(id, args);
         }
         if id == NF_TA_LEN {

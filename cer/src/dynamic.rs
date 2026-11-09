@@ -368,6 +368,7 @@ impl Vm {
             let func = self.objs[n as usize].func as int;
             let prim = self.colds[self.objs[n as usize].cold as usize].prim.clone();
             let pos = self.objs[n as usize].pos as int;
+            self.compact_dict(n);
             let keys = self.keys_of(n);
             let vals = self.objs[n as usize].vals.clone();
             self.objs[o as usize].func = func as i32;

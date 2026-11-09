@@ -221,9 +221,34 @@ pub fn snapshot(vm: &Vm) -> String {
         }
         put_num(&mut b, o.class as int);
         put_num(&mut b, o.proto as int);
-        put_ints(&mut b, &vm.shape_keys(o.shape as int));
-        put_vals(&mut b, &mut st, vm, &o.slots());
-        put_ints(&mut b, &vm.shape_attrs(o.shape as int));
+        // a dictionary's tombstones (Vm::remove_own) are left out
+        let mut keys = vm.shape_keys(o.shape as int);
+        let mut vals = o.slots();
+        let mut attrs = vm.shape_attrs(o.shape as int);
+        if vm.shapes[o.shape as usize].ndead > 0 {
+            let tomb = match vm.atoms.get(TOMB_NAME) {
+                Some(t) => *t,
+                None => -1,
+            };
+            let mut k2: Vec<int> = Vec::new();
+            let mut v2: Vec<Val> = Vec::new();
+            let mut a2: Vec<int> = Vec::new();
+            let mut j: usize = 0;
+            while j < keys.len() {
+                if keys[j] != tomb {
+                    k2.push(keys[j]);
+                    v2.push(vals[j].clone());
+                    a2.push(attrs[j]);
+                }
+                j += 1;
+            }
+            keys = k2;
+            vals = v2;
+            attrs = a2;
+        }
+        put_ints(&mut b, &keys);
+        put_vals(&mut b, &mut st, vm, &vals);
+        put_ints(&mut b, &attrs);
         put_vals(&mut b, &mut st, vm, &vm.evecs[o.elems as usize].v);
         let cold = &vm.colds[o.cold as usize];
         put_vals(&mut b, &mut st, vm, &cold.elems2);
@@ -381,6 +406,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.atom_names = Vec::new();
     vm.atom_cache = Vec::new();
     vm.atom_vals = Vec::new();
+    vm.char_vals = Vec::new();
     let na = r.num();
     i = 0;
     while i < na && !r.bad {

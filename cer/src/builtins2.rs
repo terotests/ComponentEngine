@@ -783,14 +783,14 @@ impl Vm {
                         if c < 0 {
                             self.str_val("")
                         } else {
-                            self.string_val(jsstr::from_unit(c))
+                            self.unit_val(c)
                         }
                     }
                     NF_SP_AT => {
                         if c < 0 {
                             Val::Undef
                         } else {
-                            self.string_val(jsstr::from_unit(c))
+                            self.unit_val(c)
                         }
                     }
                     NF_SP_CHARCODEAT => Val::Num(if c < 0 { nan() } else { c as double }),

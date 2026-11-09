@@ -163,6 +163,9 @@ pub struct Vm {
     pub atom_cache: Vec<int>,
     /// atom names as string values, made on first use (atom_val)
     pub atom_vals: Vec<Val>,
+    /// the one-unit strings of ASCII, shared (unit_val), pinned like
+    /// atom_vals
+    pub char_vals: Vec<Val>,
     /// "undefined", "object", … as string values for typeof (type_val)
     pub type_vals: Vec<Val>,
     /// atoms that are symbols (their description is the name)
@@ -529,6 +532,7 @@ impl Vm {
             atom_cache: Vec::new(),
             atom_names: Vec::new(),
             atom_vals: Vec::new(),
+            char_vals: Vec::new(),
             atom_kinds: Vec::new(),
             tostr_vals: Vec::new(),
             a_tostringtag: -1,
@@ -1114,8 +1118,36 @@ impl Vm {
         self.own_shape(o);
         self.shape_epoch += 1;
         let sh = self.objs[o as usize].shape as int;
+        if self.shapes[sh as usize].nkeys > TOMB_AT {
+            // a big dictionary: a tombstone, not every later key and
+            // value moved down; compacted once half are tombstones
+            let tomb = self.intern(TOMB_NAME);
+            self.shapes[sh as usize].bury(slot, tomb);
+            self.put_slot(o, slot, Val::Undef);
+            if self.shapes[sh as usize].ndead * 2 > self.shapes[sh as usize].nkeys {
+                self.compact_dict(o);
+            }
+            return;
+        }
         self.shapes[sh as usize].remove(slot);
         self.remove_val(o, slot);
+    }
+
+    /// `o`'s dictionary without its tombstones (remove_own), and before
+    /// anything that copies its keys and values as they are.
+    pub fn compact_dict(&mut self, o: int) {
+        let sh = self.objs[o as usize].shape as int;
+        if !self.shapes[sh as usize].owned || self.shapes[sh as usize].ndead == 0 {
+            return;
+        }
+        let tomb = self.intern(TOMB_NAME);
+        let mut keep: Vec<bool> = Vec::new();
+        for k in self.shapes[sh as usize].keys.iter() {
+            keep.push(*k != tomb);
+        }
+        self.shapes[sh as usize].compact(&keep);
+        self.objs[o as usize].retain_slots(&keep);
+        self.shape_epoch += 1;
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
@@ -1744,6 +1776,22 @@ impl Vm {
             self.atom_vals[a as usize] = self.pin_rc(rc);
         }
         self.atom_vals[a as usize].clone()
+    }
+
+    /// The string of one UTF-16 unit `c`; ASCII ones are shared.
+    pub fn unit_val(&mut self, c: int) -> Val {
+        if c >= 128 {
+            return self.string_val(jsstr::from_unit(c));
+        }
+        if self.char_vals.is_empty() {
+            let mut k: int = 0;
+            while k < 128 {
+                let v = self.pin_rc(Rc::new(jsstr::from_unit(k)));
+                self.char_vals.push(v);
+                k += 1;
+            }
+        }
+        self.char_vals[c as usize].clone()
     }
 
     /// `typeof v` as a string value, shared.
@@ -2503,7 +2551,7 @@ impl Vm {
                         let s = self.sget(s.clone());
                         let c = self.str_at(&s, i);
                         if c >= 0 {
-                            return self.string_val(jsstr::from_unit(c));
+                            return self.unit_val(c);
                         }
                     }
                 }
@@ -2534,7 +2582,7 @@ impl Vm {
                 let s = self.sget(s.clone());
                 let c = self.str_at(&s, i);
                 if c >= 0 {
-                    return self.string_val(jsstr::from_unit(c));
+                    return self.unit_val(c);
                 }
                 Val::Undef
             }
@@ -4141,6 +4189,7 @@ impl Vm {
         if self.objs[o as usize].class != C_ARGUMENTS {
             return;
         }
+        self.compact_dict(o);
         let keys = self.keys_of(o);
         let mut vals: Vec<Val> = Vec::new();
         let mut attrs: Vec<int> = Vec::new();
@@ -4533,7 +4582,8 @@ impl Vm {
             }
             self.ta_length(src)
         } else {
-            let l = self.get(&Val::Obj(src), A_LENGTH);
+            let srcv = Val::Obj(src);
+            let l = self.get(&srcv, A_LENGTH);
             if self.throwing {
                 return None;
             }
@@ -6591,6 +6641,7 @@ impl Vm {
                     }
                     // the native made its own object: give it this one's fields
                     if let (Val::Obj(t), Val::Obj(n)) = (&this, &r) {
+                        self.compact_dict(*t);
                         let keys = self.keys_of(*t);
                         let vals = self.objs[*t as usize].slots();
                         let mut i: usize = 0;

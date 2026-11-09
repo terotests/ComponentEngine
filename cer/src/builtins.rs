@@ -1469,7 +1469,8 @@ impl Vm {
         if sepstr.is_empty() {
             let mut i: int = 0;
             while i < n && (out.len() as int) < lim {
-                out.push(self.string_val(jsstr::sub_units(s.as_str(), units, i, i + 1)));
+                let c = units[i as usize];
+                out.push(self.unit_val(c));
                 i += 1;
             }
             let a = self.new_array(out);
@@ -3239,7 +3240,7 @@ impl Vm {
             let answer = self.host_sync.call(&req);
             return self.string_val(answer);
         }
-        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_TA_NEW) {
+        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_TA_SORT) {
             return self.call_native_ta(id, &this, args);
         }
         if id >= 920 && id < 930 {

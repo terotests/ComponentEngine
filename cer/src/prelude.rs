@@ -1060,9 +1060,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
 // ---- ArrayBuffer, SharedArrayBuffer, the typed arrays, DataView, Atomics:
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
-var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew;
+var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew, taSort = globalThis.__taSort;
 var bufMax = globalThis.__bufMax, bufResize = globalThis.__bufResize;
-['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__taKind', '__taSub', '__taNew', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
+['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__taKind', '__taSub', '__taNew', '__taSort', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
 function toIndex(v, what) {
   if (v === undefined) return 0;
   var n = toIntegerOrInfinity(v);
@@ -1427,6 +1427,7 @@ function sortedValues(o, cmp, what) {
   return vals;
 }
 hide(TAP, 'sort', function sort(cmp) {
+  if (cmp === undefined && taSort(this)) return this;
   var vals = sortedValues(this, cmp, 'TypedArray.prototype.sort');
   for (var i = 0; i < vals.length; i++) this[i] = vals[i];
   return this;
@@ -2138,12 +2139,16 @@ hide(AP, 'map', setLength(function map(f, t) {
   return A;
 }, 1));
 var nativeFrom = Array.from, nativeOf = Array.of;
+var fromSetValues = Set.prototype.values, fromMapEntries = Map.prototype.entries, fromStrIter = String.prototype[Symbol.iterator];
 hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
   var C = this;
   if (mapFn !== undefined && !isCallable(mapFn)) throw new TypeError(String(mapFn) + ' is not a function');
   var iter = items === undefined || items === null ? undefined : items[Symbol.iterator];
   if (C === Array && Array.isArray(items) && iter === AP.values && mapFn === undefined) return nativeFrom.call(Array, items);
   var ctor = isCallable(C) && C !== Array;
+  // a Set, a Map or a string with its own iterator, into a plain array:
+  // the native spread (no user code runs while it iterates)
+  if (!ctor && mapFn === undefined && iter !== undefined && ((iter === fromSetValues && items instanceof Set) || (iter === fromMapEntries && items instanceof Map) || (typeof items === 'string' && iter === fromStrIter))) return nativeFrom.call(Array, items);
   var A, k = 0;
   if (iter !== undefined && iter !== null) {
     if (!isCallable(iter)) throw new TypeError('Symbol.iterator is not a function');
@@ -2157,7 +2162,7 @@ hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
         try { v = mapFn.call(thisArg, v, k); }
         catch (e) { if (isCallable(it.return)) { try { it.return(); } catch (e2) {} } throw e; }
       }
-      defineProperty(A, k, { value: v, writable: true, enumerable: true, configurable: true });
+      if (ctor) defineProperty(A, k, { value: v, writable: true, enumerable: true, configurable: true }); else A[k] = v;
       k++;
     }
     A.length = k;
@@ -2167,7 +2172,7 @@ hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
   A = ctor ? new C(len) : new Array(len);
   for (; k < len; k++) {
     var x = mapFn ? mapFn.call(thisArg, src[k], k) : src[k];
-    defineProperty(A, k, { value: x, writable: true, enumerable: true, configurable: true });
+    if (ctor) defineProperty(A, k, { value: x, writable: true, enumerable: true, configurable: true }); else A[k] = x;
   }
   A.length = len;
   return A;
