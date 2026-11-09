@@ -7737,9 +7737,9 @@ impl Vm {
     fn drop_refs(&mut self, x: int, work: &mut Vec<int>) {
         let (proto, env, home) = {
             let ob = crate::rvm::obj_at(&self.objs, x as usize);
-            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
+            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { crate::rvm::cold_at(&self.colds, ob.cold as usize).home })
         };
-        let primv = self.colds[crate::rvm::obj_at(&self.objs, x as usize).cold as usize].prim;
+        let primv = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).prim;
         let prim = obj_of(&primv);
         self.sdec(str_of(&primv));
         self.drop_ref(proto as int, work);
@@ -7775,10 +7775,10 @@ impl Vm {
             }
             j += 1;
         }
-        let ne2 = self.colds[crate::rvm::obj_at(&self.objs, x as usize).cold as usize].elems2.len();
+        let ne2 = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2.len();
         j = 0;
         while j < ne2 {
-            match self.colds[crate::rvm::obj_at(&self.objs, x as usize).cold as usize].elems2[j] {
+            match crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2[j] {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
