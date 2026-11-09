@@ -2470,6 +2470,34 @@ pub fn obj_at(v: &Vec<JsObj>, i: usize) -> &JsObj {
     &v[i]
 }
 
+/// `v[i]` of the objects, to write.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn obj_mut(v: &mut Vec<JsObj>, i: usize) -> &mut JsObj {
+    debug_assert!(i < v.len(), "object id past objs");
+    // SAFETY: as obj_at
+    unsafe { v.get_unchecked_mut(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn obj_mut(v: &mut Vec<JsObj>, i: usize) -> &mut JsObj {
+    &mut v[i]
+}
+
+/// `v[i]` of the Colds.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn cold_at(v: &Vec<Cold>, i: usize) -> &Cold {
+    debug_assert!(i < v.len(), "cold past colds");
+    // SAFETY: an object's cold index names an allocated Cold (0: the empty one)
+    unsafe { v.get_unchecked(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn cold_at(v: &Vec<Cold>, i: usize) -> &Cold {
+    &v[i]
+}
+
 /// `v[i]` of the element vectors.
 #[ranger::target(rust)]
 #[inline(always)]

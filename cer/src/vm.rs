@@ -1103,6 +1103,7 @@ impl Vm {
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
+    #[inline]
     pub fn free_shape(&mut self, o: int) {
         let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].owned {
@@ -1759,28 +1760,41 @@ impl Vm {
         self.made += 1;
         self.live += 1;
         if proto >= 0 {
-            self.objs[proto as usize].rc += 1;
-            self.objs[proto as usize].is_proto = true;
+            let p = crate::rvm::obj_mut(&mut self.objs, proto as usize);
+            p.rc += 1;
+            p.is_proto = true;
         }
         let i = if !self.free_list.is_empty() {
             let i = self.free_list.pop().unwrap();
-            let o = &mut self.objs[i as usize];
+            let o = crate::rvm::obj_mut(&mut self.objs, i as usize);
             o.class = class;
             o.proto = proto as i32;
             o.free = false;
             o.marked = false;
+            if self.rc_on {
+                o.zct = true;
+            }
             i
         } else {
-            grow_objs(&mut self.objs);
-            self.objs.push(JsObj::new(class, proto as i32));
-            (self.objs.len() as int) - 1
+            self.alloc_slot(class, proto)
         };
         if self.rc_on {
-            self.objs[i as usize].zct = true;
             self.zct.push(i);
         }
         if self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.made >= self.made_limit {
             self.gc_flag = true;
+        }
+        i
+    }
+
+    /// A new slot at the end of objs (alloc's free list was empty).
+    #[inline(never)]
+    fn alloc_slot(&mut self, class: i32, proto: int) -> int {
+        grow_objs(&mut self.objs);
+        self.objs.push(JsObj::new(class, proto as i32));
+        let i = (self.objs.len() as int) - 1;
+        if self.rc_on {
+            self.objs[i as usize].zct = true;
         }
         i
     }
@@ -7607,6 +7621,7 @@ impl Vm {
     }
 
     /// Empties slot `o` (garbage): its shape and Cold go back.
+    #[inline]
     fn release(&mut self, o: int) {
         // shape 0 (arrays, scopes, most functions) is never owned
         if self.objs[o as usize].shape != 0 {
@@ -7620,6 +7635,30 @@ impl Vm {
             self.objs[o as usize].elems = 0;
         }
         let ob = &mut self.objs[o as usize];
+        ob.clear();
+        ob.free = true;
+        ob.zct = false;
+        ob.marked = false;
+    }
+
+    /// release() for reclaim's loop: an object with no owned shape and no
+    /// Cold (most) is emptied here, the rest by release().
+    #[inline(always)]
+    fn release_fast(&mut self, o: int) {
+        let (sh, c, e) = {
+            let ob = crate::rvm::obj_at(&self.objs, o as usize);
+            (ob.shape, ob.cold, ob.elems)
+        };
+        if c > 0 || (sh != 0 && self.shapes[sh as usize].owned) {
+            self.release(o);
+            return;
+        }
+        if e > 0 {
+            clear_elems(&mut crate::rvm::evec_mut(&mut self.evecs, e as usize).v);
+            self.efree.push(e);
+        }
+        let ob = crate::rvm::obj_mut(&mut self.objs, o as usize);
+        ob.elems = 0;
         ob.clear();
         ob.free = true;
         ob.zct = false;
@@ -7652,7 +7691,7 @@ impl Vm {
         while i < n {
             let o = list[i];
             i += 1;
-            let ob = &mut self.objs[o as usize];
+            let ob = crate::rvm::obj_mut(&mut self.objs, o as usize);
             if !ob.zct {
                 continue;
             }
@@ -7677,7 +7716,7 @@ impl Vm {
                     }
                 }
                 self.drop_refs(x, &mut work);
-                self.release(x);
+                self.release_fast(x);
                 self.freed.push(x);
                 self.live -= 1;
                 self.alloc_count -= 1;
@@ -7701,20 +7740,20 @@ impl Vm {
     /// held joins `work`.
     fn drop_refs(&mut self, x: int, work: &mut Vec<int>) {
         let (proto, env, home) = {
-            let ob = &self.objs[x as usize];
-            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
+            let ob = crate::rvm::obj_at(&self.objs, x as usize);
+            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { crate::rvm::cold_at(&self.colds, ob.cold as usize).home })
         };
-        let primv = self.colds[self.objs[x as usize].cold as usize].prim;
+        let primv = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).prim;
         let prim = obj_of(&primv);
         self.sdec(str_of(&primv));
         self.drop_ref(proto as int, work);
         self.drop_ref(env as int, work);
         self.drop_ref(home, work);
         self.drop_ref(prim, work);
-        let nv = self.objs[x as usize].nv as usize;
+        let nv = crate::rvm::obj_at(&self.objs, x as usize).nv as usize;
         let mut j: usize = 0;
         while j < nv {
-            match self.objs[x as usize].get_slot(j) {
+            match crate::rvm::obj_at(&self.objs, x as usize).get_slot(j) {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -7725,11 +7764,11 @@ impl Vm {
             }
             j += 1;
         }
-        let xe = self.objs[x as usize].elems as usize;
-        let ne = self.evecs[xe].v.len();
+        let xe = crate::rvm::obj_at(&self.objs, x as usize).elems as usize;
+        let ne = crate::rvm::evec_at(&self.evecs, xe).v.len();
         j = 0;
         while j < ne {
-            match self.evecs[xe].v[j] {
+            match *crate::rvm::val_at(&crate::rvm::evec_at(&self.evecs, xe).v, j) {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -7740,10 +7779,10 @@ impl Vm {
             }
             j += 1;
         }
-        let ne2 = self.colds[self.objs[x as usize].cold as usize].elems2.len();
+        let ne2 = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2.len();
         j = 0;
         while j < ne2 {
-            match self.colds[self.objs[x as usize].cold as usize].elems2[j] {
+            match crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2[j] {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -7761,7 +7800,7 @@ impl Vm {
         if c < 0 {
             return;
         }
-        let ob = &mut self.objs[c as usize];
+        let ob = crate::rvm::obj_mut(&mut self.objs, c as usize);
         ob.rc -= 1;
         if ob.rc > 0 || ob.free {
             return;
