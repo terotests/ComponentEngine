@@ -732,8 +732,10 @@ impl Vm {
                                 continue;
                             }
                         }
-                        if c == -4 && o >= 0 && self.ob(o).class == C_ARRAY {
-                            // a site r_get_prop_slow saw reading an array's length
+                        if c == -4 && o >= 0 && (self.ob(o).class == C_ARRAY || self.ob(o).class == C_ARGUMENTS) {
+                            // a site r_get_prop_slow saw reading an array's length (or
+                            // an unmodified arguments object's: a written or deleted
+                            // length makes it C_SARGS)
                             let n = evec_at(&self.evecs, self.ob(o).elems as usize).v.len() as double;
                             self.rset((bp + (w1 as int)) as usize, Val::Num(n));
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -1368,7 +1370,7 @@ impl Vm {
                 self.stack[(bp + w1) as usize] = r;
                 return false;
             }
-            if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+            if atom == A_LENGTH && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && self.find(o, atom) < 0 {
                 let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                 self.stack[(bp + w1) as usize] = r;
                 // the next read here takes rrun's array-length path
