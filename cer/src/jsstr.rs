@@ -409,6 +409,14 @@ pub fn to_lower(s: &str) -> String {
     out
 }
 
+/// The first byte of `s`, -1 for "".
+pub fn first_byte(s: &str) -> int {
+    if s.as_bytes().len() == 0 {
+        return -1;
+    }
+    s.as_bytes()[0] as int
+}
+
 /// A canonical array index ("0", "17"; not "017" or "-1"), or -1.
 pub fn array_index(s: &str) -> int {
     let n = s.as_bytes().len();

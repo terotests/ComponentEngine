@@ -773,6 +773,17 @@ impl Vm {
                                     r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
+                            } else if ob.class == C_TYPED {
+                                // a typed array's element (ta_slot: no detached, resizable or converted buffer)
+                                let i = *n as int;
+                                if (i as double) == *n {
+                                    let s = self.ta_slot(*o, i);
+                                    if s >= 0 {
+                                        let bc = self.objs[ob.env as usize].cold as usize;
+                                        r = Val::Num(self.colds[bc].nums[s as usize]);
+                                        done = true;
+                                    }
+                                }
                             }
                         }
                         if done {
@@ -807,7 +818,15 @@ impl Vm {
                             num = true;
                         }
                         let mut done = false;
-                        if o >= 0 && num {
+                        if o >= 0 && num && self.objs[o as usize].class == C_TYPED {
+                            if let Val::Num(x) = val {
+                                let i = n as int;
+                                if (i as double) == n && self.ta_put_num(o, i, x) {
+                                    done = true;
+                                }
+                            }
+                        }
+                        if !done && o >= 0 && num {
                             self.inc(&val);
                             let ob = &mut self.objs[o as usize];
                             let mut old: int = -1;

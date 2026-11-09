@@ -58,6 +58,13 @@ fn main() {
     if let Ok(v) = std::env::var("CER_REGS") {
         e.vm.regs = v == "1";
     }
+    // CERXES_PROF=1: the sampling profiler (Vm::prof_tick); the functions
+    // that took the most time are printed to stderr at the end
+    let prof = std::env::var("CERXES_PROF").is_ok();
+    if prof {
+        e.vm.prof_on = true;
+        e.vm.prof_t = cerxes::builtins::now_ms();
+    }
     e.set_syntax_for_path(path.as_str());
     e.set_echo(true);
     // CERXES_SLICE_MS=n: the script runs in slices of n ms, resumed until
@@ -116,6 +123,9 @@ fn main() {
     }
     if slice > 0.0 {
         eprintln!("slices: {}", slices);
+    }
+    if prof {
+        prof_report(&e, src.as_str());
     }
     // CER_DUMP=name: the register code of the functions of that name
     if let Ok(name) = std::env::var("CER_DUMP") {
@@ -308,4 +318,24 @@ fn js_str(s: &str) -> String {
     }
     o.push('"');
     o
+}
+
+/// CERXES_PROF's table: self and inclusive ms per function, the top 40 by
+/// self time, with the script line where the function starts (functions of
+/// the prelude count lines in the prelude).
+fn prof_report(e: &Engine, src: &str) {
+    let v = &e.vm;
+    let total: f64 = v.prof_self.iter().sum();
+    let mut idx: Vec<usize> = (0..v.prof_self.len()).filter(|&i| v.prof_self[i] > 0.0).collect();
+    idx.sort_by(|a, b| v.prof_self[*b].partial_cmp(&v.prof_self[*a]).unwrap());
+    let starts: Vec<usize> = src.char_indices().filter(|(_, c)| *c == '\n').map(|(i, _)| i).collect();
+    eprintln!("profile: {:.1} ms sampled", total);
+    eprintln!("  self ms   self %   incl ms  function");
+    for &i in idx.iter().take(40) {
+        let p = &v.protos[i];
+        let at = p.src_start.max(0) as usize;
+        let line = starts.partition_point(|&s| s < at) + 1;
+        let name = if p.name.is_empty() { String::from("<anonymous>") } else { p.name.clone() };
+        eprintln!("{:9.1} {:7.1}% {:9.1}  {} :{}", v.prof_self[i], 100.0 * v.prof_self[i] / total.max(1e-9), v.prof_incl[i], name, line);
+    }
 }
