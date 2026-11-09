@@ -4605,6 +4605,27 @@ impl Vm {
         if self.throwing {
             return None;
         }
+        // a generator with its own next: resumed here, no result object
+        let nf = obj_of(&next);
+        if o >= 0 && nf >= 0 && self.objs[nf as usize].class == C_NATIVE && (self.objs[nf as usize].func as int) == crate::coroutine::NF_GEN_NEXT && self.objs[o as usize].class == C_GENERATOR && !self.protos[self.objs[o as usize].func as usize].is_async {
+            let v = self.gen_resume(o, crate::coroutine::GM_NEXT, Val::Undef);
+            if self.throwing || self.gen_done {
+                return None;
+            }
+            if !self.gen_raw {
+                return Some(v);
+            }
+            // yield* handed on its inner result as it is
+            if !is_obj(&v) {
+                self.throw_type("Iterator result is not an object");
+                return None;
+            }
+            let done = self.get(&v, A_DONE);
+            if self.throwing || self.truthy_v(&done) {
+                return None;
+            }
+            return Some(self.get(&v, A_VALUE));
+        }
         let r = self.call_fixed(next, it.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
         if self.throwing {
             return None;
