@@ -693,6 +693,12 @@ fn few_decimals(x: double, a: double) -> String {
         push_int(&mut s, a as i64);
         return s;
     }
+    // a hit at any k is a hit at 9 too (the same quotient, rounded once):
+    // a clean miss at 9 (most doubles, e.g. Math.random()'s) ends it here
+    let m9 = (a * 1e9).round();
+    if m9 < 9007199254740992.0 && m9 / 1e9 != a && (m9 - 1.0) / 1e9 != a && (m9 + 1.0) / 1e9 != a {
+        return String::new();
+    }
     let mut k: i64 = 1;
     let mut p: f64 = 10.0;
     let mut pi: i64 = 10;

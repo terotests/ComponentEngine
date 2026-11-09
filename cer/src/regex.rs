@@ -46,6 +46,10 @@ const I_CHKPOS: int = 15;
 const I_ANYNL: int = 16;
 /// caps[a..=b] = -1 (a repetition's groups, at each iteration)
 const I_CLEAR: int = 17;
+/// a repetition of the one-unit matcher at pc + 1 (I_CHAR, I_CLASS, I_ANY,
+/// I_ANYNL), any number of times (b 1 greedy, 0 lazy), then pc + 2: one
+/// backtrack entry for the whole run, not one per unit
+const I_STAR: int = 18;
 
 struct RNode {
     kind: int,
@@ -1408,6 +1412,12 @@ impl Gen {
                 self.gen(p, inner, flags, backward);
                 i += 1;
             }
+            let ik = p.nodes[inner as usize].kind;
+            if max < 0 && lo < 0 && !backward && !p.unicode && (ik == R_CHAR || ik == R_CLASS || ik == R_ANY) {
+                self.emit(I_STAR, 0, if greedy { 1 } else { 0 });
+                self.gen(p, inner, flags, backward);
+                return;
+            }
             if max < 0 {
                 let reg = self.nregs;
                 self.nregs += 1;
@@ -2002,6 +2012,10 @@ impl Regex {
             } else if ins.op == I_SPLIT {
                 work.push(ins.a);
                 work.push(ins.b);
+            } else if ins.op == I_STAR {
+                // its unit, or none and what follows
+                work.push(pc + 1);
+                work.push(pc + 2);
             } else if ins.op == I_JMP {
                 work.push(ins.a);
             } else if ins.op == I_SAVE || ins.op == I_CLEAR || ins.op == I_SETPOS || ins.op == I_CHKPOS || ins.op == I_BOL || ins.op == I_EOL || ins.op == I_WORDB || ins.op == I_NWORDB {
@@ -2078,6 +2092,20 @@ impl Regex {
     fn word_at(&self, input: &Vec<int>, i: int) -> bool {
         let c = input[i as usize];
         is_word(c) || (self.unicode && self.ignore_case && c >= 128 && is_word(fold_u(c)))
+    }
+
+    /// Whether the one-unit matcher `ins` (I_STAR's) takes unit c.
+    #[inline]
+    fn unit_ok(&self, ins: Inst, c: int) -> bool {
+        if ins.op == I_CHAR {
+            self.eq(c, ins.a, ins.b != 0)
+        } else if ins.op == I_CLASS {
+            self.class_has(ins.a, c, ins.b != 0)
+        } else if ins.op == I_ANYNL {
+            true
+        } else {
+            !is_line_term(c)
+        }
     }
 
     /// The code point at `pos` (a surrogate pair is one under /u) and its
@@ -2166,6 +2194,31 @@ impl Regex {
                     } else {
                         ok = false;
                     }
+                }
+                I_STAR => {
+                    steps += 1;
+                    if steps > 50000000 {
+                        stack.truncate(base);
+                        return -1;
+                    }
+                    let unit = self.code[(pc + 1) as usize];
+                    if ins.b == 1 {
+                        let mut e = pos;
+                        while e < n && self.unit_ok(unit, input[e as usize]) {
+                            e += 1;
+                        }
+                        if e > pos {
+                            // (3, what follows, the shortest end), then
+                            // (5, this end): each backtrack gives one back
+                            stack.push((3, pc + 2, pos));
+                            stack.push((5, e, 0));
+                        }
+                        pos = e;
+                    } else {
+                        // lazy: none first; a backtrack takes one more
+                        stack.push((6, pc + 2, pos));
+                    }
+                    pc += 2;
                 }
                 I_SPLIT => {
                     // a run without splits ends (no loop goes back without
@@ -2329,6 +2382,30 @@ impl Regex {
                         pc = a;
                         pos = b;
                         break;
+                    } else if kind == 5 {
+                        // a greedy run one unit shorter; (3, …) below it
+                        let (k3, cont, least) = stack[stack.len() - 1];
+                        let _ = k3;
+                        let e = a - 1;
+                        if e > least {
+                            stack.push((5, e, 0));
+                        } else {
+                            stack.pop();
+                        }
+                        pc = cont;
+                        pos = e;
+                        break;
+                    } else if kind == 6 {
+                        // a lazy run one unit longer
+                        let unit = self.code[(a - 1) as usize];
+                        if b < n && self.unit_ok(unit, input[b as usize]) {
+                            stack.push((6, a, b + 1));
+                            pc = a;
+                            pos = b + 1;
+                            break;
+                        }
+                    } else if kind == 3 {
+                        // reached only through kind 5's handling
                     } else if kind == 1 {
                         caps[a as usize] = b;
                     } else {
