@@ -866,6 +866,9 @@ impl Vm {
                 let len = self.str_len(&s);
                 let a = self.rel_index(&a0, len, 0);
                 let b = self.rel_index(&a1, len, len);
+                if a <= 0 && b >= len {
+                    return self.same_str_val(&this, s);
+                }
                 { let tw2 = self.str_slice(&s, a, b); self.string_val(tw2) }
             }
             NF_SP_SUBSTRING => {
@@ -876,6 +879,9 @@ impl Vm {
                 let len = self.str_len(&s);
                 let a = self.rel_index_pos(&a0, len, 0);
                 let b = self.rel_index_pos(&a1, len, len);
+                if (a <= 0 && b >= len) || (b <= 0 && a >= len) {
+                    return self.same_str_val(&this, s);
+                }
                 if a < b {
                     { let tw3 = self.str_slice(&s, a, b); self.string_val(tw3) }
                 } else {
@@ -911,14 +917,23 @@ impl Vm {
             }
             NF_SP_TRIM => {
                 let s = self.this_str(&this);
+                if !trim_needed(s.as_str(), true, true) {
+                    return self.same_str_val(&this, s);
+                }
                 self.string_val(js_trim(s.as_str()))
             }
             NF_SP_TRIMSTART => {
                 let s = self.this_str(&this);
+                if !trim_needed(s.as_str(), true, false) {
+                    return self.same_str_val(&this, s);
+                }
                 self.string_val(js_trim_start(s.as_str()))
             }
             NF_SP_TRIMEND => {
                 let s = self.this_str(&this);
+                if !trim_needed(s.as_str(), false, true) {
+                    return self.same_str_val(&this, s);
+                }
                 self.string_val(js_trim_end(s.as_str()))
             }
             NF_SP_NORMALIZE => {
@@ -1013,7 +1028,8 @@ impl Vm {
                     return Val::Obj(it);
                 }
                 if !global {
-                    return self.regexp_exec(ro, &s);
+                    let inp = if let Val::Str(_) = this { this } else { Val::Undef };
+                    return self.regexp_exec_in(ro, &s, inp, true);
                 }
                 let units = self.rx_take(&s);
                 let mut out: Vec<Val> = Vec::new();
@@ -1053,7 +1069,7 @@ impl Vm {
                 let fill = if matches!(a1, Val::Undef) { String::from(" ") } else { self.to_string(&a1) };
                 let len = jsstr::len(s.as_str());
                 if target <= len || fill.is_empty() {
-                    return self.rc_val(s);
+                    return self.same_str_val(&this, s);
                 }
                 let need = target - len;
                 let fu = jsstr::units(fill.as_str());
@@ -1072,6 +1088,9 @@ impl Vm {
             }
             NF_SP_CONCAT => {
                 let s = self.this_str(&this);
+                if args.is_empty() {
+                    return self.same_str_val(&this, s);
+                }
                 let mut out = s.as_ref().clone();
                 for a in args.iter() {
                     let x = self.to_str(a);
@@ -1086,18 +1105,9 @@ impl Vm {
             }
             NF_SP_ITERATOR => {
                 let s = self.this_str(&this);
-                let mut items: Vec<Val> = Vec::new();
-                for c in s.chars() {
-                    let mut t = String::new();
-                    t.push(c);
-                    items.push(self.string_val(t));
-                }
-                let arr = self.new_array(items);
+                let sv = self.rc_val(s);
                 let ip = self.string_iter_proto;
-                let it = self.alloc(C_ITER, ip);
-                self.put_env(it, arr);
-                self.objs[it as usize].func = 0;
-                Val::Obj(it)
+                self.string_iter(sv, ip)
             }
             // ---- Number / Boolean
             NF_N_ISINTEGER | NF_N_ISSAFEINTEGER | NF_N_ISFINITE | NF_N_ISNAN => {
@@ -1313,7 +1323,8 @@ impl Vm {
                     return Val::Undef;
                 }
                 let s = self.to_str(&a0);
-                let m = self.regexp_exec(ro, &s);
+                let inp = if let Val::Str(_) = a0 { a0 } else { Val::Undef };
+                let m = self.regexp_exec_in(ro, &s, inp, id != NF_RP_TEST);
                 if id == NF_RP_TEST {
                     return Val::Bool(!matches!(m, Val::Null));
                 }

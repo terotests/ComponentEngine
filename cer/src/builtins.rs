@@ -1076,6 +1076,14 @@ impl Vm {
 
     /// RegExp.prototype.exec: the match array or null; updates lastIndex.
     pub fn regexp_exec(&mut self, ro: int, s: &Rc<String>) -> Val {
+        self.regexp_exec_in(ro, s, Val::Undef, true)
+    }
+
+    /// regexp_exec with the input's own string value when the caller has
+    /// one (`input` then shares its handle instead of a new one counting
+    /// the whole text again toward the next collection), and for test()
+    /// (`want` false) only true or null, no match array.
+    pub fn regexp_exec_in(&mut self, ro: int, s: &Rc<String>, inp: Val, want: bool) -> Val {
         let idx = self.objs[ro as usize].func as int;
         let (global, sticky, ngroups, has_indices) = {
             let re = &self.regexes[idx as usize];
@@ -1112,6 +1120,9 @@ impl Vm {
                 return Val::Undef;
             }
         }
+        if !want {
+            return Val::Bool(true);
+        }
         let mut items: Vec<Val> = Vec::new();
         let mut g: int = 0;
         while g <= ngroups {
@@ -1126,7 +1137,7 @@ impl Vm {
         }
         let arr = self.new_array(items.clone());
         self.add_own(arr, A_INDEX, Val::Num(caps[0] as double), 0);
-        let sv9 = self.rc_val(s.clone());
+        let sv9 = if let Val::Str(_) = inp { inp } else { self.rc_val(s.clone()) };
         self.add_own(arr, A_INPUT, sv9, 0);
         let names = self.regexes[idx as usize].names.clone();
         let nidx = self.regexes[idx as usize].name_index.clone();

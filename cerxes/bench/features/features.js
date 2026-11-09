@@ -574,6 +574,187 @@ add("tolocalestring", function () {
   return n;
 });
 
+// ---- batch 3: patterns from real libraries
+add("class-extends-super", function () {
+  class A { constructor(x) { this.x = x; } v() { return this.x; } }
+  class B extends A { constructor(x) { super(x); this.y = 1; } v() { return super.v() + this.y; } }
+  var s = 0;
+  for (var i = 0; i < 200000; i++) s += new B(i).v();
+  return s;
+});
+add("closure-alloc", function () {
+  var s = 0;
+  for (var i = 0; i < 300000; i++) { var k = i; var f = function (x) { return x + k; }; s = (s + f(1)) | 0; }
+  return s;
+});
+add("callback-array-invoke", function () {
+  var hs = []; for (var i = 0; i < 8; i++) (function (k) { hs.push(function (e) { return e + k; }); })(i);
+  var s = 0;
+  for (var r = 0; r < 100000; r++) for (var j = 0; j < hs.length; j++) s = (s + hs[j](r)) | 0;
+  return s;
+});
+add("method-call-many-args", function () {
+  var o = { f: function (a, b, c, d, e, g) { return a + b + c + d + e + g; } }, s = 0;
+  for (var i = 0; i < 500000; i++) s = (s + o.f(i, 1, 2, 3, 4, 5)) | 0;
+  return s;
+});
+add("sort-objects-cmp", function () {
+  var n = 0;
+  for (var r = 0; r < 10; r++) {
+    var a = []; for (var i = 0; i < 20000; i++) a.push({ k: (i * 7919) % 20011, s: "x" + i });
+    a.sort(function (x, y) { return x.k - y.k; });
+    n += a[100].k;
+  }
+  return n;
+});
+add("custom-iterator", function () {
+  function Range(n) { this.n = n; }
+  Range.prototype[Symbol.iterator] = function () { var i = 0, n = this.n; return { next: function () { return i < n ? { value: i++, done: false } : { value: undefined, done: true }; } }; };
+  var s = 0;
+  for (var r = 0; r < 20; r++) for (var v of new Range(20000)) s += v;
+  return s;
+});
+add("spread-set-map", function () {
+  var st = new Set(); for (var i = 0; i < 2000; i++) st.add(i);
+  var n = 0;
+  for (var r = 0; r < 100; r++) { var a = [...st]; n += a.length; var b = Array.from(st); n += b[5]; }
+  return n;
+});
+add("array-flat-flatmap", function () {
+  var a = []; for (var i = 0; i < 1000; i++) a.push([i, [i + 1, i + 2]]);
+  var n = 0;
+  for (var r = 0; r < 50; r++) { n += a.flat(2).length; n += a.flatMap(function (x) { return x; }).length; }
+  return n;
+});
+add("object-create-null-dict", function () {
+  var n = 0;
+  for (var r = 0; r < 20; r++) {
+    var d = Object.create(null);
+    for (var i = 0; i < 5000; i++) d["k" + i] = i;
+    for (var i = 0; i < 5000; i++) n += d["k" + i];
+  }
+  return n;
+});
+add("proxy-get", function () {
+  var t = { a: 1, b: 2 }, p = new Proxy(t, { get: function (o, k) { return o[k] * 2; } }), s = 0;
+  for (var i = 0; i < 200000; i++) s += p.a + p.b;
+  return s;
+});
+add("reflect-ownkeys", function () {
+  var o = { a: 1, b: 2, c: 3, d: 4, e: 5 }, n = 0;
+  for (var i = 0; i < 100000; i++) n += Reflect.ownKeys(o).length + Object.getOwnPropertyNames(o).length;
+  return n;
+});
+add("tagged-template", function () {
+  function tag(s, a, b) { return s[0].length + a + b; }
+  var n = 0;
+  for (var i = 0; i < 300000; i++) n += tag`x${i}y${1}z`;
+  return n;
+});
+add("number-tostring-radix", function () {
+  var n = 0;
+  for (var i = 0; i < 200000; i++) { n += i.toString(16).length + parseInt("ff" + (i & 7), 16) % 7; }
+  return n;
+});
+add("try-finally", function () {
+  var s = 0;
+  function f(i) { try { return i; } finally { s++; } }
+  for (var i = 0; i < 500000; i++) s = (s + f(i)) | 0;
+  return s;
+});
+add("switch-int", function () {
+  var s = 0;
+  for (var i = 0; i < 1000000; i++) {
+    switch (i & 7) { case 0: s += 1; break; case 1: s += 3; break; case 2: s -= 1; break; case 3: s += 7; break; case 4: s ^= 1; break; default: s += 2; }
+  }
+  return s;
+});
+add("matrix-2d", function () {
+  var n = 64, a = [], b = [], c = [];
+  for (var i = 0; i < n; i++) { a.push([]); b.push([]); c.push([]); for (var j = 0; j < n; j++) { a[i].push(i + j); b[i].push(i - j); c[i].push(0); } }
+  for (var r = 0; r < 4; r++) for (var i = 0; i < n; i++) for (var j = 0; j < n; j++) { var t = 0; for (var k = 0; k < n; k++) t += a[i][k] * b[k][j]; c[i][j] = t; }
+  return c[3][5];
+});
+add("string-split-chars-join", function () {
+  var t = "the quick brown fox jumps over the lazy dog", n = 0;
+  for (var i = 0; i < 30000; i++) n += t.split("").reverse().join("").length;
+  return n;
+});
+add("regex-sticky-tokenize", function () {
+  var src = ""; for (var i = 0; i < 500; i++) src += "foo = bar + 12 * (baz - 3); ";
+  var re = /\s*(?:([A-Za-z_]\w*)|(\d+)|(.))/y, n = 0;
+  for (var r = 0; r < 10; r++) { re.lastIndex = 0; var m; while (re.lastIndex < src.length && (m = re.exec(src))) n++; }
+  return n;
+});
+add("regex-global-match-all", function () {
+  var t = ""; for (var i = 0; i < 2000; i++) t += "id" + i + "=v" + i + ";";
+  var n = 0;
+  for (var r = 0; r < 10; r++) { var re = /(\w+)=(\w+);/g, m; while ((m = re.exec(t))) n += m[2].length; }
+  return n;
+});
+add("json-stringify-indent", function () {
+  var o = []; for (var i = 0; i < 200; i++) o.push({ id: i, name: "n" + i, tags: ["a", "b"], deep: { x: i } });
+  var n = 0;
+  for (var r = 0; r < 30; r++) n += JSON.stringify(o, null, 2).length;
+  return n;
+});
+add("array-length-truncate", function () {
+  var a = [], n = 0;
+  for (var r = 0; r < 2000; r++) { for (var i = 0; i < 200; i++) a.push(i); n += a.length; a.length = 0; }
+  return n;
+});
+add("new-array-fill-loop", function () {
+  var n = 0;
+  for (var r = 0; r < 200; r++) { var a = new Array(5000); for (var i = 0; i < a.length; i++) a[i] = i; n += a[4999]; }
+  return n;
+});
+add("instanceof-deep", function () {
+  class A {} class B extends A {} class C extends B {} class D extends C {}
+  var d = new D(), s = 0;
+  for (var i = 0; i < 1000000; i++) if (d instanceof A) s++;
+  return s;
+});
+add("object-spread-update", function () {
+  var st = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 };
+  for (var i = 0; i < 100000; i++) st = { ...st, a: st.a + 1 };
+  return st.a;
+});
+add("array-spread-concat", function () {
+  var a = [1, 2, 3, 4, 5, 6, 7, 8], n = 0;
+  for (var i = 0; i < 100000; i++) { var b = [...a, i]; n += b.length; }
+  return n;
+});
+add("string-index-bracket", function () {
+  var t = "abcdefghijklmnopqrstuvwxyz0123456789", n = 0;
+  for (var r = 0; r < 30000; r++) for (var i = 0; i < t.length; i++) if (t[i] === "q") n++;
+  return n;
+});
+add("string-builder-array", function () {
+  var n = 0;
+  for (var r = 0; r < 30; r++) { var p = []; for (var i = 0; i < 10000; i++) p.push("<li>", i, "</li>"); n += p.join("").length; }
+  return n;
+});
+add("math-max-apply", function () {
+  var a = []; for (var i = 0; i < 1000; i++) a.push((i * 37) % 1001);
+  var n = 0;
+  for (var r = 0; r < 2000; r++) n += Math.max.apply(null, a) + Math.min(...a);
+  return n;
+});
+add("date-now-loop", function () {
+  var n = 0;
+  for (var i = 0; i < 200000; i++) n += Date.now() > 0 ? 1 : 0;
+  return n;
+});
+add("event-emitter", function () {
+  function E() { this.h = {}; }
+  E.prototype.on = function (k, f) { (this.h[k] || (this.h[k] = [])).push(f); };
+  E.prototype.emit = function (k, a) { var l = this.h[k]; if (l) for (var i = 0; i < l.length; i++) l[i].call(this, a); };
+  var e = new E(), s = 0;
+  e.on("x", function (v) { s += v; }); e.on("x", function (v) { s ^= v; }); e.on("y", function () { s++; });
+  for (var i = 0; i < 200000; i++) { e.emit("x", i & 255); e.emit("y"); }
+  return s;
+});
+
 for (var c = 0; c < cases.length; c++) {
   var name = cases[c][0];
   if (ONLY && ONLY !== name) continue;
