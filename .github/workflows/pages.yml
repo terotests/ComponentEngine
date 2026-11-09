@@ -79,6 +79,11 @@ jobs:
           node playground/smoke.mjs --sandbox --shot=playground-sandbox.png
 
       - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('playground/hermes/dist/hermes.wasm') != ''
+        with:
+          name: hermes-wasm
+          path: playground/hermes/dist
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: playground-smoke

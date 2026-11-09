@@ -40,7 +40,8 @@ export default {
           else (code = 1), err.push(String(e && e.message ? e.message : e));
         }
         if (code !== 0) {
-          const line = err.find((l) => l.trim()) || "exit " + code;
+          const lines = err.filter((l) => l.trim());
+          const line = lines.join(" | ") || "exit " + code;
           out.push(line.startsWith("Uncaught") ? line : "Uncaught " + line);
         }
         return { out, error: code !== 0 };
