@@ -202,6 +202,18 @@ fn is_js_space(c: char) -> bool {
     c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u{b}' || c == '\u{c}' || c == '\u{a0}' || c == '\u{feff}' || c == '\u{2028}' || c == '\u{2029}' || (c as int > 127 && c.is_whitespace())
 }
 
+/// Whether trimming `s` (at its start, its end) removes anything; the
+/// other targets always trim.
+#[ranger::target(rust)]
+pub fn trim_needed(s: &str, start: bool, end: bool) -> bool {
+    (start && s.chars().next().map_or(false, is_js_space)) || (end && s.chars().next_back().map_or(false, is_js_space))
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn trim_needed(_s: &str, _start: bool, _end: bool) -> bool {
+    true
+}
+
 pub fn js_trim(s: &str) -> String {
     let cs = s.chars().collect::<Vec<char>>();
     let mut a: int = 0;

@@ -119,6 +119,21 @@ pub fn len(s: &str) -> int {
     n
 }
 
+/// Rust: counted over the bytes (vectorised): every byte that starts a
+/// character is one unit, and a 4-byte character one more.
+#[ranger::target(rust)]
+fn len_units(s: &str) -> int {
+    if s.is_ascii() {
+        return s.as_bytes().len() as int;
+    }
+    let mut n: usize = 0;
+    for &b in s.as_bytes() {
+        n += ((b & 0xc0) != 0x80) as usize + (b >= 0xf0) as usize;
+    }
+    n as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 fn len_units(s: &str) -> int {
     let mut n: int = 0;
     let mut ascii = true;
@@ -184,6 +199,56 @@ fn slice_units(s: &str, a: int, b: int) -> String {
     let x = if a < 0 { 0 } else if a > n { n } else { a };
     let y = if b < 0 { 0 } else if b > n { n } else { b };
     from_units(&u, x, y)
+}
+
+/// The string iterator's steps (Vm::string_iter): the code point at
+/// position `i` (Rust: a byte offset, else a UTF-16 position), how far it
+/// moves the position, and the end position.
+pub fn cp_at(s: &str, i: int) -> int {
+    let r: int = ranger::native!(rust: { cp_at_byte(s, i) }, es6: "{s}.codePointAt({i})");
+    r
+}
+
+#[ranger::target(rust)]
+fn cp_at_byte(s: &str, i: int) -> int {
+    match s[(i as usize)..].chars().next() {
+        Some(c) => c as int,
+        None => -1,
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn cp_at_byte(s: &str, i: int) -> int {
+    let mut p: int = 0;
+    for c in s.chars() {
+        if p == i {
+            return c as int;
+        }
+        p += cp_width(c as int);
+    }
+    -1
+}
+
+pub fn cp_width(cp: int) -> int {
+    let r: int = ranger::native!(rust: { cp_width_utf8(cp) }, es6: "({cp} > 0xffff ? 2 : 1)");
+    r
+}
+
+fn cp_width_utf8(cp: int) -> int {
+    if cp < 0x80 {
+        1
+    } else if cp < 0x800 {
+        2
+    } else if cp < 0x10000 {
+        3
+    } else {
+        4
+    }
+}
+
+pub fn cp_end(s: &str) -> int {
+    let r: int = ranger::native!(rust: { s.as_bytes().len() as int }, es6: "{s}.length");
+    r
 }
 
 /// The first `n` bytes of `s` (a string table prefix, Vm::sref; only Rust

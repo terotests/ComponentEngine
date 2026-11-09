@@ -1281,6 +1281,15 @@ impl Vm {
     }
 
     /// A string value for a shared string.
+    /// A string method's unchanged result: `this` itself when it is a
+    /// string value (no copy, no new handle), else a handle on `s`.
+    pub fn same_str_val(&mut self, this: &Val, s: Rc<String>) -> Val {
+        if let Val::Str(_) = this {
+            return this.clone();
+        }
+        self.rc_val(s)
+    }
+
     pub fn rc_val(&mut self, s: Rc<String>) -> Val {
         if s.is_empty() {
             return Val::Str(0);
@@ -4491,20 +4500,9 @@ impl Vm {
                 }
             }
         }
-        if let Val::Str(s) = v {
-            let s = self.sget(s.clone());
-            let mut items: Vec<Val> = Vec::new();
-            for c in s.chars() {
-                let mut t = String::new();
-                t.push(c);
-                items.push(self.string_val(t));
-            }
-            let arr = self.new_array(items);
+        if let Val::Str(_) = v {
             let ip = self.iter_proto;
-            let it = self.alloc(C_ITER, ip);
-            self.put_env(it, arr);
-            self.objs[it as usize].func = 0;
-            return Val::Obj(it);
+            return self.string_iter(v.clone(), ip);
         }
         let f = self.get(v, A_ITERATOR);
         if self.throwing {
@@ -4564,6 +4562,36 @@ impl Vm {
         Some(v)
     }
 
+    /// An iterator over the code points of string `s`, one step at a time
+    /// (iter_next, kind 16): its source is a one-element array holding the
+    /// string, its position a jsstr::cp_at position.
+    pub fn string_iter(&mut self, s: Val, proto: int) -> Val {
+        let arr = self.new_array(vec![s]);
+        let it = self.alloc(C_ITER, proto);
+        self.put_env(it, arr);
+        self.objs[it as usize].func = 0;
+        self.objs[it as usize].pos = 16;
+        Val::Obj(it)
+    }
+
+    fn string_iter_next(&mut self, o: int, src: int, i: int) -> Option<Val> {
+        let sv = self.evecs[self.objs[src as usize].elems as usize].v[0].clone();
+        let s = self.to_str(&sv);
+        if i >= jsstr::cp_end(s.as_str()) {
+            self.put_env(o, -1);
+            return None;
+        }
+        let cp = jsstr::cp_at(s.as_str(), i);
+        if cp < 0 {
+            self.put_env(o, -1);
+            return None;
+        }
+        self.objs[o as usize].func = (i + jsstr::cp_width(cp)) as i32;
+        let mut t = String::new();
+        jsstr::push_cp(&mut t, cp);
+        Some(self.string_val(t))
+    }
+
     /// The next value of an iterator made by `iter_values` / ITER_KEYS;
     /// None when done.
     pub fn iter_next(&mut self, it: &Val) -> Option<Val> {
@@ -4574,6 +4602,9 @@ impl Vm {
             let kind = self.objs[o as usize].pos as int;
             if src < 0 {
                 return None;
+            }
+            if kind == 16 {
+                return self.string_iter_next(o, src, i);
             }
             if (kind & 3) == 3 {
                 return self.for_in_next(o, src, i, kind >> 2);
