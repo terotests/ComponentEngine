@@ -35,7 +35,7 @@ const zoo = (process.argv.find((a) => a.startsWith("--zoo=")) || "").slice(6);
 const evgDemo = process.argv.includes("--evg");
 const sandboxDemo = process.argv.includes("--sandbox");
 
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
+const TYPES = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
 const server = http.createServer((req, res) => {
   const rel = decodeURIComponent(new URL(req.url, "http://x").pathname).replace(/^\/+/, "") || "index.html";
   let file = path.join(DIST, rel);

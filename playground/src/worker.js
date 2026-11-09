@@ -25,7 +25,7 @@ export function serve(engine) {
       let res = { out: [], error: false };
       for (let i = 0; i < (reps || 1); i++) {
         const t = performance.now();
-        res = inst.run(src);
+        res = await inst.run(src);
         times.push(performance.now() - t);
         if (res.error) break;
       }
