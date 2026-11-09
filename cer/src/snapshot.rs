@@ -407,6 +407,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.rtab = Vec::new();
     vm.rpic = Vec::new();
     vm.ic2 = Vec::new();
+    vm.mcache = Vec::new();
     vm.pic = Vec::new();
     vm.shape_epoch += 1;
     let np = r.num();
