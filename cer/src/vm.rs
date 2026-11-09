@@ -1756,28 +1756,41 @@ impl Vm {
         self.made += 1;
         self.live += 1;
         if proto >= 0 {
-            self.objs[proto as usize].rc += 1;
-            self.objs[proto as usize].is_proto = true;
+            let p = crate::rvm::obj_mut(&mut self.objs, proto as usize);
+            p.rc += 1;
+            p.is_proto = true;
         }
         let i = if !self.free_list.is_empty() {
             let i = self.free_list.pop().unwrap();
-            let o = &mut self.objs[i as usize];
+            let o = crate::rvm::obj_mut(&mut self.objs, i as usize);
             o.class = class;
             o.proto = proto as i32;
             o.free = false;
             o.marked = false;
+            if self.rc_on {
+                o.zct = true;
+            }
             i
         } else {
-            grow_objs(&mut self.objs);
-            self.objs.push(JsObj::new(class, proto as i32));
-            (self.objs.len() as int) - 1
+            self.alloc_slot(class, proto)
         };
         if self.rc_on {
-            self.objs[i as usize].zct = true;
             self.zct.push(i);
         }
         if self.alloc_count >= self.gc_threshold || (self.zct.len() as int) >= self.zct_limit || self.made >= self.made_limit {
             self.gc_flag = true;
+        }
+        i
+    }
+
+    /// A new slot at the end of objs (alloc's free list was empty).
+    #[inline(never)]
+    fn alloc_slot(&mut self, class: i32, proto: int) -> int {
+        grow_objs(&mut self.objs);
+        self.objs.push(JsObj::new(class, proto as i32));
+        let i = (self.objs.len() as int) - 1;
+        if self.rc_on {
+            self.objs[i as usize].zct = true;
         }
         i
     }
