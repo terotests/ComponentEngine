@@ -73,3 +73,124 @@ textarea.code {
   word-break: break-word;
 }
 .console .err { color: var(--bad); }
+
+/* ---- the touch buttons ----------------------------------------------------- */
+
+.play-area { position: relative; }
+.pad {
+  max-width: 800px;
+  margin: 12px auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 8px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.pad[hidden] { display: none; }
+.pad-dir {
+  display: grid;
+  grid-template-columns: repeat(3, 64px);
+  grid-template-rows: repeat(3, 56px);
+  gap: 4px;
+}
+.pad-btn {
+  appearance: none;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  font: 800 22px/1 system-ui, sans-serif;
+  color: #fff7e0;
+  background: linear-gradient(180deg, #4a3a8c, #2a1f5c);
+  box-shadow: 0 4px 0 #160f36, inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  border-radius: 14px;
+  touch-action: none;
+  cursor: pointer;
+}
+.pad-btn.down { transform: translateY(3px); box-shadow: 0 1px 0 #160f36; filter: brightness(1.25); }
+.pad-up { grid-column: 2; grid-row: 1; }
+.pad-left { grid-column: 1; grid-row: 2; }
+.pad-right { grid-column: 3; grid-row: 2; }
+.pad-down { grid-column: 2; grid-row: 3; }
+.pad-jump {
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  font-size: 22px;
+  letter-spacing: 1px;
+  color: #3a1a00;
+  background: radial-gradient(circle at 35% 30%, #ffd27a, #ff8a1f 70%);
+  box-shadow: 0 5px 0 #a34a00, inset 0 2px 0 rgba(255, 255, 255, 0.4);
+}
+.pad-jump.down { box-shadow: 0 1px 0 #a34a00; }
+
+.exit-play { display: none; }
+
+/* ---- full-screen play: only the game and the buttons ----------------------- */
+
+body.play { background: #05081a; overflow: hidden; overscroll-behavior: none; }
+body.play header.top,
+body.play .controls,
+body.play .stats,
+body.play .how,
+body.play .console-wrap { display: none; }
+body.play main.wrap { max-width: none; margin: 0; padding: 0; }
+body.play .play-area {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  box-sizing: border-box;
+}
+/* portrait: the game as wide as the screen, the buttons under it */
+body.play .stage:focus-visible { box-shadow: none; }
+body.play .stage {
+  width: min(100vw, (100dvh - 220px) * 4 / 3);
+  max-width: none;
+  border-radius: 0;
+  border: 0;
+  flex: none;
+}
+body.play .pad { width: 100%; max-width: 520px; margin: 0; padding: 0 16px; box-sizing: border-box; }
+body.play .exit-play {
+  display: block;
+  position: absolute;
+  top: calc(8px + env(safe-area-inset-top));
+  right: calc(8px + env(safe-area-inset-right));
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  font-size: 16px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+  z-index: 2;
+}
+/* landscape: the game as tall as the screen, the arrows on the left and the
+   jump button on the right, over the empty sides */
+@media (orientation: landscape) {
+  body.play .stage { width: min(100dvh * 4 / 3, 100vw - 340px); height: auto; }
+  body.play .pad-dir { grid-template-columns: repeat(3, 50px); grid-template-rows: repeat(3, 50px); }
+  body.play .pad-jump { width: 104px; height: 104px; }
+  body.play .pad {
+    position: absolute;
+    inset: auto 0 calc(12px + env(safe-area-inset-bottom)) 0;
+    max-width: none;
+    padding: 0 calc(12px + env(safe-area-inset-right)) 0 calc(12px + env(safe-area-inset-left));
+    pointer-events: none;
+  }
+  body.play .pad-dir, body.play .pad-jump { pointer-events: auto; opacity: 0.9; }
+}
+/* a touch screen outside play mode: bigger buttons on a small screen */
+@media (max-width: 480px) {
+  .pad-dir { grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(3, 52px); }
+  .pad-jump { width: 104px; height: 104px; }
+}

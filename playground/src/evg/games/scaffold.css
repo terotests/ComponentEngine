@@ -1,161 +1,216 @@
 /* Scaffold Scramble's stylesheet, applied by EVG. Every sprite is a small
-   tree of boxes: the classes here give them their colours and shapes, the
-   script only places them. Try changing the girder colours (a slightly loud blue-green now), or make the
-   spools square. */
+   tree of boxes: the classes here give them their colours and shapes (EVG
+   draws linear gradients, rounded corners, rotation and opacity), the script
+   only places them. Try giving Rumbo green fur, or make the barrels square. */
 
-.stage { background-color: #0b1020; font-family: sans-serif }
+.stage { background-color: #0b1030; font-family: sans-serif }
 .scene { position: absolute; left: 0px; top: 0px; width: 640px; height: 480px }
-.moon {
-  position: absolute; left: 560px; top: 48px; width: 40px; height: 40px;
-  border-radius: 999px; background-color: #fdf3c4;
-}
 
-/* the steel */
+/* the night sky and the city */
+.sky {
+  position: absolute; left: 0px; top: 0px; width: 640px; height: 480px;
+  background: linear-gradient(180deg, #0a0f2e, #3a1d5c);
+}
+.star { position: absolute; width: 2px; height: 2px; background-color: #c9d6ff; border-radius: 999px }
+.big { width: 3px; height: 3px; background-color: #ffffff }
+.moon-glow {
+  position: absolute; width: 72px; height: 72px; border-radius: 999px;
+  background-color: #fff3c4; opacity: 0.12;
+}
+.moon {
+  position: absolute; width: 44px; height: 44px; border-radius: 999px;
+  background: linear-gradient(135deg, #fffbe6, #f5dc8a);
+}
+.crater { position: absolute; border-radius: 999px; background-color: #e8cd78 }
+.tower {
+  position: absolute;
+  background: linear-gradient(180deg, #2a1f52, #150f30);
+  border-radius: 3px 3px 0px 0px;
+}
+.win { position: absolute; width: 5px; height: 6px; background-color: #ffe08a; border-radius: 1px; opacity: 0.7 }
+.warm { background-color: #ff9f5a }
+
+/* the steel: red beams, a golden one for the kitten */
 .girder {
   position: absolute;
-  background-color: #00d9a3;
-  border-width: 2px;
-  border-color: #7affd9;
-  border-radius: 1px;
+  background: linear-gradient(180deg, #ff7452, #b02b26);
+  border-width: 1px;
+  border-color: #6e1714;
+  border-radius: 2px;
 }
 .perch {
   position: absolute;
-  background-color: #ff5fa2;
-  border-width: 2px;
-  border-color: #ffb3d4;
+  background: linear-gradient(180deg, #ffe066, #d99a1e);
+  border-width: 1px;
+  border-color: #8a5a07;
+  border-radius: 2px;
 }
-.rail { position: absolute; width: 2px; background-color: #ffe066 }
-.rung { position: absolute; width: 16px; height: 2px; background-color: #ffe066 }
+.rail { position: absolute; width: 3px; background: linear-gradient(90deg, #fff1a8, #e3b524); border-radius: 1px }
+.rung { position: absolute; width: 16px; height: 3px; background-color: #f5cf3b; border-radius: 1px }
 
-/* the player: a construction bot */
-.bot { position: absolute; width: 16px; height: 26px }
-.bot-helmet {
-  position: absolute; left: 1px; top: 0px; width: 14px; height: 7px;
-  background-color: #ffd23f; border-radius: 6px;
+/* Pip the builder */
+.hero { position: absolute; width: 20px; height: 30px }
+.hero-boot { position: absolute; width: 6px; height: 5px; background-color: #5a3a22; border-radius: 2px }
+.hero-arm { position: absolute; width: 4px; height: 9px; background-color: #3d7bf0; border-radius: 2px }
+.hero-body {
+  position: absolute; left: 4px; top: 14px; width: 12px; height: 12px;
+  background: linear-gradient(180deg, #ff4b4b, #c41f2f); border-radius: 3px;
 }
-.bot-visor {
-  position: absolute; top: 7px; width: 7px; height: 4px;
-  background-color: #58e1ff; border-radius: 2px;
+.hurt { background: linear-gradient(180deg, #ffffff, #ffd0d0) }
+.hero-strap { position: absolute; top: 14px; width: 2px; height: 5px; background-color: #ffd23f }
+.hero-face {
+  position: absolute; left: 4px; top: 5px; width: 12px; height: 10px;
+  background-color: #ffcf9e; border-radius: 4px 4px 5px 5px;
 }
-.bot-body {
-  position: absolute; left: 2px; top: 11px; width: 12px; height: 9px;
-  background-color: #3a6df0; border-radius: 3px;
+.back { background-color: #7a4a2a }
+.hero-eye { position: absolute; top: 8px; width: 3px; height: 4px; background-color: #1b1b2b; border-radius: 1px }
+.hero-cheek { position: absolute; top: 12px; width: 3px; height: 2px; background-color: #ff8f8f; border-radius: 1px }
+.hero-hat {
+  position: absolute; left: 3px; top: 0px; width: 14px; height: 7px;
+  background: linear-gradient(180deg, #ffe45c, #f0a800); border-radius: 7px 7px 1px 1px;
 }
-.bot-leg { position: absolute; width: 4px; height: 6px; background-color: #9aa7c7; border-radius: 1px }
-.hurt { background-color: #ff4d6d }
-.wrench-held {
-  position: absolute; width: 9px; height: 4px;
-  background-color: #c9d1e6; border-radius: 2px;
-}
-.wrench {
-  position: absolute; width: 10px; height: 16px;
-  background-color: #c9d1e6; border-radius: 3px;
-  border-width: 2px; border-color: #ffffff;
-}
+.hero-brim { position: absolute; top: 5px; width: 10px; height: 2px; background-color: #e09400; border-radius: 1px }
+.power { position: absolute; width: 36px; height: 40px; border-radius: 999px; background-color: #7affd9 }
+.wrench-held { position: absolute; width: 11px; height: 4px; background-color: #dfe6f5; border-radius: 2px }
 
-/* Grumble, the crane-bot: boxes and circles, nothing else */
-.grumble { position: absolute; width: 76px; height: 58px }
-.grumble-lamp {
-  position: absolute; left: 27px; top: 0px; width: 8px; height: 5px;
-  background-color: #7a2a2a; border-radius: 3px;
+/* Rumbo, the giant ape */
+.ape { position: absolute; width: 110px; height: 86px }
+.ape-leg {
+  position: absolute; top: 62px; width: 22px; height: 20px;
+  background-color: #4b2f78; border-radius: 8px;
 }
-.on { background-color: #ff3b3b }
-.grumble-antenna { position: absolute; left: 30px; top: 4px; width: 2px; height: 5px; background-color: #c9d1e6 }
-.grumble-head {
-  position: absolute; left: 12px; top: 8px; width: 38px; height: 18px;
-  background-color: #8c96b3; border-radius: 4px;
-  border-width: 2px; border-color: #b6bfd8;
+.ape-foot {
+  position: absolute; top: 79px; width: 28px; height: 7px;
+  background-color: #b48ad8; border-radius: 4px 4px 2px 2px;
 }
-.grumble-eye {
-  position: absolute; top: 12px; width: 7px; height: 6px;
-  background-color: #ffdd57; border-radius: 999px;
+.ape-body {
+  position: absolute; left: 16px; top: 26px; width: 76px; height: 46px;
+  background: linear-gradient(180deg, #7a52b8, #4b2f78); border-radius: 28px 28px 18px 18px;
 }
-.shut { height: 2px; top: 15px }
-.grumble-grille { position: absolute; top: 20px; width: 2px; height: 4px; background-color: #3a4260 }
-.grumble-body {
-  position: absolute; left: 8px; top: 26px; width: 46px; height: 22px;
-  background-color: #5b6585; border-radius: 3px;
-  border-width: 2px; border-color: #7c87a8;
+.ape-belly {
+  position: absolute; left: 35px; top: 40px; width: 38px; height: 28px;
+  background: linear-gradient(180deg, #d9b8f5, #b48ad8); border-radius: 14px;
 }
-.grumble-bolt { position: absolute; width: 4px; height: 4px; background-color: #c9d1e6; border-radius: 999px }
-.grumble-panel {
-  position: absolute; left: 22px; top: 31px; width: 18px; height: 10px;
-  background-color: #2b3148; border-radius: 2px;
-  border-width: 1px; border-color: #58e1ff;
+.ape-arm {
+  position: absolute; width: 20px; height: 40px;
+  background: linear-gradient(90deg, #6a44a4, #4b2f78); border-radius: 10px;
 }
-.grumble-arm { position: absolute; width: 8px; height: 18px; background-color: #a3adc9; border-radius: 3px }
-.grumble-boom { position: absolute; width: 16px; height: 5px; background-color: #ffd23f; border-radius: 1px }
-.grumble-hook {
-  position: absolute; width: 7px; height: 9px;
-  border-width: 2px; border-color: #c9d1e6; border-radius: 3px;
+.short { height: 22px }
+.ape-fist {
+  position: absolute; width: 24px; height: 15px;
+  background-color: #b48ad8; border-radius: 7px;
+  border-width: 2px; border-color: #8a63b3;
 }
-.grumble-tread {
-  position: absolute; left: 4px; top: 47px; width: 54px; height: 11px;
-  background-color: #2b3148; border-radius: 6px;
+.ape-head {
+  position: absolute; left: 32px; top: 6px; width: 44px; height: 36px;
+  background: linear-gradient(180deg, #7a52b8, #5c3a92); border-radius: 18px 18px 14px 14px;
 }
-.grumble-wheel {
-  position: absolute; top: 49px; width: 7px; height: 7px;
-  background-color: #6b7596; border-radius: 999px;
+.ape-face {
+  position: absolute; left: 37px; top: 15px; width: 34px; height: 25px;
+  background: linear-gradient(180deg, #e3c7fa, #c29ce6); border-radius: 11px 11px 13px 13px;
 }
+.ape-brow { position: absolute; left: 36px; top: 15px; width: 36px; height: 5px; background-color: #3a2260; border-radius: 3px }
+.ape-eye {
+  position: absolute; top: 19px; width: 10px; height: 8px;
+  background-color: #ffffff; border-radius: 999px;
+}
+.shut { height: 2px; top: 23px; background-color: #3a2260 }
+.ape-pupil { position: absolute; top: 2px; width: 4px; height: 5px; background-color: #1b1030; border-radius: 999px }
+.ape-angry { position: absolute; top: 15px; width: 13px; height: 4px; background-color: #2a1548; border-radius: 2px }
+.ape-nostril { position: absolute; top: 29px; width: 3px; height: 2px; background-color: #6a3f96; border-radius: 1px }
+.ape-mouth {
+  position: absolute; left: 45px; top: 33px; width: 18px; height: 3px;
+  background-color: #3a1748; border-radius: 2px;
+}
+.open { top: 32px; height: 7px; background-color: #5a1030; border-radius: 3px 3px 6px 6px }
+.ape-tooth { position: absolute; top: 0px; width: 4px; height: 3px; background-color: #ffffff; border-radius: 1px }
+.ape-hat {
+  position: absolute; left: 33px; top: 0px; width: 42px; height: 13px;
+  background: linear-gradient(180deg, #ffab40, #f06a00); border-radius: 21px 21px 2px 2px;
+}
+.ape-hat-ridge { position: absolute; left: 51px; top: 1px; width: 6px; height: 11px; background-color: #ffc477; border-radius: 3px }
+.ape-hat-brim { position: absolute; left: 29px; top: 11px; width: 50px; height: 4px; background-color: #d45a00; border-radius: 2px }
+.roar-text { position: absolute; font-size: 16px; font-weight: 900; color: #ffab40 }
 
-/* the spools it rolls */
-.spool, .pile-spool {
-  position: absolute; width: 18px; height: 18px;
-  border-radius: 999px; background-color: #b5651d;
-  border-width: 3px; border-color: #7a3e0c;
+/* the barrels he rolls */
+.barrel {
+  position: absolute; width: 20px; height: 20px;
+  border-radius: 999px; background: linear-gradient(90deg, #d98a3d, #8a4a1a);
+  border-width: 2px; border-color: #5c2e0b;
 }
-.spool-hub {
-  position: absolute; left: 3px; top: 5px; width: 6px; height: 2px;
-  background-color: #2a1404;
+.held { width: 24px; height: 24px }
+.barrel-band { position: absolute; left: 6px; top: 0px; width: 4px; height: 16px; background-color: #9aa3b8; border-radius: 1px }
+.barrel-hub { position: absolute; left: 6px; top: 6px; width: 4px; height: 4px; background-color: #4a2408; border-radius: 999px }
+.keg {
+  position: absolute; width: 16px; height: 21px;
+  background: linear-gradient(90deg, #d98a3d, #8a4a1a); border-radius: 5px;
+  border-width: 1px; border-color: #5c2e0b;
 }
-.turned { left: 5px; top: 3px; width: 2px; height: 6px }
+.keg-band { position: absolute; left: 0px; width: 14px; height: 2px; background-color: #9aa3b8 }
 
 /* the kitten */
-.kitten { position: absolute; width: 22px; height: 24px }
-.kitten-ear { position: absolute; top: 0px; width: 5px; height: 5px; background-color: #ff9f43 }
+.kitten { position: absolute; width: 26px; height: 26px }
+.kitten-ear {
+  position: absolute; top: 2px; width: 6px; height: 6px;
+  background-color: #ff9f43; transform: rotate(45deg);
+}
 .kitten-head {
-  position: absolute; left: 0px; top: 3px; width: 15px; height: 11px;
-  background-color: #ff9f43; border-radius: 4px;
+  position: absolute; left: 1px; top: 4px; width: 18px; height: 13px;
+  background-color: #ffad5c; border-radius: 6px;
 }
-.kitten-eyes {
-  position: absolute; left: 3px; top: 7px; width: 9px; height: 3px;
-  border-width: 0px 3px; border-color: #1b1b1b;
-}
-.closed { height: 1px; top: 9px }
+.kitten-stripe { position: absolute; left: 9px; top: 4px; width: 2px; height: 4px; background-color: #d9731f }
+.kitten-eye { position: absolute; top: 9px; width: 3px; height: 4px; background-color: #1b1b1b; border-radius: 999px }
+.closed { height: 1px; top: 11px }
+.kitten-nose { position: absolute; left: 9px; top: 13px; width: 3px; height: 2px; background-color: #ff6f91; border-radius: 1px }
 .kitten-body {
-  position: absolute; left: 3px; top: 14px; width: 14px; height: 10px;
-  background-color: #ff9f43; border-radius: 5px;
+  position: absolute; left: 4px; top: 15px; width: 16px; height: 11px;
+  background: linear-gradient(180deg, #ffad5c, #f08a2c); border-radius: 6px;
 }
-.kitten-tail { position: absolute; left: 17px; top: 10px; width: 3px; height: 10px; background-color: #ff9f43; border-radius: 2px }
-.help { position: absolute; font-size: 11px; font-weight: 700; color: #ffffff }
+.kitten-tail { position: absolute; width: 4px; height: 12px; background-color: #f08a2c; border-radius: 2px }
+.bubble {
+  position: absolute; width: 40px; height: 18px;
+  background-color: #ffffff; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+}
+.bubble-text { font-size: 11px; font-weight: 800; color: #c41f5f }
+
+/* the wrench power-up */
+.wrench { position: absolute; width: 24px; height: 24px }
+.wrench-glow { position: absolute; left: 0px; top: 0px; width: 24px; height: 24px; border-radius: 999px; background-color: #7affd9 }
+.wrench-handle { position: absolute; left: 10px; top: 6px; width: 4px; height: 15px; background-color: #dfe6f5; border-radius: 2px }
+.wrench-head {
+  position: absolute; left: 12px; top: 2px; width: 9px; height: 9px;
+  border-width: 3px; border-color: #dfe6f5; border-radius: 999px;
+}
 
 /* score popups and the heads-up display */
-.popup { position: absolute; font-size: 12px; font-weight: 700; color: #ffe066 }
+.popup { position: absolute; font-size: 15px; font-weight: 900; color: #ffe066 }
 
 .hud {
-  position: absolute; left: 0px; top: 0px; width: 100%; height: 30px;
-  display: flex; flex-direction: row; align-items: center; gap: 18px;
-  padding: 0px 12px;
+  position: absolute; left: 336px; top: 4px; width: 296px; height: 30px;
+  display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 10px;
 }
-.hud-col { display: flex; flex-direction: row; align-items: center; gap: 6px }
-.hud-label { font-size: 11px; font-weight: 700; color: #ff5a5a }
-.hud-value { font-size: 15px; font-weight: 700; color: #ffffff }
-.spacer { flex: 1 }
-.lives { display: flex; flex-direction: row; gap: 4px }
-.life { width: 8px; height: 12px; background-color: #ffd23f; border-radius: 3px }
+.hud-col { width: 58px; display: flex; flex-direction: column; align-items: flex-end }
+.hud-label { font-size: 9px; font-weight: 800; color: #ff9a8a }
+.hud-value { font-size: 14px; font-weight: 800; color: #ffffff }
+.lives { display: flex; flex-direction: row; gap: 3px }
+.life { width: 11px; height: 7px; background: linear-gradient(180deg, #ffe45c, #f0a800); border-radius: 6px 6px 1px 1px }
 .bonus-box {
-  display: flex; flex-direction: row; align-items: center; gap: 6px;
-  padding: 2px 8px; border-width: 2px; border-color: #3cbf8f; border-radius: 4px;
+  width: 54px; display: flex; flex-direction: column; align-items: center;
+  padding: 1px 0px; border-width: 2px; border-color: #3cbf8f; border-radius: 6px;
+  background-color: #10283a;
 }
-.bonus-value { font-size: 14px; font-weight: 700; color: #8ff0c9 }
+.bonus-value { font-size: 13px; font-weight: 800; color: #8ff0c9 }
 .low { color: #ff5a5a }
-.hud-level { font-size: 13px; font-weight: 700; color: #6ad1ff }
+.hud-level { font-size: 14px; font-weight: 800; color: #6ad1ff }
 
 .banner {
-  position: absolute; width: 340px;
+  position: absolute; width: 400px;
   display: flex; flex-direction: column; align-items: center; gap: 8px;
-  padding: 18px; border-radius: 10px;
-  background-color: #151c36; border-width: 2px; border-color: #00d9a3;
+  padding: 20px; border-radius: 14px;
+  background: linear-gradient(180deg, #2a1f5c, #151034);
+  border-width: 3px; border-color: #ffab40;
 }
-.banner-title { font-size: 24px; font-weight: 800; color: #7affd9 }
-.banner-line { font-size: 13px; color: #c9d1e6 }
+.banner-title { font-size: 30px; font-weight: 900; color: #ffcf5c }
+.banner-line { font-size: 15px; color: #e3dcff }
+.go { font-size: 16px; font-weight: 800; color: #7affd9 }

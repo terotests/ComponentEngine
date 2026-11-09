@@ -214,7 +214,7 @@ async function runScaffold() {
   console.log("scaffold:", info.stats);
   console.log("scaffold text:", text);
   const consoleErrors = await page.evaluate(() => [...document.querySelectorAll("#console .err")].map((n) => n.textContent));
-  if (consoleErrors.length || !/1UP/.test(text) || /SCAFFOLD SCRAMBLE/.test(text)) {
+  if (consoleErrors.length || !/SCORE/.test(text) || /SCAFFOLD SCRAMBLE/.test(text)) {
     console.log("scaffold failed:", consoleErrors.join("\n") || "the game did not start");
     process.exitCode = 1;
   }
