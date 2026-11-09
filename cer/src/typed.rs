@@ -52,6 +52,25 @@ pub const NF_BUF_RESIZE: int = 929;
 /// array or a plain array (call_native_ta)
 pub const NF_TA_LEN: int = 970;
 pub const NF_TA_SET: int = 971;
+/// DataView: __dvMake(view, buffer, byteOffset, byteLength or -1) marks a
+/// new view (C_DATAVIEW); __dvGet(view, index, kind, little) and
+/// __dvSet(view, index, kind, value, little) do get/set for a number kind,
+/// an integer index and a view in bounds (undefined / false otherwise: the
+/// prelude's checks and errors then)
+pub const NF_DV_MAKE: int = 972;
+pub const NF_DV_GET: int = 973;
+pub const NF_DV_SET: int = 974;
+/// __taKind(o): o's element kind when it is a typed array __taSub can
+/// take (fixed length, in bounds, buffer neither detached nor resizable),
+/// -1 otherwise.
+/// __taSub(view, start, end, prototype): `view.subarray(start, end)` with
+/// the default species, for start/end undefined or numbers and a view in
+/// bounds over a fixed buffer (undefined otherwise: the prelude's path).
+/// __taNew(kind, length, prototype, ArrayBuffer.prototype): `new
+/// XArray(length)` for an integer length (undefined otherwise).
+pub const NF_TA_KIND: int = 975;
+pub const NF_TA_SUB: int = 976;
+pub const NF_TA_NEW: int = 977;
 
 /// n zeros (a new buffer's contents). Rust: one zeroed allocation.
 #[ranger::target(rust)]
@@ -68,6 +87,36 @@ pub fn zeros(n: int) -> Vec<double> {
         i += 1;
     }
     z
+}
+
+/// colds[tc].nums[d0..d0 + n] = colds[sc].nums[s0..s0 + n] (the two may be
+/// one buffer and overlap). Rust: one memmove.
+#[ranger::target(rust)]
+pub fn copy_nums(colds: &mut Vec<Cold>, sc: usize, s0: usize, tc: usize, d0: usize, n: usize) {
+    if sc == tc {
+        colds[sc].nums.copy_within(s0..s0 + n, d0);
+    } else if sc < tc {
+        let (lo, hi) = colds.split_at_mut(tc);
+        hi[0].nums[d0..d0 + n].copy_from_slice(&lo[sc].nums[s0..s0 + n]);
+    } else {
+        let (lo, hi) = colds.split_at_mut(sc);
+        lo[tc].nums[d0..d0 + n].copy_from_slice(&hi[0].nums[s0..s0 + n]);
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn copy_nums(colds: &mut Vec<Cold>, sc: usize, s0: usize, tc: usize, d0: usize, n: usize) {
+    let mut tmp: Vec<double> = Vec::new();
+    let mut k: usize = 0;
+    while k < n {
+        tmp.push(colds[sc].nums[s0 + k]);
+        k += 1;
+    }
+    let mut k2: usize = 0;
+    while k2 < n {
+        colds[tc].nums[d0 + k2] = tmp[k2];
+        k2 += 1;
+    }
 }
 
 /// log2 of kind_size.
@@ -748,8 +797,235 @@ impl Vm {
         self.method(g, "__taInfo", NF_TA_INFO, 1);
         self.method(g, "__taLength", NF_TA_LEN, 0);
         self.method(g, "__taSetFast", NF_TA_SET, 3);
+        self.method(g, "__dvMake", NF_DV_MAKE, 4);
+        self.method(g, "__dvGet", NF_DV_GET, 4);
+        self.method(g, "__dvSet", NF_DV_SET, 5);
+        self.method(g, "__taKind", NF_TA_KIND, 1);
+        self.method(g, "__taSub", NF_TA_SUB, 4);
+        self.method(g, "__taNew", NF_TA_NEW, 4);
         self.method(g, "__bufMax", NF_BUF_MAX, 1);
         self.method(g, "__bufResize", NF_BUF_RESIZE, 2);
+    }
+
+    /// A typed array of fixed length over a buffer that is neither
+    /// detached nor resizable, in bounds: what NF_TA_SUB handles.
+    fn ta_plain_view(&self, t: int) -> bool {
+        if self.objs[t as usize].class != C_TYPED || self.ta_out_of_bounds(t) {
+            return false;
+        }
+        if !matches!(self.colds[self.objs[t as usize].cold as usize].prim, Val::Num(_)) {
+            return false;
+        }
+        let b = self.objs[t as usize].env as int;
+        b >= 0 && (self.objs[b as usize].pos & 1) == 0 && !self.buf_resizable(b)
+    }
+
+    /// NF_TA_KIND / NF_TA_SUB / NF_TA_NEW (see there).
+    pub fn call_native_ta2(&mut self, id: int, args: &Vec<Val>) -> Val {
+        if id == NF_TA_KIND {
+            let t = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            if t < 0 || !self.ta_plain_view(t) {
+                return Val::Num(-1.0);
+            }
+            return Val::Num(self.objs[t as usize].pos as double);
+        }
+        if id == NF_TA_NEW {
+            if args.len() < 4 {
+                return Val::Undef;
+            }
+            let kind = num(&args[0]) as int;
+            let n = match &args[1] {
+                Val::Num(x) => {
+                    let k = *x as int;
+                    if (k as double) != *x || k < 0 || k > 100000000 {
+                        return Val::Undef;
+                    }
+                    k
+                }
+                _ => {
+                    return Val::Undef;
+                }
+            };
+            let proto = obj_of(&args[2]);
+            let ab = obj_of(&args[3]);
+            let b = self.alloc(C_ARRAYBUFFER, ab);
+            // the buffer holds the elements as this kind from the start
+            let home = if is_big(kind) { -1 } else { kind };
+            let z = zeros(if home >= 0 { n } else { n * kind_size(kind) });
+            { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
+            let cid = self.cold_id(b) as usize;
+            self.colds[cid].home = home;
+            let t = self.alloc(C_TYPED, proto);
+            self.objs[t as usize].pos = kind as i32;
+            self.put_env(t, b);
+            self.objs[t as usize].func = 0;
+            self.put_prim(t, Val::Num(n as double));
+            return Val::Obj(t);
+        }
+        // NF_TA_SUB
+        if args.len() < 4 {
+            return Val::Undef;
+        }
+        let t = obj_of(&args[0]);
+        if t < 0 || !self.ta_plain_view(t) {
+            return Val::Undef;
+        }
+        let b = self.objs[t as usize].env as int;
+        let n = self.ta_length(t);
+        // relIndex: ToIntegerOrInfinity of a number, clamped into [0, n]
+        let mut ends: Vec<int> = vec![0, n];
+        let mut k: usize = 0;
+        while k < 2 {
+            match &args[1 + k] {
+                Val::Undef => {}
+                Val::Num(x) => {
+                    let x = *x;
+                    let t = if x < 0.0 { x.ceil() } else { x.floor() };
+                    let r: int = if x != x {
+                        0
+                    } else if t < 0.0 {
+                        let m = (n as double) + t;
+                        if m <= 0.0 { 0 } else { m as int }
+                    } else if t >= (n as double) {
+                        n
+                    } else {
+                        t as int
+                    };
+                    ends[k] = r;
+                }
+                _ => {
+                    return Val::Undef;
+                }
+            }
+            k += 1;
+        }
+        let kind = self.objs[t as usize].pos as int;
+        let start = ends[0];
+        let len = if ends[1] > start { ends[1] - start } else { 0 };
+        let off = (self.objs[t as usize].func as int) + start * kind_size(kind);
+        let proto = obj_of(&args[3]);
+        let v = self.alloc(C_TYPED, proto);
+        self.objs[v as usize].pos = kind as i32;
+        self.put_env(v, b);
+        self.objs[v as usize].func = off as i32;
+        self.put_prim(v, Val::Num(len as double));
+        Val::Obj(v)
+    }
+
+    /// NF_DV_MAKE / NF_DV_GET / NF_DV_SET (see there).
+    pub fn call_native_dv(&mut self, id: int, args: &Vec<Val>) -> Val {
+        let v = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+        if id == NF_DV_MAKE {
+            if v >= 0 && args.len() >= 4 {
+                let b = obj_of(&args[1]);
+                if b >= 0 && self.objs[b as usize].class == C_ARRAYBUFFER {
+                    self.objs[v as usize].class = C_DATAVIEW;
+                    self.put_env(v, b);
+                    self.objs[v as usize].func = num(&args[2]) as i32;
+                    self.objs[v as usize].pos = num(&args[3]) as i32;
+                }
+            }
+            return Val::Undef;
+        }
+        let miss = if id == NF_DV_GET { Val::Undef } else { Val::Bool(false) };
+        if v < 0 || args.len() < 3 || self.objs[v as usize].class != C_DATAVIEW {
+            return miss;
+        }
+        let i = match &args[1] {
+            Val::Num(x) => {
+                let k = *x as int;
+                if (k as double) != *x || k < 0 {
+                    return miss;
+                }
+                k
+            }
+            _ => {
+                return miss;
+            }
+        };
+        let kind = num(&args[2]) as int;
+        if is_big(kind) {
+            return miss;
+        }
+        let b = self.objs[v as usize].env as int;
+        if b < 0 || (self.objs[b as usize].pos & 1) != 0 {
+            return miss;
+        }
+        // the view's byte length as the prelude's dvLength
+        let blen = self.buf_size(b);
+        let off = self.objs[v as usize].func as int;
+        let fixed = self.objs[v as usize].pos as int;
+        if off > blen {
+            return miss;
+        }
+        let n = if fixed < 0 { blen - off } else if off + fixed > blen { -1 } else { fixed };
+        let size = kind_size(kind);
+        if n < 0 || i + size > n {
+            return miss;
+        }
+        let at = off + i;
+        if id == NF_DV_GET {
+            let little = args.len() > 3 && truthy(&args[3]);
+            return Val::Num(self.dv_read(b, at, kind, little));
+        }
+        if args.len() < 4 {
+            return miss;
+        }
+        let x = match &args[3] {
+            Val::Num(x) => *x,
+            _ => {
+                return miss;
+            }
+        };
+        let little = args.len() > 4 && truthy(&args[4]);
+        self.dv_write(b, at, kind, x, little);
+        Val::Bool(true)
+    }
+
+    /// buf_read for a DataView: integer kinds straight from the bytes.
+    fn dv_read(&mut self, b: int, at: int, kind: int, little: bool) -> double {
+        if kind == TK_FLOAT32 || kind == TK_FLOAT64 || kind == TK_FLOAT16 {
+            return self.buf_read(b, at, kind, little);
+        }
+        self.buf_to_bytes(b);
+        let size = kind_size(kind);
+        let c = self.objs[b as usize].cold as usize;
+        let mut u: int = 0;
+        let mut k: int = 0;
+        while k < size {
+            let idx = if little { at + size - 1 - k } else { at + k };
+            u = u * 256 + (self.colds[c].nums[idx as usize] as int);
+            k += 1;
+        }
+        if kind == TK_INT8 && u >= 128 {
+            u -= 256;
+        } else if kind == TK_INT16 && u >= 32768 {
+            u -= 65536;
+        } else if kind == TK_INT32 && u >= 2147483648 {
+            u -= 4294967296;
+        }
+        u as double
+    }
+
+    /// buf_write for a DataView: integer kinds straight to the bytes.
+    fn dv_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
+        if kind == TK_FLOAT32 || kind == TK_FLOAT64 || kind == TK_FLOAT16 || !(x > -9007199254740992.0 && x < 9007199254740992.0) {
+            self.buf_write(b, at, kind, x, little);
+            return;
+        }
+        self.buf_to_bytes(b);
+        let size = kind_size(kind);
+        // ToInt8 … ToUint32: the low bits of the truncated number
+        let t = x as int;
+        let mut u = t & 4294967295;
+        let c = self.objs[b as usize].cold as usize;
+        let mut k: int = 0;
+        while k < size {
+            let idx = if little { at + k } else { at + size - 1 - k };
+            self.colds[c].nums[idx as usize] = (u & 255) as double;
+            u = u >> 8;
+            k += 1;
+        }
     }
 
     /// NF_TA_LEN: `this.length` for a typed array (0 when detached or out
@@ -759,6 +1035,12 @@ impl Vm {
     /// without holes, the offset a non-negative integer and everything fits;
     /// true then, false when the prelude's `set` has to do it.
     pub fn call_native_ta(&mut self, id: int, this: &Val, args: &Vec<Val>) -> Val {
+        if id == NF_DV_MAKE || id == NF_DV_GET || id == NF_DV_SET {
+            return self.call_native_dv(id, args);
+        }
+        if id == NF_TA_KIND || id == NF_TA_SUB || id == NF_TA_NEW {
+            return self.call_native_ta2(id, args);
+        }
         if id == NF_TA_LEN {
             let t = obj_of(this);
             if t < 0 || self.objs[t as usize].class != C_TYPED {
@@ -823,18 +1105,8 @@ impl Vm {
             if s0 >= 0 && d0 >= 0 && skind == tkind && self.ta_slot(src, n - 1) == s0 + n - 1 && self.ta_slot(t, off + n - 1) == d0 + n - 1 {
                 let sbc = self.objs[sb as usize].cold as usize;
                 let tbc = self.objs[tb as usize].cold as usize;
-                let mut tmp: Vec<double> = Vec::with_capacity(n as usize);
-                let mut k: int = 0;
-                while k < n {
-                    tmp.push(self.colds[sbc].nums[(s0 + k) as usize]);
-                    k += 1;
-                }
                 self.colds[tbc].home = tkind;
-                let mut k2: int = 0;
-                while k2 < n {
-                    self.colds[tbc].nums[(d0 + k2) as usize] = tmp[k2 as usize];
-                    k2 += 1;
-                }
+                copy_nums(&mut self.colds, sbc, s0 as usize, tbc, d0 as usize, n as usize);
                 return Val::Bool(true);
             }
             let mut i: int = 0;

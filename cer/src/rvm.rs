@@ -346,9 +346,10 @@ impl Vm {
                     op_at(&self.rcode, (rb + pc) as usize)
                 };
                 let w0 = ins.code;
-                let w1 = ins.a;
-                let w2 = ins.b;
-                let w3 = ins.c;
+                // the operands widened once here: the arms index with them
+                let w1 = ins.a as int;
+                let w2 = ins.b as int;
+                let w3 = ins.c as int;
                 let mut npc: int = -1;
                 match ((w0 & 255) as int) {
                     R_NOP => {
@@ -404,9 +405,10 @@ impl Vm {
                                 let p = a as int;
                                 let q = b as int;
                                 r = Val::Num((p % q) as double);
-                            // bit operations on numbers that are int32 already
+                            // bit operations on numbers in int32 range: ToInt32 is
+                            // the truncation
                             } else if code >= OP_BAND && code <= OP_SHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
-                                let (p, q) = (a as int, b as int);
+                                let (p, q) = (trunc_i32(a), trunc_i32(b));
                                 r = Val::Num(match code {
                                     OP_BAND => (p & q) as double,
                                     OP_BOR => (p | q) as double,
@@ -491,7 +493,7 @@ impl Vm {
                                 continue 'frames;
                             }
                         }
-                        let t = if r { w0 >> 16 } else { w3 };
+                        let t = if r { (w0 >> 16) as int } else { w3 };
                         if (t as int) <= pc && self.gc_due() {
                             self.frames[fi].pc = (t as int);
                             self.rgc(want);
@@ -677,11 +679,11 @@ impl Vm {
                             let k = *x - (w3 as double);
                             let size = self.rtab[w2 as usize];
                             if k >= 0.0 && k < (size as double) && k == ((k as int) as double) {
-                                t = self.rtab[(w2 + 1 + ((k as int) as i32)) as usize];
+                                t = self.rtab[(w2 + 1 + (k as int)) as usize];
                             }
                         }
                         if t < 0 {
-                            t = self.rtab[(w2 + 1 + (self.rtab[w2 as usize] as i32)) as usize];
+                            t = self.rtab[(w2 + 1 + (self.rtab[w2 as usize] as int)) as usize];
                         }
                         pc = t;
                         if self.slicing && self.brk(fi, pc) {
@@ -730,8 +732,10 @@ impl Vm {
                                 continue;
                             }
                         }
-                        if c == -4 && o >= 0 && self.ob(o).class == C_ARRAY {
-                            // a site r_get_prop_slow saw reading an array's length
+                        if c == -4 && o >= 0 && (self.ob(o).class == C_ARRAY || self.ob(o).class == C_ARGUMENTS) {
+                            // a site r_get_prop_slow saw reading an array's length (or
+                            // an unmodified arguments object's: a written or deleted
+                            // length makes it C_SARGS)
                             let n = evec_at(&self.evecs, self.ob(o).elems as usize).v.len() as double;
                             self.rset((bp + (w1 as int)) as usize, Val::Num(n));
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -1366,7 +1370,7 @@ impl Vm {
                 self.stack[(bp + w1) as usize] = r;
                 return false;
             }
-            if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+            if atom == A_LENGTH && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && self.find(o, atom) < 0 {
                 let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                 self.stack[(bp + w1) as usize] = r;
                 // the next read here takes rrun's array-length path
@@ -2599,6 +2603,20 @@ pub fn jit_flush(_vm: &mut Vm) {}
 /// back edge this often (4 per such entry, 1 back per good one) is no
 /// longer entered.
 pub const JIT_MISS_MAX: int = 1024;
+
+/// `a` (in int32 range, checked by the caller) truncated toward zero.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn trunc_i32(a: double) -> int {
+    debug_assert!(a >= -2147483648.0 && a <= 2147483647.0);
+    // SAFETY: the caller checks that a is in int32 range (NaN fails it)
+    unsafe { a.to_int_unchecked::<i32>() as int }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn trunc_i32(a: double) -> int {
+    a as int
+}
 
 /// A bit operation on two numbers outside rrun's int32 fast path (`>>>`,
 /// uint32s): below 2^53 ToInt32 truncates and keeps the low 32 bits.

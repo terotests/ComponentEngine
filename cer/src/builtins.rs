@@ -2427,8 +2427,10 @@ impl Vm {
                     self.temp_roots.pop();
                     return Val::Undef;
                 }
-                let kv = self.string_val(k);
-                self.define_elem(o, &kv, v, 0);
+                // the key straight to its atom: no string value in between
+                let ki = jsstr::array_index(k.as_str());
+                let atom = if ki >= 0 { self.index_atom(ki) } else { self.intern(k.as_str()) };
+                self.define(o, atom, v, 0);
                 self.json_ws(cs, pos);
                 if *pos < cs.len() && cs[*pos] == ',' {
                     *pos += 1;
@@ -2483,23 +2485,19 @@ impl Vm {
             return self.string_val(s);
         }
         if c == 't' || c == 'f' || c == 'n' {
-            let words = vec![("true", Val::Bool(true)), ("false", Val::Bool(false)), ("null", Val::Null)];
-            for e in words.iter() {
-                let w = e.0;
-                let v = e.1;
-                let wc = w.chars().collect::<Vec<char>>();
-                let mut ok = *pos + wc.len() <= cs.len();
-                let mut i: usize = 0;
-                while ok && i < wc.len() {
-                    if cs[*pos + i] != wc[i] {
-                        ok = false;
-                    }
-                    i += 1;
-                }
-                if ok {
-                    *pos += wc.len();
-                    return v;
-                }
+            let n = cs.len();
+            let p = *pos;
+            if c == 't' && p + 4 <= n && cs[p + 1] == 'r' && cs[p + 2] == 'u' && cs[p + 3] == 'e' {
+                *pos += 4;
+                return Val::Bool(true);
+            }
+            if c == 'f' && p + 5 <= n && cs[p + 1] == 'a' && cs[p + 2] == 'l' && cs[p + 3] == 's' && cs[p + 4] == 'e' {
+                *pos += 5;
+                return Val::Bool(false);
+            }
+            if c == 'n' && p + 4 <= n && cs[p + 1] == 'u' && cs[p + 2] == 'l' && cs[p + 3] == 'l' {
+                *pos += 4;
+                return Val::Null;
             }
             self.throw_syntax("Unexpected token in JSON");
             return Val::Undef;
@@ -2512,6 +2510,17 @@ impl Vm {
             if *pos < cs.len() && cs[*pos] == '0' && *pos + 1 < cs.len() && cs[*pos + 1] >= '0' && cs[*pos + 1] <= '9' {
                 self.throw_syntax("Unexpected number in JSON");
                 return Val::Undef;
+            }
+            // an integer of up to 15 digits is exact as it is summed
+            let d0 = *pos;
+            let mut iv: double = 0.0;
+            while *pos < cs.len() && cs[*pos] >= '0' && cs[*pos] <= '9' {
+                iv = iv * 10.0 + (((cs[*pos] as int) - 48) as double);
+                *pos += 1;
+            }
+            let nd = *pos - d0;
+            if nd > 0 && nd <= 15 && (*pos >= cs.len() || !(cs[*pos] == '.' || cs[*pos] == 'e' || cs[*pos] == 'E' || cs[*pos] == '+' || cs[*pos] == '-')) {
+                return Val::Num(if cs[start] == '-' { -iv } else { iv });
             }
             while *pos < cs.len() && ((cs[*pos] >= '0' && cs[*pos] <= '9') || cs[*pos] == '.' || cs[*pos] == 'e' || cs[*pos] == 'E' || cs[*pos] == '+' || cs[*pos] == '-') {
                 *pos += 1;
@@ -3219,7 +3228,7 @@ impl Vm {
             let answer = self.host_sync.call(&req);
             return self.string_val(answer);
         }
-        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET {
+        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_TA_NEW) {
             return self.call_native_ta(id, &this, args);
         }
         if id >= 920 && id < 930 {

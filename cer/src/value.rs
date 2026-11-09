@@ -58,6 +58,9 @@ pub const C_BIGINT: i32 = 23;
 /// mapped one (sloppy, simple parameters), or one that got attributes,
 /// deletes or a length write (vm.rs slow_args)
 pub const C_SARGS: i32 = 24;
+/// a DataView (typed.rs): its buffer in env, byte offset in func, byte
+/// length in pos (-1: tracks a resizable buffer's length)
+pub const C_DATAVIEW: i32 = 25;
 
 // property attributes
 pub const P_HIDDEN: int = 1;
@@ -241,18 +244,21 @@ impl JsObj {
     pub fn remove_slot(&mut self, i: usize) -> Val {
         let v = self.get_slot(i);
         let n = self.nv as usize;
-        let mut k = i;
-        while k + 1 < n {
-            let x = self.get_slot(k + 1);
-            self.set_slot(k, x);
-            k += 1;
-        }
-        if n > 2 {
-            self.vals.pop();
-        } else if n == 2 {
-            self.inl1 = Val::Undef;
+        // vals holds slots 2.. (one move of the rest, not a slot at a time)
+        if i >= 2 {
+            self.vals.remove(i - 2);
         } else {
-            self.inl0 = Val::Undef;
+            if i == 0 {
+                self.inl0 = self.inl1;
+            }
+            if n > 2 {
+                self.inl1 = self.vals.remove(0);
+            } else {
+                self.inl1 = Val::Undef;
+                if n == 1 {
+                    self.inl0 = Val::Undef;
+                }
+            }
         }
         self.nv = (n - 1) as i32;
         v
@@ -298,7 +304,7 @@ pub struct Shape {
     pub attrs: Vec<int>,
     /// past SHAPE_HASH_AT keys, slot + 1 by key: an open-addressing table
     /// of a power-of-two size at least twice the keys, 0 for empty
-    pub itab: Vec<int>,
+    pub itab: Vec<i32>,
     /// transitions: adding t_atom[i] with t_attr[i] leads to t_to[i];
     /// past T_LINEAR of them, t_map by atom * 32 + attr
     pub t_atom: Vec<int>,
@@ -336,9 +342,9 @@ impl Shape {
         // table's probes
         if n > SHAPE_HASH_AT && self.itab.len() > 0 {
             let mask = (self.itab.len() as int) - 1;
-            let mut h = atom & mask;
+            let mut h = key_hash(atom) & mask;
             loop {
-                let e = self.itab[h as usize];
+                let e = self.itab[h as usize] as int;
                 if e == 0 {
                     return -1;
                 }
@@ -375,11 +381,11 @@ impl Shape {
 
     fn tab_put(&mut self, atom: int, slot: int) {
         let mask = (self.itab.len() as int) - 1;
-        let mut h = atom & mask;
+        let mut h = key_hash(atom) & mask;
         while self.itab[h as usize] != 0 {
             h = (h + 1) & mask;
         }
-        self.itab[h as usize] = slot + 1;
+        self.itab[h as usize] = (slot + 1) as i32;
     }
 
     /// The table again for the keys there are now.
@@ -408,10 +414,52 @@ impl Shape {
 
     /// An owned shape's key at `slot` goes.
     pub fn remove(&mut self, slot: int) {
+        if self.itab.len() > 0 && self.keys.len() as int - 1 > SHAPE_HASH_AT {
+            // the table kept: the key's entry out, later slots down one
+            self.tab_remove(self.keys[slot as usize]);
+            dec_above(&mut self.itab, (slot + 1) as i32);
+            self.keys.remove(slot as usize);
+            self.attrs.remove(slot as usize);
+            self.nkeys -= 1;
+            return;
+        }
         self.keys.remove(slot as usize);
         self.attrs.remove(slot as usize);
         self.nkeys -= 1;
         self.rehash();
+    }
+
+    /// Takes `atom`'s entry out of the table (linear probing: the entries
+    /// after it in its run move back where their probe allows).
+    fn tab_remove(&mut self, atom: int) {
+        let mask = (self.itab.len() as int) - 1;
+        let mut i = key_hash(atom) & mask;
+        loop {
+            let e = self.itab[i as usize] as int;
+            if e == 0 {
+                return;
+            }
+            if self.keys[(e - 1) as usize] == atom {
+                break;
+            }
+            i = (i + 1) & mask;
+        }
+        let mut j = i;
+        loop {
+            j = (j + 1) & mask;
+            let e = self.itab[j as usize] as int;
+            if e == 0 {
+                break;
+            }
+            let k = key_hash(self.keys[(e - 1) as usize]) & mask;
+            // the entry at j may fill i when its home k is not in (i, j]
+            let movable = if i <= j { k <= i || k > j } else { k <= i && k > j };
+            if movable {
+                self.itab[i as usize] = e as i32;
+                i = j;
+            }
+        }
+        self.itab[i as usize] = 0;
     }
 
     /// In a holder: a holder of its own with the first `n` keys and
@@ -724,4 +772,34 @@ pub struct Handler {
     pub catch_pc: int,
     pub sp: int,
     pub env: int,
+}
+
+/// Each entry of `v` above `x` one less. Rust: a loop the compiler
+/// vectorizes.
+#[ranger::target(rust)]
+pub fn dec_above(v: &mut Vec<i32>, x: i32) {
+    for e in v.iter_mut() {
+        *e -= (*e > x) as i32;
+    }
+}
+
+/// Where a key's probe starts in a shape's table. Atoms made one after
+/// another (k0, k1, ...) are consecutive: as they are they would fill one
+/// run, and a delete walks the run to its end; spread they leave gaps.
+/// (Kept within 31 bits for targets with narrower ints.)
+#[inline(always)]
+pub fn key_hash(atom: int) -> int {
+    (atom & 65535) * 25173 + (atom >> 16)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn dec_above(v: &mut Vec<i32>, x: i32) {
+    let m = v.len();
+    let mut h: usize = 0;
+    while h < m {
+        if v[h] > x {
+            v[h] -= 1;
+        }
+        h += 1;
+    }
 }

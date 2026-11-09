@@ -58,6 +58,12 @@ pub struct Intl {
     /// the tailoring in use: where its entries start, and how many
     pub tailor_off: int,
     pub tailor_count: int,
+    /// sort keys made for (key_tag, key_flags), by string: a sort compares
+    /// each string many times
+    pub key_index: HashMap<String, int>,
+    pub key_store: Vec<Vec<int>>,
+    pub key_tag: String,
+    pub key_flags: int,
 }
 
 impl Intl {
@@ -75,6 +81,10 @@ impl Intl {
             tag: String::from("-"),
             tailor_off: 0,
             tailor_count: 0,
+            key_index: HashMap::new(),
+            key_store: Vec::new(),
+            key_tag: String::from("-"),
+            key_flags: -1,
         }
     }
 }
@@ -471,14 +481,40 @@ fn without_punct(t: &Intl, s: &str) -> String {
     out
 }
 
+fn cached_keys(t: &mut Intl, norm: &mut crate::normalize::Norm, s: &str, flags: int) -> Vec<int> {
+    let at = match t.key_index.get(s) {
+        Some(i) => *i,
+        None => -1,
+    };
+    if at >= 0 {
+        return t.key_store[at as usize].clone();
+    }
+    let k = keys(t, norm, s, flags);
+    if s.as_bytes().len() <= 64 {
+        if t.key_store.len() >= 4096 {
+            t.key_index = HashMap::new();
+            t.key_store = Vec::new();
+        }
+        t.key_index.insert(String::from(s), t.key_store.len() as int);
+        t.key_store.push(k.clone());
+    }
+    k
+}
+
 pub fn collate(t: &mut Intl, norm: &mut crate::normalize::Norm, a: &str, b: &str, tag: &str, flags: int) -> int {
     if a == b {
         return 0;
     }
     load(t);
     select_locale(t, tag);
-    let ka = keys(t, norm, a, flags);
-    let kb = keys(t, norm, b, flags);
+    if t.key_flags != flags || t.key_tag.as_str() != tag {
+        t.key_index = HashMap::new();
+        t.key_store = Vec::new();
+        t.key_tag = String::from(tag);
+        t.key_flags = flags;
+    }
+    let ka = cached_keys(t, norm, a, flags);
+    let kb = cached_keys(t, norm, b, flags);
     let c = level_cmp(&ka, 0, &kb, 0);
     if c != 0 {
         return c;
@@ -721,7 +757,9 @@ function numberDigits(o, a, big) {
   while (end > minF && frac.charAt(end - 1) === '0') end--;
   frac = frac.slice(0, end);
   while (frac.length < minF) frac += '0';
-  int = int.replace(/^0+(?=\d)/, '');
+  var z = 0;
+  while (z < int.length - 1 && int.charCodeAt(z) === 48) z++;
+  if (z) int = int.slice(z);
   while (int.length < o.minimumIntegerDigits) int = '0' + int;
   return [int, frac];
 }
@@ -863,18 +901,75 @@ function numberParts(nf, x) {
   if (o.style === 'unit') parts.push({ type: 'literal', value: o.unitDisplay === 'narrow' ? '' : ' ' }, { type: 'unit', value: o.unit });
   return parts;
 }
+// format's string without the parts: the same digits, grouping and affixes
+// as numberParts, the per-format strings looked up once (__c)
+function numberCache(nf) {
+  var c = nf.__c;
+  if (c) return c;
+  var o = nf.__o, loc = nf.__loc, mode = o.useGrouping;
+  c = { sym: o.style === 'currency' ? currencySymbol(o, loc) : '', sep: mode === false ? '' : str22(loc, 1), dec: str22(loc, 0),
+    p1: int5(loc, 0), p2: int5(loc, 1), minG: mode === 'min2' ? 2 : mode === 'always' ? 1 : int5(loc, 2), nan: sup(loc, 0),
+    aff: [null, null, null, null], unit: o.style === 'unit' ? (o.unitDisplay === 'narrow' ? '' : ' ') + o.unit : '' };
+  hide(nf, '__c', c);
+  return c;
+}
+// an affix's text: the minus as a plus sign when one shows, the symbol in
+// place of U+00A4
+function affixText(nf, c, neg, plus) {
+  var o = nf.__o, loc = nf.__loc, aff = numberAffix(o, loc, neg, c.sym), m = str22(loc, 2), out = [];
+  for (var i = 0; i < 2; i++) {
+    var t = aff[i];
+    if (plus && m) t = t.split(m).join('+');
+    if (o.style === 'currency') t = t.split('¤').join(c.sym);
+    out.push(t);
+  }
+  return out;
+}
+function numberString(nf, x) {
+  var o = nf.__o, c = numberCache(nf), big;
+  if (typeof x === 'bigint') { big = String(x < 0 ? -x : x); x = Number(x); }
+  else if (typeof x === 'string' && /^\s*-?\d+\s*$/.test(x) && x.trim().replace('-', '').length > 15) { big = x.trim().replace('-', '').replace(/^0+(?=\d)/, ''); x = Number(x); }
+  else x = Number(x);
+  var neg = x < 0 || (x === 0 && 1 / x < 0);
+  var a = neg ? -x : x;
+  if (o.style === 'percent') { a = a * 100; if (big !== undefined) big += '00'; }
+  var digits = a !== a || a === Infinity ? null : numberDigits(o, a, big);
+  var sd = o.signDisplay, showNeg = false, plus = false;
+  if (a !== a) neg = false;
+  if (sd === 'auto') showNeg = neg;
+  else if (sd === 'always') { showNeg = true; plus = !neg; }
+  else {
+    var zero = digits !== null && /^0*$/.test(digits[0] + digits[1]);
+    if (sd === 'exceptZero') { if (!zero && a === a) { showNeg = true; plus = !neg; } }
+    else if (sd === 'negative') showNeg = neg && !zero;
+  }
+  var k = (showNeg ? 1 : 0) + (plus ? 2 : 0), aff = c.aff[k] || (c.aff[k] = affixText(nf, c, showNeg, plus)), body;
+  if (a !== a) body = c.nan;
+  else if (a === Infinity) body = '∞';
+  else {
+    var int = digits[0], n = int.length;
+    if (c.sep === '' || n < c.p1 + c.minG) body = int;
+    else {
+      var end = n - c.p1;
+      body = int.slice(end);
+      while (end > 0) { body = int.slice(end > c.p2 ? end - c.p2 : 0, end) + c.sep + body; end -= c.p2; }
+    }
+    if (digits[1]) body += c.dec + digits[1];
+  }
+  return aff[0] + body + aff[1] + c.unit;
+}
 function joinParts(parts) { var s = ''; for (var i = 0; i < parts.length; i++) s += parts[i].value; return s; }
 hide(NumberFormat.prototype, 'formatToParts', function formatToParts(x) { intlBrand(this, 'NumberFormat', 'Intl.NumberFormat.prototype.formatToParts'); return numberParts(this, x); });
 defineProperty(NumberFormat.prototype, 'format', { configurable: true, enumerable: false, get: function () {
   intlBrand(this, 'NumberFormat', 'get Intl.NumberFormat.prototype.format');
   var self = this;
-  if (!this.__f) hide(this, '__f', function (x) { return joinParts(numberParts(self, x)); });
+  if (!this.__f) hide(this, '__f', function (x) { return numberString(self, x); });
   return this.__f;
 } });
 hide(NumberFormat.prototype, 'formatRange', function formatRange(a, b) {
   intlBrand(this, 'NumberFormat', 'Intl.NumberFormat.prototype.formatRange');
   if (a === undefined || b === undefined) throw new TypeError('start or end is undefined');
-  var x = joinParts(numberParts(this, a)), y = joinParts(numberParts(this, b));
+  var x = numberString(this, a), y = numberString(this, b);
   if (x === y) return '~' + x;
   return x + (this.__o.style === 'decimal' ? '–' : ' – ') + y;
 });
@@ -1238,9 +1333,20 @@ function dateLocale(d, locales, options, dflt) {
   else if (dflt === 'time' && o.dateStyle !== undefined) throw new TypeError('Invalid option : dateStyle');
   return new DateTimeFormat(locales, o).format(d);
 }
+var NF_CACHE = create(null), NF_COUNT = 0;
 return {
   Intl: Intl,
-  numberLocale: function (x, locales, options) { return new NumberFormat(locales, options).format(x); },
+  // toLocaleString without options: one NumberFormat per locale string
+  numberLocale: function (x, locales, options) {
+    if (options !== undefined || (locales !== undefined && typeof locales !== 'string')) return new NumberFormat(locales, options).format(x);
+    var key = locales === undefined ? '' : '-' + locales, nf = NF_CACHE[key];
+    if (!nf) {
+      nf = new NumberFormat(locales);
+      if (++NF_COUNT > 64) { NF_CACHE = create(null); NF_COUNT = 1; }
+      NF_CACHE[key] = nf;
+    }
+    return numberString(nf, x);
+  },
   collate: function (a, b, locales, options) { return new Collator(locales, options).compare(a, b); },
   dateLocale: dateLocale
 };

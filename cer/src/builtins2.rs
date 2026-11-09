@@ -390,6 +390,26 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
+                // a number in a plain array: the elements compared in place
+                if plain && i >= 0 {
+                    if let Val::Num(x) = a0 {
+                        if x == x {
+                            let e = self.objs[o as usize].elems as usize;
+                            let n = self.evecs[e].v.len() as int;
+                            let end = if n < len { n } else { len };
+                            let mut k = i;
+                            while k < end {
+                                if let Val::Num(y) = self.evecs[e].v[k as usize] {
+                                    if y == x {
+                                        return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(k as double) };
+                                    }
+                                }
+                                k += 1;
+                            }
+                            i = if end > i { end } else { i };
+                        }
+                    }
+                }
                 while i < len {
                     let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
                         self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
@@ -793,9 +813,19 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
-                if (id == NF_SP_INCLUDES || id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && self.class_of(&a0) == C_REGEXP {
-                    self.throw_type("First argument must not be a regular expression");
-                    return Val::Undef;
+                if (id == NF_SP_INCLUDES || id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && is_obj(&a0) {
+                    // IsRegExp: Symbol.match when set, else the internal slot
+                    let am = self.intern("@@match");
+                    let m = self.get(&a0, am);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    let is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
+                    if is_re {
+                        let what = if id == NF_SP_INCLUDES { "includes" } else if id == NF_SP_STARTSWITH { "startsWith" } else { "endsWith" };
+                        self.throw_type(format!("First argument to String.prototype.{} must not be a regular expression", what).as_str());
+                        return Val::Undef;
+                    }
                 }
                 let p = self.to_str(&a0);
                 let len = self.str_len(&s);

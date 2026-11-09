@@ -1060,9 +1060,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
 // ---- ArrayBuffer, SharedArrayBuffer, the typed arrays, DataView, Atomics:
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
-var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast;
+var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew;
 var bufMax = globalThis.__bufMax, bufResize = globalThis.__bufResize;
-['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
+['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__taKind', '__taSub', '__taNew', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
 function toIndex(v, what) {
   if (v === undefined) return 0;
   var n = toIntegerOrInfinity(v);
@@ -1201,6 +1201,7 @@ function construct(kind, nt, a, b, c) {
   var size = SIZES[kind];
   var proto = protoFrom(nt, CTORS[kind].prototype);
   if (!isObject(a)) {
+    if (typeof a === 'number') { var t0 = taNew(kind, a, proto, ArrayBuffer.prototype); if (t0 !== undefined) return t0; }
     var n = toIndex(a, 'typed array length');
     return taMake(kind, bufNew(n * size, ArrayBuffer.prototype, false, undefined, kind), 0, n, proto);
   }
@@ -1431,6 +1432,13 @@ hide(TAP, 'sort', function sort(cmp) {
   return this;
 });
 hide(TAP, 'subarray', function subarray(start, end) {
+  // the default species and number bounds: native (the order of the
+  // steps is not observable then)
+  var k = taKind(this);
+  if (k >= 0 && (start === undefined || typeof start === 'number') && (end === undefined || typeof end === 'number')) {
+    var D = CTORS[k];
+    if (speciesOf(this, D) === D) { var r = taSub(this, start, end, D.prototype); if (r !== undefined) return r; }
+  }
   var info = taOf(this, 'TypedArray.prototype.subarray'); var n = info[3];
   var s = relIndex(start, n, 0);
   if (info[5] && end === undefined) return speciesCreate(this, [info[1], info[2] + s * SIZES[info[0]]]);
@@ -1490,6 +1498,7 @@ function DataView(buffer, byteOffset, byteLength) {
   if (off > blen) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
   if (byteLength !== undefined && off + n > blen) throw new RangeError('Invalid DataView length ' + n);
   dvData.set(o, [buffer, off, tracking ? -1 : n]);
+  dvMake(o, buffer, off, tracking ? -1 : n);
   return o;
 }
 // the view's byte length; -1 when out of bounds or detached
@@ -1510,6 +1519,8 @@ tag(DVP, 'DataView');
 ['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64', 'BigInt64', 'BigUint64', 'Float16'].forEach(function (name, kind) {
   if (!name) return;
   hide(DVP, 'get' + name, function (index, little) {
+    var r = dvGetFast(this, index, kind, little);
+    if (r !== undefined) return r;
     var d = dv(this, 'DataView.prototype.get' + name); var i = toIndex(index, 'offset');
     var n = dvLength(d);
     if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.get' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
@@ -1517,6 +1528,7 @@ tag(DVP, 'DataView');
     return bufGet(d[0], d[1] + i, kind, !!little);
   });
   hide(DVP, 'set' + name, function (index, value, little) {
+    if (dvSetFast(this, index, kind, value, little)) return;
     var d = dv(this, 'DataView.prototype.set' + name); var i = toIndex(index, 'offset'); var x = elemOf(kind)(value);
     var n = dvLength(d);
     if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.set' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
@@ -2439,17 +2451,7 @@ function isRegExpLike(x) {
   if (m !== undefined) return !!m;
   return x instanceof RegExp;
 }
-['startsWith', 'endsWith', 'includes'].forEach(function (name) {
-  var nat = SP[name];
-  var f = function (s, pos) {
-    'use strict';
-    if (this === undefined || this === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
-    if (isRegExpLike(s)) throw new TypeError('First argument to String.prototype.' + name + ' must not be a regular expression');
-    return nat.call(this, isObject(s) ? String(s) : s, pos);
-  };
-  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
-  hide(SP, name, setLength(f, 1));
-});
+// startsWith, endsWith and includes are the natives: they do IsRegExp
 
 // ---- smaller pieces: unscopables, Date's @@toPrimitive, Number.parseFloat,
 // the Annex B String HTML methods, RegExp flags and RegExp.escape
@@ -2709,8 +2711,12 @@ if (typeof BigInt === 'function') hide(BigInt.prototype, 'toLocaleString', funct
 });
 hide(String.prototype, 'localeCompare', function localeCompare(that, locales, options) {
   'use strict';
+  if (locales === undefined && options === undefined) {
+    if (typeof this === 'string' && typeof that === 'string') return intlCollate(this, that, '', 3);
+    if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
+    return intlCollate(String(this), String(that), '', 3);
+  }
   if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
-  if (locales === undefined && options === undefined) return intlCollate(String(this), String(that), '', 3);
   return intl().collate(String(this), String(that), locales, options);
 });
 hide(DP, 'toLocaleString', function toLocaleString(locales, options) { return intl().dateLocale(this, locales, options, 'all'); });
