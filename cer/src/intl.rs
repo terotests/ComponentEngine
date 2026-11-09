@@ -58,6 +58,12 @@ pub struct Intl {
     /// the tailoring in use: where its entries start, and how many
     pub tailor_off: int,
     pub tailor_count: int,
+    /// sort keys made for (key_tag, key_flags), by string: a sort compares
+    /// each string many times
+    pub key_index: HashMap<String, int>,
+    pub key_store: Vec<Vec<int>>,
+    pub key_tag: String,
+    pub key_flags: int,
 }
 
 impl Intl {
@@ -75,6 +81,10 @@ impl Intl {
             tag: String::from("-"),
             tailor_off: 0,
             tailor_count: 0,
+            key_index: HashMap::new(),
+            key_store: Vec::new(),
+            key_tag: String::from("-"),
+            key_flags: -1,
         }
     }
 }
@@ -471,14 +481,40 @@ fn without_punct(t: &Intl, s: &str) -> String {
     out
 }
 
+fn cached_keys(t: &mut Intl, norm: &mut crate::normalize::Norm, s: &str, flags: int) -> Vec<int> {
+    let at = match t.key_index.get(s) {
+        Some(i) => *i,
+        None => -1,
+    };
+    if at >= 0 {
+        return t.key_store[at as usize].clone();
+    }
+    let k = keys(t, norm, s, flags);
+    if s.as_bytes().len() <= 64 {
+        if t.key_store.len() >= 4096 {
+            t.key_index = HashMap::new();
+            t.key_store = Vec::new();
+        }
+        t.key_index.insert(String::from(s), t.key_store.len() as int);
+        t.key_store.push(k.clone());
+    }
+    k
+}
+
 pub fn collate(t: &mut Intl, norm: &mut crate::normalize::Norm, a: &str, b: &str, tag: &str, flags: int) -> int {
     if a == b {
         return 0;
     }
     load(t);
     select_locale(t, tag);
-    let ka = keys(t, norm, a, flags);
-    let kb = keys(t, norm, b, flags);
+    if t.key_flags != flags || t.key_tag.as_str() != tag {
+        t.key_index = HashMap::new();
+        t.key_store = Vec::new();
+        t.key_tag = String::from(tag);
+        t.key_flags = flags;
+    }
+    let ka = cached_keys(t, norm, a, flags);
+    let kb = cached_keys(t, norm, b, flags);
     let c = level_cmp(&ka, 0, &kb, 0);
     if c != 0 {
         return c;
