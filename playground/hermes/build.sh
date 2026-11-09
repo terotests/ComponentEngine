@@ -30,7 +30,10 @@ cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -S "$WORK/src" -B "$WORK/host"
 cmake --build "$WORK/host" --target hermesc --target hermes --target shermes --parallel
 
 # stage 2: the VM's command line as an ES module factory for a page or a
-# worker; the playground writes each script into MEMFS and calls main
+# worker; the playground writes each script into MEMFS and calls main.
+# No test suite and no Node-API: their shared-library addons collide in
+# ninja under emscripten ("multiple rules generate ...test_exception.node")
+# and the hermes command would link NAPI with -rdynamic.
 LINK="-sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1MB -sMODULARIZE=1 -sEXPORT_ES6=1"
 LINK="$LINK -sEXPORT_NAME=HermesModule -sINVOKE_RUN=0 -sEXIT_RUNTIME=0"
 LINK="$LINK -sFORCE_FILESYSTEM=1 -sENVIRONMENT=web,worker -sEXPORTED_RUNTIME_METHODS=callMain,FS"
@@ -39,6 +42,8 @@ cmake -G Ninja -S "$WORK/src" -B "$WORK/wasm" \
   -DCMAKE_BUILD_TYPE=Release \
   -DIMPORT_HOST_COMPILERS="$WORK/host/ImportHostCompilers.cmake" \
   -DHAVE_SYS_IOCTL_H=0 \
+  -DHERMES_ENABLE_TEST_SUITE=OFF \
+  -DHERMES_ENABLE_NAPI=OFF \
   -DCMAKE_EXE_LINKER_FLAGS="$LINK"
 cmake --build "$WORK/wasm" --target hermes --parallel
 
