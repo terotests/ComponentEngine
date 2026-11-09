@@ -3219,6 +3219,9 @@ impl Vm {
             let answer = self.host_sync.call(&req);
             return self.string_val(answer);
         }
+        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET {
+            return self.call_native_ta(id, &this, args);
+        }
         if id >= 920 && id < 930 {
             return self.call_native_typed(id, args);
         }

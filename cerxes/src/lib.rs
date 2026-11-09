@@ -262,9 +262,9 @@ impl Engine {
         }
         self.vm.slice_t0 = builtins::now_ms();
         self.vm.ticks = vm::SLICE_TICKS;
-        self.vm.slicing = self.vm.slice_ms > 0.0;
+        self.vm.slicing = self.vm.slice_ms > 0.0 || self.vm.prof_on;
         let r = self.run_val(u);
-        self.vm.slicing = false;
+        self.vm.slicing = self.vm.prof_on;
         if self.vm.suspended {
             return String::new();
         }
@@ -306,11 +306,11 @@ impl Engine {
         self.vm.suspended = false;
         self.vm.slice_t0 = builtins::now_ms();
         self.vm.ticks = vm::SLICE_TICKS;
-        self.vm.slicing = self.vm.slice_ms > 0.0;
+        self.vm.slicing = self.vm.slice_ms > 0.0 || self.vm.prof_on;
         if !self.vm.regs || self.vm.translate_frames() {
             self.vm.run(0);
         }
-        self.vm.slicing = false;
+        self.vm.slicing = self.vm.prof_on;
         if self.vm.suspended {
             return String::new();
         }

@@ -328,6 +328,16 @@ pub struct Vm {
     /// slices are on for this run: set by Engine::run / resume only, so a
     /// host call (call_top, jobs) never stops half way
     pub slicing: bool,
+    /// the sampling profiler (cerxes CERXES_PROF=1): with slicing on, every
+    /// tick charges the time since the last one to the running function
+    /// (prof_self) and once to each function on the stack (prof_incl), in
+    /// ms by proto index; no tick ever ends a slice then
+    pub prof_on: bool,
+    pub prof_t: double,
+    pub prof_self: Vec<double>,
+    pub prof_incl: Vec<double>,
+    pub prof_mark: Vec<int>,
+    pub prof_n: int,
     /// the baseline JIT (wjit.rs) runs hot loops: a host that can run its
     /// code sets it
     pub jit_on: bool,
@@ -615,6 +625,12 @@ impl Vm {
             ticks: SLICE_TICKS,
             suspended: false,
             slicing: false,
+            prof_on: false,
+            prof_t: 0.0,
+            prof_self: Vec::new(),
+            prof_incl: Vec::new(),
+            prof_mark: Vec::new(),
+            prof_n: 0,
             jit_on: false,
             jit_min: 64,
             jit_fn: Vec::new(),
@@ -2483,7 +2499,7 @@ impl Vm {
                     }
                 }
                 if class == C_TYPED {
-                    return self.ta_get(*o, i);
+                    return self.ta_get_fast(*o, i);
                 }
                 let a = self.index_atom(i);
                 // an element up the chain (an array or string prototype) is
@@ -2847,6 +2863,13 @@ impl Vm {
         if k == 3 || k == 4 {
             return false;
         }
+        // what a number prints as starts with a digit, '-', "Infinity" or
+        // "NaN": any other key without converting it (a typed array's
+        // methods and accessors are looked up through here)
+        let c0 = jsstr::first_byte(self.atom_names[atom as usize].as_str());
+        if !((c0 >= 48 && c0 <= 57) || c0 == 45 || c0 == 73 || c0 == 78) {
+            return false;
+        }
         let n = self.atom_str(atom);
         n.as_str() == "-0" || number_to_string(string_to_number(n.as_str())) == n
     }
@@ -2863,6 +2886,11 @@ impl Vm {
             self.idx_protos = true;
         }
         if class == C_TYPED {
+            if let Val::Num(x) = v {
+                if self.ta_put_num(o, i, x) {
+                    return;
+                }
+            }
             self.ta_set(o, i, &v);
             return;
         }
@@ -5411,6 +5439,10 @@ impl Vm {
     /// over and the script can stop here, with no native code under it
     /// (native_depth 0). The clock is read once in SLICE_TICKS branches.
     pub fn slice_over(&mut self) -> bool {
+        if self.prof_on {
+            self.prof_tick();
+            return false;
+        }
         self.ticks -= 1;
         if self.ticks > 0 || self.native_depth != 0 {
             return false;
@@ -5418,6 +5450,38 @@ impl Vm {
         self.ticks = SLICE_TICKS;
         let now = crate::builtins::now_ms();
         now - self.slice_t0 >= self.slice_ms
+    }
+
+    /// The profiler's tick (prof_on): the time since the last tick to the
+    /// running function and to each function on the stack once.
+    #[inline(never)]
+    pub fn prof_tick(&mut self) {
+        let now = crate::builtins::now_ms();
+        let dt = now - self.prof_t;
+        self.prof_t = now;
+        if self.frames.is_empty() || dt <= 0.0 || dt > 1000.0 {
+            return;
+        }
+        let n = self.protos.len();
+        while self.prof_self.len() < n {
+            self.prof_self.push(0.0);
+            self.prof_incl.push(0.0);
+            self.prof_mark.push(0);
+        }
+        self.prof_n += 1;
+        let top = self.frames[self.frames.len() - 1].proto;
+        if top >= 0 {
+            self.prof_self[top as usize] += dt;
+        }
+        let mut k = self.frames.len();
+        while k > 0 {
+            k -= 1;
+            let p = self.frames[k].proto;
+            if p >= 0 && self.prof_mark[p as usize] != self.prof_n {
+                self.prof_mark[p as usize] = self.prof_n;
+                self.prof_incl[p as usize] += dt;
+            }
+        }
     }
 
     /// A taken branch to `to` with slices on: when the slice is over the
@@ -5527,6 +5591,27 @@ impl Vm {
                 return true;
             }
         }
+        // "s".charCodeAt(i) and n.toString(): no argument vector
+        if id == crate::builtins::NF_SP_CHARCODEAT && argc >= 1 {
+            let t = self.stack[(fpos + 1) as usize];
+            let a = self.stack[bp as usize];
+            let r = self.char_code_fast(&t, &a);
+            if !matches!(r, Val::Undef) {
+                self.stack[fpos as usize] = r;
+                return true;
+            }
+        }
+        if id == crate::builtins::NF_NP_TOSTRING && argc <= 1 {
+            let radix = if argc == 0 { Val::Num(10.0) } else { self.stack[bp as usize] };
+            if let (Val::Num(n), Val::Num(rx)) = (self.stack[(fpos + 1) as usize], radix) {
+                if rx != 2.0 && rx != 8.0 && rx != 10.0 && rx != 16.0 && rx != 36.0 {
+                    return false;
+                }
+                let r = self.string_val(crate::num::radix_string(n, rx as int));
+                self.stack[fpos as usize] = r;
+                return true;
+            }
+        }
         // The hottest natives, straight off the stack: no argument
         // vector, same checks as their builtins.
         if argc >= 1 {
@@ -5580,6 +5665,21 @@ impl Vm {
             }
         }
         false
+    }
+
+    /// `t.charCodeAt(a)` for a string `t` and a whole number `a`, as
+    /// NF_SP_CHARCODEAT answers it; undefined when it is not that case.
+    pub fn char_code_fast(&mut self, t: &Val, a: &Val) -> Val {
+        if let (Val::Str(h), Val::Num(x)) = (t, a) {
+            let i = *x as int;
+            if (i as double) != *x {
+                return Val::Undef;
+            }
+            let s = self.sget(*h);
+            let c = if i < 0 { -1 } else { self.str_at(&s, i) };
+            return Val::Num(if c < 0 { nan() } else { c as double });
+        }
+        Val::Undef
     }
 
     /// The calling part of OP_CALL; true when a frame was pushed or the

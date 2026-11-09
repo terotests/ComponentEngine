@@ -1060,9 +1060,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
 // ---- ArrayBuffer, SharedArrayBuffer, the typed arrays, DataView, Atomics:
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
-var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo;
+var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast;
 var bufMax = globalThis.__bufMax, bufResize = globalThis.__bufResize;
-['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
+['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
 function toIndex(v, what) {
   if (v === undefined) return 0;
   var n = toIntegerOrInfinity(v);
@@ -1300,7 +1300,7 @@ hide(TypedArray, 'of', function of() {
 getter(TAP, 'buffer', function () { return taOf(this, 'TypedArray.prototype.buffer')[1]; });
 getter(TAP, 'byteLength', function () { var i = taOf(this, 'TypedArray.prototype.byteLength'); return i[3] * SIZES[i[0]]; });
 getter(TAP, 'byteOffset', function () { var i = taOf(this, 'TypedArray.prototype.byteOffset'); return i[4] ? 0 : i[2]; });
-getter(TAP, 'length', function () { return taOf(this, 'TypedArray.prototype.length')[3]; });
+getter(TAP, 'length', taLength);
 getter(TAP, Symbol.toStringTag, function () { var i = taInfo(this); return i === undefined ? undefined : KINDS[i[0]]; });
 function len(o, what) { return live(o, what)[3]; }
 function fn(f, what) { if (!isCallable(f)) throw new TypeError(what + ': ' + String(f) + ' is not a function'); return f; }
@@ -1393,6 +1393,7 @@ hide(TAP, 'reverse', function reverse() {
   return this;
 });
 hide(TAP, 'set', function set(source, offset) {
+  if (taSetFast(this, source, offset)) return;
   var info = live(this, 'TypedArray.prototype.set');
   var off = toIntegerOrInfinity(offset);
   if (off < 0) throw new RangeError('offset is out of bounds');
