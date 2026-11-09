@@ -7650,7 +7650,7 @@ impl Vm {
         while i < n {
             let o = list[i];
             i += 1;
-            let ob = &mut self.objs[o as usize];
+            let ob = crate::rvm::obj_mut(&mut self.objs, o as usize);
             if !ob.zct {
                 continue;
             }
@@ -7699,20 +7699,20 @@ impl Vm {
     /// held joins `work`.
     fn drop_refs(&mut self, x: int, work: &mut Vec<int>) {
         let (proto, env, home) = {
-            let ob = &self.objs[x as usize];
+            let ob = crate::rvm::obj_at(&self.objs, x as usize);
             (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { self.colds[ob.cold as usize].home })
         };
-        let primv = self.colds[self.objs[x as usize].cold as usize].prim;
+        let primv = self.colds[crate::rvm::obj_at(&self.objs, x as usize).cold as usize].prim;
         let prim = obj_of(&primv);
         self.sdec(str_of(&primv));
         self.drop_ref(proto as int, work);
         self.drop_ref(env as int, work);
         self.drop_ref(home, work);
         self.drop_ref(prim, work);
-        let nv = self.objs[x as usize].nv as usize;
+        let nv = crate::rvm::obj_at(&self.objs, x as usize).nv as usize;
         let mut j: usize = 0;
         while j < nv {
-            match self.objs[x as usize].get_slot(j) {
+            match crate::rvm::obj_at(&self.objs, x as usize).get_slot(j) {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -7723,11 +7723,11 @@ impl Vm {
             }
             j += 1;
         }
-        let xe = self.objs[x as usize].elems as usize;
-        let ne = self.evecs[xe].v.len();
+        let xe = crate::rvm::obj_at(&self.objs, x as usize).elems as usize;
+        let ne = crate::rvm::evec_at(&self.evecs, xe).v.len();
         j = 0;
         while j < ne {
-            match self.evecs[xe].v[j] {
+            match *crate::rvm::val_at(&crate::rvm::evec_at(&self.evecs, xe).v, j) {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -7738,10 +7738,10 @@ impl Vm {
             }
             j += 1;
         }
-        let ne2 = self.colds[self.objs[x as usize].cold as usize].elems2.len();
+        let ne2 = self.colds[crate::rvm::obj_at(&self.objs, x as usize).cold as usize].elems2.len();
         j = 0;
         while j < ne2 {
-            match self.colds[self.objs[x as usize].cold as usize].elems2[j] {
+            match self.colds[crate::rvm::obj_at(&self.objs, x as usize).cold as usize].elems2[j] {
                 Val::Obj(c) => {
                     self.drop_ref(c, work);
                 }
@@ -7759,7 +7759,7 @@ impl Vm {
         if c < 0 {
             return;
         }
-        let ob = &mut self.objs[c as usize];
+        let ob = crate::rvm::obj_mut(&mut self.objs, c as usize);
         ob.rc -= 1;
         if ob.rc > 0 || ob.free {
             return;

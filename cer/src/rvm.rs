@@ -2424,6 +2424,20 @@ pub fn obj_at(v: &Vec<JsObj>, i: usize) -> &JsObj {
     &v[i]
 }
 
+/// `v[i]` of the objects, to write.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn obj_mut(v: &mut Vec<JsObj>, i: usize) -> &mut JsObj {
+    debug_assert!(i < v.len(), "object id past objs");
+    // SAFETY: as obj_at
+    unsafe { v.get_unchecked_mut(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn obj_mut(v: &mut Vec<JsObj>, i: usize) -> &mut JsObj {
+    &mut v[i]
+}
+
 /// `v[i]` of the element vectors.
 #[ranger::target(rust)]
 #[inline(always)]
