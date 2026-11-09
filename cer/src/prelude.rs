@@ -1202,7 +1202,7 @@ function construct(kind, nt, a, b, c) {
   var proto = protoFrom(nt, CTORS[kind].prototype);
   if (!isObject(a)) {
     var n = toIndex(a, 'typed array length');
-    return taMake(kind, bufNew(n * size, ArrayBuffer.prototype, false), 0, n, proto);
+    return taMake(kind, bufNew(n * size, ArrayBuffer.prototype, false, undefined, kind), 0, n, proto);
   }
   var bi = bufInfo(a);
   if (bi !== -1) {
@@ -1236,7 +1236,7 @@ function construct(kind, nt, a, b, c) {
     }
   }
   var count = toLength(src.length);
-  var t = taMake(kind, bufNew(count * size, ArrayBuffer.prototype, false), 0, count, proto);
+  var t = taMake(kind, bufNew(count * size, ArrayBuffer.prototype, false, undefined, kind), 0, count, proto);
   for (var i = 0; i < count; i++) t[i] = src[i];
   return t;
 }
