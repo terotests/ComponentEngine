@@ -53,6 +53,22 @@ pub const NF_BUF_RESIZE: int = 929;
 pub const NF_TA_LEN: int = 970;
 pub const NF_TA_SET: int = 971;
 
+/// log2 of kind_size.
+pub fn kind_shift(kind: int) -> int {
+    if kind == TK_FLOAT16 {
+        return 1;
+    }
+    if kind <= TK_UINT8C {
+        0
+    } else if kind <= TK_UINT16 {
+        1
+    } else if kind <= TK_UINT32 || kind == TK_FLOAT32 {
+        2
+    } else {
+        3
+    }
+}
+
 pub fn kind_size(kind: int) -> int {
     if kind == TK_FLOAT16 {
         return 2;
@@ -571,30 +587,32 @@ impl Vm {
     /// R_GET_ELEM / R_SET_ELEM and get_index / set_index take it first.
     #[inline]
     pub fn ta_slot(&self, o: int, i: int) -> int {
-        let ob = &self.objs[o as usize];
+        let ob = crate::rvm::obj_at(&self.objs, o as usize);
         let b = ob.env as int;
         if b < 0 || i < 0 {
             return -1;
         }
-        let bo = &self.objs[b as usize];
+        let bo = crate::rvm::obj_at(&self.objs, b as usize);
         if (bo.pos & 1) != 0 || bo.cold <= 0 {
             return -1;
         }
-        let fixed = match self.colds[ob.cold as usize].prim {
-            Val::Num(n) => n as int,
-            _ => -1,
+        // the fixed length as a number: i (an int) compared without a
+        // conversion back from double
+        let inside = match crate::rvm::cold_at(&self.colds, ob.cold as usize).prim {
+            Val::Num(n) => (i as double) < n,
+            _ => false,
         };
-        if i >= fixed {
+        if !inside {
             return -1;
         }
-        let bc = &self.colds[bo.cold as usize];
+        let bc = crate::rvm::cold_at(&self.colds, bo.cold as usize);
         if matches!(bc.prim, Val::Num(_)) {
             return -1;
         }
         let kind = ob.pos as int;
         if bc.home == kind {
-            let size = kind_size(kind);
-            return ((ob.func as int) + i * size) / size;
+            // a view's byte offset is a multiple of its element size
+            return ((ob.func as int) >> kind_shift(kind)) + i;
         }
         if bc.home < 0 && kind == TK_UINT8 {
             return (ob.func as int) + i;
@@ -602,13 +620,20 @@ impl Vm {
         -1
     }
 
+    /// `ta[i]` as ta_slot finds it (a buffer's Cold and the slot in its
+    /// nums): the number there, for an s >= 0 from ta_slot.
+    #[inline(always)]
+    pub fn ta_num_at(&self, o: int, s: int) -> double {
+        let bo = crate::rvm::obj_at(&self.objs, crate::rvm::obj_at(&self.objs, o as usize).env as usize);
+        crate::rvm::cold_at(&self.colds, bo.cold as usize).nums[s as usize]
+    }
+
     /// `ta[i]` when ta_slot finds it, else ta_get.
     #[inline]
     pub fn ta_get_fast(&mut self, o: int, i: int) -> Val {
         let s = self.ta_slot(o, i);
         if s >= 0 {
-            let bc = self.objs[self.objs[o as usize].env as usize].cold as usize;
-            return Val::Num(self.colds[bc].nums[s as usize]);
+            return Val::Num(self.ta_num_at(o, s));
         }
         self.ta_get(o, i)
     }
@@ -622,11 +647,12 @@ impl Vm {
         if s < 0 {
             return false;
         }
-        let kind = self.objs[o as usize].pos as int;
+        let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        let kind = ob.pos as int;
         if is_big(kind) {
             return false;
         }
-        let bc = self.objs[self.objs[o as usize].env as usize].cold as usize;
+        let bc = crate::rvm::obj_at(&self.objs, ob.env as usize).cold as usize;
         // a Uint8Array over bytes: the buffer holds Uint8 elements from now
         self.colds[bc].home = kind;
         if kind == TK_FLOAT64 {
