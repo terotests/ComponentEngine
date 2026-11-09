@@ -769,6 +769,36 @@ impl Vm {
                 }
             },
             NF_SP_CHARAT | NF_SP_CHARCODEAT | NF_SP_CODEPOINTAT | NF_SP_AT => {
+                // an ASCII string value: the unit off its handle (no copy
+                // of a prefix, no scan of a string that grew in place)
+                if let (Val::Str(h), Val::Num(x)) = (this, a0) {
+                    let mut i = to_integer(x);
+                    if id == NF_SP_AT && i < 0.0 {
+                        i += self.hlen(h) as double;
+                    }
+                    let c = if i < 0.0 || i > 4294967295.0 { -1 } else { self.hunit(h, i as int) };
+                    if c != -2 {
+                        return match id {
+                            NF_SP_CHARAT => {
+                                if c < 0 {
+                                    self.str_val("")
+                                } else {
+                                    self.unit_val(c)
+                                }
+                            }
+                            NF_SP_CHARCODEAT => Val::Num(if c < 0 { nan() } else { c as double }),
+                            _ => {
+                                if c < 0 {
+                                    Val::Undef
+                                } else if id == NF_SP_AT {
+                                    self.unit_val(c)
+                                } else {
+                                    Val::Num(c as double)
+                                }
+                            }
+                        };
+                    }
+                }
                 let s = self.this_str(&this);
                 if self.throwing {
                     return Val::Undef;
