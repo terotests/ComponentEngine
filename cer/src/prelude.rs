@@ -1060,9 +1060,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
 // ---- ArrayBuffer, SharedArrayBuffer, the typed arrays, DataView, Atomics:
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
-var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew;
+var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew, taSort = globalThis.__taSort;
 var bufMax = globalThis.__bufMax, bufResize = globalThis.__bufResize;
-['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__taKind', '__taSub', '__taNew', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
+['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__taKind', '__taSub', '__taNew', '__taSort', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
 function toIndex(v, what) {
   if (v === undefined) return 0;
   var n = toIntegerOrInfinity(v);
@@ -1427,6 +1427,7 @@ function sortedValues(o, cmp, what) {
   return vals;
 }
 hide(TAP, 'sort', function sort(cmp) {
+  if (cmp === undefined && taSort(this)) return this;
   var vals = sortedValues(this, cmp, 'TypedArray.prototype.sort');
   for (var i = 0; i < vals.length; i++) this[i] = vals[i];
   return this;

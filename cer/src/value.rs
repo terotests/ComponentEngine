@@ -240,6 +240,23 @@ impl JsObj {
         self.nv = n + 1;
     }
 
+    /// Keeps the slots `keep` says, in order (Vm::compact_dict; the
+    /// others hold nothing counted).
+    pub fn retain_slots(&mut self, keep: &Vec<bool>) {
+        let all = self.slots();
+        self.inl0 = Val::Undef;
+        self.inl1 = Val::Undef;
+        self.vals.truncate(0);
+        self.nv = 0;
+        let mut i: usize = 0;
+        while i < all.len() {
+            if keep[i] {
+                self.push_slot(all[i]);
+            }
+            i += 1;
+        }
+    }
+
     /// Takes slot `i` out, the later ones moving down one.
     pub fn remove_slot(&mut self, i: usize) -> Val {
         let v = self.get_slot(i);
@@ -315,7 +332,18 @@ pub struct Shape {
     /// for-in (Vm::for_in_fast): 0 not asked yet, 1 the keys can be
     /// walked in place, 2 an index-like key comes first
     pub for_in: i32,
+    /// an owned dictionary's deleted keys still in place (Vm::remove_own):
+    /// the tombstone atom (TOMB_NAME, a private name), hidden
+    pub ndead: int,
 }
+
+/// A deleted key's place in a big dictionary (Vm::remove_own): a private
+/// name, hidden, so no key list shows it; compacted once they are half.
+pub const TOMB_NAME: &str = "\u{1}deleted";
+
+/// Past this many keys a dictionary's delete leaves a tombstone instead of
+/// moving every later key and value down.
+pub const TOMB_AT: int = 64;
 
 impl Shape {
     pub fn new() -> Shape {
@@ -331,6 +359,7 @@ impl Shape {
             t_map: HashMap::new(),
             owned: false,
             for_in: 0,
+            ndead: 0,
         }
     }
 
@@ -410,6 +439,36 @@ impl Shape {
             self.tab_put(a, i);
             i += 1;
         }
+    }
+
+    /// An owned dictionary's key at `slot` goes, its place kept by the
+    /// tombstone atom `tomb` (slots stay where they are).
+    pub fn bury(&mut self, slot: int, tomb: int) {
+        if self.itab.len() > 0 {
+            self.tab_remove(self.keys[slot as usize]);
+        }
+        self.keys[slot as usize] = tomb;
+        self.attrs[slot as usize] = P_HIDDEN | P_READONLY | P_FIXED;
+        self.ndead += 1;
+    }
+
+    /// The tombstones out: `keep` says which slots stay.
+    pub fn compact(&mut self, keep: &Vec<bool>) {
+        let mut keys: Vec<int> = Vec::new();
+        let mut attrs: Vec<int> = Vec::new();
+        let mut i: usize = 0;
+        while i < self.keys.len() {
+            if keep[i] {
+                keys.push(self.keys[i]);
+                attrs.push(self.attrs[i]);
+            }
+            i += 1;
+        }
+        self.nkeys = keys.len() as int;
+        self.keys = keys;
+        self.attrs = attrs;
+        self.ndead = 0;
+        self.rehash();
     }
 
     /// An owned shape's key at `slot` goes.

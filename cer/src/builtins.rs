@@ -3240,7 +3240,7 @@ impl Vm {
             let answer = self.host_sync.call(&req);
             return self.string_val(answer);
         }
-        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_TA_NEW) {
+        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_TA_SORT) {
             return self.call_native_ta(id, &this, args);
         }
         if id >= 920 && id < 930 {

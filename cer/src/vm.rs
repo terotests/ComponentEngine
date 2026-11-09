@@ -1118,8 +1118,36 @@ impl Vm {
         self.own_shape(o);
         self.shape_epoch += 1;
         let sh = self.objs[o as usize].shape as int;
+        if self.shapes[sh as usize].nkeys > TOMB_AT {
+            // a big dictionary: a tombstone, not every later key and
+            // value moved down; compacted once half are tombstones
+            let tomb = self.intern(TOMB_NAME);
+            self.shapes[sh as usize].bury(slot, tomb);
+            self.put_slot(o, slot, Val::Undef);
+            if self.shapes[sh as usize].ndead * 2 > self.shapes[sh as usize].nkeys {
+                self.compact_dict(o);
+            }
+            return;
+        }
         self.shapes[sh as usize].remove(slot);
         self.remove_val(o, slot);
+    }
+
+    /// `o`'s dictionary without its tombstones (remove_own), and before
+    /// anything that copies its keys and values as they are.
+    pub fn compact_dict(&mut self, o: int) {
+        let sh = self.objs[o as usize].shape as int;
+        if !self.shapes[sh as usize].owned || self.shapes[sh as usize].ndead == 0 {
+            return;
+        }
+        let tomb = self.intern(TOMB_NAME);
+        let mut keep: Vec<bool> = Vec::new();
+        for k in self.shapes[sh as usize].keys.iter() {
+            keep.push(*k != tomb);
+        }
+        self.shapes[sh as usize].compact(&keep);
+        self.objs[o as usize].retain_slots(&keep);
+        self.shape_epoch += 1;
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
@@ -4161,6 +4189,7 @@ impl Vm {
         if self.objs[o as usize].class != C_ARGUMENTS {
             return;
         }
+        self.compact_dict(o);
         let keys = self.keys_of(o);
         let mut vals: Vec<Val> = Vec::new();
         let mut attrs: Vec<int> = Vec::new();
@@ -6612,6 +6641,7 @@ impl Vm {
                     }
                     // the native made its own object: give it this one's fields
                     if let (Val::Obj(t), Val::Obj(n)) = (&this, &r) {
+                        self.compact_dict(*t);
                         let keys = self.keys_of(*t);
                         let vals = self.objs[*t as usize].slots();
                         let mut i: usize = 0;
