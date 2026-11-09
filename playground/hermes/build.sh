@@ -23,7 +23,36 @@ if [ ! -d "$WORK/src/.git" ]; then
   git clone --filter=blob:none https://github.com/facebook/hermes.git "$WORK/src"
 fi
 git -C "$WORK/src" fetch -q origin "$REV" || true
-git -C "$WORK/src" checkout -q "$REV"
+git -C "$WORK/src" checkout -q -f "$REV"
+git -C "$WORK/src" reset -q --hard
+
+# Without pthreads std::thread throws, which aborts (no C++ exceptions):
+# SerialExecutor, where the JSI layer defers deleting host function
+# contexts, would start its worker at runtime teardown and abort after the
+# script has run. In a single-threaded build it keeps the tasks and runs
+# them in its destructor instead.
+python3 - "$WORK/src/lib/Support/SerialExecutor.cpp" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+st = "#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)\n"
+dtor = "SerialExecutor::~SerialExecutor() {\n"
+add = "void SerialExecutor::add(llvh::unique_function<void()> task) {\n"
+assert dtor in s and add in s
+s = s.replace(dtor, dtor + st +
+  "  while (!tasks_.empty()) {\n"
+  "    llvh::unique_function<void()> t = std::move(tasks_.front());\n"
+  "    tasks_.pop_front();\n"
+  "    t();\n"
+  "  }\n"
+  "  return;\n"
+  "#endif\n", 1)
+s = s.replace(add, add + st +
+  "  tasks_.push_back(std::move(task));\n"
+  "  return;\n"
+  "#endif\n", 1)
+open(p, "w").write(s)
+PY
 
 # stage 1: the host compilers the wasm build runs
 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -S "$WORK/src" -B "$WORK/host"
