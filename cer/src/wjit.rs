@@ -155,6 +155,9 @@ pub struct Layout {
     /// Cold.prim (an arrow's this)
     pub cold_prim: u32,
     pub vm_global: u32,
+    /// Cold.nums' buffer and length words (a typed array's buffer)
+    pub cold_nums_p: u32,
+    pub cold_nums_l: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -273,6 +276,8 @@ pub fn probe() -> Layout {
         cold_e2_len: 0,
         cold_prim: 0,
         vm_global: 0,
+        cold_nums_p: 0,
+        cold_nums_l: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -459,6 +464,10 @@ pub fn probe() -> Layout {
         l.elems_vc = std::mem::offset_of!(crate::value::Elems, v) as u32 + (12 - vp - vl);
         l.cold_e2_len = std::mem::offset_of!(crate::value::Cold, elems2) as u32 + vl;
         l.cold_prim = std::mem::offset_of!(crate::value::Cold, prim) as u32;
+        // Vec<double> is laid out as Vec<Val> is (the buffer and length
+        // words found above)
+        l.cold_nums_p = std::mem::offset_of!(crate::value::Cold, nums) as u32 + vp;
+        l.cold_nums_l = std::mem::offset_of!(crate::value::Cold, nums) as u32 + vl;
     }
     l
 }
@@ -576,6 +585,7 @@ const I32_AND: u8 = 0x71;
 const I32_OR: u8 = 0x72;
 const I32_XOR: u8 = 0x73;
 const I32_SHL: u8 = 0x74;
+const I32_SHR_U: u8 = 0x76;
 const I32_SHR_S: u8 = 0x75;
 const F64_NEG: u8 = 0x9a;
 const F64_ADD: u8 = 0xa0;
@@ -1843,8 +1853,33 @@ impl<'a> Cg<'a> {
         self.get(L_SP);
         self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
         self.obj_addr();
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T2 as u64);
+        self.set(L_T2);
+        let typed = MASK.with(|m| m.get()) & (1u64 << 61) == 0;
+        let tdone = self.extra + 1;
+        if typed {
+            // a typed array's element (Vm::ta_slot's checks, typed_at)
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_class);
+            self.i32c(C_TYPED as i64);
+            self.op(I32_EQ);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.index_key(key, pc);
+            self.typed_at(pc);
+            self.get(L_T4);
+            self.mem(F64_LOAD, 3, 0);
+            self.set(L_A);
+            self.store_num(dst, L_A);
+            self.op(BR);
+            self.w.u((self.extra - tdone) as u64);
+            self.extra -= 1;
+            self.op(END);
+        }
+        self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_class);
         self.i32c(C_ARRAY as i64);
         self.op(I32_NE);
@@ -1905,9 +1940,245 @@ impl<'a> Cg<'a> {
         self.mem(I64_LOAD, 3, 8);
         self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
+        if typed {
+            self.extra -= 1;
+            self.op(END);
+        }
         if skey.is_some() {
             self.extra -= 1;
             self.op(END);
+        }
+        true
+    }
+    /// The key, a whole number 0 <= k < 2^31, into L_T3 (after need_num)
+    fn index_key(&mut self, key: Opnd, pc: i64) {
+        self.num(key);
+        self.set(L_A);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&0f64.to_le_bytes());
+        self.op(F64_GE);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&2147483647f64.to_le_bytes());
+        self.op(F64_LE);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        self.get(L_A);
+        self.op(I32_TRUNC_F64_S);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T3 as u64);
+        self.op(F64_CONVERT_I32_S);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.fail_if(pc);
+    }
+    /// For the typed array at L_T2 and the index in L_T3: the address of
+    /// its element's number in L_T4, as Vm::ta_slot finds it (a fixed-length
+    /// view of a buffer neither detached nor resizable that holds this
+    /// kind, the index inside both); fails otherwise. Uses L_T5, L_T6.
+    fn typed_at(&mut self, pc: i64) {
+        let l = self.lay;
+        // the buffer: an object, not detached (pos bit 0)
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_env);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.i32c(0);
+        self.op(I32_LT_S);
+        self.fail_if(pc);
+        self.get(L_T5);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.i32c(1);
+        self.op(I32_AND);
+        self.fail_if(pc);
+        // the view's length (Cold.prim a number): index < length
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_cold);
+        self.i32c(l.cold_size as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T6 as u64);
+        self.mem(I32_LOAD8_U, 0, l.cold_prim);
+        self.i32c(l.t_num as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.get(L_T3);
+        self.op(F64_CONVERT_I32_U);
+        self.get(L_T6);
+        self.mem(F64_LOAD, 3, l.cold_prim + l.off_num);
+        self.op(F64_GE);
+        self.fail_if(pc);
+        // the buffer's cold part: there, not resizable, home == kind
+        self.get(L_T5);
+        self.mem(I32_LOAD, 2, l.off_cold);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T6 as u64);
+        self.i32c(0);
+        self.op(I32_LE_S);
+        self.fail_if(pc);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+        self.get(L_T6);
+        self.i32c(l.cold_size as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T6 as u64);
+        self.mem(I32_LOAD8_U, 0, l.cold_prim);
+        self.i32c(l.t_num as i64);
+        self.op(I32_EQ);
+        self.fail_if(pc);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_home);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        // log2 of the element size: (kind >= 3) + (kind >= 5) + (kind >= 8)
+        // - 2 (kind == 11, Float16)
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.set(L_T5);
+        for k in [3i64, 5, 8] {
+            self.get(L_T5);
+            self.i32c(k);
+            self.op(I32_GE_S);
+        }
+        self.op(I32_ADD);
+        self.op(I32_ADD);
+        self.get(L_T5);
+        self.i32c(11);
+        self.op(I32_EQ);
+        self.i32c(1);
+        self.op(I32_SHL);
+        self.op(I32_SUB);
+        self.set(L_T5);
+        // the element's index in nums: byteOffset >> log2 + index
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_func);
+        self.get(L_T5);
+        self.op(I32_SHR_U);
+        self.get(L_T3);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_nums_l);
+        self.op(I32_GE_U);
+        self.fail_if(pc);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_nums_p);
+        self.get(L_T5);
+        self.i32c(3);
+        self.op(I32_SHL);
+        self.op(I32_ADD);
+        self.set(L_T4);
+    }
+    /// R_SET_ELEM on a typed array by a whole number in range: a number
+    /// the element kind holds as it is (Float64 any, the integer kinds a
+    /// whole number in their range) stored, the rest to H_SET_ELEM. sub 1:
+    /// the value also into w1.
+    fn set_elem_typed(&mut self, ob: u32, key: Opnd, val: Opnd, keep: bool, pc: i64) -> bool {
+        let l = self.lay;
+        if keep && matches!(val, Opnd::Num(_)) {
+            return false;
+        }
+        self.need_obj(L_SP, ob * 16, pc);
+        self.need_num(key, pc);
+        self.need_num(val, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_TYPED as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.index_key(key, pc);
+        self.typed_at(pc);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.set(L_T6);
+        self.num(val);
+        self.set(L_A);
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        let stored = self.extra;
+        // Float64: as it is
+        self.get(L_T6);
+        self.i32c(8);
+        self.op(I32_EQ);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(L_T4);
+        self.get(L_A);
+        self.mem(F64_STORE, 3, 0);
+        self.op(BR);
+        self.w.u((self.extra - stored) as u64);
+        self.extra -= 1;
+        self.op(END);
+        // the kind's range (an impossible one for Float32 / Float16)
+        let f = |cg: &mut Cg<'a>, x: f64| {
+            cg.op(F64_CONST);
+            cg.w.b.extend_from_slice(&x.to_le_bytes());
+        };
+        let chain = |cg: &mut Cg<'a>, vals: &[(i64, i64, f64)], dflt: f64| {
+            // kind in lo..=hi ? x : ... (selects, innermost last)
+            for v in vals.iter() {
+                f(cg, v.2);
+            }
+            f(cg, dflt);
+            for v in vals.iter().rev() {
+                cg.get(L_T6);
+                cg.i32c(v.0);
+                cg.op(I32_GE_S);
+                cg.get(L_T6);
+                cg.i32c(v.1);
+                cg.op(I32_LE_S);
+                cg.op(I32_AND);
+                cg.op(SELECT);
+            }
+        };
+        self.get(L_A);
+        chain(self, &[(0, 0, -128.0), (3, 3, -32768.0), (5, 5, -2147483648.0)], 0.0);
+        self.op(F64_GE);
+        self.get(L_A);
+        chain(self, &[(0, 0, 127.0), (1, 2, 255.0), (3, 3, 32767.0), (4, 4, 65535.0), (5, 6, 2147483647.0)], -1.0);
+        self.op(F64_LE);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        // a whole number: stored as the int's double (-0 as 0)
+        self.get(L_A);
+        self.op(I32_TRUNC_F64_S);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.op(F64_CONVERT_I32_S);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.fail_if(pc);
+        self.get(L_T4);
+        self.get(L_T5);
+        self.op(F64_CONVERT_I32_S);
+        self.mem(F64_STORE, 3, 0);
+        self.extra -= 1;
+        self.op(END);
+        if keep {
+            if !self.load_val(val, L_Q0) {
+                return false;
+            }
+            self.store_val(ob, L_Q0);
         }
         true
     }
@@ -5036,6 +5307,16 @@ impl<'a> Cg<'a> {
                 }
                 self.with_helper(H_GET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.get_elem_fast(w1 as u32, w2 as u32, key, p))
             }
+            R_SET_ELEM if self.lay.obj_ok && w1 >= 0 && MASK.with(|m| m.get()) & (1u64 << 61) == 0 => {
+                // a typed array's element (set_elem_typed), else the helper
+                let key = self.opnd(w2);
+                let val = self.opnd(w3);
+                if key.is_k() || val.is_k() {
+                    self.helper(H_SET_ELEM, p, next);
+                    return true;
+                }
+                self.with_helper(H_SET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.set_elem_typed(w1 as u32, key, val, sub == 1, p))
+            }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && w3 == -4 => {
                 // a site that reads an array's length (rrun's c = -4)
                 self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.array_len(w1 as u32, w2 as u32, p))
@@ -6983,9 +7264,20 @@ fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<
         }
         return None;
     }
-    if id == NF_NP_TOSTRING && argc == 0 {
-        if let Val::Num(n) = vm.stack[(fpos + 1) as usize] {
-            return Some(vm.string_val(crate::num::radix_string(n, 10)));
+    if id == NF_SP_CHARCODEAT && argc >= 1 {
+        let t = vm.stack[(fpos + 1) as usize];
+        let r = vm.char_code_fast(&t, &a0);
+        if !matches!(r, Val::Undef) {
+            return Some(r);
+        }
+        return None;
+    }
+    if id == NF_NP_TOSTRING && argc <= 1 {
+        let rx = if argc == 0 { Val::Num(10.0) } else { a0 };
+        if let (Val::Num(n), Val::Num(r)) = (vm.stack[(fpos + 1) as usize], rx) {
+            if r == 2.0 || r == 8.0 || r == 10.0 || r == 16.0 || r == 36.0 {
+                return Some(vm.string_val(crate::num::radix_string(n, r as int)));
+            }
         }
     }
     None
@@ -7014,6 +7306,17 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
             if i >= 0 && (i as usize) < ev.len() && (i as double) == *n {
                 r = ev[i as usize];
                 done = true;
+            }
+        } else if ob.class == C_TYPED {
+            // a typed array's element (Vm::ta_slot)
+            let i = *n as int;
+            if (i as double) == *n {
+                let sl = vm.ta_slot(*o, i);
+                if sl >= 0 {
+                    let bc = vm.objs[ob.env as usize].cold as usize;
+                    r = Val::Num(vm.colds[bc].nums[sl as usize]);
+                    done = true;
+                }
             }
         }
     }
@@ -7102,6 +7405,13 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
         Val::Num(x) => *x,
         _ => return false,
     };
+    if o >= 0 && vm.objs[o as usize].class == C_TYPED {
+        let i = n as int;
+        return match val {
+            Val::Num(x) => (i as double) == n && vm.ta_put_num(o, i, x),
+            _ => false,
+        };
+    }
     if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos >= 2 {
         return false;
     }

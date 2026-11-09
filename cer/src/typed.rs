@@ -48,6 +48,10 @@ pub const NF_TA_MAKE: int = 926;
 pub const NF_TA_INFO: int = 927;
 pub const NF_BUF_MAX: int = 928;
 pub const NF_BUF_RESIZE: int = 929;
+/// TypedArray.prototype's `length` getter, and `set`'s copy from a typed
+/// array or a plain array (call_native_ta)
+pub const NF_TA_LEN: int = 970;
+pub const NF_TA_SET: int = 971;
 
 pub fn kind_size(kind: int) -> int {
     if kind == TK_FLOAT16 {
@@ -418,6 +422,20 @@ impl Vm {
 
     /// A resizable ArrayBuffer (or growable SharedArrayBuffer) keeps its
     /// maximum byte length in `prim`.
+    /// Every byte of buffer `b` (holding bytes) is 0.
+    fn buf_zero(&self, b: int) -> bool {
+        let c = self.objs[b as usize].cold as usize;
+        let n = self.colds[c].nums.len();
+        let mut i: usize = 0;
+        while i < n {
+            if self.colds[c].nums[i] != 0.0 {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
     pub fn buf_resizable(&self, b: int) -> bool {
         matches!(self.colds[self.objs[b as usize].cold as usize].prim, Val::Num(_))
     }
@@ -545,6 +563,95 @@ impl Vm {
         Val::Num(self.buf_read(b, at as int, kind, true))
     }
 
+    /// Where `ta[i]` is in its buffer's `nums` when the read or write needs
+    /// nothing else: a fixed-length view over a buffer that is neither
+    /// detached nor resizable, `i` inside it, and the buffer holding its
+    /// elements as this view's kind (or as bytes, for a Uint8Array). -1
+    /// otherwise; ta_get / ta_set do the rest. The register machine's
+    /// R_GET_ELEM / R_SET_ELEM and get_index / set_index take it first.
+    #[inline]
+    pub fn ta_slot(&self, o: int, i: int) -> int {
+        let ob = &self.objs[o as usize];
+        let b = ob.env as int;
+        if b < 0 || i < 0 {
+            return -1;
+        }
+        let bo = &self.objs[b as usize];
+        if (bo.pos & 1) != 0 || bo.cold <= 0 {
+            return -1;
+        }
+        let fixed = match self.colds[ob.cold as usize].prim {
+            Val::Num(n) => n as int,
+            _ => -1,
+        };
+        if i >= fixed {
+            return -1;
+        }
+        let bc = &self.colds[bo.cold as usize];
+        if matches!(bc.prim, Val::Num(_)) {
+            return -1;
+        }
+        let kind = ob.pos as int;
+        if bc.home == kind {
+            let size = kind_size(kind);
+            return ((ob.func as int) + i * size) / size;
+        }
+        if bc.home < 0 && kind == TK_UINT8 {
+            return (ob.func as int) + i;
+        }
+        -1
+    }
+
+    /// `ta[i]` when ta_slot finds it, else ta_get.
+    #[inline]
+    pub fn ta_get_fast(&mut self, o: int, i: int) -> Val {
+        let s = self.ta_slot(o, i);
+        if s >= 0 {
+            let bc = self.objs[self.objs[o as usize].env as usize].cold as usize;
+            return Val::Num(self.colds[bc].nums[s as usize]);
+        }
+        self.ta_get(o, i)
+    }
+
+    /// `ta[i] = x` for a number when ta_slot finds the element: an integer
+    /// the kind holds is stored as it is (as +0 for -0), anything else as
+    /// element_value converts it. false: nothing written, ta_set does it.
+    #[inline]
+    pub fn ta_put_num(&mut self, o: int, i: int, x: double) -> bool {
+        let s = self.ta_slot(o, i);
+        if s < 0 {
+            return false;
+        }
+        let kind = self.objs[o as usize].pos as int;
+        if is_big(kind) {
+            return false;
+        }
+        let bc = self.objs[self.objs[o as usize].env as usize].cold as usize;
+        // a Uint8Array over bytes: the buffer holds Uint8 elements from now
+        self.colds[bc].home = kind;
+        if kind == TK_FLOAT64 {
+            self.colds[bc].nums[s as usize] = x;
+            return true;
+        }
+        let iv = x as int;
+        let fits = (iv as double) == x
+            && (if kind == TK_UINT8 || kind == TK_UINT8C {
+                iv >= 0 && iv <= 255
+            } else if kind == TK_INT32 {
+                iv >= -2147483648 && iv <= 2147483647
+            } else if kind == TK_UINT16 {
+                iv >= 0 && iv <= 65535
+            } else if kind == TK_INT16 {
+                iv >= -32768 && iv <= 32767
+            } else if kind == TK_UINT32 {
+                iv >= 0 && iv <= 4294967295
+            } else {
+                kind == TK_INT8 && iv >= -128 && iv <= 127
+            });
+        self.colds[bc].nums[s as usize] = if fits { iv as double } else { element_value(kind, x) };
+        true
+    }
+
     /// `ta[i] = v`: the value is converted even when `i` is outside.
     pub fn ta_set(&mut self, o: int, i: int, v: &Val) {
         if is_big(self.objs[o as usize].pos as int) {
@@ -596,8 +703,136 @@ impl Vm {
         self.method(g, "__bufDetach", NF_BUF_DETACH, 1);
         self.method(g, "__taMake", NF_TA_MAKE, 5);
         self.method(g, "__taInfo", NF_TA_INFO, 1);
+        self.method(g, "__taLength", NF_TA_LEN, 0);
+        self.method(g, "__taSetFast", NF_TA_SET, 3);
         self.method(g, "__bufMax", NF_BUF_MAX, 1);
         self.method(g, "__bufResize", NF_BUF_RESIZE, 2);
+    }
+
+    /// NF_TA_LEN: `this.length` for a typed array (0 when detached or out
+    /// of bounds), a TypeError otherwise. NF_TA_SET (target, source,
+    /// offset): `target.set(source, offset)` done here when the source is a
+    /// typed array of the same family (numbers or BigInts) or a plain array
+    /// without holes, the offset a non-negative integer and everything fits;
+    /// true then, false when the prelude's `set` has to do it.
+    pub fn call_native_ta(&mut self, id: int, this: &Val, args: &Vec<Val>) -> Val {
+        if id == NF_TA_LEN {
+            let t = obj_of(this);
+            if t < 0 || self.objs[t as usize].class != C_TYPED {
+                self.throw_type("TypedArray.prototype.length: this is not a typed array");
+                return Val::Undef;
+            }
+            return Val::Num(self.ta_length(t) as double);
+        }
+        if args.len() < 2 {
+            return Val::Bool(false);
+        }
+        let t = obj_of(&args[0]);
+        let src = obj_of(&args[1]);
+        if t < 0 || src < 0 || self.objs[t as usize].class != C_TYPED || self.ta_out_of_bounds(t) {
+            return Val::Bool(false);
+        }
+        let off = if args.len() > 2 {
+            match &args[2] {
+                Val::Undef => 0,
+                Val::Num(x) => {
+                    let i = *x as int;
+                    if (i as double) != *x || i < 0 {
+                        return Val::Bool(false);
+                    }
+                    i
+                }
+                _ => {
+                    return Val::Bool(false);
+                }
+            }
+        } else {
+            0
+        };
+        let tb = self.objs[t as usize].env as int;
+        if tb < 0 || (self.objs[tb as usize].pos & 1) != 0 {
+            return Val::Bool(false);
+        }
+        let tlen = self.ta_length(t);
+        let tkind = self.objs[t as usize].pos as int;
+        let sc = self.objs[src as usize].class;
+        let mut vals: Vec<Val> = Vec::new();
+        if sc == C_TYPED {
+            let sb = self.objs[src as usize].env as int;
+            if sb < 0 || (self.objs[sb as usize].pos & 1) != 0 || self.ta_out_of_bounds(src) {
+                return Val::Bool(false);
+            }
+            let skind = self.objs[src as usize].pos as int;
+            if is_big(skind) != is_big(tkind) {
+                return Val::Bool(false);
+            }
+            let n = self.ta_length(src);
+            if off + n > tlen {
+                return Val::Bool(false);
+            }
+            if n == 0 {
+                return Val::Bool(true);
+            }
+            // the same element kind, both buffers holding it: the numbers
+            // as they are (through a copy when the buffers are one)
+            let s0 = self.ta_slot(src, 0);
+            let d0 = self.ta_slot(t, off);
+            if s0 >= 0 && d0 >= 0 && skind == tkind && self.ta_slot(src, n - 1) == s0 + n - 1 && self.ta_slot(t, off + n - 1) == d0 + n - 1 {
+                let sbc = self.objs[sb as usize].cold as usize;
+                let tbc = self.objs[tb as usize].cold as usize;
+                let mut tmp: Vec<double> = Vec::with_capacity(n as usize);
+                let mut k: int = 0;
+                while k < n {
+                    tmp.push(self.colds[sbc].nums[(s0 + k) as usize]);
+                    k += 1;
+                }
+                self.colds[tbc].home = tkind;
+                let mut k2: int = 0;
+                while k2 < n {
+                    self.colds[tbc].nums[(d0 + k2) as usize] = tmp[k2 as usize];
+                    k2 += 1;
+                }
+                return Val::Bool(true);
+            }
+            let mut i: int = 0;
+            while i < n {
+                vals.push(self.ta_get_fast(src, i));
+                i += 1;
+            }
+        } else if sc == C_ARRAY {
+            let ob = &self.objs[src as usize];
+            if ob.pos == 3 || self.idx_protos || !self.colds[ob.cold as usize].elems2.is_empty() {
+                return Val::Bool(false);
+            }
+            let ev = ob.elems as usize;
+            let n = self.evecs[ev].v.len() as int;
+            if off + n > tlen {
+                return Val::Bool(false);
+            }
+            let mut i: int = 0;
+            while i < n {
+                vals.push(self.evecs[ev].v[i as usize].clone());
+                i += 1;
+            }
+        } else {
+            return Val::Bool(false);
+        }
+        let mut j: int = 0;
+        while j < (vals.len() as int) {
+            let v = vals[j as usize].clone();
+            let done = match v {
+                Val::Num(x) => self.ta_put_num(t, off + j, x),
+                _ => false,
+            };
+            if !done {
+                self.ta_set(t, off + j, &v);
+                if self.throwing {
+                    return Val::Undef;
+                }
+            }
+            j += 1;
+        }
+        Val::Bool(true)
     }
 
     pub fn call_native_typed(&mut self, id: int, args: &Vec<Val>) -> Val {
@@ -808,7 +1043,12 @@ impl Vm {
             let len = num(&a[3]) as int;
             let tracking = matches!(a[3], Val::Undef);
             // the first view over all of a new buffer: it holds this kind
-            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
+            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) && (kind == TK_UINT8 || kind == TK_UINT8C || (kind == TK_INT8 && self.buf_zero(b))) {
+                // one byte per element: the bytes are the elements as they
+                // are (an Int8Array's when all are 0)
+                let cid = self.cold_id(b) as usize;
+                self.colds[cid].home = kind;
+            } else if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
                 let mut z: Vec<double> = Vec::new();
                 let mut j = 0;
                 while j < len {
