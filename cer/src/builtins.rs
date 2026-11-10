@@ -1585,6 +1585,13 @@ impl Vm {
     }
 
     pub fn map_find(&mut self, m: int, k: &Val) -> int {
+        if let Val::Str(h) = k {
+            let s = self.sget(*h);
+            return match self.colds[self.objs[m as usize].cold as usize].sindex.get(s.as_str()) {
+                Some(i) => *i,
+                None => -1,
+            };
+        }
         let key = self.map_key(k);
         match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
             Some(i) => *i,
@@ -1593,16 +1600,22 @@ impl Vm {
     }
 
     pub fn map_set(&mut self, m: int, k: Val, v: Val) {
-        let key = self.map_key(&k);
-        let found = match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
-            Some(i) => *i,
-            None => -1,
+        let is_str = matches!(k, Val::Str(_));
+        let key = if is_str { 0 } else { self.map_key(&k) };
+        let found = if is_str {
+            self.map_find(m, &k)
+        } else {
+            match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
+                Some(i) => *i,
+                None => -1,
+            }
         };
         if found >= 0 {
             self.put_elem2(m, found, v);
             return;
         }
         let pos = self.evecs[self.objs[m as usize].elems as usize].v.len() as int;
+        let text = if let Val::Str(h) = &k { self.sget(*h).as_ref().clone() } else { String::new() };
         let kk = if let Val::Num(n) = k {
             if n == 0.0 {
                 Val::Num(0.0)
@@ -1616,7 +1629,11 @@ impl Vm {
         self.push_elem2(m, v);
         let c = self.cold_id(m) as usize;
         self.colds[c].marks.push(0);
-        self.colds[c].index.insert(key, pos);
+        if is_str {
+            self.colds[c].sindex.insert(text, pos);
+        } else {
+            self.colds[c].index.insert(key, pos);
+        }
         self.objs[m as usize].pos += 1;
     }
 
@@ -1625,9 +1642,14 @@ impl Vm {
         if i < 0 {
             return false;
         }
-        let key = self.map_key(k);
         let c = self.cold_id(m) as usize;
-        self.colds[c].index.remove(&key);
+        if let Val::Str(h) = k {
+            let s = self.sget(*h);
+            self.colds[c].sindex.remove(s.as_str());
+        } else {
+            let key = self.map_key(k);
+            self.colds[c].index.remove(&key);
+        }
         self.colds[c].marks[i as usize] = 1;
         self.put_elem(m, i, Val::Undef);
         self.put_elem2(m, i, Val::Undef);

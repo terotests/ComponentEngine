@@ -161,6 +161,17 @@ pub struct Vm {
     pub atom_names: Vec<String>,
     /// intern's cache: atom by a hash of the text, -1 for none
     pub atom_cache: Vec<int>,
+    /// array index -> its atom, for the atoms made so far (a cache in front
+    /// of format + intern): open addressing, keys stored as index + 1 (0 is
+    /// empty), the atom beside each
+    pub idx_keys: Vec<int>,
+    pub idx_vals: Vec<int>,
+    pub idx_count: int,
+    /// own properties removed so far (remove_own): a for-in over a plain
+    /// object skips its per-key check while this stays the same
+    pub del_count: int,
+    /// atom_names up to here are in the idx table when they are indexes
+    pub idx_seen: int,
     /// atom names as string values, made on first use (atom_val)
     pub atom_vals: Vec<Val>,
     /// the one-unit strings of ASCII, shared (unit_val), pinned like
@@ -533,6 +544,11 @@ impl Vm {
             protos: Vec::new(),
             atoms: HashMap::new(),
             atom_cache: Vec::new(),
+            idx_keys: Vec::new(),
+            idx_vals: Vec::new(),
+            idx_count: 0,
+            del_count: 0,
+            idx_seen: 0,
             atom_names: Vec::new(),
             atom_vals: Vec::new(),
             char_vals: Vec::new(),
@@ -1119,6 +1135,7 @@ impl Vm {
     }
 
     pub fn remove_own(&mut self, o: int, slot: int) {
+        self.del_count += 1;
         self.own_shape(o);
         self.shape_epoch += 1;
         let sh = self.objs[o as usize].shape as int;
@@ -2368,8 +2385,109 @@ impl Vm {
     }
 
     pub fn index_atom(&mut self, i: int) -> int {
-        let s = format!("{}", i);
-        self.intern(s.as_str())
+        if i < 0 {
+            let s = format!("{}", i);
+            return self.intern(s.as_str());
+        }
+        let c = self.idx_get(i);
+        if c >= 0 {
+            return c;
+        }
+        let s = int_to_string(i);
+        let a = self.intern(s.as_str());
+        if i <= 999999999 {
+            self.idx_put(i, a);
+        }
+        a
+    }
+
+    fn idx_get(&self, i: int) -> int {
+        let n = self.idx_keys.len() as int;
+        if n == 0 {
+            return -1;
+        }
+        let mask = n - 1;
+        let x = i * 40503;
+        let mut h = (x ^ (x >> 15)) & mask;
+        loop {
+            let k = self.idx_keys[h as usize];
+            if k == 0 {
+                return -1;
+            }
+            if k == i + 1 {
+                return self.idx_vals[h as usize];
+            }
+            h = (h + 1) & mask;
+        }
+    }
+
+    fn idx_put(&mut self, i: int, a: int) {
+        let n = self.idx_keys.len() as int;
+        if (self.idx_count + 1) * 2 > n {
+            // grow to twice the size (or 256) and put every entry back
+            let nn: int = if n == 0 { 256 } else { n * 2 };
+            let ok = self.idx_keys.clone();
+            let ov = self.idx_vals.clone();
+            let mut nk: Vec<int> = Vec::new();
+            let mut nv: Vec<int> = Vec::new();
+            let mut j: int = 0;
+            while j < nn {
+                nk.push(0);
+                nv.push(0);
+                j += 1;
+            }
+            self.idx_keys = nk;
+            self.idx_vals = nv;
+            self.idx_count = 0;
+            let mut j: usize = 0;
+            while j < ok.len() {
+                if ok[j] != 0 {
+                    self.idx_put(ok[j] - 1, ov[j]);
+                }
+                j += 1;
+            }
+        }
+        let mask = self.idx_keys.len() as int - 1;
+        let x = i * 40503;
+        let mut h = (x ^ (x >> 15)) & mask;
+        loop {
+            let k = self.idx_keys[h as usize];
+            if k == 0 {
+                self.idx_keys[h as usize] = i + 1;
+                self.idx_vals[h as usize] = a;
+                self.idx_count += 1;
+                return;
+            }
+            if k == i + 1 {
+                return;
+            }
+            h = (h + 1) & mask;
+        }
+    }
+
+    /// The atom of index `i` when there is one already, else -1: no
+    /// object can have that key yet, so a read of it makes none. Atoms are
+    /// only appended, so the index names among the new ones are added to
+    /// the idx table first, and it then holds every index atom.
+    pub fn index_atom_if(&mut self, i: int) -> int {
+        if i > 999999999 {
+            // past what array_index reads (9 digits)
+            let s = format!("{}", i);
+            return match self.atoms.get(&s) {
+                Some(a) => *a,
+                None => -1,
+            };
+        }
+        let n = self.atom_names.len() as int;
+        while self.idx_seen < n {
+            let k = jsstr::array_index(self.atom_names[self.idx_seen as usize].as_str());
+            if k >= 0 {
+                let a = self.idx_seen;
+                self.idx_put(k as int, a);
+            }
+            self.idx_seen += 1;
+        }
+        self.idx_get(i)
     }
 
     pub fn key_val(&mut self, a: int) -> Val {
@@ -2591,7 +2709,28 @@ impl Vm {
                 if class == C_TYPED {
                     return self.ta_get_fast(*o, i);
                 }
-                let a = self.index_atom(i);
+                let a = self.index_atom_if(i);
+                if a < 0 {
+                    // no key of that name anywhere: only an element up the
+                    // chain or a proxy can answer
+                    let mut cur = *o;
+                    loop {
+                        let c = self.objs[cur as usize].class;
+                        if c == C_PROXY {
+                            let a = self.index_atom(i);
+                            return self.get_obj(cur, a, v);
+                        }
+                        let p = self.objs[cur as usize].proto as int;
+                        if p < 0 {
+                            return Val::Undef;
+                        }
+                        let pc = self.objs[p as usize].class;
+                        if pc == C_ARRAY || pc == C_ARGUMENTS || pc == C_TYPED || pc == C_STRING {
+                            return self.get_index(&Val::Obj(p), i);
+                        }
+                        cur = p;
+                    }
+                }
                 // an element up the chain (an array or string prototype) is
                 // not an atom property
                 let mut cur = *o;
@@ -3359,7 +3498,11 @@ impl Vm {
                 return true;
             }
         }
-        let atom = if i >= 0 { self.index_atom(i) } else { a };
+        let atom = if i >= 0 { self.index_atom_if(i) } else { a };
+        if atom < 0 {
+            // an index no key has had: nothing to delete
+            return true;
+        }
         let slot = self.find(o, atom);
         if slot >= 0 {
             if (self.attr_at(o, slot) & P_FIXED) != 0 {
@@ -3499,6 +3642,15 @@ impl Vm {
     }
 
     /// Keys a for-in visits: own and inherited enumerable string keys.
+    /// Whether for-in iterator `it` checks each key is still there: not
+    /// while no own property was removed since it began (ITER_KEYS).
+    pub fn for_in_recheck(&self, it: int) -> bool {
+        match &self.colds[self.objs[it as usize].cold as usize].prim {
+            Val::Num(d) => (*d as int) != self.del_count,
+            _ => true,
+        }
+    }
+
     pub fn for_in_keys(&mut self, o: int) -> Vec<Val> {
         // the common case: the prototypes add no enumerable keys (an object
         // literal over Object.prototype, a class instance), so the keys are
@@ -6960,6 +7112,14 @@ impl Vm {
                 self.objs[it as usize].func = 0;
                 // for-in skips keys deleted during the loop
                 self.put_home(it, obj_of(&v));
+                if let Val::Obj(so) = &v {
+                    // keys of a plain object's own only: none can go
+                    // without a remove_own, so the deletes so far tell
+                    if self.objs[*so as usize].class == C_OBJECT && self.for_in_own_only(*so) {
+                        let c = self.objs[it as usize].cold as usize;
+                        self.colds[c].prim = Val::Num(self.del_count as double);
+                    }
+                }
                 self.stack.push(Val::Obj(it));
             }
             OP_ITER_VALUES => {
@@ -6977,7 +7137,7 @@ impl Vm {
                 loop {
                     match self.iter_next(&it) {
                         Some(v) => {
-                            if src_obj >= 0 && self.objs[o as usize].class == C_ITER {
+                            if src_obj >= 0 && self.objs[o as usize].class == C_ITER && self.for_in_recheck(o) {
                                 // a key deleted since the loop began is skipped
                                 if !self.has_property(src_obj, &v) {
                                     continue;
@@ -8474,6 +8634,9 @@ pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
     let c = &mut colds[i];
     if c.index.capacity() > 0 {
         c.index = HashMap::new();
+    }
+    if c.sindex.capacity() > 0 {
+        c.sindex = HashMap::new();
     }
     if c.marks.capacity() > 16 {
         c.marks = Vec::new();

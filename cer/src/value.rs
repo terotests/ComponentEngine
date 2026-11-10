@@ -81,6 +81,8 @@ pub const SHAPE_HASH_AT: int = 8;
 pub struct Cold {
     /// a Map's or Set's entries by map_key, and which are deleted (1)
     pub index: HashMap<int, int>,
+    /// a Map's or Set's string keys by their text (no atom per key)
+    pub sindex: HashMap<String, int>,
     pub marks: Vec<int>,
     /// an ArrayBuffer's contents: its bytes, or the elements of the one
     /// typed array kind that has used it (typed.rs)
@@ -100,6 +102,7 @@ impl Cold {
     pub fn new() -> Cold {
         Cold {
             index: HashMap::new(),
+            sindex: HashMap::new(),
             marks: Vec::new(),
             nums: Vec::new(),
             elems2: Vec::new(),

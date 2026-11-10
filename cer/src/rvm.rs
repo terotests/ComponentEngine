@@ -2070,7 +2070,7 @@ impl Vm {
         loop {
             match self.iter_next(&it) {
                 Some(v) => {
-                    if src_obj >= 0 && self.objs[o as usize].class == C_ITER {
+                    if src_obj >= 0 && self.objs[o as usize].class == C_ITER && self.for_in_recheck(o) {
                         // a key deleted since the loop began is skipped
                         if !self.has_property(src_obj, &v) {
                             continue;
