@@ -756,6 +756,7 @@ r.push(String.prototype.replace.call(12321, "2", "x"), "123".padStart(8, "0"), "
 r.join("|")
 ----
 a+b-c-d-é😀-x|a+b+c+d+é😀+x|a-b-c-d-E😀-x|a-b-c-d-éS-x|a--b-c-d-é😀-x|45|a-b-c-d-é😀-x|^a-b-c-d-é😀-x|27|a_b_c_d_é😀_x|a1b-c-d-é😀-x|aa-bb-cc-d-é😀-x|6|13|a/b|2|6|R:ab1|S/ab|zb|TypeError|TypeError|TypeError|replace|2|2|replaceAll|1x321|00000123|abcxyxy|😀😀x|abcdaq|é__
+
 ==== js optional chaining as a register jump: undefined/null short-circuit, falsy values kept, calls, nested
 var r = [], o = { a: { b: 0, c: "", n: null, f() { return this.b; } }, z: false }, u, nl = null;
 for (var i = 0; i < 3; i++) {
