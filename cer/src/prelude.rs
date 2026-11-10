@@ -624,13 +624,15 @@ var nativeThen = PP.then;
 var isPromiseObj = globalThis.__isPromise;
 delete globalThis.__isPromise;
 function isPromise(x) { return isPromiseObj(x); }
+var SymSpecies = Symbol.species;
 function speciesOf(o, d) {
   var C = o.constructor;
   if (C === undefined) return d;
-  if (!isObject(C)) throw new TypeError('object.constructor is not an object');
-  var S = C[Symbol.species];
+  var tc = typeof C;
+  if (tc !== 'function' && (tc !== 'object' || C === null)) throw new TypeError('object.constructor is not an object');
+  var S = C[SymSpecies];
   if (S === undefined || S === null) return d;
-  if (isCallable(S)) return S;
+  if (typeof S === 'function') return S;
   throw new TypeError('object.constructor[Symbol.species] is not a constructor');
 }
 function capability(C) {
@@ -806,7 +808,7 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
   function speciesCreate(o, n) {
     if (!isArray(o)) return arrayCreate(n);
     var C = o.constructor;
-    if (isObject(C)) { C = C[Symbol.species]; if (C === null) C = undefined; }
+    if (isObject(C)) { C = C[SymSpecies]; if (C === null) C = undefined; }
     if (C === undefined) return arrayCreate(n);
     if (!isConstructor(C)) throw new TypeError('object.constructor[Symbol.species] is not a constructor');
     return new C(n);
@@ -2111,7 +2113,7 @@ function arraySpecies(o, n) {
   if (!Array.isArray(o)) return null;
   var C = o.constructor;
   if (C === Array) return null;
-  if (isObject(C)) { C = C[Symbol.species]; if (C === null) C = undefined; }
+  if (isObject(C)) { C = C[SymSpecies]; if (C === null) C = undefined; }
   if (C === undefined || C === Array) return null;
   if (!isCallable(C)) throw new TypeError('object.constructor[Symbol.species] is not a constructor');
   return new C(n);
