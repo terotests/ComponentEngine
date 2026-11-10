@@ -868,3 +868,16 @@ true,true,false,false,false,true,true,false,false,false,true,true,false,false,fa
 var r = /a/g; r.lastIndex = 3; r.compile('b', 'g'); [r.lastIndex, r.source, r.global, r.test('xb')].join()
 ----
 0,b,true,true
+
+==== js RegExp exec result arrays: index, input and groups shape kept, extra keys, named groups, indices
+var r = [];
+var m = /(\d+)-(\d+)/.exec("range 12-345 end"); r.push(m.length, m[0], m[1], m[2], m.index, m.input, m.groups, Object.keys(m).join("/"));
+var m2 = /(\d+)-(\d+)/.exec("x 1-2"); m2.extra = 1; r.push(Object.keys(m2).join("/"));
+var m3 = /(\d+)-(\d+)/.exec("7-8"); r.push(JSON.stringify(Object.getOwnPropertyDescriptor(m3, "index")), m3.hasOwnProperty("extra"));
+var n = /(?<a>\d)/.exec("q5"); r.push(n.groups.a, Object.keys(n).join("/"));
+var d = /(b)/d.exec("abc"); r.push(JSON.stringify(d.indices), Object.keys(d).join("/"));
+var g = /o/g, s = "foo boo", c = 0, mm; while ((mm = g.exec(s))) c += mm.index; r.push(c);
+r.push(JSON.stringify("a1b22".match(/\d+/)), JSON.stringify("a1b22".match(/\d+/g)));
+r.join("|")
+----
+3|12-345|12|345|6|range 12-345 end||0/1/2/index/input/groups|0/1/2/index/input/groups/extra|{"value":0,"writable":true,"enumerable":true,"configurable":true}|false|5|0/1/index/input/groups|[[1,2],[1,2]]|0/1/index/input/groups/indices|14|["1"]|["1","22"]
