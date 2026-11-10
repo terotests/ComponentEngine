@@ -767,3 +767,18 @@ function g(p) { return p?.k ?? "dflt"; } r.push(g(), g(null), g({ k: 0 }), g({ k
 r.join()
 ----
 0,true,,,,false,0,,,0,0,0,true,,,,false,0,,,0,,0,true,,,,false,0,,,0,2,dflt,dflt,0,dflt
+
+==== js number methods cached on Number.prototype, toString radix of integers, parseInt of ASCII texts, startsWith/endsWith as bytes
+var r = [], t = "héllo😀wörld";
+for (var x of [0, -0, 7, -255, 4096, 9007199254740991, -9007199254740991, 2.5]) r.push(x.toString(16), x.toString(2), x.toString(36));
+for (var s of ["ff7", " \n-0x1A", "0x", "+12px", "", "-", "077", "z9"]) r.push(parseInt(s), parseInt(s, 16), parseInt(s, 36), parseInt(s, 1));
+r.push(parseInt("  42"), parseInt("é5"), 1 / parseInt("-0"));
+r.push(t.startsWith("hé"), t.startsWith("h"), t.startsWith("x"), t.endsWith("rld"), t.endsWith("ld", 11), t.startsWith("llo", 2), t.endsWith(""), t.startsWith(""), "😀".startsWith("\ud83d"), "a😀".endsWith("\ude00"));
+r.push("abc".startsWith({ toString() { return "ab"; } }), "abc".indexOf("c"), "abc".includes("d", 1), "aXc".toLowerCase(), "x".repeat(3));
+try { "a".startsWith(/a/); } catch (e) { r.push(e.name); }
+var n = 5; r.push(n.toFixed(2), n.toString(), (12).toString(8));
+Number.prototype.toString = function (b) { return "P" + b; }; r.push(n.toString(16), (3).toString());
+Number.prototype.hex = function () { return "h" + this; }; r.push((10).hex(), n.hex());
+r.join()
+----
+0,0,0,0,0,0,7,111,7,-ff,-11111111,-73,1000,1000000000000,35s,1fffffffffffff,11111111111111111111111111111111111111111111111111111,2gosa7pa2gv,-1fffffffffffff,-11111111111111111111111111111111111111111111111111111,-2gosa7pa2gv,2.8,10.1,2.i,NaN,4087,19987,NaN,-26,-26,-42814,NaN,NaN,NaN,33,NaN,12,18,50181,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,77,119,259,NaN,NaN,NaN,1269,NaN,42,NaN,-Infinity,true,true,false,true,false,true,true,true,true,true,true,2,false,axc,xxx,TypeError,5.00,5,14,P16,Pundefined,h10,h5

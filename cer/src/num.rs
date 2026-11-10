@@ -472,6 +472,9 @@ pub fn parse_float(s: &str) -> double {
 
 /// parseInt(s, radix)
 pub fn parse_int(s: &str, radix_in: int) -> double {
+    if parse_int_ascii_ok(s) {
+        return parse_int_ascii(s, radix_in);
+    }
     let t = js_trim_start(s);
     let cs = t.chars().collect::<Vec<char>>();
     let n = cs.len() as int;
@@ -518,6 +521,83 @@ pub fn parse_int(s: &str, radix_in: int) -> double {
 
 fn floor(x: double) -> double {
     x.floor()
+}
+
+/// Rust: whether parse_int_ascii takes `s` (an ASCII text); false on the
+/// other targets.
+#[ranger::target(rust)]
+fn parse_int_ascii_ok(s: &str) -> bool {
+    s.is_ascii()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn parse_int_ascii_ok(_s: &str) -> bool {
+    false
+}
+
+/// Rust: parse_int of an ASCII text over its bytes (the same steps, no char
+/// vectors).
+#[ranger::target(rust)]
+fn parse_int_ascii(s: &str, radix_in: int) -> double {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+    while i < n && (b[i] == b' ' || (b[i] >= 9 && b[i] <= 13)) {
+        i += 1;
+    }
+    let mut sign: double = 1.0;
+    if i < n && (b[i] == b'+' || b[i] == b'-') {
+        if b[i] == b'-' {
+            sign = -1.0;
+        }
+        i += 1;
+    }
+    let mut radix = radix_in;
+    let mut strip = true;
+    if radix != 0 {
+        if radix < 2 || radix > 36 {
+            return nan();
+        }
+        if radix != 16 {
+            strip = false;
+        }
+    } else {
+        radix = 10;
+    }
+    if strip && i + 1 < n && b[i] == b'0' && (b[i + 1] == b'x' || b[i + 1] == b'X') {
+        i += 2;
+        radix = 16;
+    }
+    let mut v: double = 0.0;
+    let mut any = false;
+    while i < n {
+        let c = b[i];
+        let d: int = if c >= b'0' && c <= b'9' {
+            (c - b'0') as int
+        } else if c >= b'a' && c <= b'z' {
+            (c - b'a') as int + 10
+        } else if c >= b'A' && c <= b'Z' {
+            (c - b'A') as int + 10
+        } else {
+            99
+        };
+        if d >= radix {
+            break;
+        }
+        v = v * (radix as double) + (d as double);
+        any = true;
+        i += 1;
+    }
+    if any {
+        sign * v
+    } else {
+        nan()
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn parse_int_ascii(_s: &str, _radix_in: int) -> double {
+    0.0
 }
 
 pub fn to_integer(x: double) -> double {
@@ -620,6 +700,26 @@ fn quick_radix(x: double, radix: int) -> String {
     const DIG: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let neg = x < 0.0;
     let v = if neg { -x } else { x };
+    if v < 9007199254740992.0 && v == v.floor() {
+        // a safe integer: its digits by integer division, no big buffer
+        let mut u = v as u64;
+        let r = radix as u64;
+        let mut small = [0u8; 66];
+        let mut p = small.len();
+        loop {
+            p -= 1;
+            small[p] = DIG[(u % r) as usize];
+            u /= r;
+            if u == 0 {
+                break;
+            }
+        }
+        if neg && v != 0.0 {
+            p -= 1;
+            small[p] = b'-';
+        }
+        return String::from(std::str::from_utf8(&small[p..]).unwrap_or(""));
+    }
     let mut ip = v.floor();
     let mut fp = v - ip;
     let r = radix as f64;

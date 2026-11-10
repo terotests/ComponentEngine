@@ -6040,6 +6040,9 @@ impl Vm {
     /// as their builtins. True when it ran: the result is in slot fpos (or
     /// it threw); the stack keeps its length.
     pub fn native_fast(&mut self, id: int, fpos: int, argc: int) -> bool {
+        if !native_fast_id(id) {
+            return false;
+        }
         let bp = fpos + 2;
         // a prelude method with a native body for its plain cases
         if id == crate::typed::NF_FAST_WRAP {
@@ -9253,6 +9256,36 @@ pub fn str_hash(s: &str) -> int {
         h = ((h ^ (x as int)) * 16777619) & 4294967295;
     }
     h
+}
+
+/// Whether native_fast has a path for native `id`: the others are rejected
+/// at once (its checks one by one cost a native call ~150 instructions).
+/// A new path in native_fast needs its id here.
+pub fn native_fast_id(id: int) -> bool {
+    let m = id - crate::builtins::NF_MATH;
+    (m >= 0 && m <= 32)
+        || (id >= crate::builtins::NF_N_ISINTEGER && id <= crate::builtins::NF_N_ISNAN)
+        || id == crate::typed::NF_DVM_GET
+        || id == crate::typed::NF_DVM_SET
+        || id == crate::typed::NF_FAST_WRAP
+        || id == crate::builtins::NF_ISNAN
+        || id == crate::builtins::NF_ISFINITE
+        || id == crate::builtins::NF_STRING
+        || id == crate::builtins::NF_SP_SLICE
+        || id == crate::builtins::NF_SP_SUBSTRING
+        || id == crate::builtins::NF_SP_CHARCODEAT
+        || id == crate::builtins::NF_NP_TOSTRING
+        || id == crate::builtins::NF_OP_HASOWN
+        || id == crate::builtins::NF_AP_PUSH
+        || id == crate::builtins::NF_MP_GET
+        || id == crate::builtins::NF_MP_HAS
+        || id == crate::builtins::NF_MP_SET
+        || id == crate::builtins::NF_SP_HAS
+        || id == crate::builtins::NF_SETP_ADD
+        || id == crate::builtins::NF_WM_GET
+        || id == crate::builtins::NF_WM_HAS
+        || id == crate::builtins::NF_WM_SET
+        || id == crate::builtins::NF_WS_HAS
 }
 
 /// A bound native_fast's slice/substring takes: undefined or a whole
