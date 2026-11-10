@@ -263,6 +263,12 @@ pub fn prefix(s: &str, _n: int) -> &str {
     s
 }
 
+/// Byte `i` of an ASCII string, i in range.
+pub fn byte_at(s: &str, i: int) -> int {
+    let r: int = ranger::native!(rust: { s.as_bytes()[i as usize] as int }, es6: "{s}.charCodeAt({i})");
+    r
+}
+
 /// Bytes [a, b) of an ASCII string, a and b in range.
 pub fn byte_slice(s: &str, a: int, b: int) -> String {
     let r: String = ranger::native!(rust: { String::from(&s[(a as usize)..(b as usize)]) }, es6: "{s}.substring({a}, {b})");

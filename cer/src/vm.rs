@@ -391,6 +391,9 @@ pub struct Vm {
     pub symbol_registry: HashMap<String, int>,
     /// promise jobs, four values each
     pub jobs: Vec<Val>,
+    /// the next job's index in `jobs` (run_jobs takes them from the front
+    /// without moving the rest down; the ones taken are undefined)
+    pub job_head: int,
     pub regexes: Vec<crate::regex::Regex>,
     pub regex_cache: HashMap<String, int>,
     /// a regex's `source` as shown (make_regexp), by its index
@@ -659,6 +662,7 @@ impl Vm {
             symbols: Vec::new(),
             symbol_registry: HashMap::new(),
             jobs: Vec::new(),
+            job_head: 0,
             regexes: Vec::new(),
             regex_cache: HashMap::new(),
             regex_shown: Vec::new(),
@@ -1241,6 +1245,7 @@ impl Vm {
             let i = h as usize;
             self.strs[i].up = -1;
             self.strs[i].len = 0;
+            self.strs[i].ulen = -1;
             self.strs[i].flag = flag as i32;
             self.strs[i].rc = 0;
             self.strs[i].atom = -1;
@@ -1373,6 +1378,32 @@ impl Vm {
 
     /// String handle `h` as a shared string.
     #[inline]
+    /// Handle `h`'s length in UTF-16 units, kept on the handle.
+    pub fn hlen(&mut self, h: int) -> int {
+        let u = self.strs[h as usize].ulen;
+        if u >= 0 {
+            return u as int;
+        }
+        let n = jsstr::len(self.sref(h));
+        self.strs[h as usize].ulen = n as i32;
+        n
+    }
+
+    /// The UTF-16 unit at `i` of handle `h` when its text is ASCII (its
+    /// length is its bytes): -1 out of range; -2 when it is not ASCII
+    /// (the caller's general path then).
+    pub fn hunit(&mut self, h: int, i: int) -> int {
+        let n = self.hlen(h);
+        let s = self.sref(h);
+        if (n as usize) != s.as_bytes().len() {
+            return -2;
+        }
+        if i < 0 || i >= n {
+            return -1;
+        }
+        jsstr::byte_at(s, i)
+    }
+
     pub fn sget(&self, h: int) -> Rc<String> {
         if self.strs[h as usize].up < 0 {
             self.strs[h as usize].s.clone()
@@ -1397,6 +1428,9 @@ impl Vm {
         let e = self.sempty.clone();
         self.strs[i].s = e;
         let h2 = self.new_handle(rc, 0);
+        if self.strs[i].ulen >= 0 {
+            self.strs[h2 as usize].ulen = self.strs[i].ulen + jsstr::len(b) as i32;
+        }
         // only the appended bytes are new
         self.sbytes -= n;
         self.strs[i].up = h2 as i32;
@@ -2495,8 +2529,7 @@ impl Vm {
             Val::Obj(o) => self.get_obj(*o, atom, v),
             Val::Str(s) => {
                 if atom == A_LENGTH {
-                    let s = self.sget(*s);
-                    return Val::Num(self.str_len(&s) as double);
+                    return Val::Num(self.hlen(*s) as double);
                 }
                 let p = self.string_proto;
                 self.get_obj(p, atom, v)
@@ -2579,7 +2612,15 @@ impl Vm {
                 self.get_obj(*o, a, v)
             }
             Val::Str(s) => {
-                let s = self.sget(s.clone());
+                let h = *s;
+                let c0 = self.hunit(h, i);
+                if c0 >= 0 {
+                    return self.unit_val(c0);
+                }
+                if c0 == -1 {
+                    return Val::Undef;
+                }
+                let s = self.sget(h);
                 let c = self.str_at(&s, i);
                 if c >= 0 {
                     return self.unit_val(c);
@@ -5777,6 +5818,10 @@ impl Vm {
             if (i as double) != *x {
                 return Val::Undef;
             }
+            let c0 = if i < 0 { -1 } else { self.hunit(*h, i) };
+            if c0 != -2 {
+                return Val::Num(if c0 < 0 { nan() } else { c0 as double });
+            }
             let s = self.sget(*h);
             let c = if i < 0 { -1 } else { self.str_at(&s, i) };
             return Val::Num(if c < 0 { nan() } else { c as double });
@@ -8600,6 +8645,9 @@ pub struct SEnt {
     /// handle (this one is then its first `len` bytes)
     pub up: i32,
     pub len: i32,
+    /// the text's length in UTF-16 units, -1 until asked (Vm::hlen); an
+    /// append in place carries it on, so `s += x; s.length` is not a scan
+    pub ulen: i32,
     /// 1 pinned (constants, atoms), 2 free
     pub flag: i32,
     /// the heap's references to the handle (object slots and the prefixes
@@ -8617,7 +8665,7 @@ pub struct SEnt {
 
 impl SEnt {
     pub fn new(s: Rc<String>, flag: i32) -> SEnt {
-        SEnt { s: s, up: -1, len: 0, flag: flag, rc: 0, atom: -1, mark: false, inz: false }
+        SEnt { s: s, up: -1, len: 0, ulen: -1, flag: flag, rc: 0, atom: -1, mark: false, inz: false }
     }
 }
 
