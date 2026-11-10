@@ -2607,7 +2607,19 @@ impl Vm {
                 t.push(cs[i]);
                 i += 1;
             }
-            let n = string_to_number(t.as_str());
+            // a point needs a digit after it ("1." and "1.e3" are not JSON)
+            let dot = jsstr::byte_index_of(t.as_str(), ".", 0);
+            let mut bad_dot = false;
+            if dot >= 0 {
+                let tl = t.as_bytes().len() as int;
+                if dot + 1 >= tl {
+                    bad_dot = true;
+                } else {
+                    let after = jsstr::byte_at(t.as_str(), dot + 1);
+                    bad_dot = after < 48 || after > 57;
+                }
+            }
+            let n = if bad_dot { nan() } else { string_to_number(t.as_str()) };
             if is_nan(n) {
                 self.throw_syntax("Unexpected number in JSON");
                 return Val::Undef;

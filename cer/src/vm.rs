@@ -9194,3 +9194,396 @@ pub fn str_hash(s: &str) -> int {
     }
     h
 }
+
+/// JSON.parse over the text's bytes (Rust): no char vector is made, a
+/// string with no escapes is one copy of its slice and a key is interned
+/// from its slice. True when it parsed the text (vm.throwing on a syntax
+/// error, else `out` holds the value); the other targets return false and
+/// the caller parses chars (Vm::json_parse_value).
+#[ranger::target(rust)]
+pub fn json_parse_fast(vm: &mut Vm, s: &str, out: &mut Val) -> bool {
+    let b = s.as_bytes();
+    let mut pos: usize = 0;
+    let mut buf = String::new();
+    let v = jf_value(vm, s, b, &mut pos, &mut buf);
+    if vm.throwing {
+        return true;
+    }
+    jf_ws(b, &mut pos);
+    if pos < b.len() {
+        vm.throw_syntax("Unexpected non-whitespace character after JSON");
+        return true;
+    }
+    *out = v;
+    true
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn json_parse_fast(_vm: &mut Vm, _s: &str, _out: &mut Val) -> bool {
+    false
+}
+
+#[ranger::target(rust)]
+#[inline(always)]
+fn jf_ws(b: &[u8], pos: &mut usize) {
+    while *pos < b.len() {
+        let c = b[*pos];
+        if c == b' ' || c == b'\n' || c == b'\r' || c == b'\t' {
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+/// The JSON string at `pos` (its opening quote): (start, end, escaped).
+/// Not escaped: the text is s[start..end]; escaped: it is in `buf`.
+#[ranger::target(rust)]
+fn jf_string(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String) -> (usize, usize, bool) {
+    *pos += 1;
+    let start = *pos;
+    let n = b.len();
+    let mut i = start;
+    while i < n {
+        let c = b[i];
+        if c == b'"' {
+            *pos = i + 1;
+            return (start, i, false);
+        }
+        if c == b'\\' {
+            break;
+        }
+        if c < 32 {
+            vm.throw_syntax("Bad control character in string literal in JSON");
+            return (start, i, false);
+        }
+        i += 1;
+    }
+    if i >= n {
+        vm.throw_syntax("Unterminated string in JSON");
+        return (start, i, false);
+    }
+    // escapes: the text so far, then decoded runs into buf
+    buf.clear();
+    buf.push_str(&s[start..i]);
+    let mut run = i;
+    while i < n {
+        let c = b[i];
+        if c == b'"' {
+            buf.push_str(&s[run..i]);
+            *pos = i + 1;
+            return (start, i, true);
+        }
+        if c < 32 {
+            vm.throw_syntax("Bad control character in string literal in JSON");
+            return (start, i, true);
+        }
+        if c != b'\\' {
+            i += 1;
+            continue;
+        }
+        buf.push_str(&s[run..i]);
+        i += 1;
+        if i >= n {
+            break;
+        }
+        let e = b[i];
+        i += 1;
+        match e {
+            b'n' => buf.push('\n'),
+            b't' => buf.push('\t'),
+            b'r' => buf.push('\r'),
+            b'b' => buf.push('\u{8}'),
+            b'f' => buf.push('\u{c}'),
+            b'/' => buf.push('/'),
+            b'\\' => buf.push('\\'),
+            b'"' => buf.push('"'),
+            b'u' => {
+                let v0 = jf_hex4(b, i);
+                if v0 < 0 {
+                    vm.throw_syntax("Bad Unicode escape in JSON");
+                    return (start, i, true);
+                }
+                let mut v = v0;
+                i += 4;
+                // a surrogate pair written as two escapes
+                if v >= 0xd800 && v <= 0xdbff && i + 5 < n && b[i] == b'\\' && b[i + 1] == b'u' {
+                    let lo = jf_hex4(b, i + 2);
+                    if lo >= 0xdc00 && lo <= 0xdfff {
+                        i += 6;
+                        v = 0x10000 + ((v - 0xd800) << 10) + (lo - 0xdc00);
+                    }
+                }
+                jsstr::push_cp(buf, v);
+            }
+            _ => {
+                vm.throw_syntax("Bad escaped character in JSON");
+                return (start, i, true);
+            }
+        }
+        run = i;
+    }
+    vm.throw_syntax("Unterminated string in JSON");
+    (start, i, true)
+}
+
+/// The text is a JSON number: -?(0|[1-9]d*)(.d+)?([eE][+-]?d+)?
+#[ranger::target(rust)]
+fn jf_num_ok(t: &[u8]) -> bool {
+    let n = t.len();
+    let mut i = 0;
+    if i < n && t[i] == b'-' {
+        i += 1;
+    }
+    let d = i;
+    while i < n && t[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == d {
+        return false;
+    }
+    if i < n && t[i] == b'.' {
+        i += 1;
+        let f = i;
+        while i < n && t[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == f {
+            return false;
+        }
+    }
+    if i < n && (t[i] == b'e' || t[i] == b'E') {
+        i += 1;
+        if i < n && (t[i] == b'+' || t[i] == b'-') {
+            i += 1;
+        }
+        let e = i;
+        while i < n && t[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == e {
+            return false;
+        }
+    }
+    i == n
+}
+
+/// Four hex digits at b[i..], -1 when not.
+#[ranger::target(rust)]
+fn jf_hex4(b: &[u8], i: usize) -> int {
+    if i + 4 > b.len() {
+        return -1;
+    }
+    let mut v: int = 0;
+    for k in 0..4 {
+        let h = b[i + k];
+        let d = if h >= b'0' && h <= b'9' {
+            (h - b'0') as int
+        } else if h >= b'a' && h <= b'f' {
+            (h - b'a') as int + 10
+        } else if h >= b'A' && h <= b'F' {
+            (h - b'A') as int + 10
+        } else {
+            return -1;
+        };
+        v = v * 16 + d;
+    }
+    v
+}
+
+/// A string value from a slice, into a reclaimed handle's own buffer
+/// when it has one.
+#[ranger::target(rust)]
+fn jf_str_val(vm: &mut Vm, t: &str) -> Val {
+    if t.is_empty() {
+        return Val::Str(0);
+    }
+    if t.len() == 1 {
+        return vm.unit_val(t.as_bytes()[0] as int);
+    }
+    let h = vm.take_handle(t.len() as int, 0);
+    let rc = &mut vm.strs[h as usize].s;
+    if let Some(m) = Rc::get_mut(rc) {
+        m.clear();
+        m.push_str(t);
+    } else {
+        *rc = Rc::new(String::from(t));
+    }
+    Val::Str(h)
+}
+
+#[ranger::target(rust)]
+fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String) -> Val {
+    jf_ws(b, pos);
+    let n = b.len();
+    if *pos >= n {
+        vm.throw_syntax("Unexpected end of JSON input");
+        return Val::Undef;
+    }
+    let c = b[*pos];
+    if c == b'{' {
+        *pos += 1;
+        let o = vm.new_object();
+        vm.temp_roots.push(Val::Obj(o));
+        jf_ws(b, pos);
+        if *pos < n && b[*pos] == b'}' {
+            *pos += 1;
+            vm.temp_roots.pop();
+            return Val::Obj(o);
+        }
+        loop {
+            jf_ws(b, pos);
+            if *pos >= n || b[*pos] != b'"' {
+                vm.throw_syntax("Unexpected token in JSON");
+                vm.temp_roots.pop();
+                return Val::Undef;
+            }
+            let (ka, kb, kesc) = jf_string(vm, s, b, pos, buf);
+            if vm.throwing {
+                vm.temp_roots.pop();
+                return Val::Undef;
+            }
+            // the key straight to its atom: no string value in between
+            let atom = {
+                let k: &str = if kesc { buf.as_str() } else { &s[ka..kb] };
+                let ki = jsstr::array_index(k);
+                if ki >= 0 {
+                    vm.index_atom(ki)
+                } else {
+                    vm.intern(k)
+                }
+            };
+            jf_ws(b, pos);
+            if *pos >= n || b[*pos] != b':' {
+                vm.throw_syntax("Expected ':' in JSON");
+                vm.temp_roots.pop();
+                return Val::Undef;
+            }
+            *pos += 1;
+            let v = jf_value(vm, s, b, pos, buf);
+            if vm.throwing {
+                vm.temp_roots.pop();
+                return Val::Undef;
+            }
+            vm.define(o, atom, v, 0);
+            jf_ws(b, pos);
+            if *pos < n && b[*pos] == b',' {
+                *pos += 1;
+                continue;
+            }
+            if *pos < n && b[*pos] == b'}' {
+                *pos += 1;
+                break;
+            }
+            vm.throw_syntax("Unexpected token in JSON");
+            vm.temp_roots.pop();
+            return Val::Undef;
+        }
+        vm.temp_roots.pop();
+        return Val::Obj(o);
+    }
+    if c == b'[' {
+        *pos += 1;
+        let a = vm.new_array(Vec::new());
+        vm.temp_roots.push(Val::Obj(a));
+        jf_ws(b, pos);
+        if *pos < n && b[*pos] == b']' {
+            *pos += 1;
+            vm.temp_roots.pop();
+            return Val::Obj(a);
+        }
+        loop {
+            let v = jf_value(vm, s, b, pos, buf);
+            if vm.throwing {
+                vm.temp_roots.pop();
+                return Val::Undef;
+            }
+            vm.push_elem(a, v);
+            jf_ws(b, pos);
+            if *pos < n && b[*pos] == b',' {
+                *pos += 1;
+                continue;
+            }
+            if *pos < n && b[*pos] == b']' {
+                *pos += 1;
+                break;
+            }
+            vm.throw_syntax("Unexpected token in JSON");
+            vm.temp_roots.pop();
+            return Val::Undef;
+        }
+        vm.temp_roots.pop();
+        return Val::Obj(a);
+    }
+    if c == b'"' {
+        let (a, e, esc) = jf_string(vm, s, b, pos, buf);
+        if vm.throwing {
+            return Val::Undef;
+        }
+        return if esc { jf_str_val(vm, buf.as_str()) } else { jf_str_val(vm, &s[a..e]) };
+    }
+    if c == b't' && b[*pos..].starts_with(b"true") {
+        *pos += 4;
+        return Val::Bool(true);
+    }
+    if c == b'f' && b[*pos..].starts_with(b"false") {
+        *pos += 5;
+        return Val::Bool(false);
+    }
+    if c == b'n' && b[*pos..].starts_with(b"null") {
+        *pos += 4;
+        return Val::Null;
+    }
+    if c == b'-' || (c >= b'0' && c <= b'9') {
+        let start = *pos;
+        if c == b'-' {
+            *pos += 1;
+        }
+        if *pos + 1 < n && b[*pos] == b'0' && b[*pos + 1].is_ascii_digit() {
+            vm.throw_syntax("Unexpected number in JSON");
+            return Val::Undef;
+        }
+        // an integer of up to 15 digits is exact as it is summed
+        let d0 = *pos;
+        let mut iv: double = 0.0;
+        while *pos < n && b[*pos].is_ascii_digit() {
+            iv = iv * 10.0 + ((b[*pos] - b'0') as double);
+            *pos += 1;
+        }
+        let nd = *pos - d0;
+        let more = |p: usize| p < n && matches!(b[p], b'.' | b'e' | b'E' | b'+' | b'-');
+        if nd > 0 && nd <= 15 && !more(*pos) {
+            return Val::Num(if c == b'-' { -iv } else { iv });
+        }
+        // d.ddd with at most 15 digits in all and no exponent: the integer
+        // over a power of ten, both exact, is the correctly rounded value
+        if nd > 0 && nd < 15 && *pos < n && b[*pos] == b'.' {
+            let f0 = *pos + 1;
+            let mut p = f0;
+            let mut fv = iv;
+            while p < n && b[p].is_ascii_digit() && p - f0 + nd < 15 {
+                fv = fv * 10.0 + ((b[p] - b'0') as double);
+                p += 1;
+            }
+            let nf = p - f0;
+            if nf > 0 && !(p < n && (b[p].is_ascii_digit() || b[p] == b'e' || b[p] == b'E' || b[p] == b'.' || b[p] == b'+' || b[p] == b'-')) {
+                const P10: [double; 16] = [1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15];
+                *pos = p;
+                let r = fv / P10[nf];
+                return Val::Num(if c == b'-' { -r } else { r });
+            }
+        }
+        while *pos < n && (b[*pos].is_ascii_digit() || more(*pos)) {
+            *pos += 1;
+        }
+        let v = if jf_num_ok(&b[start..*pos]) { string_to_number(&s[start..*pos]) } else { nan() };
+        if is_nan(v) {
+            vm.throw_syntax("Unexpected number in JSON");
+            return Val::Undef;
+        }
+        return Val::Num(v);
+    }
+    let ch = s[*pos..].chars().next().unwrap_or(' ');
+    vm.throw_syntax(format!("Unexpected token '{}' in JSON", ch).as_str());
+    Val::Undef
+}

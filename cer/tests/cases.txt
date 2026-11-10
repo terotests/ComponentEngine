@@ -682,3 +682,12 @@ var c = Object.create({inh:1}); c.own = 2; var d = {}; for (var i = 0; i < 300; 
 [JSON.stringify(o), JSON.stringify(o, function(k, v){ return typeof v === 'number' ? v * 10 : v; }), JSON.stringify(c), JSON.stringify(d).length, new Function('return ' + JSON.stringify(d))().k299].join('|')
 ----
 {"2":[1,{"y":null}],"10":2,"b":1,"a":"Ta","n":5,"g":"G"}|{"2":[10,{"y":null}],"10":20,"b":10,"a":"Ta","n":5,"g":"G"}|{"own":2}|3081|299
+
+==== js JSON.parse numbers, escapes, keys and syntax errors
+var r = [];
+['[1.5,-0.25,0.1,123.456,1e5,1.5e-3,12345678901234.5,9007199254740993,1.0]', '"\\u00e4\\ud83d\\ude00x\\n"', '{"a":"b","10":[],"k\\"":{"x":"y"}}', '01', '1.', '1.e3', '-', '[1,]', '"\\x"', '1 2', '"a\u0001"'].forEach(function (s) {
+  try { r.push(JSON.stringify(JSON.parse(s))); } catch (e) { r.push(e.name); }
+});
+r.join(';')
+----
+[1.5,-0.25,0.1,123.456,100000,0.0015,12345678901234.5,9007199254740992,1];"ä😀x\n";{"10":[],"a":"b","k\"":{"x":"y"}};SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError
