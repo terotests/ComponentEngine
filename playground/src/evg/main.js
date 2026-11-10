@@ -21,8 +21,10 @@ import SCAFFOLD_TSX from "./games/scaffold.tsx";
 import SCAFFOLD_CSS from "./games/scaffold.css";
 
 // The examples; `?game=<id>` picks one, and so does the menu.
+// `pad`: the game is played with the arrow keys and space, so a touch screen
+// gets buttons for them.
 const GAMES = {
-  scaffold: { name: "Scaffold Scramble (climber)", tsx: SCAFFOLD_TSX, css: SCAFFOLD_CSS },
+  scaffold: { name: "Scaffold Scramble (climber)", tsx: SCAFFOLD_TSX, css: SCAFFOLD_CSS, pad: true },
   breakout: { name: "Breakout", tsx: BREAKOUT_TSX, css: BREAKOUT_CSS },
 };
 
@@ -74,6 +76,7 @@ function loadGame(id) {
   const ok = saved && typeof saved.tsx === "string" && typeof saved.css === "string";
   tsxEl.value = ok ? saved.tsx : GAMES[id].tsx;
   cssEl.value = ok ? saved.css : GAMES[id].css;
+  showPad();
 }
 function save() {
   storeSet(STORE + ":" + game, JSON.stringify({ tsx: tsxEl.value, css: cssEl.value }));
@@ -176,6 +179,86 @@ stage.addEventListener("pointerdown", (e) => {
 window.addEventListener("pointerup", () => {
   pointer.down = false;
 });
+
+// ---- touch buttons and the full-screen play mode ---------------------------
+//
+// Each finger on the pad holds the key of the button under it, and slides to
+// another button without lifting; a key is let go when no finger holds it.
+// The game sees the same keys and keydown events the keyboard gives it.
+
+const pad = $("pad");
+const fingers = new Map(); // pointerId -> the key it holds, or null
+
+// (called from loadGame, before this part of the file has run)
+function showPad() {
+  const coarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+  $("pad").hidden = !(GAMES[game].pad && (coarse || document.body.classList.contains("play")));
+}
+function padKeyAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const b = el && el.closest ? el.closest("[data-key]") : null;
+  return b && pad.contains(b) ? b.dataset.key : null;
+}
+function held(key) {
+  for (const k of fingers.values()) if (k === key) return true;
+  return false;
+}
+function setFinger(id, key) {
+  const old = fingers.has(id) ? fingers.get(id) : null;
+  if (old === key && fingers.has(id)) return;
+  fingers.set(id, key);
+  if (old !== null && !held(old)) {
+    delete keys[old];
+    events.push({ type: "keyup", key: old });
+  }
+  if (key !== null && !keys[key]) {
+    events.push({ type: "keydown", key });
+    keys[key] = true;
+    if (navigator.vibrate) {
+      try { navigator.vibrate(8); } catch (e) {}
+    }
+  }
+  for (const b of pad.querySelectorAll("[data-key]")) b.classList.toggle("down", held(b.dataset.key));
+}
+function liftFinger(id) {
+  if (!fingers.has(id)) return;
+  setFinger(id, null);
+  fingers.delete(id);
+}
+pad.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  try { pad.setPointerCapture(e.pointerId); } catch (err) {}
+  setFinger(e.pointerId, padKeyAt(e.clientX, e.clientY));
+});
+pad.addEventListener("pointermove", (e) => {
+  if (fingers.has(e.pointerId)) setFinger(e.pointerId, padKeyAt(e.clientX, e.clientY));
+});
+for (const t of ["pointerup", "pointercancel", "lostpointercapture"]) pad.addEventListener(t, (e) => liftFinger(e.pointerId));
+pad.addEventListener("contextmenu", (e) => e.preventDefault());
+
+let fullscreenAsked = false;
+function enterPlay(askFullscreen) {
+  document.body.classList.add("play");
+  showTab("game");
+  showPad();
+  if (askFullscreen && document.documentElement.requestFullscreen && !document.fullscreenElement) {
+    document.documentElement.requestFullscreen({ navigationUI: "hide" }).then(() => { fullscreenAsked = true; }, () => {});
+  }
+  stage.focus({ preventScroll: true });
+}
+function leavePlay() {
+  document.body.classList.remove("play");
+  showPad();
+  if (fullscreenAsked && document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  fullscreenAsked = false;
+}
+$("full").addEventListener("click", () => enterPlay(true));
+$("exit-play").addEventListener("click", leavePlay);
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement && fullscreenAsked) leavePlay();
+});
+if (new URLSearchParams(location.search).has("play")) enterPlay(false);
+showPad();
 
 // ---- the engine and the loop -----------------------------------------------
 

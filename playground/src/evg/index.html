@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0f2e">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>CErXes + EVG game demo</title>
   <meta name="description" content="Games written in TypeScript and JSX, run by CErXes compiled to WebAssembly, laid out by the EVG layout engine and painted as SVG, every frame.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='2' width='4' height='3' rx='1' fill='%23f38ba8'/%3E%3Crect x='6' y='2' width='4' height='3' rx='1' fill='%23fab387'/%3E%3Crect x='11' y='2' width='4' height='3' rx='1' fill='%23a6e3a1'/%3E%3Ccircle cx='8' cy='10' r='1.6' fill='%232a78d6'/%3E%3Crect x='4' y='13' width='8' height='2' rx='1' fill='%232a78d6'/%3E%3C/svg%3E">
@@ -32,11 +36,25 @@
       <button id="run" class="primary" title="Ctrl+Enter / ⌘+Enter">Run</button>
       <button id="pause">Pause</button>
       <button id="reset" title="Put this example back in both editors">Reset example</button>
+      <button id="full" title="Only the game and the touch buttons (also: add ?play to the address)">Play full screen</button>
       <span id="status" class="status" aria-live="polite">Loading…</span>
     </div>
 
     <section id="panel-game" role="tabpanel" aria-labelledby="tab-game">
-      <div id="stage" class="stage" tabindex="0" aria-label="Game view: click here, then use the arrow keys and space"></div>
+      <div class="play-area">
+        <div id="stage" class="stage" tabindex="0" aria-label="Game view: click here, then use the arrow keys and space"></div>
+        <!-- the touch buttons: they hold the same keys the keyboard does -->
+        <div id="pad" class="pad" hidden>
+          <div class="pad-dir">
+            <button type="button" class="pad-btn pad-up" data-key="ArrowUp" aria-label="Up">▲</button>
+            <button type="button" class="pad-btn pad-left" data-key="ArrowLeft" aria-label="Left">◀</button>
+            <button type="button" class="pad-btn pad-right" data-key="ArrowRight" aria-label="Right">▶</button>
+            <button type="button" class="pad-btn pad-down" data-key="ArrowDown" aria-label="Down">▼</button>
+          </div>
+          <button type="button" class="pad-btn pad-jump" data-key=" " aria-label="Jump">JUMP</button>
+        </div>
+        <button id="exit-play" class="exit-play" type="button" aria-label="Leave full screen">✕</button>
+      </div>
       <div class="stats" id="stats"></div>
       <details class="how">
         <summary>How a frame is made</summary>
@@ -49,7 +67,8 @@
             stylesheet, lays the tree out at 640×480 and builds its display list.</li>
           <li>EVG's SVG painter draws the list. Text is measured by the browser's canvas and broken into lines by EVG.</li>
         </ol>
-        <p>Keyboard: click the game first. The script can define <code>onKeyDown(key)</code> and
+        <p>On a phone or tablet the buttons under the game hold the same keys; <b>Play full screen</b> (or
+          <code>?play</code> in the address) leaves only the game and the buttons. Keyboard: click the game first. The script can define <code>onKeyDown(key)</code> and
           <code>onKeyUp(key)</code>; <code>input.keys</code> holds the keys down, <code>input.pointer</code> the pointer.</p>
       </details>
     </section>
