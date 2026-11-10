@@ -782,3 +782,26 @@ Number.prototype.hex = function () { return "h" + this; }; r.push((10).hex(), n.
 r.join()
 ----
 0,0,0,0,0,0,7,111,7,-ff,-11111111,-73,1000,1000000000000,35s,1fffffffffffff,11111111111111111111111111111111111111111111111111111,2gosa7pa2gv,-1fffffffffffff,-11111111111111111111111111111111111111111111111111111,-2gosa7pa2gv,2.8,10.1,2.i,NaN,4087,19987,NaN,-26,-26,-42814,NaN,NaN,NaN,33,NaN,12,18,50181,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,77,119,259,NaN,NaN,NaN,1269,NaN,42,NaN,-Infinity,true,true,false,true,false,true,true,true,true,true,2,false,axc,xxx,TypeError,5.00,5,14,P16,Pundefined,h10,h5
+
+==== js generators: stack and slots saved in place, next lookup kept per shape, patched and own next, return/throw/finally
+var r = [];
+function* g(n) { for (var i = 0; i < n; i++) { var o = { v: i }; yield o.v; } return "end"; }
+var s = 0; for (var x of g(5)) s += x; r.push(s);
+var it = g(2); r.push(JSON.stringify([it.next(), it.next(), it.next(), it.next()]));
+function* h() { try { yield 1; yield 2; } finally { r.push("fin"); } }
+for (var y of h()) { r.push(y); break; }
+var it2 = h(); it2.next(); r.push(JSON.stringify(it2.return(7)));
+var it3 = h(); it3.next(); try { it3.throw(new Error("e")); } catch (e) { r.push(e.message); }
+var it4 = g(3); it4.next = function () { return { done: this.c++ > 1, value: "own" }; }; it4.c = 0;
+for (var z of it4) r.push(z);
+var GP = Object.getPrototypeOf(g.prototype); var saved = GP.next;
+GP.next = function () { var v = saved.call(this); if (!v.done) v.value = v.value * 10; return v; };
+for (var w of g(3)) r.push(w);
+GP.next = saved;
+for (var w2 of g(2)) r.push(w2);
+function* deep(a) { var t = [a, a + 1]; var str = "s" + a; yield t; yield str; yield* g(2); }
+for (var d of deep(4)) r.push(String(d));
+r.push([...g(4)].join("/"));
+r.join()
+----
+10,[{"value":0,"done":false},{"value":1,"done":false},{"value":"end","done":true},{"done":true}],1,fin,fin,{"value":7,"done":true},fin,e,own,own,0,10,20,0,1,4,5,s4,0,1,0/1/2/3
