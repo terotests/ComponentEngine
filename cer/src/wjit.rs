@@ -396,8 +396,9 @@ pub fn probe() -> Layout {
         l.off_elems = std::mem::offset_of!(JsObj, elems) as u32;
         l.vm_evecs_ptr = std::mem::offset_of!(crate::vm::Vm, evecs) as u32 + vp;
         l.elems_size = std::mem::size_of::<crate::value::Elems>() as u32;
-        l.elems_vp = std::mem::offset_of!(crate::value::Elems, v) as u32 + vp;
-        l.elems_vl = std::mem::offset_of!(crate::value::Elems, v) as u32 + vl;
+        // Elems.v is an EVec whose first field is its Vec (evec.rs)
+        l.elems_vp = std::mem::offset_of!(crate::value::Elems, v) as u32 + std::mem::offset_of!(crate::evec::EVec, inner) as u32 + vp;
+        l.elems_vl = std::mem::offset_of!(crate::value::Elems, v) as u32 + std::mem::offset_of!(crate::evec::EVec, inner) as u32 + vl;
         l.off_rc = std::mem::offset_of!(JsObj, rc) as u32;
         let vc = 12 - vp - vl;
         l.off_ext = std::mem::offset_of!(JsObj, extensible) as u32;
@@ -7878,7 +7879,7 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
         vm.inc(&val);
         let old = crate::vm::obj_of(&vm.evecs[e].v[i as usize]);
         let old_s = crate::vm::str_of(&vm.evecs[e].v[i as usize]);
-        vm.evecs[e].v[i as usize] = val;
+        elem_put(&mut vm.evecs[e], i as usize, val);
         let oc = vm.objs[o as usize].cold as usize;
         if oc > 0 && (i as usize) < vm.colds[oc].elems2.len() {
             vm.colds[oc].elems2[i as usize] = Val::Bool(false);

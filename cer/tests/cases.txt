@@ -881,3 +881,21 @@ r.push(JSON.stringify("a1b22".match(/\d+/)), JSON.stringify("a1b22".match(/\d+/g
 r.join("|")
 ----
 3|12-345|12|345|6|range 12-345 end||0/1/2/index/input/groups|0/1/2/index/input/groups/extra|{"value":0,"writable":true,"enumerable":true,"configurable":true}|false|5|0/1/index/input/groups|[[1,2],[1,2]]|0/1/index/input/groups/indices|14|["1"]|["1","22"]
+
+==== js arrays as queues: shift moves the start (O(1)), unshift into the room, then push, writes, reverse, sort, splice, length
+var r = [];
+var a = []; for (var i = 0; i < 200; i++) a.push(i);
+var s = 0; for (var k = 0; k < 150; k++) s += a.shift(); r.push(s, a.length, a[0], a[49], a[50]);
+a.unshift(-1, -2); r.push(a.length, a[0], a[1], a[2]);
+a.push(999); a[3] = 7; r.push(a.length, a[3], a[a.length - 1]);
+var q = []; for (var j = 0; j < 1000; j++) { q.push(j); q.push(j + 0.5); q.shift(); } r.push(q.length, q[0], q[999]);
+var b = []; for (var i2 = 0; i2 < 100; i2++) b.push(i2); for (var k2 = 0; k2 < 40; k2++) b.shift();
+b.reverse(); r.push(b[0], b[59]); b.sort(function (x, y) { return x - y; }); r.push(b[0], b.slice(0, 3).join("/"));
+b.splice(1, 2, "x"); r.push(b.length, b[1], b.indexOf(46), b.includes(99), JSON.stringify(b.slice(-2)));
+var c = []; for (var i3 = 0; i3 < 70; i3++) c.push({ n: i3 }); for (var k3 = 0; k3 < 69; k3++) c.shift(); r.push(c.length, c[0].n);
+for (var k4 = 0; k4 < 30; k4++) c.unshift(k4); r.push(c.length, c[0], c[29], c[30].n, c.map(function (x) { return typeof x; }).join("").length);
+var d = []; for (var i4 = 0; i4 < 64; i4++) d.push(i4); var e = d.shift(); d.length = 3; r.push(e, d.join(","));
+var f = []; for (var i5 = 0; i5 < 300; i5++) f.push(i5); while (f.length > 1) { f.push(f.shift() + f.shift()); } r.push(f[0]);
+r.join("|")
+----
+11175|50|150|199||52|-1|-2|150|53|7|999|1000|500|999.5|99|40|40|40/41/42|59|x|5|true|[98,99]|1|69|31|29|0|69|186|0|1,2,3|44850

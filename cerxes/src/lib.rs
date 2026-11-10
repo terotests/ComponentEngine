@@ -62,6 +62,12 @@ pub mod vm;
 pub mod fxmap {
     include!("fxmap.rs");
 }
+/// an object's elements with an O(1) shift (evec.rs): Rust only, the other
+/// targets keep their arrays
+#[ranger::target(rust)]
+pub mod evec {
+    include!("evec.rs");
+}
 
 /// the baseline JIT (wjit.rs): Rust only
 #[ranger::target(rust)]

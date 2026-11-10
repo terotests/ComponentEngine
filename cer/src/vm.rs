@@ -735,7 +735,7 @@ impl Vm {
         };
         vm.shapes.push(Shape::new());
         vm.colds.push(Cold::new());
-        vm.evecs.push(Elems { v: Vec::new() });
+        vm.evecs.push(elems_of(Vec::new()));
         for n in first_atoms() {
             vm.intern(n.as_str());
         }
@@ -5820,7 +5820,7 @@ impl Vm {
                                 if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos < 2 {
                                     old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
-                                    self.evecs[ob.elems as usize].v[i as usize] = val.clone();
+                                    elem_put(&mut self.evecs[ob.elems as usize], i as usize, val.clone());
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
                                         // the element is no longer a hole
@@ -5833,7 +5833,7 @@ impl Vm {
                                             ob.elems = self.efree.pop().unwrap();
                                         } else {
                                             grow_evecs(&mut self.evecs);
-                                            self.evecs.push(Elems { v: Vec::new() });
+                                            self.evecs.push(elems_of(Vec::new()));
                                             ob.elems = (self.evecs.len() - 1) as i32;
                                         }
                                     }
@@ -6653,7 +6653,7 @@ impl Vm {
                     let h = self.append_val(cur, b);
                     if h >= 0 {
                         self.stack.pop();
-                        self.evecs[self.objs[e as usize].elems as usize].v[i] = Val::Str(h);
+                        elem_put(&mut self.evecs[self.objs[e as usize].elems as usize], i as usize, Val::Str(h));
                         // the slot holds the new handle, no longer the old
                         // (now its prefix)
                         self.sinc(h);
@@ -6682,7 +6682,7 @@ impl Vm {
                 if x == y {
                     let h = self.append_val(cur, b);
                     if h >= 0 {
-                        self.evecs[self.objs[e as usize].elems as usize].v[i as usize] = Val::Str(h);
+                        elem_put(&mut self.evecs[self.objs[e as usize].elems as usize], i as usize, Val::Str(h));
                         self.sinc(h);
                         self.sdec(x);
                         return;
@@ -7998,7 +7998,7 @@ impl Vm {
     pub fn put_elem(&mut self, o: int, i: int, v: Val) {
         self.inc(&v);
         let old = self.evecs[self.objs[o as usize].elems as usize].v[i as usize];
-        self.evecs[self.objs[o as usize].elems as usize].v[i as usize] = v;
+        elem_put(&mut self.evecs[self.objs[o as usize].elems as usize], i as usize, v);
         self.dec(&old);
     }
 
@@ -8032,7 +8032,7 @@ impl Vm {
             return self.efree.pop().unwrap() as usize;
         }
         grow_evecs(&mut self.evecs);
-        self.evecs.push(Elems { v: Vec::new() });
+        self.evecs.push(elems_of(Vec::new()));
         self.evecs.len() - 1
     }
 
@@ -8068,7 +8068,7 @@ impl Vm {
             i += 1;
         }
         let e = self.elems_id(o);
-        self.evecs[e].v = vs;
+        elems_set(&mut self.evecs[e], vs);
     }
 
     pub fn put_elems2(&mut self, o: int, vs: Vec<Val>) {
@@ -8489,7 +8489,7 @@ impl Vm {
         let mut q: usize = 0;
         while q < ne {
             let e = self.efree[q] as usize;
-            self.evecs[e].v = Vec::new();
+            elems_set(&mut self.evecs[e], Vec::new());
             q += 1;
         }
         let nf = self.freed.len();
