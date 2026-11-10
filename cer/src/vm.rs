@@ -326,6 +326,9 @@ pub struct Vm {
     /// R_GET_METHOD's method cache (rcode c <= -100000, entry -100000 - c):
     /// receiver shape, shape epoch, prototype, its shape, slot; 5 ints each
     pub mcache: Vec<i32>,
+    /// regexp_exec_in: a new array's shape and the one index, input and
+    /// groups give it
+    pub rx_shapes: Vec<i32>,
     pub gn_memo: Vec<i32>,
     /// array_iter_plain's memo: an array's shape, the shape epoch, its
     /// prototype, the prototype's shape and its Symbol.iterator slot
@@ -658,6 +661,7 @@ impl Vm {
             rpic: Vec::new(),
             ic2: Vec::new(),
             mcache: Vec::new(),
+            rx_shapes: Vec::new(),
             gn_memo: Vec::new(),
             ai_memo: Vec::new(),
             pic: Vec::new(),
@@ -1385,6 +1389,7 @@ impl Vm {
         Val::Str(self.new_handle(s, 0))
     }
 
+    #[inline(never)]
     pub fn str_val(&mut self, s: &str) -> Val {
         if s.is_empty() {
             return Val::Str(0);

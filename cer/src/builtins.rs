@@ -1135,9 +1135,33 @@ impl Vm {
             }
             g += 1;
         }
+        let plain = self.regexes[idx as usize].names.is_empty() && !has_indices;
+        let sv9 = if let Val::Str(_) = inp { inp } else { self.rc_val(s.clone()) };
+        if plain {
+            // index, input and groups (undefined): the shape they give a new
+            // array kept (rx_shapes), the slots put at once
+            let ma = self.new_array(items);
+            let sh = self.objs[ma as usize].shape;
+            if self.rx_shapes.len() == 2 && self.rx_shapes[0] == sh {
+                let nsh = self.rx_shapes[1];
+                self.objs[ma as usize].shape = nsh;
+                let most = self.shapes[self.holder(nsh as int)].keys.len();
+                slot_room(&mut self.objs[ma as usize], most);
+                self.push_val(ma, Val::Num(caps[0] as double));
+                self.push_val(ma, sv9);
+                self.push_val(ma, Val::Undef);
+            } else {
+                self.add_own(ma, A_INDEX, Val::Num(caps[0] as double), 0);
+                self.add_own(ma, A_INPUT, sv9, 0);
+                self.add_own(ma, A_GROUPS, Val::Undef, 0);
+                if !self.shapes[sh as usize].owned && !self.shapes[self.objs[ma as usize].shape as usize].owned {
+                    self.rx_shapes = vec![sh, self.objs[ma as usize].shape];
+                }
+            }
+            return Val::Obj(ma);
+        }
         let arr = self.new_array(items.clone());
         self.add_own(arr, A_INDEX, Val::Num(caps[0] as double), 0);
-        let sv9 = if let Val::Str(_) = inp { inp } else { self.rc_val(s.clone()) };
         self.add_own(arr, A_INPUT, sv9, 0);
         let names = self.regexes[idx as usize].names.clone();
         let nidx = self.regexes[idx as usize].name_index.clone();
