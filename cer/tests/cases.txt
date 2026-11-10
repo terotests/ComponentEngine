@@ -853,6 +853,22 @@ r.join("|")
 ----
 bye world, bye there|bye world, hello there|eh-hello-$ world, eh-hello-$ there|hell0 w0rld, hell0 there|hello <world>, hello there|he2@2o wor1@9d, he2@15o there|hell_ w_rld, hell_ there|0|TypeError|e-ü-e|-a-a-a-|obj|object|mine:abc
 
+==== js instanceof fast path and its fallbacks
+function A(){} function B(){} B.prototype = Object.create(A.prototype); var b = new B(), r = [];
+for (var i = 0; i < 3; i++) r.push(b instanceof A, b instanceof B, 1 instanceof A, null instanceof A, ({}) instanceof A);
+A.prototype = {}; r.push(b instanceof A); r.push(new Proxy(b, {}) instanceof B); r.push(b instanceof B.bind(null));
+function C(){} C.prototype = 5; try { b instanceof C; r.push('nothrow'); } catch (e) { r.push(e instanceof TypeError); }
+function D(){} Object.defineProperty(D, Symbol.hasInstance, { value: function(){ return true; } }); r.push(1 instanceof D);
+function E(){} var e = new E(); for (var j = 0; j < 2; j++) { r.push(e instanceof E); E.prototype = {}; }
+r.join()
+----
+true,true,false,false,false,true,true,false,false,false,true,true,false,false,false,false,true,true,true,true,true,false
+
+==== js RegExp.prototype.compile keeps the new regexp's properties
+var r = /a/g; r.lastIndex = 3; r.compile('b', 'g'); [r.lastIndex, r.source, r.global, r.test('xb')].join()
+----
+0,b,true,true
+
 ==== js RegExp exec result arrays: index, input and groups shape kept, extra keys, named groups, indices
 var r = [];
 var m = /(\d+)-(\d+)/.exec("range 12-345 end"); r.push(m.length, m[0], m[1], m[2], m.index, m.input, m.groups, Object.keys(m).join("/"));

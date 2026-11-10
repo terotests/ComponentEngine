@@ -374,7 +374,7 @@ impl Vm {
             let pos = self.objs[n as usize].pos as int;
             self.compact_dict(n);
             let keys = self.keys_of(n);
-            let vals = self.objs[n as usize].vals.clone();
+            let vals = self.objs[n as usize].slots();
             self.objs[o as usize].func = func as i32;
             self.put_prim(o, prim);
             self.objs[o as usize].pos = pos as i32;
