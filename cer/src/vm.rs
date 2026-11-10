@@ -6041,6 +6041,11 @@ impl Vm {
     /// it threw); the stack keeps its length.
     pub fn native_fast(&mut self, id: int, fpos: int, argc: int) -> bool {
         let bp = fpos + 2;
+        // a prelude method with a native body for its plain cases
+        if id == crate::typed::NF_FAST_WRAP {
+            let f = obj_of(&self.stack[fpos as usize]);
+            return f >= 0 && self.fast_wrap(f, fpos, argc);
+        }
         // DataView get<Kind> / set<Kind> in bounds
         if id == crate::typed::NF_DVM_GET || id == crate::typed::NF_DVM_SET {
             let f = obj_of(&self.stack[fpos as usize]);
@@ -6241,6 +6246,25 @@ impl Vm {
                         r = Val::Obj(tobj);
                         hit = true;
                     }
+                } else if weak && ((tclass == C_MAP && (id == crate::builtins::NF_WM_GET || id == crate::builtins::NF_WM_HAS)) || (tclass == C_SET && id == crate::builtins::NF_WS_HAS)) {
+                    // WeakMap get/has, WeakSet has: a key that cannot be
+                    // held weakly is simply not found
+                    let k = self.stack[bp as usize].clone();
+                    let i = if obj_of(&k) >= 0 { self.map_find(tobj, &k) } else { -1 };
+                    r = if id != crate::builtins::NF_WM_GET {
+                        Val::Bool(i >= 0)
+                    } else if i >= 0 {
+                        self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
+                    } else {
+                        Val::Undef
+                    };
+                    hit = true;
+                } else if weak && tclass == C_MAP && id == crate::builtins::NF_WM_SET && argc >= 2 && obj_of(&self.stack[bp as usize]) >= 0 && self.objs[obj_of(&self.stack[bp as usize]) as usize].class != C_SYMBOL {
+                    let k = self.stack[bp as usize].clone();
+                    let v = self.stack[(bp + 1) as usize].clone();
+                    self.map_set(tobj, k, v);
+                    r = Val::Obj(tobj);
+                    hit = true;
                 }
                 if hit {
                     self.stack[fpos as usize] = r;
@@ -8945,12 +8969,7 @@ pub fn grow_vals(_v: &mut Vec<Val>, _most: usize) {}
 #[ranger::target(rust)]
 pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
     let c = &mut colds[i];
-    if c.index.capacity() > 0 {
-        c.index = HashMap::new();
-    }
-    if c.sindex.capacity() > 0 {
-        c.sindex = HashMap::new();
-    }
+    crate::value::drop_indexes(c);
     if c.marks.capacity() > 16 {
         c.marks = Vec::new();
     } else {

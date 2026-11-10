@@ -1102,6 +1102,26 @@ impl Vm {
                     return self.same_str_val(&this, s);
                 }
                 let need = target - len;
+                if jsstr::is_ascii(fill.as_str()) {
+                    // an ASCII fill: whole copies of it and a head, no units
+                    let fl = fill.as_bytes().len() as int;
+                    let mut out = String::new();
+                    if id != NF_SP_PADSTART {
+                        out.push_str(s.as_str());
+                    }
+                    let mut k = need / fl;
+                    while k > 0 {
+                        out.push_str(fill.as_str());
+                        k -= 1;
+                    }
+                    if need % fl > 0 {
+                        out.push_str(jsstr::slice(fill.as_str(), 0, need % fl).as_str());
+                    }
+                    if id == NF_SP_PADSTART {
+                        out.push_str(s.as_str());
+                    }
+                    return self.string_val(out);
+                }
                 let fu = jsstr::units(fill.as_str());
                 let mut pad: Vec<int> = Vec::new();
                 let mut i: int = 0;

@@ -1259,7 +1259,43 @@ impl Vm {
         out
     }
 
+    /// A __fastWrap method `f` on the stack frame at fpos, for a string
+    /// `this` and text (or no) operands: replace / replaceAll of a text by a
+    /// text, split by a text. True when done, the result in stack[fpos];
+    /// else the prelude's function runs (call_native).
+    #[inline(never)]
+    pub fn fast_wrap(&mut self, f: int, fpos: int, argc: int) -> bool {
+        let inner = self.objs[f as usize].pos as int;
+        let bp = (fpos + 2) as usize;
+        let h = match self.stack[bp - 1] {
+            Val::Str(h) => h,
+            _ => return false,
+        };
+        let a0 = if argc >= 1 { self.stack[bp] } else { Val::Undef };
+        let a1 = if argc >= 2 { self.stack[bp + 1] } else { Val::Undef };
+        if (inner == NF_SP_REPLACE || inner == NF_SP_REPLACEALL) && matches!(a0, Val::Str(_)) && matches!(a1, Val::Str(_)) {
+            let s = self.sget(h);
+            let r = self.string_replace(&s, &a0, &a1, inner == NF_SP_REPLACEALL);
+            self.stack[fpos as usize] = r;
+            return true;
+        }
+        if inner == NF_SP_SPLIT && matches!(a0, Val::Str(_)) && matches!(a1, Val::Undef) {
+            let s = self.sget(h);
+            let r = self.string_split(&s, &a0, &a1);
+            self.stack[fpos as usize] = r;
+            return true;
+        }
+        false
+    }
+
     pub fn string_replace(&mut self, s: &Rc<String>, pattern: &Val, repl: &Val, all: bool) -> Val {
+        if let (Val::Str(ph), Val::Str(rh)) = (pattern, repl) {
+            // an ASCII text for a text without `$`: no UTF-16 units needed
+            if replace_plain_ok(self.sref(*ph), self.sref(*rh)) {
+                let out = replace_plain(s.as_str(), self.sref(*ph), self.sref(*rh), all);
+                return self.string_val(out);
+            }
+        }
         let units = self.rx_take(s);
         let r = self.string_replace_units(s, &units, pattern, repl, all);
         self.rx_put(s, units);
@@ -3343,7 +3379,22 @@ impl Vm {
             let answer = self.host_sync.call(&req);
             return self.string_val(answer);
         }
-        if id == crate::typed::NF_DVM_GET || id == crate::typed::NF_DVM_SET {
+        if id == crate::typed::NF_FAST_WRAP && fobj >= 0 && (self.objs[fobj as usize].pos as int) == 0 {
+            // __fastWrap(native, slowFn, name, length): the method
+            let nat = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            let slow = if args.len() > 1 { obj_of(&args[1]) } else { -1 };
+            let name = if args.len() > 2 { self.to_string(&args[2]) } else { String::new() };
+            let len = if args.len() > 3 { self.to_number(&args[3]) as int } else { 0 };
+            if nat < 0 || slow < 0 || self.objs[nat as usize].class != C_NATIVE {
+                self.throw_type("__fastWrap: a native and a function");
+                return Val::Undef;
+            }
+            let f = self.native_fn(name.as_str(), crate::typed::NF_FAST_WRAP, len);
+            self.objs[f as usize].pos = self.objs[nat as usize].func;
+            self.put_env(f, slow);
+            return Val::Obj(f);
+        }
+        if id == crate::typed::NF_DVM_GET || id == crate::typed::NF_DVM_SET || id == crate::typed::NF_FAST_WRAP {
             // not done in place (native_fast): the prelude's own method
             let slow = if fobj >= 0 { self.objs[fobj as usize].env as int } else { -1 };
             if slow < 0 {
@@ -4695,4 +4746,42 @@ fn group_pairs(names: &Vec<String>, nidx: &Vec<int>, vals: &Vec<Val>) -> Vec<(St
         i += 1;
     }
     out
+}
+
+/// Whether `s.replace(pat, rep)` / replaceAll is replace_plain's: a
+/// non-empty ASCII `pat` and a `rep` without `$` (Rust; the other targets
+/// take the general path).
+#[ranger::target(rust)]
+pub fn replace_plain_ok(pat: &str, rep: &str) -> bool {
+    !pat.is_empty() && pat.is_ascii() && !rep.as_bytes().contains(&b'$')
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn replace_plain_ok(_pat: &str, _rep: &str) -> bool {
+    false
+}
+
+/// `s.replace(pat, rep)` / replaceAll when replace_plain_ok: an ASCII byte
+/// is never part of a longer UTF-8 sequence, so a byte match is the UTF-16
+/// match.
+#[ranger::target(rust)]
+pub fn replace_plain(s: &str, pat: &str, rep: &str, all: bool) -> String {
+    let mut out = String::new();
+    let mut last = 0usize;
+    while let Some(p) = s[last..].find(pat) {
+        let at = last + p;
+        out.push_str(&s[last..at]);
+        out.push_str(rep);
+        last = at + pat.len();
+        if !all {
+            break;
+        }
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn replace_plain(_s: &str, _pat: &str, _rep: &str, _all: bool) -> String {
+    String::new()
 }

@@ -10,7 +10,11 @@
 //! stay empty.
 
 use ranger::prelude::*;
+#[cfg(ranger)]
 use std::collections::HashMap;
+// rustc: a Map's or Set's index hashes with FxHasher (fxmap.rs)
+#[cfg(not(ranger))]
+use crate::fxmap::HashMap;
 use std::rc::Rc;
 
 #[derive(Clone, Copy)]
@@ -96,6 +100,17 @@ pub struct Cold {
     /// the object a method's `super` looks up from; a proxy's handler; an
     /// ArrayBuffer's typed-array kind (a number, not an object)
     pub home: int,
+}
+
+/// A Cold's Map / Set index tables freed (Rust: reset_cold in vm.rs).
+#[ranger::target(rust)]
+pub fn drop_indexes(c: &mut Cold) {
+    if c.index.capacity() > 0 {
+        c.index = HashMap::new();
+    }
+    if c.sindex.capacity() > 0 {
+        c.sindex = HashMap::new();
+    }
 }
 
 impl Cold {
