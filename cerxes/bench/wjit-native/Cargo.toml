@@ -1,0 +1,16 @@
+[package]
+name = "wjit-native"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+wasmtime = { version = "36", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+wasmtime-wasi = { version = "36", default-features = false, features = ["preview1"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+
+[workspace]

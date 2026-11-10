@@ -40,7 +40,7 @@ jobs:
       # Hermes as WebAssembly (playground/hermes/build.sh, ~30 min): built
       # once per version of the script and kept in the cache
       - id: hermes-key
-        run: echo "key=hermes-wasm-${{ hashFiles('playground/hermes/build.sh') }}" >> "$GITHUB_OUTPUT"
+        run: echo "key=hermes-wasm-${{ hashFiles('playground/hermes/build.sh', 'playground/hermes/host.cpp') }}" >> "$GITHUB_OUTPUT"
       - id: hermes-cache
         uses: actions/cache/restore@v4
         with:

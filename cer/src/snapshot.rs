@@ -22,7 +22,7 @@ use crate::value::*;
 use crate::vm::*;
 
 /// Bumped when the text or what it holds changes.
-pub const SNAPSHOT_FORMAT: int = 2;
+pub const SNAPSHOT_FORMAT: int = 3;
 
 struct Strings {
     index: HashMap<String, int>,
@@ -221,9 +221,31 @@ pub fn snapshot(vm: &Vm) -> String {
         }
         put_num(&mut b, o.class as int);
         put_num(&mut b, o.proto as int);
-        put_ints(&mut b, &vm.shape_keys(o.shape as int));
-        put_vals(&mut b, &mut st, vm, &o.slots());
-        put_ints(&mut b, &vm.shape_attrs(o.shape as int));
+        // a dictionary's tombstones (Vm::remove_own) are left out
+        let mut keys = vm.shape_keys(o.shape as int);
+        let mut vals = o.slots();
+        let mut attrs = vm.shape_attrs(o.shape as int);
+        if vm.shapes[o.shape as usize].ndead > 0 {
+            let tomb = vm.atom_lookup(TOMB_NAME);
+            let mut k2: Vec<int> = Vec::new();
+            let mut v2: Vec<Val> = Vec::new();
+            let mut a2: Vec<int> = Vec::new();
+            let mut j: usize = 0;
+            while j < keys.len() {
+                if keys[j] != tomb {
+                    k2.push(keys[j]);
+                    v2.push(vals[j].clone());
+                    a2.push(attrs[j]);
+                }
+                j += 1;
+            }
+            keys = k2;
+            vals = v2;
+            attrs = a2;
+        }
+        put_ints(&mut b, &keys);
+        put_vals(&mut b, &mut st, vm, &vals);
+        put_ints(&mut b, &attrs);
         put_vals(&mut b, &mut st, vm, &vm.evecs[o.elems as usize].v);
         let cold = &vm.colds[o.cold as usize];
         put_vals(&mut b, &mut st, vm, &cold.elems2);
@@ -297,10 +319,20 @@ pub fn snapshot(vm: &Vm) -> String {
         vm.priv_seq,
     ];
     put_ints(&mut b, &ints);
-    put_num(&mut b, vm.bigints.len() as int);
+    // both BigInt tables as text; restore sorts them again by size
+    put_num(&mut b, (vm.bigints.len() as int) + vm.bs_count);
     for (k, v) in vm.bigints.iter() {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
+    }
+    let mut j: usize = 0;
+    while j < vm.bs_vals.len() {
+        if vm.bs_vals[j] >= 0 {
+            let kt = crate::bigint::int_text(vm.bs_keys[j]);
+            put_num(&mut b, st.id(kt.as_str()));
+            put_num(&mut b, vm.bs_vals[j]);
+        }
+        j += 1;
     }
     put_ints(&mut b, &vm.roots);
     put_num(&mut b, vm.out.len() as int);
@@ -313,7 +345,8 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
     }
-    put_vals(&mut b, &mut st, vm, &vm.jobs);
+    put_vals(&mut b, &mut st, vm, &vm.pending_jobs());
+    put_num(&mut b, vm.del_count);
     // the regular expressions by their cache key ("source/flags"), in order
     let mut keys: Vec<String> = Vec::new();
     let mut i: usize = 0;
@@ -378,9 +411,19 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.atoms = HashMap::new();
+    vm.idx_pending = Vec::new();
+    vm.fa_tab = Vec::new();
+    vm.atom_hash = Vec::new();
+    vm.fa_seen = 0;
+    vm.fa_count = 0;
     vm.atom_names = Vec::new();
     vm.atom_cache = Vec::new();
+    vm.idx_keys = Vec::new();
+    vm.idx_vals = Vec::new();
+    vm.idx_count = 0;
+    vm.idx_seen = 0;
     vm.atom_vals = Vec::new();
+    vm.char_vals = Vec::new();
     let na = r.num();
     i = 0;
     while i < na && !r.bad {
@@ -594,6 +637,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.pcomp = ints[43] == 1;
     vm.priv_seq = ints[44];
     vm.bigints = HashMap::new();
+    vm.bs_keys = Vec::new();
+    vm.bs_vals = Vec::new();
+    vm.bs_count = 0;
     let nb = r.num();
     i = 0;
     while i < nb && !r.bad {
@@ -602,7 +648,12 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         if k == "0" {
             vm.big_zero = v;
         }
-        vm.bigints.insert(k, v);
+        let kn = crate::bigint::small_big_of(k.as_str());
+        if kn < crate::bigint::small_big_limit() {
+            vm.bs_put(kn as int, v);
+        } else {
+            vm.bigints.insert(k, v);
+        }
         i += 1;
     }
     vm.roots = get_ints(&mut r);
@@ -625,6 +676,8 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.jobs = get_vals(&mut r, &strs);
+    vm.job_head = 0;
+    vm.del_count = r.num();
     vm.regexes = Vec::new();
     vm.regex_cache = HashMap::new();
     vm.regex_shown = Vec::new();
@@ -694,6 +747,26 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         unpack_code(&mut vm.protos[f.proto as usize]);
     }
     vm.find_setters();
+    // a Map's or Set's string keys are found by text, made again here
+    let mut o: usize = 0;
+    while o < vm.objs.len() {
+        let class = vm.objs[o].class;
+        if class == C_MAP || class == C_SET {
+            let c = vm.objs[o].cold as usize;
+            let e = vm.objs[o].elems as usize;
+            let mut j: usize = 0;
+            while j < vm.evecs[e].v.len() && j < vm.colds[c].marks.len() {
+                if vm.colds[c].marks[j] == 0 {
+                    if let Val::Str(h) = &vm.evecs[e].v[j] {
+                        let t = vm.sget(*h).as_ref().clone();
+                        vm.colds[c].sindex.insert(t, j as int);
+                    }
+                }
+                j += 1;
+            }
+        }
+        o += 1;
+    }
     // the counts are not in the text: made again from the heap
     vm.recount();
     true

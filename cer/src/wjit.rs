@@ -748,6 +748,148 @@ struct Cg<'a> {
     /// in an inlined callee: where its this is, from the caller's sp
     /// (L_SSP), and whether it is strict
     inl_this: Option<(u32, bool)>,
+    /// by pc: an arithmetic op that never saw anything but numbers in the
+    /// interpreter (note_nonnum): written without a slow path, a check
+    /// that fails returns its pc (the frame is the interpreter's, so that
+    /// is the whole deoptimization) and the interpreter's slow path then
+    /// marks the site and sends the function back to be compiled again
+    spec: Vec<bool>,
+    /// by register: the f64 local (KN0 ..) that holds its number, -1 for
+    /// none; known since the block began (the registers in memory stay
+    /// written, so any exit leaves the frame right)
+    kn: Vec<i32>,
+    kn_regs: Vec<u32>,
+    kn_next: u32,
+    /// by register: its fixed local (KN0 ..) when it is one of the
+    /// registers whose numbers are kept across blocks (kn_plan), -1 else
+    kn_fix: Vec<i32>,
+}
+
+/// the f64 locals that keep registers known to be numbers (Cg.kn)
+const KN0: u32 = 25;
+const KN_N: u32 = 16;
+/// i32: 1 until the first block's start has run (the code was entered from
+/// outside, where the interpreter may have left anything in a register)
+const L_FRESH: u32 = 41;
+
+/// What an op does to the registers known to hold numbers (kn_plan and
+/// the code agree on it): Spec its speculated arithmetic (its operands and
+/// result known after it), Kill registers it may write, All when it may
+/// write any.
+enum KnFx {
+    Same,
+    Spec(i32, i32, i32),
+    Kill(i32, i32),
+    All,
+}
+
+/// The op's KnFx; `spec` says whether its pc speculates.
+fn kn_fx(ins: Op, spec: bool) -> KnFx {
+    let kind = (ins.code & 255) as int;
+    let sub = ((ins.code >> 8) & 255) as int;
+    if spec && ins.a >= 0 && (kind == R_ADD || kind == R_SUB || kind == R_MUL || (kind == R_ARITH && (sub == OP_SUB || sub == OP_MUL || sub == OP_DIV))) {
+        return KnFx::Spec(ins.a, ins.b, ins.c);
+    }
+    match kind {
+        R_NOP | R_JUMP | R_LOOP | R_JF | R_JT | R_CMP_JF | R_CMP_JT | R_CMP_JFK | R_CMP_JTK => KnFx::Same,
+        R_MOVE | R_GET_ELEM | R_GET_PROP | R_GET_THIS_PROP | R_GET_ENV | R_GET_GLOBAL | R_THIS | R_TYPEOF | R_NOT | R_TONUM | R_CMP | R_ADD | R_SUB | R_MUL | R_ARITH | R_SET_PROP | R_SET_ELEM | R_SET_ENV => KnFx::Kill(ins.a, ins.a + 1),
+        R_LOAD2 => KnFx::Kill(ins.a, ins.a + 1),
+        _ => KnFx::All,
+    }
+}
+
+/// The registers (at most KN_N) whose numbers are kept in fixed locals:
+/// those of the speculated arithmetic, most used first. Each block's set
+/// known on entry (a bit per kept register): what every jump or fall into
+/// it brings (a forward must-analysis); an entry from outside checks them
+/// (Cg::kn_block).
+fn kn_plan(code: &[Op], rtab: &[int], spec: &[bool], starts: &[bool], skip_to: &[usize], fsize: u32) -> (Vec<i32>, Vec<u32>) {
+    let n = code.len();
+    let mut uses = vec![0u32; fsize as usize + 2];
+    for (i, ins) in code.iter().enumerate() {
+        if let KnFx::Spec(d, x, y) = kn_fx(*ins, i < spec.len() && spec[i]) {
+            for r in [d, x, y] {
+                if r >= 0 && (r as usize) < uses.len() {
+                    uses[r as usize] += 1;
+                }
+            }
+        }
+    }
+    let mut regs: Vec<usize> = (0..uses.len()).filter(|r| uses[*r] > 0).collect();
+    regs.sort_by(|a, b| uses[*b].cmp(&uses[*a]));
+    regs.truncate(KN_N as usize);
+    let mut fix = vec![-1i32; uses.len()];
+    for (k, r) in regs.iter().enumerate() {
+        fix[*r] = k as i32;
+    }
+    let bit = |r: i32| -> u32 { if r >= 0 && (r as usize) < fix.len() && fix[r as usize] >= 0 { 1u32 << fix[r as usize] } else { 0 } };
+    let step = |set: u32, i: usize| -> u32 {
+        match kn_fx(code[i], i < spec.len() && spec[i]) {
+            KnFx::Same => set,
+            KnFx::Spec(d, x, y) => set | bit(d) | bit(x) | bit(y),
+            KnFx::Kill(a, b) => set & !bit(a) & !bit(b),
+            KnFx::All => 0,
+        }
+    };
+    // in[pc] for block starts; all bits until a path says otherwise
+    let full: u32 = if regs.is_empty() { 0 } else { u32::MAX };
+    let mut inb = vec![full; n];
+    if regs.is_empty() {
+        return (fix, vec![0; n]);
+    }
+    let mut changed = true;
+    let mut rounds = 0;
+    while changed && rounds < 64 {
+        changed = false;
+        rounds += 1;
+        let mut out: Vec<u32> = vec![full; n];
+        let mut seen = vec![false; n];
+        let mut set: u32 = 0;
+        let mut live = false;
+        for i in 0..n {
+            if starts[i] {
+                // the fall from the op before is one of its ways in
+                if live {
+                    out[i] &= set;
+                    seen[i] = true;
+                }
+                set = inb[i];
+                live = true;
+            }
+            if !live {
+                continue;
+            }
+            set = step(set, i);
+            let mut ts = Vec::new();
+            targets(code[i], i, rtab, &mut ts);
+            if skip_to[i] > 0 {
+                ts.push(skip_to[i]);
+            }
+            for t in ts {
+                if t < n {
+                    out[t] &= set;
+                    seen[t] = true;
+                }
+            }
+            let k = (code[i].code & 255) as int;
+            if k == R_JUMP || k == R_LOOP {
+                live = false;
+            }
+        }
+        for i in 0..n {
+            if starts[i] {
+                let v = if seen[i] { out[i] } else { 0 };
+                if v != inb[i] {
+                    inb[i] = v;
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        return (vec![-1i32; uses.len()], vec![0; n]);
+    }
+    (fix, inb)
 }
 
 /// A callee to write in place of its call (call_op): straight register
@@ -4993,6 +5135,181 @@ impl<'a> Cg<'a> {
         if MASK.with(|m| m.get()) & (1u64 << k) != 0 && (ins.code & 255) < 64 {
             return false;
         }
+        if self.inlining {
+            return self.one_op(pc, ins);
+        }
+        let kind = (ins.code & 255) as int;
+        let sub = ((ins.code >> 8) & 255) as int;
+        if pc < self.spec.len() && self.spec[pc] && ins.a >= 0 {
+            let code = match kind {
+                R_ADD => OP_ADD,
+                R_SUB => OP_SUB,
+                R_MUL => OP_MUL,
+                R_ARITH if sub == OP_SUB || sub == OP_MUL || sub == OP_DIV => sub,
+                _ => -1,
+            };
+            if code >= 0 {
+                return self.spec_arith(code, ins.a, ins.b, ins.c, pc as i64);
+            }
+        }
+        let wrote = self.one_op(pc, ins);
+        match kn_fx(ins, false) {
+            KnFx::Same | KnFx::Spec(_, _, _) => {}
+            KnFx::Kill(a, b) => {
+                for r in [a, b] {
+                    if r >= 0 {
+                        self.kn_forget(r as u32);
+                    }
+                }
+            }
+            KnFx::All => self.kn_clear(),
+        }
+        wrote
+    }
+
+    /// A block's start: the registers of `set` (kn_plan's bits) are known.
+    /// Entered from outside (L_FRESH), their tags are checked (a number
+    /// else back to the interpreter at pc) and their numbers loaded.
+    fn kn_block(&mut self, pc: usize, set: u32) {
+        self.kn_clear();
+        if set != 0 {
+            let mut regs: Vec<u32> = Vec::new();
+            for r in 0..self.kn_fix.len() {
+                let f = self.kn_fix[r];
+                if f >= 0 && set & (1u32 << (f as u32 - KN0)) != 0 {
+                    regs.push(r as u32);
+                }
+            }
+            self.get(L_FRESH);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            for r in regs.iter() {
+                let o = Opnd::Reg(*r);
+                self.tag(o);
+                let t = self.lay.t_num as i64;
+                self.i32c(t);
+                self.op(I32_NE);
+                self.exit_if(pc as i64);
+                self.num(o);
+                let f = self.kn_fix[*r as usize] as u32;
+                self.set(f);
+            }
+            self.extra -= 1;
+            self.op(END);
+            for r in regs.iter() {
+                self.kn[*r as usize] = self.kn_fix[*r as usize];
+                self.kn_regs.push(*r);
+            }
+        }
+        self.i32c(0);
+        self.set(L_FRESH);
+    }
+
+    /// nothing known about any register (Cg.kn)
+    fn kn_clear(&mut self) {
+        for r in self.kn_regs.iter() {
+            self.kn[*r as usize] = -1;
+        }
+        self.kn_regs.clear();
+    }
+    fn kn_forget(&mut self, r: u32) {
+        if (r as usize) < self.kn.len() && self.kn[r as usize] >= 0 {
+            self.kn[r as usize] = -1;
+            self.kn_regs.retain(|x| *x != r);
+        }
+    }
+    /// a local for register r's number from now on (the oldest one is
+    /// taken back when all are in use)
+    fn kn_take(&mut self, r: u32) -> u32 {
+        self.kn_forget(r);
+        if !self.kn_fix.is_empty() {
+            // fixed locals (kn_plan): a register without one is not kept
+            let f = if (r as usize) < self.kn_fix.len() { self.kn_fix[r as usize] } else { -1 };
+            if f < 0 {
+                return L_A;
+            }
+            self.kn[r as usize] = f;
+            self.kn_regs.push(r);
+            return f as u32;
+        }
+        let l = KN0 + self.kn_next % KN_N;
+        self.kn_next += 1;
+        if let Some(k) = self.kn_regs.iter().position(|x| self.kn[*x as usize] == l as i32) {
+            let old = self.kn_regs.remove(k);
+            self.kn[old as usize] = -1;
+        }
+        if (r as usize) < self.kn.len() {
+            self.kn[r as usize] = l as i32;
+            self.kn_regs.push(r);
+        }
+        l
+    }
+    /// an operand's number on the wasm stack, its tag checked unless it is
+    /// known (a failed check returns pc); a register read from memory is
+    /// known after this
+    fn spec_num(&mut self, o: Opnd, pc: i64) {
+        match o {
+            Opnd::Num(n) => {
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&n.to_le_bytes());
+            }
+            Opnd::K(_) => {
+                self.exit_at(pc);
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&0f64.to_le_bytes());
+            }
+            Opnd::Reg(r) => {
+                if (r as usize) < self.kn.len() && self.kn[r as usize] >= 0 {
+                    let l = self.kn[r as usize] as u32;
+                    self.get(l);
+                    return;
+                }
+                self.tag(o);
+                let t = self.lay.t_num as i64;
+                self.i32c(t);
+                self.op(I32_NE);
+                self.exit_if(pc);
+                self.num(o);
+                if (r as usize) < self.kn.len() {
+                    let l = self.kn_take(r);
+                    self.w.byte(LOCAL_TEE);
+                    self.w.u(l as u64);
+                }
+            }
+        }
+    }
+    /// A speculated + - * /: numbers or back to the interpreter at pc; the
+    /// result is written to its register and kept known.
+    fn spec_arith(&mut self, code: int, dst: i32, x: i32, y: i32, pc: i64) -> bool {
+        let fop = match code {
+            OP_ADD => F64_ADD,
+            OP_SUB => F64_SUB,
+            OP_MUL => F64_MUL,
+            _ => F64_DIV,
+        };
+        let a = self.opnd(x);
+        let b = self.opnd(y);
+        self.spec_num(a, pc);
+        self.spec_num(b, pc);
+        self.op(fop);
+        // a register known to hold a number has its tag in memory already
+        let was = (dst as usize) < self.kn.len() && self.kn[dst as usize] >= 0;
+        let l = self.kn_take(dst as u32);
+        self.set(l);
+        if was {
+            self.get(L_SP);
+            self.get(l);
+            let on = self.lay.off_num;
+            self.mem(F64_STORE, 3, dst as u32 * 16 + on);
+        } else {
+            self.store_num(dst as u32, l);
+        }
+        true
+    }
+
+    /// One op as it is written without speculation.
+    fn one_op(&mut self, pc: usize, ins: Op) -> bool {
         let w0 = ins.code;
         let (w1, w2, w3) = (ins.a, ins.b, ins.c);
         let kind = (w0 & 255) as int;
@@ -5501,6 +5818,30 @@ impl<'a> Cg<'a> {
                 self.op(END);
                 true
             }
+            R_JNN_KEEP if sub == 1 => {
+                // `x?.`: undefined or null becomes undefined, and jumps
+                if w1 < 0 {
+                    return false;
+                }
+                let o = self.raw(w1);
+                self.tag(o);
+                self.set(L_TAG);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_undef as i64);
+                self.op(I32_EQ);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_null as i64);
+                self.op(I32_EQ);
+                self.op(I32_OR);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.store_undef(w1 as u32);
+                self.jump(w2 as i64, (w2 as i64) <= p);
+                self.extra -= 1;
+                self.op(END);
+                true
+            }
             R_JNN_KEEP => {
                 // not null or undefined: jump
                 let o = self.raw(w1);
@@ -5858,7 +6199,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], pics: &[i32], atoms: &[i32], fsize: u32, inl: Vec<Option<Inl>>) -> Option<Compiled> {
+pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], pics: &[i32], atoms: &[i32], fsize: u32, inl: Vec<Option<Inl>>, spec: &[bool]) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -5923,6 +6264,7 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
     }
     let blocks: Vec<usize> = (0..n).filter(|i| starts[*i]).collect();
     let nb = blocks.len() as u32;
+    let (kn_fix, kn_in) = kn_plan(code, rtab, spec, &starts, &skip_to, fsize);
     let mut cg = Cg {
         w: WBuf::new(),
         lay,
@@ -5946,10 +6288,15 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
         inlining: false,
         inl_bad: false,
         inl_this: None,
+        spec: spec.to_vec(),
+        kn: vec![-1; fsize as usize + 2],
+        kn_regs: Vec::new(),
+        kn_next: 0,
+        kn_fix: kn_fix.iter().map(|k| if *k >= 0 { KN0 as i32 + *k } else { -1 }).collect(),
     };
     // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c,
-    // t2..t6, ssp, sbp, senv (i32)
-    cg.w.u(4);
+    // t2..t6, ssp, sbp, senv (i32); KN_N f64 from KN0
+    cg.w.u(6);
     cg.w.u(3);
     cg.w.byte(T_I32);
     cg.w.u(2);
@@ -5958,8 +6305,14 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
     cg.w.byte(T_I64);
     cg.w.u(10);
     cg.w.byte(T_I32);
+    cg.w.u(KN_N as u64);
+    cg.w.byte(T_F64);
+    cg.w.u(1);
+    cg.w.byte(T_I32);
     cg.get(L_KEY);
     cg.set(L_ENTRY);
+    cg.i32c(1);
+    cg.set(L_FRESH);
     // loop $L / block $exit / block b_{nb-1} .. b_0
     cg.op(LOOP);
     cg.op(T_VOID);
@@ -5990,6 +6343,9 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
         let stop = if k + 1 < blocks.len() { blocks[k + 1] } else { n };
         let mut pc = start;
         let mut open = true;
+        // what every way into the block brings (kn_plan); an entry from
+        // outside checks it
+        cg.kn_block(start, kn_in[start]);
         while pc < stop {
             let ins = code[pc];
             let b0 = cg.w.b.len();
@@ -6203,6 +6559,11 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
         inlining: false,
         inl_bad: false,
         inl_this: None,
+        spec: Vec::new(),
+        kn: Vec::new(),
+        kn_regs: Vec::new(),
+        kn_next: 0,
+        kn_fix: Vec::new(),
     };
     let hs = cg.hstore_body();
     let cx = cg.callx_body();
@@ -6866,8 +7227,16 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         if rb + n <= vm.rcode.len() {
             let name = format!("{}#{}", p.name, pi);
             let inl = inline_sites(vm, pi, rb, n);
+            // the arithmetic sites to speculate on: none in a function
+            // whose speculation failed too often, else the ones that have
+            // seen only numbers (debug: mask bit 42 off)
+            let spec: Vec<bool> = with_state(vm, |st| {
+                let fails = st.spec_fails.get(pi).cloned().unwrap_or(0);
+                let on = fails < SPEC_FAILS_MAX && MASK.with(|m| m.get()) & (1u64 << 42) == 0;
+                (0..n).map(|i| on && !st.nonnum.get(rb + i).cloned().unwrap_or(false)).collect()
+            });
             let p = &vm.protos[pi];
-            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &pics, &atoms, p.fsize as u32, inl) {
+            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &pics, &atoms, p.fsize as u32, inl, &spec) {
                 f = PENDING;
                 let full = with_state(vm, |st| {
                     let t = &mut st.batch;
@@ -6928,6 +7297,83 @@ struct VmJit {
     id: i64,
     batch: Batch,
     mods: Mods,
+    /// by function: how often its speculation failed (spec_failed)
+    spec_fails: Vec<u8>,
+    /// by rcode index: an arithmetic op whose slow path has run (an
+    /// operand that was not a number): not speculated (note_nonnum)
+    nonnum: Vec<bool>,
+}
+
+/// a function whose speculation failed this often is compiled without
+const SPEC_FAILS_MAX: u8 = 4;
+
+/// The interpreter's slow path ran for the arithmetic op at rcode index
+/// ri of function pi (Vm::note_nonnum): the site is not speculated from
+/// now on, and code that speculated on it goes (spec_failed).
+pub fn note_nonnum(vm: &mut crate::vm::Vm, pi: usize, ri: usize) {
+    let first = with_state(vm, |st| {
+        if ri < st.nonnum.len() && st.nonnum[ri] {
+            return false;
+        }
+        if st.nonnum.len() <= ri {
+            st.nonnum.resize(ri + 1, false);
+        }
+        st.nonnum[ri] = true;
+        true
+    });
+    if first {
+        spec_failed(vm, pi);
+    }
+}
+
+/// Function pi's code speculated that an arithmetic site sees numbers and
+/// it did not (Vm::note_nonnum): a function waiting for its batch leaves
+/// it, a compiled one's module goes (evict, not counted against
+/// EVICT_MAX); either is compiled again once hot, without that site.
+pub fn spec_failed(vm: &mut crate::vm::Vm, pi: usize) {
+    if pi >= vm.jit_fn.len() || vm.jit_id == 0 {
+        return;
+    }
+    let f = vm.jit_fn[pi];
+    if f == PENDING {
+        with_state(vm, |st| {
+            if let Some(k) = st.batch.items.iter().position(|q| q.pi == pi) {
+                let q = st.batch.items.remove(k);
+                st.batch.bytes -= q.c.bytes.len();
+            }
+            if st.spec_fails.len() <= pi {
+                st.spec_fails.resize(pi + 1, 0);
+            }
+            st.spec_fails[pi] = st.spec_fails[pi].saturating_add(1);
+        });
+        vm.jit_fn[pi] = -1;
+        if pi < vm.jit_hot.len() {
+            vm.jit_hot[pi] = 0;
+        }
+        return;
+    }
+    if f < 0 {
+        return;
+    }
+    let m = with_state(vm, |st| {
+        if st.spec_fails.len() <= pi {
+            st.spec_fails.resize(pi + 1, 0);
+        }
+        st.spec_fails[pi] = st.spec_fails[pi].saturating_add(1);
+        let ms = &mut st.mods;
+        match ms.list.iter().position(|m| f >= m.base && f < m.base + m.pis.len() as i64) {
+            Some(k) => {
+                let m = ms.list.remove(k);
+                ms.bytes -= m.bytes;
+                Some(m)
+            }
+            None => None,
+        }
+    });
+    if let Some(m) = m {
+        let mut none: Vec<u8> = Vec::new();
+        evict_as(vm, &m, &mut none, false);
+    }
 }
 
 thread_local! {
@@ -7085,16 +7531,23 @@ thread_local! {
 /// `gone`, their records and the call sites' records that name them are
 /// cleared, and each must get hot again before it is compiled again.
 fn evict(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>) {
+    evict_as(vm, m, counts, true);
+}
+
+/// evict, counting each function's evictions (EVICT_MAX) when `count`
+fn evict_as(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>, count: bool) {
     let n = m.pis.len() as i64;
     host::drop_slots(m.base as i32, n as i32);
     let mine = |f: i64| f >= m.base && f < m.base + n;
     for &pi in m.pis.iter() {
         if pi < vm.jit_fn.len() && mine(vm.jit_fn[pi]) {
-            if counts.len() <= pi {
-                counts.resize(pi + 1, 0);
+            if count {
+                if counts.len() <= pi {
+                    counts.resize(pi + 1, 0);
+                }
+                counts[pi] = counts[pi].saturating_add(1);
             }
-            counts[pi] = counts[pi].saturating_add(1);
-            vm.jit_fn[pi] = if counts[pi] >= EVICT_MAX { -2 } else { -1 };
+            vm.jit_fn[pi] = if count && counts[pi] >= EVICT_MAX { -2 } else { -1 };
             calls_fill(vm, pi, -1);
             if pi < vm.jit_hot.len() {
                 vm.jit_hot[pi] = 0;
@@ -7746,6 +8199,8 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                         OP_SHL => crate::vm::wrap32(p << (q & 31)) as double,
                         _ => (p >> (q & 31)) as double,
                     }
+                } else if code >= OP_BAND && code <= OP_USHR {
+                    crate::rvm::bit_num(code, a, b)
                 } else {
                     crate::vm::arith_num(code, a, b)
                 };

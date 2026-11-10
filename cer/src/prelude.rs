@@ -624,13 +624,15 @@ var nativeThen = PP.then;
 var isPromiseObj = globalThis.__isPromise;
 delete globalThis.__isPromise;
 function isPromise(x) { return isPromiseObj(x); }
+var SymSpecies = Symbol.species;
 function speciesOf(o, d) {
   var C = o.constructor;
   if (C === undefined) return d;
-  if (!isObject(C)) throw new TypeError('object.constructor is not an object');
-  var S = C[Symbol.species];
+  var tc = typeof C;
+  if (tc !== 'function' && (tc !== 'object' || C === null)) throw new TypeError('object.constructor is not an object');
+  var S = C[SymSpecies];
   if (S === undefined || S === null) return d;
-  if (isCallable(S)) return S;
+  if (typeof S === 'function') return S;
   throw new TypeError('object.constructor[Symbol.species] is not a constructor');
 }
 function capability(C) {
@@ -806,7 +808,7 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
   function speciesCreate(o, n) {
     if (!isArray(o)) return arrayCreate(n);
     var C = o.constructor;
-    if (isObject(C)) { C = C[Symbol.species]; if (C === null) C = undefined; }
+    if (isObject(C)) { C = C[SymSpecies]; if (C === null) C = undefined; }
     if (C === undefined) return arrayCreate(n);
     if (!isConstructor(C)) throw new TypeError('object.constructor[Symbol.species] is not a constructor');
     return new C(n);
@@ -1060,9 +1062,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
 // ---- ArrayBuffer, SharedArrayBuffer, the typed arrays, DataView, Atomics:
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
-var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast;
+var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, dvMethod = globalThis.__dvMethod, fastWrap = globalThis.__fastWrap, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew, taSort = globalThis.__taSort;
 var bufMax = globalThis.__bufMax, bufResize = globalThis.__bufResize;
-['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
+['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__dvMethod', '__fastWrap', '__taKind', '__taSub', '__taNew', '__taSort', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
 function toIndex(v, what) {
   if (v === undefined) return 0;
   var n = toIntegerOrInfinity(v);
@@ -1104,16 +1106,21 @@ function allocBuffer(nt, dflt, n, max, shared) {
   if (max !== undefined && n > max) throw new RangeError('Invalid array buffer length: ' + n + ' is larger than maxByteLength ' + max);
   return bufNew(n, protoFrom(nt, dflt), shared, max);
 }
-function ArrayBuffer(length) {
+// options as a parameter (length 1 set below): `arguments` would make an
+// arguments object on every construction
+function ArrayBuffer(length, options) {
   if (new.target === undefined) throw new TypeError("Constructor ArrayBuffer requires 'new'");
+  if (options === undefined && new.target === ArrayBuffer && typeof length === 'number' && length >= 0 && length <= 2147483647 && length === (length | 0)) return bufNew(length, ArrayBuffer.prototype, false, undefined);
   var n = toIndex(length, 'array buffer length');
-  return allocBuffer(new.target, ArrayBuffer.prototype, n, maxLengthOption(arguments[1]), false);
+  return allocBuffer(new.target, ArrayBuffer.prototype, n, maxLengthOption(options), false);
 }
-function SharedArrayBuffer(length) {
+function SharedArrayBuffer(length, options) {
   if (new.target === undefined) throw new TypeError("Constructor SharedArrayBuffer requires 'new'");
   var n = toIndex(length, 'array buffer length');
-  return allocBuffer(new.target, SharedArrayBuffer.prototype, n, maxLengthOption(arguments[1]), true);
+  return allocBuffer(new.target, SharedArrayBuffer.prototype, n, maxLengthOption(options), true);
 }
+defineProperty(ArrayBuffer, 'length', { value: 1, writable: false, enumerable: false, configurable: true });
+defineProperty(SharedArrayBuffer, 'length', { value: 1, writable: false, enumerable: false, configurable: true });
 function bufferSlice(Default, shared, name) {
   return function slice(start, end) {
     var len = bufLength(this, shared, name + '.prototype.slice');
@@ -1201,8 +1208,9 @@ function construct(kind, nt, a, b, c) {
   var size = SIZES[kind];
   var proto = protoFrom(nt, CTORS[kind].prototype);
   if (!isObject(a)) {
+    if (typeof a === 'number') { var t0 = taNew(kind, a, proto, ArrayBuffer.prototype); if (t0 !== undefined) return t0; }
     var n = toIndex(a, 'typed array length');
-    return taMake(kind, bufNew(n * size, ArrayBuffer.prototype, false), 0, n, proto);
+    return taMake(kind, bufNew(n * size, ArrayBuffer.prototype, false, undefined, kind), 0, n, proto);
   }
   var bi = bufInfo(a);
   if (bi !== -1) {
@@ -1236,7 +1244,7 @@ function construct(kind, nt, a, b, c) {
     }
   }
   var count = toLength(src.length);
-  var t = taMake(kind, bufNew(count * size, ArrayBuffer.prototype, false), 0, count, proto);
+  var t = taMake(kind, bufNew(count * size, ArrayBuffer.prototype, false, undefined, kind), 0, count, proto);
   for (var i = 0; i < count; i++) t[i] = src[i];
   return t;
 }
@@ -1248,19 +1256,23 @@ function defineTA(kind, C) {
   defineProperty(C, 'BYTES_PER_ELEMENT', { value: SIZES[kind], writable: false, enumerable: false, configurable: false });
   defineProperty(C.prototype, 'BYTES_PER_ELEMENT', { value: SIZES[kind], writable: false, enumerable: false, configurable: false });
   hide(globalThis, KINDS[kind], C);
+  TA_PROTOS[kind] = C.prototype;
 }
-defineTA(0, function Int8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int8Array requires 'new'"); return construct(0, new.target, a, b, c); });
-defineTA(1, function Uint8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8Array requires 'new'"); return construct(1, new.target, a, b, c); });
-defineTA(2, function Uint8ClampedArray(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8ClampedArray requires 'new'"); return construct(2, new.target, a, b, c); });
-defineTA(3, function Int16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int16Array requires 'new'"); return construct(3, new.target, a, b, c); });
-defineTA(4, function Uint16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint16Array requires 'new'"); return construct(4, new.target, a, b, c); });
-defineTA(5, function Int32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int32Array requires 'new'"); return construct(5, new.target, a, b, c); });
-defineTA(6, function Uint32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint32Array requires 'new'"); return construct(6, new.target, a, b, c); });
-defineTA(7, function Float32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float32Array requires 'new'"); return construct(7, new.target, a, b, c); });
-defineTA(8, function Float64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float64Array requires 'new'"); return construct(8, new.target, a, b, c); });
-defineTA(9, function BigInt64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigInt64Array requires 'new'"); return construct(9, new.target, a, b, c); });
-defineTA(10, function BigUint64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigUint64Array requires 'new'"); return construct(10, new.target, a, b, c); });
-defineTA(11, function Float16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float16Array requires 'new'"); return construct(11, new.target, a, b, c); });
+// new Uint8Array(n) and the like with the constructor itself: straight to
+// the native (prototypes fixed, non-writable)
+var TA_PROTOS = [], ABUF_PROTO = ArrayBuffer.prototype;
+defineTA(0, function Int8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int8Array requires 'new'"); if (typeof a === 'number' && new.target === Int8Array) { var t = taNew(0, a, TA_PROTOS[0], ABUF_PROTO); if (t !== undefined) return t; } return construct(0, new.target, a, b, c); });
+defineTA(1, function Uint8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8Array requires 'new'"); if (typeof a === 'number' && new.target === Uint8Array) { var t = taNew(1, a, TA_PROTOS[1], ABUF_PROTO); if (t !== undefined) return t; } return construct(1, new.target, a, b, c); });
+defineTA(2, function Uint8ClampedArray(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8ClampedArray requires 'new'"); if (typeof a === 'number' && new.target === Uint8ClampedArray) { var t = taNew(2, a, TA_PROTOS[2], ABUF_PROTO); if (t !== undefined) return t; } return construct(2, new.target, a, b, c); });
+defineTA(3, function Int16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int16Array requires 'new'"); if (typeof a === 'number' && new.target === Int16Array) { var t = taNew(3, a, TA_PROTOS[3], ABUF_PROTO); if (t !== undefined) return t; } return construct(3, new.target, a, b, c); });
+defineTA(4, function Uint16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint16Array requires 'new'"); if (typeof a === 'number' && new.target === Uint16Array) { var t = taNew(4, a, TA_PROTOS[4], ABUF_PROTO); if (t !== undefined) return t; } return construct(4, new.target, a, b, c); });
+defineTA(5, function Int32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int32Array requires 'new'"); if (typeof a === 'number' && new.target === Int32Array) { var t = taNew(5, a, TA_PROTOS[5], ABUF_PROTO); if (t !== undefined) return t; } return construct(5, new.target, a, b, c); });
+defineTA(6, function Uint32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint32Array requires 'new'"); if (typeof a === 'number' && new.target === Uint32Array) { var t = taNew(6, a, TA_PROTOS[6], ABUF_PROTO); if (t !== undefined) return t; } return construct(6, new.target, a, b, c); });
+defineTA(7, function Float32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float32Array requires 'new'"); if (typeof a === 'number' && new.target === Float32Array) { var t = taNew(7, a, TA_PROTOS[7], ABUF_PROTO); if (t !== undefined) return t; } return construct(7, new.target, a, b, c); });
+defineTA(8, function Float64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float64Array requires 'new'"); if (typeof a === 'number' && new.target === Float64Array) { var t = taNew(8, a, TA_PROTOS[8], ABUF_PROTO); if (t !== undefined) return t; } return construct(8, new.target, a, b, c); });
+defineTA(9, function BigInt64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigInt64Array requires 'new'"); if (typeof a === 'number' && new.target === BigInt64Array) { var t = taNew(9, a, TA_PROTOS[9], ABUF_PROTO); if (t !== undefined) return t; } return construct(9, new.target, a, b, c); });
+defineTA(10, function BigUint64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigUint64Array requires 'new'"); if (typeof a === 'number' && new.target === BigUint64Array) { var t = taNew(10, a, TA_PROTOS[10], ABUF_PROTO); if (t !== undefined) return t; } return construct(10, new.target, a, b, c); });
+defineTA(11, function Float16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float16Array requires 'new'"); if (typeof a === 'number' && new.target === Float16Array) { var t = taNew(11, a, TA_PROTOS[11], ABUF_PROTO); if (t !== undefined) return t; } return construct(11, new.target, a, b, c); });
 var f16cell = new Float16Array(1);
 hide(Math, 'f16round', function f16round(x) { f16cell[0] = x; return f16cell[0]; });
 getter(TypedArray, Symbol.species, speciesSelf);
@@ -1426,11 +1438,19 @@ function sortedValues(o, cmp, what) {
   return vals;
 }
 hide(TAP, 'sort', function sort(cmp) {
+  if (cmp === undefined && taSort(this)) return this;
   var vals = sortedValues(this, cmp, 'TypedArray.prototype.sort');
   for (var i = 0; i < vals.length; i++) this[i] = vals[i];
   return this;
 });
 hide(TAP, 'subarray', function subarray(start, end) {
+  // the default species and number bounds: native (the order of the
+  // steps is not observable then)
+  var k = taKind(this);
+  if (k >= 0 && (start === undefined || typeof start === 'number') && (end === undefined || typeof end === 'number')) {
+    var D = CTORS[k];
+    if (speciesOf(this, D) === D) { var r = taSub(this, start, end, D.prototype); if (r !== undefined) return r; }
+  }
   var info = taOf(this, 'TypedArray.prototype.subarray'); var n = info[3];
   var s = relIndex(start, n, 0);
   if (info[5] && end === undefined) return speciesCreate(this, [info[1], info[2] + s * SIZES[info[0]]]);
@@ -1490,6 +1510,7 @@ function DataView(buffer, byteOffset, byteLength) {
   if (off > blen) throw new RangeError('Start offset ' + off + ' is outside the bounds of the buffer');
   if (byteLength !== undefined && off + n > blen) throw new RangeError('Invalid DataView length ' + n);
   dvData.set(o, [buffer, off, tracking ? -1 : n]);
+  dvMake(o, buffer, off, tracking ? -1 : n);
   return o;
 }
 // the view's byte length; -1 when out of bounds or detached
@@ -1509,22 +1530,20 @@ getter(DVP, 'byteOffset', function () { var d = dv(this, 'DataView.prototype.byt
 tag(DVP, 'DataView');
 ['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64', 'BigInt64', 'BigUint64', 'Float16'].forEach(function (name, kind) {
   if (!name) return;
-  hide(DVP, 'get' + name, function (index, little) {
+  hide(DVP, 'get' + name, dvMethod(kind, function (index, little) {
     var d = dv(this, 'DataView.prototype.get' + name); var i = toIndex(index, 'offset');
     var n = dvLength(d);
     if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.get' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
     if (i + SIZES[kind] > n) throw new RangeError('Offset is outside the bounds of the DataView');
     return bufGet(d[0], d[1] + i, kind, !!little);
-  });
-  hide(DVP, 'set' + name, function (index, value, little) {
+  }, false, 'get' + name, 1));
+  hide(DVP, 'set' + name, dvMethod(kind, function (index, value, little) {
     var d = dv(this, 'DataView.prototype.set' + name); var i = toIndex(index, 'offset'); var x = elemOf(kind)(value);
     var n = dvLength(d);
     if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.set' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
     if (i + SIZES[kind] > n) throw new RangeError('Offset is outside the bounds of the DataView');
     bufSet(d[0], d[1] + i, kind, x, !!little);
-  });
-  setLength(DVP['get' + name], 1);
-  setLength(DVP['set' + name], 2);
+  }, true, 'set' + name, 2));
 });
 hide(globalThis, 'DataView', DataView);
 
@@ -2089,7 +2108,7 @@ function arraySpecies(o, n) {
   if (!Array.isArray(o)) return null;
   var C = o.constructor;
   if (C === Array) return null;
-  if (isObject(C)) { C = C[Symbol.species]; if (C === null) C = undefined; }
+  if (isObject(C)) { C = C[SymSpecies]; if (C === null) C = undefined; }
   if (C === undefined || C === Array) return null;
   if (!isCallable(C)) throw new TypeError('object.constructor[Symbol.species] is not a constructor');
   return new C(n);
@@ -2110,7 +2129,10 @@ function arrayThis(t) {
 hide(AP, 'forEach', setLength(function forEach(f, t) {
   var o = arrayThis(this), n = toLength(o.length);
   if (typeof f !== 'function') throw new TypeError('callback is not a function');
-  for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
+  // no thisArg: a plain call, which passes undefined as `this` the same
+  // way and runs in the caller's loop (call() goes through a native)
+  if (t === undefined) { for (var i = 0; i < n; i++) if (i in o) f(o[i], i, o); }
+  else for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
 }, 1));
 hide(AP, 'map', setLength(function map(f, t) {
   var o = arrayThis(this), n = toLength(o.length);
@@ -2119,19 +2141,23 @@ hide(AP, 'map', setLength(function map(f, t) {
   if (plain) A = new Array(n);
   for (var i = 0; i < n; i++) {
     if (i in o) {
-      var v = fcall.call(f, t, o[i], i, o);
+      var v = t === undefined ? f(o[i], i, o) : fcall.call(f, t, o[i], i, o);
       if (plain) A[i] = v; else defineProperty(A, i, { value: v, writable: true, enumerable: true, configurable: true });
     }
   }
   return A;
 }, 1));
 var nativeFrom = Array.from, nativeOf = Array.of;
+var fromSetValues = Set.prototype.values, fromMapEntries = Map.prototype.entries, fromStrIter = String.prototype[Symbol.iterator];
 hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
   var C = this;
   if (mapFn !== undefined && !isCallable(mapFn)) throw new TypeError(String(mapFn) + ' is not a function');
   var iter = items === undefined || items === null ? undefined : items[Symbol.iterator];
   if (C === Array && Array.isArray(items) && iter === AP.values && mapFn === undefined) return nativeFrom.call(Array, items);
   var ctor = isCallable(C) && C !== Array;
+  // a Set, a Map or a string with its own iterator, into a plain array:
+  // the native spread (no user code runs while it iterates)
+  if (!ctor && mapFn === undefined && iter !== undefined && ((iter === fromSetValues && items instanceof Set) || (iter === fromMapEntries && items instanceof Map) || (typeof items === 'string' && iter === fromStrIter))) return nativeFrom.call(Array, items);
   var A, k = 0;
   if (iter !== undefined && iter !== null) {
     if (!isCallable(iter)) throw new TypeError('Symbol.iterator is not a function');
@@ -2145,7 +2171,7 @@ hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
         try { v = mapFn.call(thisArg, v, k); }
         catch (e) { if (isCallable(it.return)) { try { it.return(); } catch (e2) {} } throw e; }
       }
-      defineProperty(A, k, { value: v, writable: true, enumerable: true, configurable: true });
+      if (ctor) defineProperty(A, k, { value: v, writable: true, enumerable: true, configurable: true }); else A[k] = v;
       k++;
     }
     A.length = k;
@@ -2155,7 +2181,7 @@ hide(Array, 'from', setLength(function from(items, mapFn, thisArg) {
   A = ctor ? new C(len) : new Array(len);
   for (; k < len; k++) {
     var x = mapFn ? mapFn.call(thisArg, src[k], k) : src[k];
-    defineProperty(A, k, { value: x, writable: true, enumerable: true, configurable: true });
+    if (ctor) defineProperty(A, k, { value: x, writable: true, enumerable: true, configurable: true }); else A[k] = x;
   }
   A.length = len;
   return A;
@@ -2430,8 +2456,8 @@ hide(SP, 'matchAll', setLength(named0(function matchAll(x) {
     }
     return nat.call(this, x, y);
   };
-  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
-  hide(SP, name, setLength(f, e[3]));
+  // a native for a string and text operands (fast_wrap), f for the rest
+  hide(SP, name, fastWrap(nat, f, name, e[3]));
 });
 function isRegExpLike(x) {
   if (!isObject(x)) return false;
@@ -2439,17 +2465,7 @@ function isRegExpLike(x) {
   if (m !== undefined) return !!m;
   return x instanceof RegExp;
 }
-['startsWith', 'endsWith', 'includes'].forEach(function (name) {
-  var nat = SP[name];
-  var f = function (s, pos) {
-    'use strict';
-    if (this === undefined || this === null) throw new TypeError('String.prototype.' + name + ' called on null or undefined');
-    if (isRegExpLike(s)) throw new TypeError('First argument to String.prototype.' + name + ' must not be a regular expression');
-    return nat.call(this, isObject(s) ? String(s) : s, pos);
-  };
-  defineProperty(f, 'name', { value: name, writable: false, enumerable: false, configurable: true });
-  hide(SP, name, setLength(f, 1));
-});
+// startsWith, endsWith and includes are the natives: they do IsRegExp
 
 // ---- smaller pieces: unscopables, Date's @@toPrimitive, Number.parseFloat,
 // the Annex B String HTML methods, RegExp flags and RegExp.escape
@@ -2709,8 +2725,12 @@ if (typeof BigInt === 'function') hide(BigInt.prototype, 'toLocaleString', funct
 });
 hide(String.prototype, 'localeCompare', function localeCompare(that, locales, options) {
   'use strict';
+  if (locales === undefined && options === undefined) {
+    if (typeof this === 'string' && typeof that === 'string') return intlCollate(this, that, '', 3);
+    if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
+    return intlCollate(String(this), String(that), '', 3);
+  }
   if (this === null || this === undefined) throw new TypeError('String.prototype.localeCompare called on null or undefined');
-  if (locales === undefined && options === undefined) return intlCollate(String(this), String(that), '', 3);
   return intl().collate(String(this), String(that), locales, options);
 });
 hide(DP, 'toLocaleString', function toLocaleString(locales, options) { return intl().dateLocale(this, locales, options, 'all'); });

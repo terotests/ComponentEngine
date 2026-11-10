@@ -312,7 +312,7 @@ impl Vm {
             NF_AP_TOSTRING => {
                 let o = self.this_array(&this);
                 if self.objs[o as usize].class != C_ARRAY {
-                    let jf = self.get(&this, self.atoms["join"]);
+                    let jf = self.get(&this, self.atom_lookup("join"));
                     if self.is_callable(&jf) {
                         return self.call_fixed(jf, this.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                     }
@@ -389,6 +389,26 @@ impl Vm {
                 let mut i = self.rel_index(&a1, len, 0);
                 if self.throwing {
                     return Val::Undef;
+                }
+                // a number in a plain array: the elements compared in place
+                if plain && i >= 0 {
+                    if let Val::Num(x) = a0 {
+                        if x == x {
+                            let e = self.objs[o as usize].elems as usize;
+                            let n = self.evecs[e].v.len() as int;
+                            let end = if n < len { n } else { len };
+                            let mut k = i;
+                            while k < end {
+                                if let Val::Num(y) = self.evecs[e].v[k as usize] {
+                                    if y == x {
+                                        return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(k as double) };
+                                    }
+                                }
+                                k += 1;
+                            }
+                            i = if end > i { end } else { i };
+                        }
+                    }
                 }
                 while i < len {
                     let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
@@ -749,6 +769,36 @@ impl Vm {
                 }
             },
             NF_SP_CHARAT | NF_SP_CHARCODEAT | NF_SP_CODEPOINTAT | NF_SP_AT => {
+                // an ASCII string value: the unit off its handle (no copy
+                // of a prefix, no scan of a string that grew in place)
+                if let (Val::Str(h), Val::Num(x)) = (this, a0) {
+                    let mut i = to_integer(x);
+                    if id == NF_SP_AT && i < 0.0 {
+                        i += self.hlen(h) as double;
+                    }
+                    let c = if i < 0.0 || i > 4294967295.0 { -1 } else { self.hunit(h, i as int) };
+                    if c != -2 {
+                        return match id {
+                            NF_SP_CHARAT => {
+                                if c < 0 {
+                                    self.str_val("")
+                                } else {
+                                    self.unit_val(c)
+                                }
+                            }
+                            NF_SP_CHARCODEAT => Val::Num(if c < 0 { nan() } else { c as double }),
+                            _ => {
+                                if c < 0 {
+                                    Val::Undef
+                                } else if id == NF_SP_AT {
+                                    self.unit_val(c)
+                                } else {
+                                    Val::Num(c as double)
+                                }
+                            }
+                        };
+                    }
+                }
                 let s = self.this_str(&this);
                 if self.throwing {
                     return Val::Undef;
@@ -763,14 +813,14 @@ impl Vm {
                         if c < 0 {
                             self.str_val("")
                         } else {
-                            self.string_val(jsstr::from_unit(c))
+                            self.unit_val(c)
                         }
                     }
                     NF_SP_AT => {
                         if c < 0 {
                             Val::Undef
                         } else {
-                            self.string_val(jsstr::from_unit(c))
+                            self.unit_val(c)
                         }
                     }
                     NF_SP_CHARCODEAT => Val::Num(if c < 0 { nan() } else { c as double }),
@@ -793,11 +843,28 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef;
                 }
-                if (id == NF_SP_INCLUDES || id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && self.class_of(&a0) == C_REGEXP {
-                    self.throw_type("First argument must not be a regular expression");
-                    return Val::Undef;
+                if (id == NF_SP_INCLUDES || id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && is_obj(&a0) {
+                    // IsRegExp: Symbol.match when set, else the internal slot
+                    let am = self.intern("@@match");
+                    let m = self.get(&a0, am);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    let is_re = if matches!(m, Val::Undef) { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
+                    if is_re {
+                        let what = if id == NF_SP_INCLUDES { "includes" } else if id == NF_SP_STARTSWITH { "startsWith" } else { "endsWith" };
+                        self.throw_type(format!("First argument to String.prototype.{} must not be a regular expression", what).as_str());
+                        return Val::Undef;
+                    }
                 }
                 let p = self.to_str(&a0);
+                if (id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && matches!(a1, Val::Undef) {
+                    // no position: an ASCII text compared as bytes
+                    let q = ascii_affix(s.as_str(), p.as_str(), id == NF_SP_ENDSWITH);
+                    if q >= 0 {
+                        return Val::Bool(q == 1);
+                    }
+                }
                 let len = self.str_len(&s);
                 match id {
                     NF_SP_INDEXOF => {
@@ -836,6 +903,9 @@ impl Vm {
                 let len = self.str_len(&s);
                 let a = self.rel_index(&a0, len, 0);
                 let b = self.rel_index(&a1, len, len);
+                if a <= 0 && b >= len {
+                    return self.same_str_val(&this, s);
+                }
                 { let tw2 = self.str_slice(&s, a, b); self.string_val(tw2) }
             }
             NF_SP_SUBSTRING => {
@@ -846,6 +916,9 @@ impl Vm {
                 let len = self.str_len(&s);
                 let a = self.rel_index_pos(&a0, len, 0);
                 let b = self.rel_index_pos(&a1, len, len);
+                if (a <= 0 && b >= len) || (b <= 0 && a >= len) {
+                    return self.same_str_val(&this, s);
+                }
                 if a < b {
                     { let tw3 = self.str_slice(&s, a, b); self.string_val(tw3) }
                 } else {
@@ -881,14 +954,23 @@ impl Vm {
             }
             NF_SP_TRIM => {
                 let s = self.this_str(&this);
+                if !trim_needed(s.as_str(), true, true) {
+                    return self.same_str_val(&this, s);
+                }
                 self.string_val(js_trim(s.as_str()))
             }
             NF_SP_TRIMSTART => {
                 let s = self.this_str(&this);
+                if !trim_needed(s.as_str(), true, false) {
+                    return self.same_str_val(&this, s);
+                }
                 self.string_val(js_trim_start(s.as_str()))
             }
             NF_SP_TRIMEND => {
                 let s = self.this_str(&this);
+                if !trim_needed(s.as_str(), false, true) {
+                    return self.same_str_val(&this, s);
+                }
                 self.string_val(js_trim_end(s.as_str()))
             }
             NF_SP_NORMALIZE => {
@@ -983,7 +1065,8 @@ impl Vm {
                     return Val::Obj(it);
                 }
                 if !global {
-                    return self.regexp_exec(ro, &s);
+                    let inp = if let Val::Str(_) = this { this } else { Val::Undef };
+                    return self.regexp_exec_in(ro, &s, inp, true);
                 }
                 let units = self.rx_take(&s);
                 let mut out: Vec<Val> = Vec::new();
@@ -1023,9 +1106,29 @@ impl Vm {
                 let fill = if matches!(a1, Val::Undef) { String::from(" ") } else { self.to_string(&a1) };
                 let len = jsstr::len(s.as_str());
                 if target <= len || fill.is_empty() {
-                    return self.rc_val(s);
+                    return self.same_str_val(&this, s);
                 }
                 let need = target - len;
+                if jsstr::is_ascii(fill.as_str()) {
+                    // an ASCII fill: whole copies of it and a head, no units
+                    let fl = fill.as_bytes().len() as int;
+                    let mut out = String::new();
+                    if id != NF_SP_PADSTART {
+                        out.push_str(s.as_str());
+                    }
+                    let mut k = need / fl;
+                    while k > 0 {
+                        out.push_str(fill.as_str());
+                        k -= 1;
+                    }
+                    if need % fl > 0 {
+                        out.push_str(jsstr::slice(fill.as_str(), 0, need % fl).as_str());
+                    }
+                    if id == NF_SP_PADSTART {
+                        out.push_str(s.as_str());
+                    }
+                    return self.string_val(out);
+                }
                 let fu = jsstr::units(fill.as_str());
                 let mut pad: Vec<int> = Vec::new();
                 let mut i: int = 0;
@@ -1042,6 +1145,9 @@ impl Vm {
             }
             NF_SP_CONCAT => {
                 let s = self.this_str(&this);
+                if args.is_empty() {
+                    return self.same_str_val(&this, s);
+                }
                 let mut out = s.as_ref().clone();
                 for a in args.iter() {
                     let x = self.to_str(a);
@@ -1056,18 +1162,9 @@ impl Vm {
             }
             NF_SP_ITERATOR => {
                 let s = self.this_str(&this);
-                let mut items: Vec<Val> = Vec::new();
-                for c in s.chars() {
-                    let mut t = String::new();
-                    t.push(c);
-                    items.push(self.string_val(t));
-                }
-                let arr = self.new_array(items);
+                let sv = self.rc_val(s);
                 let ip = self.string_iter_proto;
-                let it = self.alloc(C_ITER, ip);
-                self.put_env(it, arr);
-                self.objs[it as usize].func = 0;
-                Val::Obj(it)
+                self.string_iter(sv, ip)
             }
             // ---- Number / Boolean
             NF_N_ISINTEGER | NF_N_ISSAFEINTEGER | NF_N_ISFINITE | NF_N_ISNAN => {
@@ -1177,7 +1274,7 @@ impl Vm {
                     _ => String::new(),
                 };
                 let holder = self.new_object();
-                self.add_own(holder, self.atoms[""], a0.clone(), 0);
+                self.add_own(holder, self.atom_lookup(""), a0.clone(), 0);
                 let mut out = String::new();
                 let mut stack: Vec<int> = Vec::new();
                 let sv1 = self.str_val("");
@@ -1189,22 +1286,28 @@ impl Vm {
             }
             NF_JSON_PARSE => {
                 let s = self.to_string(&a0);
-                let cs = s.chars().collect::<Vec<char>>();
-                let mut pos: usize = 0;
-                let v = self.json_parse_value(&cs, &mut pos);
+                let mut v = Val::Undef;
+                if !json_parse_fast(self, s.as_str(), &mut v) {
+                    let cs = s.chars().collect::<Vec<char>>();
+                    let mut pos: usize = 0;
+                    v = self.json_parse_value(&cs, &mut pos);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    while pos < cs.len() && (cs[pos] == ' ' || cs[pos] == '\t' || cs[pos] == '\n' || cs[pos] == '\r') {
+                        pos += 1;
+                    }
+                    if pos < cs.len() {
+                        self.throw_syntax("Unexpected non-whitespace character after JSON");
+                        return Val::Undef;
+                    }
+                }
                 if self.throwing {
-                    return Val::Undef;
-                }
-                while pos < cs.len() && (cs[pos] == ' ' || cs[pos] == '\t' || cs[pos] == '\n' || cs[pos] == '\r') {
-                    pos += 1;
-                }
-                if pos < cs.len() {
-                    self.throw_syntax("Unexpected non-whitespace character after JSON");
                     return Val::Undef;
                 }
                 if self.is_callable(&a1) {
                     let holder = self.new_object();
-                    self.add_own(holder, self.atoms[""], v, 0);
+                    self.add_own(holder, self.atom_lookup(""), v, 0);
                     let sv0 = self.str_val("");
                     return self.json_revive(&Val::Obj(holder), &sv0, &a1);
                 }
@@ -1238,13 +1341,13 @@ impl Vm {
                     let fl = if matches!(a1, Val::Undef) { self.string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
                     (src, fl)
                 } else if is_re {
-                    let a_source = self.intern("source");
+                    let a_source = self.atom_lookup("source");
                     let src = self.get(&a0, a_source);
                     if self.throwing {
                         return Val::Undef;
                     }
                     let fl = if matches!(a1, Val::Undef) {
-                        let a_flags = self.intern("flags");
+                        let a_flags = self.atom_lookup("flags");
                         self.get(&a0, a_flags)
                     } else {
                         a1
@@ -1283,16 +1386,17 @@ impl Vm {
                     return Val::Undef;
                 }
                 let s = self.to_str(&a0);
-                let m = self.regexp_exec(ro, &s);
+                let inp = if let Val::Str(_) = a0 { a0 } else { Val::Undef };
+                let m = self.regexp_exec_in(ro, &s, inp, id != NF_RP_TEST);
                 if id == NF_RP_TEST {
                     return Val::Bool(!matches!(m, Val::Null));
                 }
                 m
             }
             NF_RP_TOSTRING => {
-                let src = self.get(&this, self.atoms["source"]);
+                let src = self.get(&this, self.atom_lookup("source"));
                 let ss = self.to_string(&src);
-                let fl = self.get(&this, self.atoms["flags"]);
+                let fl = self.get(&this, self.atom_lookup("flags"));
                 let fs = self.to_string(&fl);
                 self.string_val(format!("/{}/{}", ss, fs))
             }
@@ -1818,3 +1922,23 @@ pub fn to_exponential(x: double, d: int) -> String {
     }
 }
 
+/// Rust: whether `s` starts (ends, `end`) with an ASCII `p`, 1 or 0: an
+/// ASCII byte is a whole UTF-16 unit, so the bytes answer it. -1 when `p`
+/// is not ASCII, and on the other targets.
+#[ranger::target(rust)]
+pub fn ascii_affix(s: &str, p: &str, end: bool) -> int {
+    if !p.is_ascii() {
+        return -1;
+    }
+    let r = if end { s.as_bytes().ends_with(p.as_bytes()) } else { s.as_bytes().starts_with(p.as_bytes()) };
+    if r {
+        1
+    } else {
+        0
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn ascii_affix(_s: &str, _p: &str, _end: bool) -> int {
+    -1
+}

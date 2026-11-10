@@ -46,6 +46,13 @@ pub mod uniprops;
 pub mod unit;
 pub mod value;
 pub mod vm;
+/// a HashMap with a cheaper hash for the Map / Set index (fxmap.rs):
+/// Rust only, the other targets keep their maps
+#[ranger::target(rust)]
+pub mod fxmap {
+    include!("fxmap.rs");
+}
+
 /// the baseline JIT (wjit.rs): Rust only
 #[ranger::target(rust)]
 pub mod wjit {
@@ -177,7 +184,11 @@ impl Engine {
         if self.vm.throwing {
             return self.uncaught();
         }
+        // the completion value lives through the jobs: a reclaim there
+        // must not free it
+        self.vm.temp_roots.push(r);
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -207,7 +218,9 @@ impl Engine {
             let u = self.uncaught();
             return format!("t:{}", u);
         }
+        self.vm.temp_roots.push(r);
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         match &r {
             Val::Undef => String::from("u"),
             Val::Null => String::from("l"),
