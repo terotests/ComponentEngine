@@ -722,3 +722,14 @@ r.push(p.inc(), p.t());
 r.join("|")
 ----
 TypeError|a1.5b0ctruenullundefined10S1,21e+21|S42|😀x|llo|llo|hel|bcé|bcé|1|14|301|0|3|5/1
+
+==== js optional chaining as a register jump: undefined/null short-circuit, falsy values kept, calls, nested
+var r = [], o = { a: { b: 0, c: "", n: null, f() { return this.b; } }, z: false }, u, nl = null;
+for (var i = 0; i < 3; i++) {
+  r.push(o?.a?.b, o?.a?.c === "", o?.a?.n?.x, u?.x, nl?.x, o.z?.toString(), o?.a?.f(), o.q?.r.s.t, u?.[i], o.a?.["b"]);
+  var x = i == 1 ? null : { v: i }; r.push(x?.v);
+}
+function g(p) { return p?.k ?? "dflt"; } r.push(g(), g(null), g({ k: 0 }), g({ k: null }));
+r.join()
+----
+0,true,,,,false,0,,,0,0,0,true,,,,false,0,,,0,,0,true,,,,false,0,,,0,2,dflt,dflt,0,dflt

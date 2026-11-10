@@ -5501,6 +5501,30 @@ impl<'a> Cg<'a> {
                 self.op(END);
                 true
             }
+            R_JNN_KEEP if sub == 1 => {
+                // `x?.`: undefined or null becomes undefined, and jumps
+                if w1 < 0 {
+                    return false;
+                }
+                let o = self.raw(w1);
+                self.tag(o);
+                self.set(L_TAG);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_undef as i64);
+                self.op(I32_EQ);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_null as i64);
+                self.op(I32_EQ);
+                self.op(I32_OR);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.store_undef(w1 as u32);
+                self.jump(w2 as i64, (w2 as i64) <= p);
+                self.extra -= 1;
+                self.op(END);
+                true
+            }
             R_JNN_KEEP => {
                 // not null or undefined: jump
                 let o = self.raw(w1);
