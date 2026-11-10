@@ -200,25 +200,37 @@ impl Vm {
         let fi = self.frames.len() - 1;
         let bp = self.frames[fi].bp;
         let start = (bp - 2) as usize;
-        // the frame's stack into the generator's elements, in place (the
-        // buffer kept from the last resume)
+        // the frame's stack into the generator's elements, in place: the
+        // buffer still holds (counted) what the last save put there, mostly
+        // the same values, so only a changed one is counted
         let e = self.elems_id(g);
         let n_old = self.evecs[e].v.len();
-        if n_old > 0 {
-            let mut j: usize = 0;
+        let n_new = self.stack.len() - start;
+        let mut j: usize = 0;
+        while j < n_new {
+            let x = self.stack[start + j];
+            if j < n_old {
+                let old = self.evecs[e].v[j];
+                if !same_ref(&old, &x) {
+                    self.inc(&x);
+                    self.evecs[e].v[j] = x;
+                    self.dec(&old);
+                } else {
+                    self.evecs[e].v[j] = x;
+                }
+            } else {
+                self.inc(&x);
+                self.evecs[e].v.push(x);
+            }
+            j += 1;
+        }
+        if n_old > n_new {
             while j < n_old {
                 let x = self.evecs[e].v[j];
                 self.dec(&x);
                 j += 1;
             }
-            self.evecs[e].v.clear();
-        }
-        let mut i = start;
-        while i < self.stack.len() {
-            let x = self.stack[i];
-            self.inc(&x);
-            self.evecs[e].v.push(x);
-            i += 1;
+            self.evecs[e].v.truncate(n_new);
         }
         self.stack.truncate(start);
         let (pc, this_val, new_target, fobj, env, args_obj) = {
@@ -232,26 +244,18 @@ impl Vm {
             let awaiting = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_AWAIT { self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
             let rest: Vec<Val> = vec![Val::Undef, Val::Undef, Val::Undef, Val::Undef, Val::Undef, Val::Undef, promise, awaiting];
             self.put_elems2(g, rest);
-        } else {
+        } else if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_HANDLERS {
             self.cut_elems2(g, G_HANDLERS as int);
         }
         // slots 0..5 (pc, this, new.target, function, env, arguments): the
         // same objects as last time, mostly, so only a changed one is counted
-        let vals: Vec<Val> = vec![Val::Num(pc as double), this_val, new_target, obj_val(fobj), obj_val(env), obj_val(args_obj)];
         let c = self.objs[g as usize].cold as usize;
-        let mut k: usize = 0;
-        while k < 6 {
-            let old = self.colds[c].elems2[k];
-            let nv = vals[k];
-            if !same_ref(&old, &nv) {
-                self.inc(&nv);
-                self.colds[c].elems2[k] = nv;
-                self.dec(&old);
-            } else {
-                self.colds[c].elems2[k] = nv;
-            }
-            k += 1;
-        }
+        self.colds[c].elems2[G_PC] = Val::Num(pc as double);
+        self.gen_slot(c, G_THIS, this_val);
+        self.gen_slot(c, G_NEW_TARGET, new_target);
+        self.gen_slot(c, G_FOBJ, obj_val(fobj));
+        self.gen_slot(c, G_ENV, obj_val(env));
+        self.gen_slot(c, G_ARGS, obj_val(args_obj));
         // the frame's handlers, innermost last
         let depth = fi as int;
         let mut first = self.handlers.len();
@@ -270,6 +274,20 @@ impl Vm {
         }
         self.handlers.truncate(first);
         self.frames.pop();
+    }
+
+    /// Slot `k` of the generator's cold `c` becomes `nv`, counted only when
+    /// it changed.
+    #[inline(always)]
+    fn gen_slot(&mut self, c: usize, k: usize, nv: Val) {
+        let old = self.colds[c].elems2[k];
+        if !same_ref(&old, &nv) {
+            self.inc(&nv);
+            self.colds[c].elems2[k] = nv;
+            self.dec(&old);
+        } else {
+            self.colds[c].elems2[k] = nv;
+        }
     }
 
     /// Runs `g` from where it stopped with `v` as the value of its `yield`
@@ -294,8 +312,8 @@ impl Vm {
         }
         let base = self.frames.len() as int;
         let start = self.stack.len() as int;
-        // the saved stack back onto the stack; the buffer stays for the
-        // next save
+        // the saved stack back onto the stack; the buffer keeps its counts
+        // until the next save or the end
         let e = self.elems_id(g);
         let ns = self.evecs[e].v.len();
         let mut j: usize = 0;
@@ -304,13 +322,6 @@ impl Vm {
             self.stack.push(x);
             j += 1;
         }
-        j = 0;
-        while j < ns {
-            let x = self.evecs[e].v[j];
-            self.dec(&x);
-            j += 1;
-        }
-        self.evecs[e].v.clear();
         let gc = self.objs[g as usize].cold as usize;
         let r_args = self.colds[gc].elems2[G_ARGS];
         let r_fobj = self.colds[gc].elems2[G_FOBJ];
