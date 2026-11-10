@@ -1,7 +1,7 @@
 /* Scaffold Scramble's stylesheet, applied by EVG. Every sprite is a small
    tree of boxes: the classes here give them their colours and shapes (EVG
    draws linear gradients, rounded corners, rotation and opacity), the script
-   only places them. Try giving Rumbo green fur, or make the barrels square. */
+   only places them. Try painting Grumble red, or make the spools square. */
 
 .stage { background-color: #0b1030; font-family: sans-serif }
 .scene { position: absolute; left: 0px; top: 0px; width: 640px; height: 480px }
@@ -73,80 +73,75 @@
 .power { position: absolute; width: 36px; height: 40px; border-radius: 999px; background-color: #7affd9 }
 .wrench-held { position: absolute; width: 11px; height: 4px; background-color: #dfe6f5; border-radius: 2px }
 
-/* Rumbo, the giant ape */
-.ape { position: absolute; width: 110px; height: 86px }
-.ape-leg {
-  position: absolute; top: 62px; width: 22px; height: 20px;
-  background-color: #4b2f78; border-radius: 8px;
+/* Grumble, the crane-bot */
+.crane { position: absolute; width: 120px; height: 86px }
+.crane-tread {
+  position: absolute; left: 4px; top: 70px; width: 96px; height: 16px;
+  background: linear-gradient(180deg, #4a5068, #262a3a); border-radius: 8px;
 }
-.ape-foot {
-  position: absolute; top: 79px; width: 28px; height: 7px;
-  background-color: #b48ad8; border-radius: 4px 4px 2px 2px;
+.crane-wheel {
+  position: absolute; top: 73px; width: 10px; height: 10px;
+  background-color: #9aa3b8; border-radius: 999px; border-width: 2px; border-color: #3a3f52;
 }
-.ape-body {
-  position: absolute; left: 16px; top: 26px; width: 76px; height: 46px;
-  background: linear-gradient(180deg, #7a52b8, #4b2f78); border-radius: 28px 28px 18px 18px;
+.crane-body {
+  position: absolute; left: 14px; top: 38px; width: 78px; height: 34px;
+  background: linear-gradient(180deg, #2ec4b6, #138a80); border-radius: 10px 10px 4px 4px;
 }
-.ape-belly {
-  position: absolute; left: 35px; top: 40px; width: 38px; height: 28px;
-  background: linear-gradient(180deg, #d9b8f5, #b48ad8); border-radius: 14px;
+.crane-stripe {
+  position: absolute; left: 14px; top: 58px; width: 78px; height: 6px;
+  background: linear-gradient(90deg, #ffd23f, #1b1f2e, #ffd23f, #1b1f2e, #ffd23f, #1b1f2e, #ffd23f);
 }
-.ape-arm {
-  position: absolute; width: 20px; height: 40px;
-  background: linear-gradient(90deg, #6a44a4, #4b2f78); border-radius: 10px;
+.crane-bolt { position: absolute; width: 5px; height: 5px; background-color: #d7fff9; border-radius: 999px }
+.crane-boom {
+  position: absolute; width: 30px; height: 8px;
+  background: linear-gradient(180deg, #ffd23f, #e0a100); border-radius: 3px;
 }
-.short { height: 22px }
-.ape-fist {
-  position: absolute; width: 24px; height: 15px;
-  background-color: #b48ad8; border-radius: 7px;
-  border-width: 2px; border-color: #8a63b3;
+.crane-cable { position: absolute; width: 2px; height: 12px; background-color: #c9d1e6 }
+.crane-hook {
+  position: absolute; width: 10px; height: 8px;
+  border-width: 3px; border-color: #c9d1e6; border-radius: 0px 0px 6px 6px;
 }
-.ape-head {
-  position: absolute; left: 32px; top: 6px; width: 44px; height: 36px;
-  background: linear-gradient(180deg, #7a52b8, #5c3a92); border-radius: 18px 18px 14px 14px;
+.crane-arm {
+  position: absolute; width: 14px; height: 26px;
+  background: linear-gradient(90deg, #ffd23f, #e0a100); border-radius: 6px;
 }
-.ape-face {
-  position: absolute; left: 37px; top: 15px; width: 34px; height: 25px;
-  background: linear-gradient(180deg, #e3c7fa, #c29ce6); border-radius: 11px 11px 13px 13px;
+.crane-claw { position: absolute; width: 18px; height: 10px; background-color: #9aa3b8; border-radius: 4px 4px 8px 8px }
+.crane-cab {
+  position: absolute; left: 30px; top: 6px; width: 46px; height: 36px;
+  background: linear-gradient(180deg, #ffd23f, #f0a800); border-radius: 10px 10px 6px 6px;
 }
-.ape-brow { position: absolute; left: 36px; top: 15px; width: 36px; height: 5px; background-color: #3a2260; border-radius: 3px }
-.ape-eye {
-  position: absolute; top: 19px; width: 10px; height: 8px;
-  background-color: #ffffff; border-radius: 999px;
+.crane-screen {
+  position: absolute; left: 35px; top: 11px; width: 36px; height: 20px;
+  background: linear-gradient(180deg, #24304f, #10172b); border-radius: 6px;
 }
-.shut { height: 2px; top: 23px; background-color: #3a2260 }
-.ape-pupil { position: absolute; top: 2px; width: 4px; height: 5px; background-color: #1b1030; border-radius: 999px }
-.ape-angry { position: absolute; top: 15px; width: 13px; height: 4px; background-color: #2a1548; border-radius: 2px }
-.ape-nostril { position: absolute; top: 29px; width: 3px; height: 2px; background-color: #6a3f96; border-radius: 1px }
-.ape-mouth {
-  position: absolute; left: 45px; top: 33px; width: 18px; height: 3px;
-  background-color: #3a1748; border-radius: 2px;
+.crane-eye {
+  position: absolute; top: 16px; width: 8px; height: 9px;
+  background-color: #7affd9; border-radius: 3px;
 }
-.open { top: 32px; height: 7px; background-color: #5a1030; border-radius: 3px 3px 6px 6px }
-.ape-tooth { position: absolute; top: 0px; width: 4px; height: 3px; background-color: #ffffff; border-radius: 1px }
-.ape-hat {
-  position: absolute; left: 33px; top: 0px; width: 42px; height: 13px;
-  background: linear-gradient(180deg, #ffab40, #f06a00); border-radius: 21px 21px 2px 2px;
+.shut { height: 2px; top: 21px }
+.crane-brow { position: absolute; top: 13px; width: 12px; height: 3px; background-color: #ff6b6b; border-radius: 2px }
+.crane-grille {
+  position: absolute; left: 44px; top: 33px; width: 18px; height: 4px;
+  background-color: #7a5200; border-radius: 2px;
 }
-.ape-hat-ridge { position: absolute; left: 51px; top: 1px; width: 6px; height: 11px; background-color: #ffc477; border-radius: 3px }
-.ape-hat-brim { position: absolute; left: 29px; top: 11px; width: 50px; height: 4px; background-color: #d45a00; border-radius: 2px }
-.roar-text { position: absolute; font-size: 16px; font-weight: 900; color: #ffab40 }
+.open { top: 32px; height: 7px; background-color: #3a2600; border-radius: 2px 2px 5px 5px }
+.crane-antenna { position: absolute; left: 70px; top: 4px; width: 2px; height: 6px; background-color: #9aa3b8 }
+.crane-lamp {
+  position: absolute; left: 66px; top: 0px; width: 10px; height: 6px;
+  background-color: #7a2a2a; border-radius: 5px 5px 1px 1px;
+}
+.on { background-color: #ff4d4d }
+.roar-text { position: absolute; font-size: 16px; font-weight: 900; color: #ffd23f }
 
-/* the barrels he rolls */
-.barrel {
+/* the cable spools he rolls */
+.spool {
   position: absolute; width: 20px; height: 20px;
-  border-radius: 999px; background: linear-gradient(90deg, #d98a3d, #8a4a1a);
-  border-width: 2px; border-color: #5c2e0b;
+  border-radius: 999px; background: linear-gradient(90deg, #ff8a5c, #c2410c);
+  border-width: 3px; border-color: #7c2d12;
 }
-.held { width: 24px; height: 24px }
-.barrel-band { position: absolute; left: 6px; top: 0px; width: 4px; height: 16px; background-color: #9aa3b8; border-radius: 1px }
-.barrel-hub { position: absolute; left: 6px; top: 6px; width: 4px; height: 4px; background-color: #4a2408; border-radius: 999px }
-.keg {
-  position: absolute; width: 16px; height: 21px;
-  background: linear-gradient(90deg, #d98a3d, #8a4a1a); border-radius: 5px;
-  border-width: 1px; border-color: #5c2e0b;
-}
-.keg-band { position: absolute; left: 0px; width: 14px; height: 2px; background-color: #9aa3b8 }
+.held { width: 22px; height: 22px }
+.spool-spoke { position: absolute; left: 5px; top: -1px; width: 4px; height: 16px; background-color: #ffe0c2; border-radius: 1px }
+.spool-hub { position: absolute; left: 4px; top: 4px; width: 6px; height: 6px; background-color: #3b1a08; border-radius: 999px }
 
 /* the kitten */
 .kitten { position: absolute; width: 26px; height: 26px }

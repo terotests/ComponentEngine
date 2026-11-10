@@ -4,13 +4,13 @@
 // Scaffold Scramble: a climbing game in TypeScript + JSX, run by CErXes,
 // laid out by EVG with the CSS tab's stylesheet, painted as SVG.
 //
-// Rumbo, a giant purple ape in a hard hat, has climbed the night-shift
-// scaffold and a kitten is stuck on the beam above him. He keeps rolling
-// barrels down the girders. Help Pip the builder climb up to the kitten.
+// Grumble the crane-bot has rolled up the night-shift scaffold and a kitten
+// is stuck on the beam above him. He keeps rolling cable spools down the
+// girders. Help Pip the builder climb up to the kitten.
 //
-//   ← →  walk        ↑ ↓  climb a ladder        Space  jump a barrel
+//   ← →  walk        ↑ ↓  climb a ladder        Space  jump a spool
 //   On a phone: the buttons under the game, or tap the game to jump.
-//   Pick up a wrench to smash barrels for a few seconds (no climbing then).
+//   Pick up a wrench to smash spools for a few seconds (no climbing then).
 //
 // The page calls tick(dt, input) and view() every frame; onKeyDown(key) on a
 // key press. Everything is boxes: sprites are small trees of divs, placed with
@@ -19,16 +19,16 @@
 
 type Girder = { x0: number; x1: number; yL: number; yR: number };
 type Ladder = { x: number; lo: number; hi: number; broken: boolean };
-type Barrel = { g: number; x: number; y: number; dir: number; fall: boolean; vy: number;
+type Spool = { g: number; x: number; y: number; dir: number; fall: boolean; vy: number;
   down: number; checked: number; jumped: boolean; spin: number };
 type Mode = "title" | "play" | "dying" | "cleared" | "over";
 
 const W = 640;
 const H = 480;
-const R = 9; // barrel radius (for hits; drawn a little larger)
-const THROW_X = 142; // where Rumbo puts a barrel down
+const R = 9; // spool radius (for hits; drawn a little larger)
+const THROW_X = 142; // where Grumble puts a spool down
 
-// girders from the bottom (0) to Rumbo's (5); the kitten's perch is 6
+// girders from the bottom (0) to Grumble's (5); the kitten's perch is 6
 const G: Girder[] = [
   { x0: 0, x1: 640, yL: 462, yR: 450 },
   { x0: 0, x1: 596, yL: 376, yR: 390 },
@@ -38,7 +38,7 @@ const G: Girder[] = [
   { x0: 0, x1: 430, yL: 86, yR: 86 },
   { x0: 250, x1: 340, yL: 46, yR: 46 },
 ];
-// the direction a barrel rolls on each girder (downhill)
+// the direction a spool rolls on each girder (downhill)
 const ROLL = [-1, 1, -1, 1, -1, 1, 0];
 
 const L: Ladder[] = [
@@ -73,7 +73,7 @@ let clock = 0;
 let modeClock = 0;
 
 const P = { x: 40, y: 0, g: 0, vx: 0, vy: 0, air: false, climb: -1, face: 1, walk: 0, wrench: 0 };
-let barrels: Barrel[] = [];
+let spools: Spool[] = [];
 let throwClock = 0;
 let throwAnim = 0;
 let wrenches: { g: number; x: number; taken: boolean }[] = [];
@@ -81,7 +81,7 @@ let popups: { x: number; y: number; text: string; t: number }[] = [];
 
 function resetLevel() {
   P.x = 40; P.g = 0; P.y = sy(0, P.x + 8); P.vx = 0; P.vy = 0; P.air = false; P.climb = -1; P.face = 1; P.wrench = 0;
-  barrels = [];
+  spools = [];
   throwClock = 1.2;
   bonus = 5000;
   bonusClock = 0;
@@ -148,8 +148,8 @@ function tick(dt: number, input: any) {
   if (P.wrench > 0) P.wrench = Math.max(0, P.wrench - dt);
 
   movePlayer(dt, left, right, up, down);
-  moveBarrels(dt);
-  rumbo(dt);
+  moveSpools(dt);
+  grumble(dt);
 
   // wrenches
   for (const w of wrenches) {
@@ -220,9 +220,9 @@ function movePlayer(dt: number, left: boolean, right: boolean, up: boolean, down
   }
 }
 
-function moveBarrels(dt: number) {
+function moveSpools(dt: number) {
   const speed = 105 + level * 18;
-  for (const s of barrels) {
+  for (const s of spools) {
     s.spin += dt * speed * s.dir / R;
     if (s.down > 0) {
       // going down a ladder
@@ -273,16 +273,16 @@ function moveBarrels(dt: number) {
       pop(px, P.y - 30, "100");
     }
   }
-  barrels = barrels.filter((s) => s.y < 600 && s.x > -40);
+  spools = spools.filter((s) => s.y < 600 && s.x > -40);
 }
 
-function rumbo(dt: number) {
+function grumble(dt: number) {
   throwAnim = Math.max(0, throwAnim - dt);
   throwClock -= dt;
   if (throwClock <= 0) {
     throwClock = Math.max(1.1, 2.6 - level * 0.25) + Math.random() * 1.2;
     throwAnim = 0.4;
-    barrels.push({ g: 5, x: THROW_X, y: sy(5, THROW_X) - R, dir: 1, fall: false, vy: 0, down: 0, checked: -1, jumped: false, spin: 0 });
+    spools.push({ g: 5, x: THROW_X, y: sy(5, THROW_X) - R, dir: 1, fall: false, vy: 0, down: 0, checked: -1, jumped: false, spin: 0 });
   }
 }
 
@@ -360,13 +360,13 @@ function Ladders() {
   return out;
 }
 
-// three barrels standing on end, Rumbo's supply
-function Kegs() {
-  const top = sy(5, 10) - 22;
-  return [[2, top], [20, top], [11, top - 21]].map(([x, y]) => (
-    <div className="keg" style={{ left: x, top: y }}>
-      <div className="keg-band" style={{ top: 4 }} />
-      <div className="keg-band" style={{ top: 14 }} />
+// a stack of spare cable spools, Grumble's supply
+function Stack() {
+  const top = sy(5, 10) - 20;
+  return [[0, top], [20, top], [10, top - 19]].map(([x, y]) => (
+    <div className="spool" style={{ left: x, top: y }}>
+      <div className="spool-spoke" />
+      <div className="spool-hub" />
     </div>
   ));
 }
@@ -400,72 +400,56 @@ function Hero() {
   );
 }
 
-// Rumbo: a giant purple ape in an orange hard hat. He pounds his chest now
-// and then, and roars with an arm up when he puts a barrel down.
-function Rumbo() {
+// Grumble: a big crane-bot on treads, with a cab for a head and a boom arm.
+// Now and then his lamp flashes and he honks; when he puts a spool down the
+// boom swings up with the spool on its hook.
+function Grumble() {
   const throwing = throwAnim > 0;
-  const pounding = !throwing && clock % 7 > 5.6;
+  const honking = !throwing && clock % 7 > 5.6;
   const beat = Math.floor(clock * 7) % 2;
   const blink = !throwing && Math.floor(clock * 3) % 11 === 0;
   const look = throwing ? 2 : Math.floor(clock / 2) % 3 - 1;
-  const roar = throwing || pounding;
+  const cross = throwing || honking;
   const cheer = mode === "dying";
-  const lift = roar || cheer ? 1 : 0;
+  const lampOn = cross ? beat === 1 : cheer;
+  const roll = Math.floor(clock * 6) % 2;
   return (
-    <div className="ape" style={{ left: 30, top: sy(5, 60) - 86 + (pounding && beat ? 1 : 0) }}>
-      <div className="ape-leg" style={{ left: 26 }} />
-      <div className="ape-leg" style={{ left: 58 }} />
-      <div className="ape-foot" style={{ left: 20 }} />
-      <div className="ape-foot" style={{ left: 60 }} />
-      <div className="ape-body" />
-      <div className="ape-belly" />
-      {/* arms: hanging, pounding the chest, or one up with a barrel */}
-      {pounding ? [
-        <div className="ape-arm short" style={{ left: 18, top: beat ? 30 : 36 }} />,
-        <div className="ape-arm short" style={{ left: 68, top: beat ? 36 : 30 }} />,
-        <div className="ape-fist" style={{ left: 30, top: beat ? 40 : 48 }} />,
-        <div className="ape-fist" style={{ left: 56, top: beat ? 48 : 40 }} />,
-      ] : [
-        <div className="ape-arm" style={{ left: 4, top: 30 - lift * 4 }} />,
-        <div className="ape-fist" style={{ left: 0, top: 64 - lift * 4 }} />,
-        <div className="ape-arm" style={{ left: 82, top: throwing ? 4 : 30 }} />,
-        throwing ? <div className="barrel held" style={{ left: 78, top: -6 }}>
-          <div className="barrel-band" style={{ transform: "rotate(90deg)" }} />
-        </div> : <div className="ape-fist" style={{ left: 82, top: 64 }} />,
-      ]}
-      <div className="ape-head" />
-      <div className="ape-face" />
-      <div className="ape-brow" />
-      <div className={blink ? "ape-eye shut" : "ape-eye"} style={{ left: 40 }}>
-        {!blink && <div className="ape-pupil" style={{ left: 3 + look }} />}
-      </div>
-      <div className={blink ? "ape-eye shut" : "ape-eye"} style={{ left: 55 }}>
-        {!blink && <div className="ape-pupil" style={{ left: 3 + look }} />}
-      </div>
-      {roar && <div className="ape-angry" style={{ left: 38, transform: "rotate(18deg)" }} />}
-      {roar && <div className="ape-angry" style={{ left: 55, transform: "rotate(-18deg)" }} />}
-      <div className="ape-nostril" style={{ left: 49 }} />
-      <div className="ape-nostril" style={{ left: 54 }} />
-      {roar || cheer ? (
-        <div className="ape-mouth open">
-          <div className="ape-tooth" style={{ left: 2 }} />
-          <div className="ape-tooth" style={{ left: 11 }} />
-        </div>
-      ) : <div className="ape-mouth" />}
-      <div className="ape-hat" />
-      <div className="ape-hat-ridge" />
-      <div className="ape-hat-brim" />
-      {pounding && <span className="roar-text" style={{ left: 96, top: 2 }}>GRRR!</span>}
-      {cheer && <span className="roar-text" style={{ left: 96, top: 2 }}>HA HA!</span>}
+    <div className="crane" style={{ left: 30, top: sy(5, 60) - 86 + (honking && beat ? 1 : 0) }}>
+      <div className="crane-tread" />
+      {[8, 26, 44, 62, 80].map((x) => <div className="crane-wheel" style={{ left: x + (roll ? 1 : 0) }} />)}
+      <div className="crane-body" />
+      <div className="crane-stripe" />
+      <div className="crane-bolt" style={{ left: 22, top: 48 }} />
+      <div className="crane-bolt" style={{ left: 84, top: 48 }} />
+      {/* the boom: down and resting, or up with a spool on the hook */}
+      <div className="crane-boom" style={{ left: 86, top: throwing ? 14 : 34, transform: throwing ? "rotate(-35deg)" : "rotate(10deg)" }} />
+      <div className="crane-cable" style={{ left: 108, top: throwing ? 4 : 38 }} />
+      {throwing ? <div className="spool held" style={{ left: 99, top: 14 }}>
+        <div className="spool-spoke" style={{ transform: "rotate(90deg)" }} />
+        <div className="spool-hub" />
+      </div> : <div className="crane-hook" style={{ left: 104, top: 50 }} />}
+      <div className="crane-arm" style={{ left: 2, top: cheer ? 26 : 34 }} />
+      <div className="crane-claw" style={{ left: 0, top: cheer ? 22 : 56 }} />
+      <div className="crane-cab" />
+      <div className="crane-screen" />
+      <div className={blink ? "crane-eye shut" : "crane-eye"} style={{ left: 40 + look }} />
+      <div className={blink ? "crane-eye shut" : "crane-eye"} style={{ left: 58 + look }} />
+      {cross && <div className="crane-brow" style={{ left: 38, transform: "rotate(15deg)" }} />}
+      {cross && <div className="crane-brow" style={{ left: 56, transform: "rotate(-15deg)" }} />}
+      <div className={cross || cheer ? "crane-grille open" : "crane-grille"} />
+      <div className="crane-antenna" />
+      <div className={lampOn ? "crane-lamp on" : "crane-lamp"} />
+      {honking && <span className="roar-text" style={{ left: 96, top: 2 }}>HONK!</span>}
+      {cheer && <span className="roar-text" style={{ left: 96, top: 2 }}>BEEP BEEP!</span>}
     </div>
   );
 }
 
-function Barrels() {
-  return barrels.map((s) => (
-    <div className="barrel" style={{ left: s.x - 10, top: s.y - 10 }}>
-      <div className="barrel-band" style={{ transform: "rotate(" + Math.round((s.spin * 57.3) % 360) + "deg)" }} />
-      <div className="barrel-hub" />
+function Spools() {
+  return spools.map((s) => (
+    <div className="spool" style={{ left: s.x - 10, top: s.y - 10 }}>
+      <div className="spool-spoke" style={{ transform: "rotate(" + Math.round((s.spin * 57.3) % 360) + "deg)" }} />
+      <div className="spool-hub" />
     </div>
   ));
 }
@@ -543,7 +527,7 @@ function Scene() {
       <City />
       <Girders />
       <Ladders />
-      <Kegs />
+      <Stack />
     </div>
   );
 }
@@ -554,16 +538,16 @@ function view() {
   return (
     <div className="stage" onClick={() => onKeyDown(" ")}>
       {scene}
-      <Rumbo />
+      <Grumble />
       <Kitten />
       {wrenches.filter((w) => !w.taken).map((w) => <Wrench x={w.x} y={sy(w.g, w.x) - 30 + Math.sin(clock * 4) * 2} />)}
-      <Barrels />
+      <Spools />
       {mode !== "title" && <Hero />}
       {popups.map((p) => <span className="popup" style={{ left: p.x - 12, top: p.y }}>{p.text}</span>)}
       <Hud />
       {mode === "title" && <Banner tall title="SCAFFOLD SCRAMBLE" lines={[
-        "Rumbo the giant ape is rolling barrels!",
-        "Climb up to the kitten and jump the barrels.",
+        "Grumble the crane-bot is rolling spools!",
+        "Climb up to the kitten and jump the spools.",
         "← → walk   ↑ ↓ climb   Space jump",
         "Tap, Space or JUMP to start"]} />}
       {mode === "cleared" && <Banner title="KITTEN SAVED!" lines={["Bonus " + bonus, "Next: level " + (level + 1)]} />}

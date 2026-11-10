@@ -95,8 +95,8 @@ game in TypeScript with JSX, the CSS tab its stylesheet; the Example menu (or
 `?game=`) picks one of two:
 
 - **Scaffold Scramble** (`scaffold`): a climbing game. Pip the builder
-  climbs slanted girders to a kitten while Rumbo, a giant purple ape in a
-  hard hat, rolls barrels down at them; jump them, or pick up a wrench and
+  climbs slanted girders to a kitten while Grumble, a big crane-bot on
+  treads, rolls cable spools down at them; jump them, or pick up a wrench and
   smash them. Every sprite is a small tree of boxes dressed by the
   stylesheet (gradients, rounded corners, rotation). The night sky, the city,
   the girders and the ladders are built once: the runtime serializes an
