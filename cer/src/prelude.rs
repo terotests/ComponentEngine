@@ -2123,7 +2123,10 @@ function arrayThis(t) {
 hide(AP, 'forEach', setLength(function forEach(f, t) {
   var o = arrayThis(this), n = toLength(o.length);
   if (typeof f !== 'function') throw new TypeError('callback is not a function');
-  for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
+  // no thisArg: a plain call, which passes undefined as `this` the same
+  // way and runs in the caller's loop (call() goes through a native)
+  if (t === undefined) { for (var i = 0; i < n; i++) if (i in o) f(o[i], i, o); }
+  else for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
 }, 1));
 hide(AP, 'map', setLength(function map(f, t) {
   var o = arrayThis(this), n = toLength(o.length);
@@ -2132,7 +2135,7 @@ hide(AP, 'map', setLength(function map(f, t) {
   if (plain) A = new Array(n);
   for (var i = 0; i < n; i++) {
     if (i in o) {
-      var v = fcall.call(f, t, o[i], i, o);
+      var v = t === undefined ? f(o[i], i, o) : fcall.call(f, t, o[i], i, o);
       if (plain) A[i] = v; else defineProperty(A, i, { value: v, writable: true, enumerable: true, configurable: true });
     }
   }
