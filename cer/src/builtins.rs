@@ -1303,6 +1303,17 @@ impl Vm {
             self.stack[fpos as usize] = r;
             return true;
         }
+        // a RegExp straight on RegExp.prototype: the wrapper would call the
+        // native itself
+        if inner == NF_SP_REPLACE || inner == NF_SP_REPLACEALL {
+            let ro = obj_of(&a0);
+            if ro >= 0 && self.objs[ro as usize].class == C_REGEXP && (self.objs[ro as usize].proto as int) == self.regexp_proto {
+                let s = self.sget(h);
+                let r = self.string_replace(&s, &a0, &a1, inner == NF_SP_REPLACEALL);
+                self.stack[fpos as usize] = r;
+                return true;
+            }
+        }
         if inner == NF_SP_SPLIT && matches!(a0, Val::Str(_)) && matches!(a1, Val::Undef) {
             let s = self.sget(h);
             let r = self.string_split(&s, &a0, &a1);
@@ -1329,6 +1340,7 @@ impl Vm {
     fn string_replace_units(&mut self, s: &Rc<String>, units: &Vec<int>, pattern: &Val, repl: &Val, all: bool) -> Val {
         let fn_repl = self.is_callable(repl);
         let repl_str = if fn_repl { String::new() } else { self.to_string(repl) };
+        let plain_repl = !fn_repl && !repl_str.contains("$");
         let mut out = String::new();
         let mut last: int = 0;
         if self.class_of(pattern) == C_REGEXP {
@@ -1357,6 +1369,16 @@ impl Vm {
                 }
                 let (ms, me) = (caps[0], caps[1]);
                 out.push_str(jsstr::sub_units(s.as_str(), units, last, ms).as_str());
+                if plain_repl {
+                    // a text without `$`: itself, no captures made
+                    out.push_str(repl_str.as_str());
+                    last = me;
+                    if !global {
+                        break;
+                    }
+                    start = if me == ms { me + 1 } else { me };
+                    continue;
+                }
                 let matched = jsstr::sub_units(s.as_str(), units, ms, me);
                 let mut capv: Vec<Val> = Vec::new();
                 let mut g: int = 0;
