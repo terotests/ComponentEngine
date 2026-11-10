@@ -436,7 +436,7 @@ impl Vm {
         let unscop_sym = self.well_known_symbol(a_unscop, "Symbol.unscopables");
 
         // globals
-        self.add_own(g, self.atoms["globalThis"], Val::Obj(g), P_HIDDEN);
+        self.add_own(g, self.atom_lookup("globalThis"), Val::Obj(g), P_HIDDEN);
         self.value_prop(g, "NaN", Val::Num(nan()));
         self.value_prop(g, "Infinity", Val::Num(infinity()));
         self.value_prop(g, "undefined", Val::Undef);
@@ -913,7 +913,7 @@ impl Vm {
     pub fn error_ctor_proto(&self, kind: int) -> int {
         let names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError", "SuppressedError"];
         let g = self.global;
-        let a = self.atoms[names[kind as usize]];
+        let a = self.atom_lookup(names[kind as usize]);
         let slot = self.find(g, a);
         let c = obj_of(&self.objs[g as usize].get_slot(slot as usize));
         let ps = self.find(c, A_PROTOTYPE);
@@ -1076,6 +1076,14 @@ impl Vm {
 
     /// RegExp.prototype.exec: the match array or null; updates lastIndex.
     pub fn regexp_exec(&mut self, ro: int, s: &Rc<String>) -> Val {
+        self.regexp_exec_in(ro, s, Val::Undef, true)
+    }
+
+    /// regexp_exec with the input's own string value when the caller has
+    /// one (`input` then shares its handle instead of a new one counting
+    /// the whole text again toward the next collection), and for test()
+    /// (`want` false) only true or null, no match array.
+    pub fn regexp_exec_in(&mut self, ro: int, s: &Rc<String>, inp: Val, want: bool) -> Val {
         let idx = self.objs[ro as usize].func as int;
         let (global, sticky, ngroups, has_indices) = {
             let re = &self.regexes[idx as usize];
@@ -1112,6 +1120,9 @@ impl Vm {
                 return Val::Undef;
             }
         }
+        if !want {
+            return Val::Bool(true);
+        }
         let mut items: Vec<Val> = Vec::new();
         let mut g: int = 0;
         while g <= ngroups {
@@ -1124,9 +1135,33 @@ impl Vm {
             }
             g += 1;
         }
+        let plain = self.regexes[idx as usize].names.is_empty() && !has_indices;
+        let sv9 = if let Val::Str(_) = inp { inp } else { self.rc_val(s.clone()) };
+        if plain {
+            // index, input and groups (undefined): the shape they give a new
+            // array kept (rx_shapes), the slots put at once
+            let ma = self.new_array(items);
+            let sh = self.objs[ma as usize].shape;
+            if self.rx_shapes.len() == 2 && self.rx_shapes[0] == sh {
+                let nsh = self.rx_shapes[1];
+                self.objs[ma as usize].shape = nsh;
+                let most = self.shapes[self.holder(nsh as int)].keys.len();
+                slot_room(&mut self.objs[ma as usize], most);
+                self.push_val(ma, Val::Num(caps[0] as double));
+                self.push_val(ma, sv9);
+                self.push_val(ma, Val::Undef);
+            } else {
+                self.add_own(ma, A_INDEX, Val::Num(caps[0] as double), 0);
+                self.add_own(ma, A_INPUT, sv9, 0);
+                self.add_own(ma, A_GROUPS, Val::Undef, 0);
+                if !self.shapes[sh as usize].owned && !self.shapes[self.objs[ma as usize].shape as usize].owned {
+                    self.rx_shapes = vec![sh, self.objs[ma as usize].shape];
+                }
+            }
+            return Val::Obj(ma);
+        }
         let arr = self.new_array(items.clone());
         self.add_own(arr, A_INDEX, Val::Num(caps[0] as double), 0);
-        let sv9 = self.rc_val(s.clone());
         self.add_own(arr, A_INPUT, sv9, 0);
         let names = self.regexes[idx as usize].names.clone();
         let nidx = self.regexes[idx as usize].name_index.clone();
@@ -1248,7 +1283,54 @@ impl Vm {
         out
     }
 
+    /// A __fastWrap method `f` on the stack frame at fpos, for a string
+    /// `this` and text (or no) operands: replace / replaceAll of a text by a
+    /// text, split by a text. True when done, the result in stack[fpos];
+    /// else the prelude's function runs (call_native).
+    #[inline(never)]
+    pub fn fast_wrap(&mut self, f: int, fpos: int, argc: int) -> bool {
+        let inner = self.objs[f as usize].pos as int;
+        let bp = (fpos + 2) as usize;
+        let h = match self.stack[bp - 1] {
+            Val::Str(h) => h,
+            _ => return false,
+        };
+        let a0 = if argc >= 1 { self.stack[bp] } else { Val::Undef };
+        let a1 = if argc >= 2 { self.stack[bp + 1] } else { Val::Undef };
+        if (inner == NF_SP_REPLACE || inner == NF_SP_REPLACEALL) && matches!(a0, Val::Str(_)) && matches!(a1, Val::Str(_)) {
+            let s = self.sget(h);
+            let r = self.string_replace(&s, &a0, &a1, inner == NF_SP_REPLACEALL);
+            self.stack[fpos as usize] = r;
+            return true;
+        }
+        // a RegExp straight on RegExp.prototype: the wrapper would call the
+        // native itself
+        if inner == NF_SP_REPLACE || inner == NF_SP_REPLACEALL {
+            let ro = obj_of(&a0);
+            if ro >= 0 && self.objs[ro as usize].class == C_REGEXP && (self.objs[ro as usize].proto as int) == self.regexp_proto {
+                let s = self.sget(h);
+                let r = self.string_replace(&s, &a0, &a1, inner == NF_SP_REPLACEALL);
+                self.stack[fpos as usize] = r;
+                return true;
+            }
+        }
+        if inner == NF_SP_SPLIT && matches!(a0, Val::Str(_)) && matches!(a1, Val::Undef) {
+            let s = self.sget(h);
+            let r = self.string_split(&s, &a0, &a1);
+            self.stack[fpos as usize] = r;
+            return true;
+        }
+        false
+    }
+
     pub fn string_replace(&mut self, s: &Rc<String>, pattern: &Val, repl: &Val, all: bool) -> Val {
+        if let (Val::Str(ph), Val::Str(rh)) = (pattern, repl) {
+            // an ASCII text for a text without `$`: no UTF-16 units needed
+            if replace_plain_ok(self.sref(*ph), self.sref(*rh)) {
+                let out = replace_plain(s.as_str(), self.sref(*ph), self.sref(*rh), all);
+                return self.string_val(out);
+            }
+        }
         let units = self.rx_take(s);
         let r = self.string_replace_units(s, &units, pattern, repl, all);
         self.rx_put(s, units);
@@ -1258,6 +1340,7 @@ impl Vm {
     fn string_replace_units(&mut self, s: &Rc<String>, units: &Vec<int>, pattern: &Val, repl: &Val, all: bool) -> Val {
         let fn_repl = self.is_callable(repl);
         let repl_str = if fn_repl { String::new() } else { self.to_string(repl) };
+        let plain_repl = !fn_repl && !repl_str.contains("$");
         let mut out = String::new();
         let mut last: int = 0;
         if self.class_of(pattern) == C_REGEXP {
@@ -1286,6 +1369,16 @@ impl Vm {
                 }
                 let (ms, me) = (caps[0], caps[1]);
                 out.push_str(jsstr::sub_units(s.as_str(), units, last, ms).as_str());
+                if plain_repl {
+                    // a text without `$`: itself, no captures made
+                    out.push_str(repl_str.as_str());
+                    last = me;
+                    if !global {
+                        break;
+                    }
+                    start = if me == ms { me + 1 } else { me };
+                    continue;
+                }
                 let matched = jsstr::sub_units(s.as_str(), units, ms, me);
                 let mut capv: Vec<Val> = Vec::new();
                 let mut g: int = 0;
@@ -1458,13 +1551,36 @@ impl Vm {
         if sepstr.is_empty() {
             let mut i: int = 0;
             while i < n && (out.len() as int) < lim {
-                out.push(self.string_val(jsstr::sub_units(s.as_str(), units, i, i + 1)));
+                let c = units[i as usize];
+                out.push(self.unit_val(c));
                 i += 1;
             }
             let a = self.new_array(out);
             return Val::Obj(a);
         }
         if jsstr::is_ascii(s.as_str()) && jsstr::is_ascii(sepstr.as_str()) {
+            if sepstr.as_bytes().len() == 1 {
+                // one separator byte: a scan, no substring search
+                let c = sepstr.as_bytes()[0];
+                let nb = s.as_bytes().len();
+                let mut a: usize = 0;
+                let mut i: usize = 0;
+                while i < nb {
+                    if s.as_bytes()[i] == c {
+                        if (out.len() as int) >= lim {
+                            break;
+                        }
+                        out.push(self.str_val(&s[a..i]));
+                        a = i + 1;
+                    }
+                    i += 1;
+                }
+                if (out.len() as int) < lim {
+                    out.push(self.str_val(&s[a..]));
+                }
+                let arr = self.new_array(out);
+                return Val::Obj(arr);
+            }
             for part in s.split(sepstr.as_str()) {
                 if (out.len() as int) >= lim {
                     break;
@@ -1573,6 +1689,13 @@ impl Vm {
     }
 
     pub fn map_find(&mut self, m: int, k: &Val) -> int {
+        if let Val::Str(h) = k {
+            let s = self.sget(*h);
+            return match self.colds[self.objs[m as usize].cold as usize].sindex.get(s.as_str()) {
+                Some(i) => *i,
+                None => -1,
+            };
+        }
         let key = self.map_key(k);
         match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
             Some(i) => *i,
@@ -1581,16 +1704,22 @@ impl Vm {
     }
 
     pub fn map_set(&mut self, m: int, k: Val, v: Val) {
-        let key = self.map_key(&k);
-        let found = match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
-            Some(i) => *i,
-            None => -1,
+        let is_str = matches!(k, Val::Str(_));
+        let key = if is_str { 0 } else { self.map_key(&k) };
+        let found = if is_str {
+            self.map_find(m, &k)
+        } else {
+            match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
+                Some(i) => *i,
+                None => -1,
+            }
         };
         if found >= 0 {
             self.put_elem2(m, found, v);
             return;
         }
         let pos = self.evecs[self.objs[m as usize].elems as usize].v.len() as int;
+        let text = if let Val::Str(h) = &k { self.sget(*h).as_ref().clone() } else { String::new() };
         let kk = if let Val::Num(n) = k {
             if n == 0.0 {
                 Val::Num(0.0)
@@ -1604,7 +1733,11 @@ impl Vm {
         self.push_elem2(m, v);
         let c = self.cold_id(m) as usize;
         self.colds[c].marks.push(0);
-        self.colds[c].index.insert(key, pos);
+        if is_str {
+            self.colds[c].sindex.insert(text, pos);
+        } else {
+            self.colds[c].index.insert(key, pos);
+        }
         self.objs[m as usize].pos += 1;
     }
 
@@ -1613,9 +1746,14 @@ impl Vm {
         if i < 0 {
             return false;
         }
-        let key = self.map_key(k);
         let c = self.cold_id(m) as usize;
-        self.colds[c].index.remove(&key);
+        if let Val::Str(h) = k {
+            let s = self.sget(*h);
+            self.colds[c].sindex.remove(s.as_str());
+        } else {
+            let key = self.map_key(k);
+            self.colds[c].index.remove(&key);
+        }
         self.colds[c].marks[i as usize] = 1;
         self.put_elem(m, i, Val::Undef);
         self.put_elem2(m, i, Val::Undef);
@@ -2332,6 +2470,48 @@ impl Vm {
                         out.push_str(indent);
                     }
                     out.push(']');
+                } else if allow.is_empty() && self.objs[o as usize].class == C_OBJECT && self.objs[o as usize].elems == 0 {
+                    // an ordinary object: its keys as atoms, no key strings
+                    // unless toJSON or the replacer is given one
+                    let atoms = self.own_string_atoms(o);
+                    let rep = self.is_callable(replacer);
+                    out.push('{');
+                    let mut first = true;
+                    for a in atoms {
+                        let item = self.get(&v, a);
+                        if self.throwing {
+                            return false;
+                        }
+                        let kv = if rep || is_obj(&item) { self.atom_val(a) } else { Val::Undef };
+                        let iv = self.json_val(&v, &kv, -1, item, replacer);
+                        if self.throwing {
+                            return false;
+                        }
+                        if self.json_skip(&iv) {
+                            continue;
+                        }
+                        if !first {
+                            out.push(',');
+                        }
+                        first = false;
+                        if !gap.is_empty() {
+                            out.push('\n');
+                            out.push_str(inner.as_str());
+                        }
+                        self.json_quote(self.atom_names[a as usize].as_str(), out);
+                        out.push(':');
+                        if !gap.is_empty() {
+                            out.push(' ');
+                        }
+                        if !self.json_write(iv, replacer, allow, gap, inner.as_str(), stack, out) {
+                            return false;
+                        }
+                    }
+                    if !first && !gap.is_empty() {
+                        out.push('\n');
+                        out.push_str(indent);
+                    }
+                    out.push('}');
                 } else {
                     let keys = if allow.is_empty() {
                         self.own_keys(o, false, false)
@@ -2427,8 +2607,10 @@ impl Vm {
                     self.temp_roots.pop();
                     return Val::Undef;
                 }
-                let kv = self.string_val(k);
-                self.define_elem(o, &kv, v, 0);
+                // the key straight to its atom: no string value in between
+                let ki = jsstr::array_index(k.as_str());
+                let atom = if ki >= 0 { self.index_atom(ki) } else { self.intern(k.as_str()) };
+                self.define(o, atom, v, 0);
                 self.json_ws(cs, pos);
                 if *pos < cs.len() && cs[*pos] == ',' {
                     *pos += 1;
@@ -2483,23 +2665,19 @@ impl Vm {
             return self.string_val(s);
         }
         if c == 't' || c == 'f' || c == 'n' {
-            let words = vec![("true", Val::Bool(true)), ("false", Val::Bool(false)), ("null", Val::Null)];
-            for e in words.iter() {
-                let w = e.0;
-                let v = e.1;
-                let wc = w.chars().collect::<Vec<char>>();
-                let mut ok = *pos + wc.len() <= cs.len();
-                let mut i: usize = 0;
-                while ok && i < wc.len() {
-                    if cs[*pos + i] != wc[i] {
-                        ok = false;
-                    }
-                    i += 1;
-                }
-                if ok {
-                    *pos += wc.len();
-                    return v;
-                }
+            let n = cs.len();
+            let p = *pos;
+            if c == 't' && p + 4 <= n && cs[p + 1] == 'r' && cs[p + 2] == 'u' && cs[p + 3] == 'e' {
+                *pos += 4;
+                return Val::Bool(true);
+            }
+            if c == 'f' && p + 5 <= n && cs[p + 1] == 'a' && cs[p + 2] == 'l' && cs[p + 3] == 's' && cs[p + 4] == 'e' {
+                *pos += 5;
+                return Val::Bool(false);
+            }
+            if c == 'n' && p + 4 <= n && cs[p + 1] == 'u' && cs[p + 2] == 'l' && cs[p + 3] == 'l' {
+                *pos += 4;
+                return Val::Null;
             }
             self.throw_syntax("Unexpected token in JSON");
             return Val::Undef;
@@ -2513,6 +2691,17 @@ impl Vm {
                 self.throw_syntax("Unexpected number in JSON");
                 return Val::Undef;
             }
+            // an integer of up to 15 digits is exact as it is summed
+            let d0 = *pos;
+            let mut iv: double = 0.0;
+            while *pos < cs.len() && cs[*pos] >= '0' && cs[*pos] <= '9' {
+                iv = iv * 10.0 + (((cs[*pos] as int) - 48) as double);
+                *pos += 1;
+            }
+            let nd = *pos - d0;
+            if nd > 0 && nd <= 15 && (*pos >= cs.len() || !(cs[*pos] == '.' || cs[*pos] == 'e' || cs[*pos] == 'E' || cs[*pos] == '+' || cs[*pos] == '-')) {
+                return Val::Num(if cs[start] == '-' { -iv } else { iv });
+            }
             while *pos < cs.len() && ((cs[*pos] >= '0' && cs[*pos] <= '9') || cs[*pos] == '.' || cs[*pos] == 'e' || cs[*pos] == 'E' || cs[*pos] == '+' || cs[*pos] == '-') {
                 *pos += 1;
             }
@@ -2522,7 +2711,19 @@ impl Vm {
                 t.push(cs[i]);
                 i += 1;
             }
-            let n = string_to_number(t.as_str());
+            // a point needs a digit after it ("1." and "1.e3" are not JSON)
+            let dot = jsstr::byte_index_of(t.as_str(), ".", 0);
+            let mut bad_dot = false;
+            if dot >= 0 {
+                let tl = t.as_bytes().len() as int;
+                if dot + 1 >= tl {
+                    bad_dot = true;
+                } else {
+                    let after = jsstr::byte_at(t.as_str(), dot + 1);
+                    bad_dot = after < 48 || after > 57;
+                }
+            }
+            let n = if bad_dot { nan() } else { string_to_number(t.as_str()) };
             if is_nan(n) {
                 self.throw_syntax("Unexpected number in JSON");
                 return Val::Undef;
@@ -2889,15 +3090,42 @@ impl Vm {
         self.jobs.push(derived);
     }
 
+    /// The queued jobs not run yet, in order.
+    pub fn pending_jobs(&self) -> Vec<Val> {
+        let mut out: Vec<Val> = Vec::new();
+        let mut i = self.job_head as usize;
+        while i < self.jobs.len() {
+            out.push(self.jobs[i]);
+            i += 1;
+        }
+        out
+    }
+
     /// Runs queued promise jobs until none are left.
     pub fn run_jobs(&mut self) {
         let mut guard: int = 0;
-        while !self.jobs.is_empty() && guard < 10000000 {
+        while (self.job_head as usize) < self.jobs.len() && guard < 10000000 {
             guard += 1;
-            let a = self.jobs.remove(0);
-            let b = self.jobs.remove(0);
-            let c = self.jobs.remove(0);
-            let d = self.jobs.remove(0);
+            // from the front, each job's four values taken out in place:
+            // a queue of n jobs costs n, not n * n moves
+            let h = self.job_head as usize;
+            let a = self.jobs[h];
+            let b = self.jobs[h + 1];
+            let c = self.jobs[h + 2];
+            let d = self.jobs[h + 3];
+            self.jobs[h] = Val::Undef;
+            self.jobs[h + 1] = Val::Undef;
+            self.jobs[h + 2] = Val::Undef;
+            self.jobs[h + 3] = Val::Undef;
+            self.job_head = (h + 4) as int;
+            if (self.job_head as usize) >= self.jobs.len() {
+                self.jobs.clear();
+                self.job_head = 0;
+            } else if self.job_head >= 4096 && (self.job_head as usize) * 2 >= self.jobs.len() {
+                let rest = self.pending_jobs();
+                self.jobs = rest;
+                self.job_head = 0;
+            }
             // from the host (native_depth 0) the jobs' frames are safe
             // points: what the loop still needs after a call is rooted
             let top = self.native_depth == 0;
@@ -3122,10 +3350,10 @@ impl Vm {
     /// Symbol.isConcatSpreadable, a proxy, an array with holes or its own
     /// properties.
     fn concat_generic(&mut self, this: &Val, args: &Vec<Val>) -> bool {
-        let sa = match self.atoms.get("@@isConcatSpreadable") {
-            Some(a) => *a,
-            None => return false,
-        };
+        let sa = self.atom_lookup("@@isConcatSpreadable");
+        if sa < 0 {
+            return false;
+        }
         let o = obj_of(this);
         if o >= 0 && self.objs[o as usize].shape != 0 && self.find(o, sa) >= 0 {
             return true;
@@ -3218,6 +3446,33 @@ impl Vm {
             let req = if args.is_empty() { String::new() } else { self.to_string(&args[0]) };
             let answer = self.host_sync.call(&req);
             return self.string_val(answer);
+        }
+        if id == crate::typed::NF_FAST_WRAP && fobj >= 0 && (self.objs[fobj as usize].pos as int) == 0 {
+            // __fastWrap(native, slowFn, name, length): the method
+            let nat = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            let slow = if args.len() > 1 { obj_of(&args[1]) } else { -1 };
+            let name = if args.len() > 2 { self.to_string(&args[2]) } else { String::new() };
+            let len = if args.len() > 3 { self.to_number(&args[3]) as int } else { 0 };
+            if nat < 0 || slow < 0 || self.objs[nat as usize].class != C_NATIVE {
+                self.throw_type("__fastWrap: a native and a function");
+                return Val::Undef;
+            }
+            let f = self.native_fn(name.as_str(), crate::typed::NF_FAST_WRAP, len);
+            self.objs[f as usize].pos = self.objs[nat as usize].func;
+            self.put_env(f, slow);
+            return Val::Obj(f);
+        }
+        if id == crate::typed::NF_DVM_GET || id == crate::typed::NF_DVM_SET || id == crate::typed::NF_FAST_WRAP {
+            // not done in place (native_fast): the prelude's own method
+            let slow = if fobj >= 0 { self.objs[fobj as usize].env as int } else { -1 };
+            if slow < 0 {
+                self.throw_type("DataView method without its implementation");
+                return Val::Undef;
+            }
+            return self.call_value(Val::Obj(slow), this, args.clone());
+        }
+        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_DV_METHOD) {
+            return self.call_native_ta(id, &this, args);
         }
         if id >= 920 && id < 930 {
             return self.call_native_typed(id, args);
@@ -4559,4 +4814,42 @@ fn group_pairs(names: &Vec<String>, nidx: &Vec<int>, vals: &Vec<Val>) -> Vec<(St
         i += 1;
     }
     out
+}
+
+/// Whether `s.replace(pat, rep)` / replaceAll is replace_plain's: a
+/// non-empty ASCII `pat` and a `rep` without `$` (Rust; the other targets
+/// take the general path).
+#[ranger::target(rust)]
+pub fn replace_plain_ok(pat: &str, rep: &str) -> bool {
+    !pat.is_empty() && pat.is_ascii() && !rep.as_bytes().contains(&b'$')
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn replace_plain_ok(_pat: &str, _rep: &str) -> bool {
+    false
+}
+
+/// `s.replace(pat, rep)` / replaceAll when replace_plain_ok: an ASCII byte
+/// is never part of a longer UTF-8 sequence, so a byte match is the UTF-16
+/// match.
+#[ranger::target(rust)]
+pub fn replace_plain(s: &str, pat: &str, rep: &str, all: bool) -> String {
+    let mut out = String::new();
+    let mut last = 0usize;
+    while let Some(p) = s[last..].find(pat) {
+        let at = last + p;
+        out.push_str(&s[last..at]);
+        out.push_str(rep);
+        last = at + pat.len();
+        if !all {
+            break;
+        }
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn replace_plain(_s: &str, _pat: &str, _rep: &str, _all: bool) -> String {
+    String::new()
 }

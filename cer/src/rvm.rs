@@ -116,6 +116,15 @@ impl Vm {
         val_put(&mut self.stack, i, v);
     }
 
+    /// The arithmetic op at pc of frame fi took its slow path: the JIT
+    /// stops speculating that it sees numbers there (wjit.rs Cg.spec).
+    #[inline(never)]
+    pub fn note_nonnum(&mut self, fi: usize, pc: int) {
+        let pi = self.frames[fi].proto as usize;
+        let ri = self.protos[pi].rbase + pc;
+        jit_note_nonnum(self, pi, ri);
+    }
+
     /// A back edge to pc with the JIT on: once the function is hot its
     /// compiled code (wjit.rs) runs from pc; the pc the interpreter goes on
     /// at, or -1 when the time slice ended there (the frame is stopped).
@@ -346,9 +355,10 @@ impl Vm {
                     op_at(&self.rcode, (rb + pc) as usize)
                 };
                 let w0 = ins.code;
-                let w1 = ins.a;
-                let w2 = ins.b;
-                let w3 = ins.c;
+                // the operands widened once here: the arms index with them
+                let w1 = ins.a as int;
+                let w2 = ins.b as int;
+                let w3 = ins.c as int;
                 let mut npc: int = -1;
                 match ((w0 & 255) as int) {
                     R_NOP => {
@@ -404,9 +414,10 @@ impl Vm {
                                 let p = a as int;
                                 let q = b as int;
                                 r = Val::Num((p % q) as double);
-                            // bit operations on numbers that are int32 already
+                            // bit operations on numbers in int32 range: ToInt32 is
+                            // the truncation
                             } else if code >= OP_BAND && code <= OP_SHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
-                                let (p, q) = (a as int, b as int);
+                                let (p, q) = (trunc_i32(a), trunc_i32(b));
                                 r = Val::Num(match code {
                                     OP_BAND => (p & q) as double,
                                     OP_BOR => (p | q) as double,
@@ -414,6 +425,8 @@ impl Vm {
                                     OP_SHL => wrap32(p << (q & 31)) as double,
                                     _ => (p >> (q & 31)) as double,
                                 });
+                            } else if code >= OP_BAND && code <= OP_USHR {
+                                r = Val::Num(bit_num(code, a, b));
                             } else {
                                 r = Val::Num(arith_num(code, a, b));
                             }
@@ -489,7 +502,7 @@ impl Vm {
                                 continue 'frames;
                             }
                         }
-                        let t = if r { w0 >> 16 } else { w3 };
+                        let t = if r { (w0 >> 16) as int } else { w3 };
                         if (t as int) <= pc && self.gc_due() {
                             self.frames[fi].pc = (t as int);
                             self.rgc(want);
@@ -621,6 +634,12 @@ impl Vm {
                             Val::Undef | Val::Null => true,
                             _ => false,
                         };
+                        if (w0 & 65280) != 0 {
+                            // sub 1, `x?.`: the jump when nullish (r_jnull)
+                            let to = self.r_jnull(bp, (w1 as int), (w2 as int));
+                            pc = if to >= 0 { to } else { pc + 1 + ((w0 >> 16) as int) };
+                            continue;
+                        }
                         if nullish {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
@@ -675,11 +694,11 @@ impl Vm {
                             let k = *x - (w3 as double);
                             let size = self.rtab[w2 as usize];
                             if k >= 0.0 && k < (size as double) && k == ((k as int) as double) {
-                                t = self.rtab[(w2 + 1 + ((k as int) as i32)) as usize];
+                                t = self.rtab[(w2 + 1 + (k as int)) as usize];
                             }
                         }
                         if t < 0 {
-                            t = self.rtab[(w2 + 1 + (self.rtab[w2 as usize] as i32)) as usize];
+                            t = self.rtab[(w2 + 1 + (self.rtab[w2 as usize] as int)) as usize];
                         }
                         pc = t;
                         if self.slicing && self.brk(fi, pc) {
@@ -728,8 +747,10 @@ impl Vm {
                                 continue;
                             }
                         }
-                        if c == -4 && o >= 0 && self.ob(o).class == C_ARRAY {
-                            // a site r_get_prop_slow saw reading an array's length
+                        if c == -4 && o >= 0 && (self.ob(o).class == C_ARRAY || self.ob(o).class == C_ARGUMENTS) {
+                            // a site r_get_prop_slow saw reading an array's length (or
+                            // an unmodified arguments object's: a written or deleted
+                            // length makes it C_SARGS)
                             let n = evec_at(&self.evecs, self.ob(o).elems as usize).v.len() as double;
                             self.rset((bp + (w1 as int)) as usize, Val::Num(n));
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -773,6 +794,16 @@ impl Vm {
                                     r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
+                            } else if ob.class == C_TYPED {
+                                // a typed array's element (ta_slot: no detached, resizable or converted buffer)
+                                let i = *n as int;
+                                if (i as double) == *n {
+                                    let s = self.ta_slot(*o, i);
+                                    if s >= 0 {
+                                        r = Val::Num(cold_at(&self.colds, obj_at(&self.objs, ob.env as usize).cold as usize).nums[s as usize]);
+                                        done = true;
+                                    }
+                                }
                             }
                         }
                         if done {
@@ -807,7 +838,15 @@ impl Vm {
                             num = true;
                         }
                         let mut done = false;
-                        if o >= 0 && num {
+                        if o >= 0 && num && self.objs[o as usize].class == C_TYPED {
+                            if let Val::Num(x) = val {
+                                let i = n as int;
+                                if (i as double) == n && self.ta_put_num(o, i, x) {
+                                    done = true;
+                                }
+                            }
+                        }
+                        if !done && o >= 0 && num {
                             self.inc(&val);
                             let ob = &mut self.objs[o as usize];
                             let mut old: int = -1;
@@ -1273,8 +1312,23 @@ impl Vm {
         }
     }
 
+    /// R_JNN_KEEP sub 1 (`x?.`): slot w1 undefined or null becomes undefined, and the
+    /// jump's target w2; -1 to fall through. Kept out of rrun's loop.
+    #[inline(never)]
+    pub fn r_jnull(&mut self, bp: int, w1: int, w2: int) -> int {
+        let i = (bp + w1) as usize;
+        if matches!(self.stack[i], Val::Undef | Val::Null) {
+            self.stack[i] = Val::Undef;
+            return w2;
+        }
+        -1
+    }
+
     #[inline(never)]
     pub fn r_add_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+        if self.jit_on {
+            self.note_nonnum(fi, pc);
+        }
         let a = self.rget(bp, w2).clone();
         let b = self.rget(bp, w3).clone();
         // a longer string whose buffer nothing else holds grows in place
@@ -1297,6 +1351,9 @@ impl Vm {
 
     #[inline(never)]
     pub fn r_arith_slow(&mut self, code: int, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+        if self.jit_on {
+            self.note_nonnum(fi, pc);
+        }
         let a = self.rget(bp, w2).clone();
         let b = self.rget(bp, w3).clone();
         self.frames[fi].pc = pc + 1;
@@ -1310,6 +1367,13 @@ impl Vm {
     #[inline(never)]
     pub fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
         let atom = self.ratom(pi, pc);
+        if o < 0 && atom == A_LENGTH && (w0 & 255) == R_GET_PROP {
+            if let Val::Str(h) = *self.rget(bp, w2) {
+                let n = self.hlen(h) as double;
+                self.stack[(bp + w1) as usize] = Val::Num(n);
+                return false;
+            }
+        }
         let mut h0: int = -1;
         if o >= 0 && self.rcode[(rb + pc) as usize].c == -3 {
             // the site last read through the chain: its cache first (a hit
@@ -1346,7 +1410,7 @@ impl Vm {
                 self.stack[(bp + w1) as usize] = r;
                 return false;
             }
-            if atom == A_LENGTH && self.objs[o as usize].class == C_ARRAY && self.find(o, atom) < 0 {
+            if atom == A_LENGTH && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && self.find(o, atom) < 0 {
                 let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                 self.stack[(bp + w1) as usize] = r;
                 // the next read here takes rrun's array-length path
@@ -1368,6 +1432,15 @@ impl Vm {
                 self.rcode[(rb + pc) as usize].c = -3;
                 let g = self.evecs[self.objs[obj_of(&r) as usize].elems as usize].v[0];
                 let go = obj_of(&g);
+                if go >= 0 && self.objs[go as usize].class == C_NATIVE && (self.objs[go as usize].func as int) == crate::typed::NF_TA_LEN {
+                    // TypedArray.prototype.length's own getter on a typed array
+                    let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
+                    let ro = obj_of(&recv);
+                    if ro >= 0 && self.objs[ro as usize].class == C_TYPED {
+                        self.stack[(bp + w1) as usize] = Val::Num(self.ta_length(ro) as double);
+                        return false;
+                    }
+                }
                 if go >= 0 && self.objs[go as usize].class == C_FUNCTION {
                     let gp = self.objs[go as usize].func as usize;
                     let plain = {
@@ -1600,6 +1673,10 @@ impl Vm {
         if c == C_OBJECT {
             return true;
         }
+        if c == C_TYPED {
+            // a typed array's length is TypedArray.prototype's getter
+            return atom != A_NAME && atom != A_PROTOTYPE;
+        }
         c != C_PROXY && c != C_STRING && atom != A_LENGTH && atom != A_NAME && atom != A_PROTOTYPE
     }
 
@@ -1734,7 +1811,8 @@ impl Vm {
                     if self.ob(p).shape == self.mcache[k + 3] {
                         let f = slot_at(self.ob(p), self.mcache[k + 4] as usize);
                         if let Val::Obj(fo) = f {
-                            if self.ob(fo).class == C_FUNCTION {
+                            let fc = self.ob(fo).class;
+                            if fc == C_FUNCTION || fc == C_NATIVE {
                                 self.rset((bp + w1) as usize, f);
                                 self.rset((bp + w1 + 1) as usize, v);
                                 return;
@@ -1744,10 +1822,11 @@ impl Vm {
                 }
             }
         } else if w3 <= -16 {
-            if let Val::Str(_) = v {
-                // a string's method: String.prototype's slot -16 - w3, its
-                // key checked as an inline cache's
-                let sp = self.string_proto;
+            if matches!(v, Val::Str(_)) || matches!(v, Val::Num(_)) {
+                // a string's (number's) method: String.prototype's
+                // (Number.prototype's) slot -16 - w3, its key checked as an
+                // inline cache's
+                let sp = if matches!(v, Val::Num(_)) { self.number_proto } else { self.string_proto };
                 let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
                 let slot = self.ic_slot(sp, atom, -16 - w3, false);
                 if slot >= 0 {
@@ -1804,7 +1883,7 @@ impl Vm {
     /// Keeps a method found one prototype up (holder h, slot) in the
     /// site's mcache entry, taking a new entry the first time.
     fn mc_learn(&mut self, site: int, o: int, h: int, slot: i32, w3: int, f: &Val) {
-        let fun = if let Val::Obj(fo) = f { self.ob(*fo).class == C_FUNCTION } else { false };
+        let fun = if let Val::Obj(fo) = f { self.ob(*fo).class == C_FUNCTION || self.ob(*fo).class == C_NATIVE } else { false };
         if !fun || slot < 0 {
             return;
         }
@@ -1852,10 +1931,11 @@ impl Vm {
             }
         }
         if !done {
-            if let Val::Str(_) = v {
+            if matches!(v, Val::Str(_)) || (matches!(v, Val::Num(_)) && self.number_proto >= 0) {
                 if atom != A_LENGTH {
-                    // String.prototype's own method: r_get_method's string path next time
-                    let sp = self.string_proto;
+                    // String.prototype's (Number.prototype's) own method:
+                    // r_get_method's primitive path next time
+                    let sp = if matches!(v, Val::Num(_)) { self.number_proto } else { self.string_proto };
                     let slot = self.find(sp, atom);
                     if slot >= 0 && slot < 65536 && (self.attr_at(sp, slot) & P_ACCESSOR) == 0 && self.is_callable(&self.objs[sp as usize].get_slot(slot as usize)) {
                         self.rcode[(rb + pc) as usize].c = (-16 - slot) as i32;
@@ -1896,12 +1976,56 @@ impl Vm {
                 self.stack[dst as usize] = v;
                 return false;
             }
+            if id != crate::builtins::NF_CALL && id != crate::builtins::NF_APPLY && id != crate::typed::NF_FAST_WRAP && !self.throwing {
+                // the native's full call, as call_op makes it (native_fast
+                // not tried a second time); its result to dst
+                self.stack.truncate((fpos + argc + 2) as usize);
+                let mut args: Vec<Val> = take_args(&mut self.arg_pool);
+                let mut i = 0;
+                while i < argc {
+                    args.push(self.stack[(fpos + 2 + i) as usize]);
+                    i += 1;
+                }
+                let this = self.stack[(fpos + 1) as usize];
+                self.stack.truncate(fpos as usize);
+                self.native_depth += 1;
+                // a String.prototype / Number.prototype method of primitive
+                // operands: call_native's checks (array, proxy, typed...)
+                // are not its, call_native2 answers it
+                let mut direct = (id >= crate::builtins::NF_SP_CHARAT && id <= crate::builtins::NF_SP_ITERATOR) || (id >= crate::builtins::NF_NP_TOSTRING && id <= crate::builtins::NF_NP_TOEXPONENTIAL);
+                let mut k = 0;
+                while direct && k < args.len() {
+                    if obj_of(&args[k]) >= 0 {
+                        direct = false;
+                    }
+                    k += 1;
+                }
+                let r = if direct { self.call_native2(id, fo, this, &args, false, Val::Undef) } else { self.call_native(id, fo, this, &args, false, Val::Undef) };
+                self.native_depth -= 1;
+                give_args(&mut self.arg_pool, args);
+                self.stack.push(r);
+                if self.throwing {
+                    return false;
+                }
+                if self.stack.len() < want {
+                    grow_stack(&mut self.stack, want);
+                }
+                if dst != fpos {
+                    self.stack[dst as usize] = r;
+                }
+                return false;
+            }
         }
         let nf = self.frames.len();
         self.stack.truncate((fpos + argc + 2) as usize);
         let mut fo = fo;
         let mut fpos = fpos;
         let mut argc = argc;
+        if fo >= 0 && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::typed::NF_FAST_WRAP && (self.ob(fo).env as int) >= 0 {
+            // a __fastWrap method's other cases: its prelude function, entered here
+            fo = self.ob(fo).env as int;
+            self.stack[fpos as usize] = Val::Obj(fo);
+        }
         while fo >= 0 && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_CALL {
             // f.call(this, a…): [call, f, this, a…] is already [f, this, a…]
             // one slot on, so f is called there (its result still goes to dst)
@@ -2017,6 +2141,29 @@ impl Vm {
     #[inline(never)]
     pub fn r_step_k(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let k = (w0 >> 8) & 255;
+        if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_INSTANCEOF {
+            let a = *self.rget(bp, w2);
+            let b = *self.rget(bp, w3);
+            let r = self.instanceof_fast(&a, &b);
+            if r >= 0 {
+                self.stack[(bp + w1) as usize] = Val::Bool(r == 1);
+                return;
+            }
+        }
+        if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_IN {
+            // `i in arr` for an element of a plain array: no stack trip
+            let ov = self.rget(bp, w3).clone();
+            let nv = self.rget(bp, w2).clone();
+            if let Val::Obj(o) = ov {
+                if let Val::Num(n) = nv {
+                    let i = n as int;
+                    if (i as double) == n && i >= 0 && self.objs[o as usize].class == C_ARRAY && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
+                        self.stack[(bp + w1) as usize] = Val::Bool(true);
+                        return;
+                    }
+                }
+            }
+        }
         if k >= 1 {
             let x = self.rget(bp, w2).clone();
             self.stack.push(x);
@@ -2046,7 +2193,7 @@ impl Vm {
         loop {
             match self.iter_next(&it) {
                 Some(v) => {
-                    if src_obj >= 0 && self.objs[o as usize].class == C_ITER {
+                    if src_obj >= 0 && self.objs[o as usize].class == C_ITER && self.for_in_recheck(o) {
                         // a key deleted since the loop began is skipped
                         if !self.has_property(src_obj, &v) {
                             continue;
@@ -2066,11 +2213,67 @@ impl Vm {
     /// frames changed.
     #[inline(never)]
     pub fn r_win(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int, want: usize) -> int {
-        self.stack.truncate((bp + w1) as usize);
         let op = self.protos[pi].code[pc as usize];
+        let code = op.code as int;
+        if code == OP_TRY || code == OP_END_TRY {
+            // the handler's stack height is the window's top (what the
+            // truncation below would leave); the registers stay as they are
+            if code == OP_TRY {
+                let env = self.frames[fi].env;
+                self.handlers.push(Handler { frame: fi as int, catch_pc: (op.a as int), sp: bp + w1, env: env });
+            } else {
+                self.handlers.pop();
+            }
+            self.frames[fi].pc = pc + 1;
+            return pc + 1;
+        }
+        self.stack.truncate((bp + w1) as usize);
         let mut p2 = pc + 1;
         self.frames[fi].pc = p2;
-        let changed = self.win_op(op, pi, bp, fi, &mut p2);
+        let mut changed = false;
+        // a small BigInt literal: its text (on the window's top) read in place
+        let mut done = false;
+        if code == OP_GET_PRIVATE && op.b != -2 && w1 > 0 {
+            // obj.#x as an own data property (Vm::priv_get's first case)
+            let top = (bp + w1 - 1) as usize;
+            if let Val::Obj(o) = self.stack[top] {
+                let s = self.find(o, op.a as int);
+                if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
+                    self.stack[top] = self.objs[o as usize].get_slot(s as usize);
+                    done = true;
+                }
+            }
+        } else if code == OP_SET_PRIVATE && op.c != 1 && w1 > 1 {
+            // obj.#x = v for an own data property (Vm::priv_set's case)
+            let top = (bp + w1 - 1) as usize;
+            if let Val::Obj(o) = self.stack[top - 1] {
+                let s = self.find(o, op.a as int);
+                if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
+                    let val = self.stack[top];
+                    self.put_slot(o, s, val);
+                    self.stack.truncate(top);
+                    self.stack[top - 1] = val;
+                    done = true;
+                }
+            }
+        }
+        if done {
+        } else if code == OP_TOSTR && w1 > 0 && !matches!(self.stack[(bp + w1 - 1) as usize], Val::Obj(_)) {
+            // a template's primitive substitution: as is (Vm::quick_op)
+            done = true;
+        } else if code == OP_BIGINT && w1 > 0 {
+            let top = (bp + w1 - 1) as usize;
+            if let Val::Str(h) = self.stack[top] {
+                let n = crate::bigint::small_big_of(self.sref(h));
+                if n < crate::bigint::small_big_limit() {
+                    self.stack[top] = self.bigint_small(n);
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            changed = self.win_op(op, pi, bp, fi, &mut p2);
+        }
         if self.throwing {
             return 0;
         }
@@ -2564,6 +2767,16 @@ pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _hea
     pc
 }
 
+/// Vm::note_nonnum's mark, kept by the JIT (wjit.rs note_nonnum, which
+/// also sends code that speculated on the site back). Only Rust compiles.
+#[ranger::target(rust)]
+pub fn jit_note_nonnum(vm: &mut Vm, pi: usize, ri: int) {
+    crate::wjit::note_nonnum(vm, pi, ri as usize);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_note_nonnum(_vm: &mut Vm, _pi: usize, _ri: int) {}
+
 /// The machine has run to its end (no frames left): functions compiled
 /// and waiting for their batch go to the host now (wjit.rs). Only Rust
 /// compiles.
@@ -2579,3 +2792,35 @@ pub fn jit_flush(_vm: &mut Vm) {}
 /// back edge this often (4 per such entry, 1 back per good one) is no
 /// longer entered.
 pub const JIT_MISS_MAX: int = 1024;
+
+/// `a` (in int32 range, checked by the caller) truncated toward zero.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn trunc_i32(a: double) -> int {
+    debug_assert!(a >= -2147483648.0 && a <= 2147483647.0);
+    // SAFETY: the caller checks that a is in int32 range (NaN fails it)
+    unsafe { a.to_int_unchecked::<i32>() as int }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn trunc_i32(a: double) -> int {
+    a as int
+}
+
+/// A bit operation on two numbers outside rrun's int32 fast path (`>>>`,
+/// uint32s): below 2^53 ToInt32 truncates and keeps the low 32 bits.
+#[inline(never)]
+pub fn bit_num(code: int, a: double, b: double) -> double {
+    if !(a > -9007199254740992.0 && a < 9007199254740992.0 && b > -9007199254740992.0 && b < 9007199254740992.0) {
+        return arith_num(code, a, b);
+    }
+    let (p, q) = (wrap32(a as int), wrap32(b as int));
+    match code {
+        OP_BAND => (p & q) as double,
+        OP_BOR => (p | q) as double,
+        OP_BXOR => (p ^ q) as double,
+        OP_SHL => wrap32(p << (q & 31)) as double,
+        OP_SHR => (p >> (q & 31)) as double,
+        _ => ((p & 4294967295) >> (q & 31)) as double,
+    }
+}

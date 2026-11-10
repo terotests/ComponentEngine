@@ -30,6 +30,17 @@ optimisation, trained on `bench/cpu` and Octane (not on React or Chart.js).
 On those two apps it cuts instruction cache misses by 20–25 % and the
 instruction count by 1–3 %. It needs `rustup component add llvm-tools`.
 
+`CERXES_PROF=1 cerxes app.js` samples the run and prints, at the end, the
+functions that took the most time (self and inclusive ms, the line each
+starts on; the prelude's functions count lines in the prelude). The clock is
+read at every taken branch, call and return, so the run is about twice as
+slow, but the shares hold.
+
+`node cerxes/bench/pdfkit.mjs` makes 10- and 100-page PDFs with PDFKit
+(fetched from npm into `bench/pdfkit/out`) in Node, CErXes native, CErXes
+as WebAssembly with the JIT off and on, and Hermes when `HERMES` names a
+`hermes` binary; every engine has to make the same bytes.
+
 `tests/cases.txt` holds the syntax cases (a script and the value it
 answers). `tests/syntax.rs` runs them on the cargo build, and CEr's own
 cases (`../cer/tests/cases.txt`, plain JavaScript, values from Node) both

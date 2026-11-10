@@ -56,6 +56,13 @@ pub mod unit;
 pub mod types;
 pub mod value;
 pub mod vm;
+/// a HashMap with a cheaper hash for the Map / Set index (fxmap.rs):
+/// Rust only, the other targets keep their maps
+#[ranger::target(rust)]
+pub mod fxmap {
+    include!("fxmap.rs");
+}
+
 /// the baseline JIT (wjit.rs): Rust only
 #[ranger::target(rust)]
 pub mod wjit {
@@ -262,9 +269,9 @@ impl Engine {
         }
         self.vm.slice_t0 = builtins::now_ms();
         self.vm.ticks = vm::SLICE_TICKS;
-        self.vm.slicing = self.vm.slice_ms > 0.0;
+        self.vm.slicing = self.vm.slice_ms > 0.0 || self.vm.prof_on;
         let r = self.run_val(u);
-        self.vm.slicing = false;
+        self.vm.slicing = self.vm.prof_on;
         if self.vm.suspended {
             return String::new();
         }
@@ -277,7 +284,11 @@ impl Engine {
         if self.vm.throwing {
             return self.uncaught();
         }
+        // the completion value lives through the jobs: a reclaim there
+        // must not free it
+        self.vm.temp_roots.push(r);
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -306,11 +317,11 @@ impl Engine {
         self.vm.suspended = false;
         self.vm.slice_t0 = builtins::now_ms();
         self.vm.ticks = vm::SLICE_TICKS;
-        self.vm.slicing = self.vm.slice_ms > 0.0;
+        self.vm.slicing = self.vm.slice_ms > 0.0 || self.vm.prof_on;
         if !self.vm.regs || self.vm.translate_frames() {
             self.vm.run(0);
         }
-        self.vm.slicing = false;
+        self.vm.slicing = self.vm.prof_on;
         if self.vm.suspended {
             return String::new();
         }
@@ -347,7 +358,9 @@ impl Engine {
             let u = self.uncaught();
             return format!("t:{}", u);
         }
+        self.vm.temp_roots.push(r);
         self.vm.run_jobs();
+        self.vm.temp_roots.pop();
         match &r {
             Val::Undef => String::from("u"),
             Val::Null => String::from("l"),

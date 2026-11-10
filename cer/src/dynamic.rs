@@ -63,7 +63,7 @@ impl Vm {
         let gf = self.native_fn("GeneratorFunction", NF_GENERATOR_FUNCTION, 1);
         self.add_prop(gf, A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
-        let fc = self.get_obj(self.global, self.atoms["Function"], &Val::Obj(self.global));
+        let fc = self.get_obj(self.global, self.atom_lookup("Function"), &Val::Obj(self.global));
         if let Val::Obj(f) = fc {
             self.put_proto(gf, f);
         }
@@ -147,6 +147,7 @@ impl Vm {
             self.throw_syntax(msg.as_str());
             return Val::Undef;
         }
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -180,6 +181,7 @@ impl Vm {
     /// proto, or -1 (nothing changed) and the error when pcomp cannot
     /// compile it.
     fn pcomp_program(&mut self, code: &str, strict: bool, is_eval: bool) -> (int, String) {
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -213,6 +215,7 @@ impl Vm {
         if !self.pcomp || src.starts_with("/*@cerxesModule ") {
             return self.eval_source(src, strict, true);
         }
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -246,6 +249,7 @@ impl Vm {
     /// A module's function (`parser::module_source`) compiled with pcomp
     /// and linked: its proto, or -1 (nothing changed).
     fn pcomp_module(&mut self, ms: &parser::ModuleSource) -> int {
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -354,8 +358,8 @@ impl Vm {
             }
             let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
             let (src, fl) = if self.class_of(&a0) == C_REGEXP {
-                let s = self.get(&a0, self.atoms["source"]);
-                let f = self.get(&a0, self.atoms["flags"]);
+                let s = self.get(&a0, self.atom_lookup("source"));
+                let f = self.get(&a0, self.atom_lookup("flags"));
                 (s, f)
             } else {
                 (if matches!(a0, Val::Undef) { self.str_val("") } else { a0.clone() }, a1)
@@ -368,8 +372,9 @@ impl Vm {
             let func = self.objs[n as usize].func as int;
             let prim = self.colds[self.objs[n as usize].cold as usize].prim.clone();
             let pos = self.objs[n as usize].pos as int;
+            self.compact_dict(n);
             let keys = self.keys_of(n);
-            let vals = self.objs[n as usize].vals.clone();
+            let vals = self.objs[n as usize].slots();
             self.objs[o as usize].func = func as i32;
             self.put_prim(o, prim);
             self.objs[o as usize].pos = pos as i32;

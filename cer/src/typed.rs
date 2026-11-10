@@ -48,6 +48,158 @@ pub const NF_TA_MAKE: int = 926;
 pub const NF_TA_INFO: int = 927;
 pub const NF_BUF_MAX: int = 928;
 pub const NF_BUF_RESIZE: int = 929;
+/// TypedArray.prototype's `length` getter, and `set`'s copy from a typed
+/// array or a plain array (call_native_ta)
+pub const NF_TA_LEN: int = 970;
+pub const NF_TA_SET: int = 971;
+/// DataView: __dvMake(view, buffer, byteOffset, byteLength or -1) marks a
+/// new view (C_DATAVIEW); __dvGet(view, index, kind, little) and
+/// __dvSet(view, index, kind, value, little) do get/set for a number kind,
+/// an integer index and a view in bounds (undefined / false otherwise: the
+/// prelude's checks and errors then)
+pub const NF_DV_MAKE: int = 972;
+pub const NF_DV_GET: int = 973;
+pub const NF_DV_SET: int = 974;
+/// __taKind(o): o's element kind when it is a typed array __taSub can
+/// take (fixed length, in bounds, buffer neither detached nor resizable),
+/// -1 otherwise.
+/// __taSub(view, start, end, prototype): `view.subarray(start, end)` with
+/// the default species, for start/end undefined or numbers and a view in
+/// bounds over a fixed buffer (undefined otherwise: the prelude's path).
+/// __taNew(kind, length, prototype, ArrayBuffer.prototype): `new
+/// XArray(length)` for an integer length (undefined otherwise).
+pub const NF_TA_KIND: int = 975;
+pub const NF_TA_SUB: int = 976;
+pub const NF_TA_NEW: int = 977;
+/// __taSort(view): sorts a number-kind view as the default comparator
+/// does (NaN last, -0 before +0) and gives true; false for anything
+/// __taKind refuses or a BigInt kind (the prelude sorts those).
+pub const NF_TA_SORT: int = 978;
+/// __dvMethod(kind, slow, isSet, name, length): DataView.prototype's
+/// get<Kind> / set<Kind> as a native (NF_DVM_GET / NF_DVM_SET, the kind in
+/// its pos, `slow` in its env): a number kind, an integer index and a view
+/// in bounds are done in place (Vm::native_fast), anything else calls
+/// `slow` (the prelude's checks and errors).
+pub const NF_DV_METHOD: int = 979;
+pub const NF_DVM_GET: int = 980;
+pub const NF_DVM_SET: int = 981;
+/// a prelude method (its function in env) whose plain cases a native runs
+/// (its id in pos): __fastWrap(native, slowFn, name, length), fast_wrap
+pub const NF_FAST_WRAP: int = 982;
+
+/// The default typed array order: NaN last, -0 before +0.
+pub fn num_before(a: double, b: double) -> bool {
+    if a != a {
+        return false;
+    }
+    if b != b {
+        return true;
+    }
+    if a < b {
+        return true;
+    }
+    if a == 0.0 && b == 0.0 {
+        return 1.0 / a < 0.0 && 1.0 / b > 0.0;
+    }
+    false
+}
+
+/// `v` sorted by num_before (a merge sort: stable, n log n).
+pub fn sort_nums(v: &mut Vec<double>) {
+    let n = v.len();
+    let mut tmp: Vec<double> = v.clone();
+    let mut w: usize = 1;
+    while w < n {
+        let mut lo: usize = 0;
+        while lo < n {
+            let mid = if lo + w < n { lo + w } else { n };
+            let hi = if lo + 2 * w < n { lo + 2 * w } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            while k < hi {
+                if i < mid && (j >= hi || !num_before(v[j], v[i])) {
+                    tmp[k] = v[i];
+                    i += 1;
+                } else {
+                    tmp[k] = v[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            lo = hi;
+        }
+        let mut q: usize = 0;
+        while q < n {
+            v[q] = tmp[q];
+            q += 1;
+        }
+        w = w * 2;
+    }
+}
+
+/// n zeros (a new buffer's contents). Rust: one zeroed allocation.
+#[ranger::target(rust)]
+pub fn zeros(n: int) -> Vec<double> {
+    vec![0.0; n.max(0) as usize]
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn zeros(n: int) -> Vec<double> {
+    let mut z: Vec<double> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        z.push(0.0);
+        i += 1;
+    }
+    z
+}
+
+/// colds[tc].nums[d0..d0 + n] = colds[sc].nums[s0..s0 + n] (the two may be
+/// one buffer and overlap). Rust: one memmove.
+#[ranger::target(rust)]
+pub fn copy_nums(colds: &mut Vec<Cold>, sc: usize, s0: usize, tc: usize, d0: usize, n: usize) {
+    if sc == tc {
+        colds[sc].nums.copy_within(s0..s0 + n, d0);
+    } else if sc < tc {
+        let (lo, hi) = colds.split_at_mut(tc);
+        hi[0].nums[d0..d0 + n].copy_from_slice(&lo[sc].nums[s0..s0 + n]);
+    } else {
+        let (lo, hi) = colds.split_at_mut(sc);
+        lo[tc].nums[d0..d0 + n].copy_from_slice(&hi[0].nums[s0..s0 + n]);
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn copy_nums(colds: &mut Vec<Cold>, sc: usize, s0: usize, tc: usize, d0: usize, n: usize) {
+    let mut tmp: Vec<double> = Vec::new();
+    let mut k: usize = 0;
+    while k < n {
+        tmp.push(colds[sc].nums[s0 + k]);
+        k += 1;
+    }
+    let mut k2: usize = 0;
+    while k2 < n {
+        colds[tc].nums[d0 + k2] = tmp[k2];
+        k2 += 1;
+    }
+}
+
+/// log2 of kind_size.
+pub fn kind_shift(kind: int) -> int {
+    if kind == TK_FLOAT16 {
+        return 1;
+    }
+    if kind <= TK_UINT8C {
+        0
+    } else if kind <= TK_UINT16 {
+        1
+    } else if kind <= TK_UINT32 || kind == TK_FLOAT32 {
+        2
+    } else {
+        3
+    }
+}
 
 pub fn kind_size(kind: int) -> int {
     if kind == TK_FLOAT16 {
@@ -418,6 +570,20 @@ impl Vm {
 
     /// A resizable ArrayBuffer (or growable SharedArrayBuffer) keeps its
     /// maximum byte length in `prim`.
+    /// Every byte of buffer `b` (holding bytes) is 0.
+    fn buf_zero(&self, b: int) -> bool {
+        let c = self.objs[b as usize].cold as usize;
+        let n = self.colds[c].nums.len();
+        let mut i: usize = 0;
+        while i < n {
+            if self.colds[c].nums[i] != 0.0 {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
     pub fn buf_resizable(&self, b: int) -> bool {
         matches!(self.colds[self.objs[b as usize].cold as usize].prim, Val::Num(_))
     }
@@ -545,6 +711,105 @@ impl Vm {
         Val::Num(self.buf_read(b, at as int, kind, true))
     }
 
+    /// Where `ta[i]` is in its buffer's `nums` when the read or write needs
+    /// nothing else: a fixed-length view over a buffer that is neither
+    /// detached nor resizable, `i` inside it, and the buffer holding its
+    /// elements as this view's kind (or as bytes, for a Uint8Array). -1
+    /// otherwise; ta_get / ta_set do the rest. The register machine's
+    /// R_GET_ELEM / R_SET_ELEM and get_index / set_index take it first.
+    #[inline]
+    pub fn ta_slot(&self, o: int, i: int) -> int {
+        let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        let b = ob.env as int;
+        if b < 0 || i < 0 {
+            return -1;
+        }
+        let bo = crate::rvm::obj_at(&self.objs, b as usize);
+        if (bo.pos & 1) != 0 || bo.cold <= 0 {
+            return -1;
+        }
+        // the fixed length as a number: i (an int) compared without a
+        // conversion back from double
+        let inside = match crate::rvm::cold_at(&self.colds, ob.cold as usize).prim {
+            Val::Num(n) => (i as double) < n,
+            _ => false,
+        };
+        if !inside {
+            return -1;
+        }
+        let bc = crate::rvm::cold_at(&self.colds, bo.cold as usize);
+        if matches!(bc.prim, Val::Num(_)) {
+            return -1;
+        }
+        let kind = ob.pos as int;
+        if bc.home == kind {
+            // a view's byte offset is a multiple of its element size
+            return ((ob.func as int) >> kind_shift(kind)) + i;
+        }
+        if bc.home < 0 && kind == TK_UINT8 {
+            return (ob.func as int) + i;
+        }
+        -1
+    }
+
+    /// `ta[i]` as ta_slot finds it (a buffer's Cold and the slot in its
+    /// nums): the number there, for an s >= 0 from ta_slot.
+    #[inline(always)]
+    pub fn ta_num_at(&self, o: int, s: int) -> double {
+        let bo = crate::rvm::obj_at(&self.objs, crate::rvm::obj_at(&self.objs, o as usize).env as usize);
+        crate::rvm::cold_at(&self.colds, bo.cold as usize).nums[s as usize]
+    }
+
+    /// `ta[i]` when ta_slot finds it, else ta_get.
+    #[inline]
+    pub fn ta_get_fast(&mut self, o: int, i: int) -> Val {
+        let s = self.ta_slot(o, i);
+        if s >= 0 {
+            return Val::Num(self.ta_num_at(o, s));
+        }
+        self.ta_get(o, i)
+    }
+
+    /// `ta[i] = x` for a number when ta_slot finds the element: an integer
+    /// the kind holds is stored as it is (as +0 for -0), anything else as
+    /// element_value converts it. false: nothing written, ta_set does it.
+    #[inline]
+    pub fn ta_put_num(&mut self, o: int, i: int, x: double) -> bool {
+        let s = self.ta_slot(o, i);
+        if s < 0 {
+            return false;
+        }
+        let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        let kind = ob.pos as int;
+        if is_big(kind) {
+            return false;
+        }
+        let bc = crate::rvm::obj_at(&self.objs, ob.env as usize).cold as usize;
+        // a Uint8Array over bytes: the buffer holds Uint8 elements from now
+        self.colds[bc].home = kind;
+        if kind == TK_FLOAT64 {
+            self.colds[bc].nums[s as usize] = x;
+            return true;
+        }
+        let iv = x as int;
+        let fits = (iv as double) == x
+            && (if kind == TK_UINT8 || kind == TK_UINT8C {
+                iv >= 0 && iv <= 255
+            } else if kind == TK_INT32 {
+                iv >= -2147483648 && iv <= 2147483647
+            } else if kind == TK_UINT16 {
+                iv >= 0 && iv <= 65535
+            } else if kind == TK_INT16 {
+                iv >= -32768 && iv <= 32767
+            } else if kind == TK_UINT32 {
+                iv >= 0 && iv <= 4294967295
+            } else {
+                kind == TK_INT8 && iv >= -128 && iv <= 127
+            });
+        self.colds[bc].nums[s as usize] = if fits { iv as double } else { element_value(kind, x) };
+        true
+    }
+
     /// `ta[i] = v`: the value is converted even when `i` is outside.
     pub fn ta_set(&mut self, o: int, i: int, v: &Val) {
         if is_big(self.objs[o as usize].pos as int) {
@@ -596,8 +861,451 @@ impl Vm {
         self.method(g, "__bufDetach", NF_BUF_DETACH, 1);
         self.method(g, "__taMake", NF_TA_MAKE, 5);
         self.method(g, "__taInfo", NF_TA_INFO, 1);
+        self.method(g, "__taLength", NF_TA_LEN, 0);
+        self.method(g, "__taSetFast", NF_TA_SET, 3);
+        self.method(g, "__dvMake", NF_DV_MAKE, 4);
+        self.method(g, "__dvGet", NF_DV_GET, 4);
+        self.method(g, "__dvSet", NF_DV_SET, 5);
+        self.method(g, "__dvMethod", NF_DV_METHOD, 5);
+        self.method(g, "__fastWrap", NF_FAST_WRAP, 4);
+        self.method(g, "__taKind", NF_TA_KIND, 1);
+        self.method(g, "__taSub", NF_TA_SUB, 4);
+        self.method(g, "__taNew", NF_TA_NEW, 4);
+        self.method(g, "__taSort", NF_TA_SORT, 1);
         self.method(g, "__bufMax", NF_BUF_MAX, 1);
         self.method(g, "__bufResize", NF_BUF_RESIZE, 2);
+    }
+
+    /// A typed array of fixed length over a buffer that is neither
+    /// detached nor resizable, in bounds: what NF_TA_SUB handles.
+    fn ta_plain_view(&self, t: int) -> bool {
+        if self.objs[t as usize].class != C_TYPED || self.ta_out_of_bounds(t) {
+            return false;
+        }
+        if !matches!(self.colds[self.objs[t as usize].cold as usize].prim, Val::Num(_)) {
+            return false;
+        }
+        let b = self.objs[t as usize].env as int;
+        b >= 0 && (self.objs[b as usize].pos & 1) == 0 && !self.buf_resizable(b)
+    }
+
+    /// NF_TA_KIND / NF_TA_SUB / NF_TA_NEW (see there).
+    pub fn call_native_ta2(&mut self, id: int, args: &Vec<Val>) -> Val {
+        if id == NF_TA_SORT {
+            let t = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            if t < 0 || !self.ta_plain_view(t) || is_big(self.objs[t as usize].pos as int) {
+                return Val::Bool(false);
+            }
+            let n = self.ta_length(t);
+            let mut v: Vec<double> = Vec::new();
+            let mut i: int = 0;
+            while i < n {
+                let x = self.ta_get_fast(t, i);
+                v.push(match x {
+                    Val::Num(d) => d,
+                    _ => 0.0 / 0.0,
+                });
+                i += 1;
+            }
+            sort_nums(&mut v);
+            i = 0;
+            while i < n {
+                if !self.ta_put_num(t, i, v[i as usize]) {
+                    self.ta_set(t, i, &Val::Num(v[i as usize]));
+                }
+                i += 1;
+            }
+            return Val::Bool(true);
+        }
+        if id == NF_TA_KIND {
+            let t = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+            if t < 0 || !self.ta_plain_view(t) {
+                return Val::Num(-1.0);
+            }
+            return Val::Num(self.objs[t as usize].pos as double);
+        }
+        if id == NF_TA_NEW {
+            if args.len() < 4 {
+                return Val::Undef;
+            }
+            let kind = num(&args[0]) as int;
+            let n = match &args[1] {
+                Val::Num(x) => {
+                    let k = *x as int;
+                    if (k as double) != *x || k < 0 || k > 100000000 {
+                        return Val::Undef;
+                    }
+                    k
+                }
+                _ => {
+                    return Val::Undef;
+                }
+            };
+            let proto = obj_of(&args[2]);
+            let ab = obj_of(&args[3]);
+            let b = self.alloc(C_ARRAYBUFFER, ab);
+            // the buffer holds the elements as this kind from the start
+            let home = if is_big(kind) { -1 } else { kind };
+            let z = zeros(if home >= 0 { n } else { n * kind_size(kind) });
+            { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
+            let cid = self.cold_id(b) as usize;
+            self.colds[cid].home = home;
+            let t = self.alloc(C_TYPED, proto);
+            self.objs[t as usize].pos = kind as i32;
+            self.put_env(t, b);
+            self.objs[t as usize].func = 0;
+            self.put_prim(t, Val::Num(n as double));
+            return Val::Obj(t);
+        }
+        // NF_TA_SUB
+        if args.len() < 4 {
+            return Val::Undef;
+        }
+        let t = obj_of(&args[0]);
+        if t < 0 || !self.ta_plain_view(t) {
+            return Val::Undef;
+        }
+        let b = self.objs[t as usize].env as int;
+        let n = self.ta_length(t);
+        // relIndex: ToIntegerOrInfinity of a number, clamped into [0, n]
+        let mut ends: Vec<int> = vec![0, n];
+        let mut k: usize = 0;
+        while k < 2 {
+            match &args[1 + k] {
+                Val::Undef => {}
+                Val::Num(x) => {
+                    let x = *x;
+                    let t = if x < 0.0 { x.ceil() } else { x.floor() };
+                    let r: int = if x != x {
+                        0
+                    } else if t < 0.0 {
+                        let m = (n as double) + t;
+                        if m <= 0.0 { 0 } else { m as int }
+                    } else if t >= (n as double) {
+                        n
+                    } else {
+                        t as int
+                    };
+                    ends[k] = r;
+                }
+                _ => {
+                    return Val::Undef;
+                }
+            }
+            k += 1;
+        }
+        let kind = self.objs[t as usize].pos as int;
+        let start = ends[0];
+        let len = if ends[1] > start { ends[1] - start } else { 0 };
+        let off = (self.objs[t as usize].func as int) + start * kind_size(kind);
+        let proto = obj_of(&args[3]);
+        let v = self.alloc(C_TYPED, proto);
+        self.objs[v as usize].pos = kind as i32;
+        self.put_env(v, b);
+        self.objs[v as usize].func = off as i32;
+        self.put_prim(v, Val::Num(len as double));
+        Val::Obj(v)
+    }
+
+    /// NF_DV_MAKE / NF_DV_GET / NF_DV_SET (see there).
+    pub fn call_native_dv(&mut self, id: int, args: &Vec<Val>) -> Val {
+        let v = if args.is_empty() { -1 } else { obj_of(&args[0]) };
+        if id == NF_DV_MAKE {
+            if v >= 0 && args.len() >= 4 {
+                let b = obj_of(&args[1]);
+                if b >= 0 && self.objs[b as usize].class == C_ARRAYBUFFER {
+                    self.objs[v as usize].class = C_DATAVIEW;
+                    self.put_env(v, b);
+                    self.objs[v as usize].func = num(&args[2]) as i32;
+                    self.objs[v as usize].pos = num(&args[3]) as i32;
+                }
+            }
+            return Val::Undef;
+        }
+        let miss = if id == NF_DV_GET { Val::Undef } else { Val::Bool(false) };
+        if args.len() < 3 {
+            return miss;
+        }
+        let kind = num(&args[2]) as int;
+        let at = self.dv_at(v, &args[1], kind);
+        if at < 0 {
+            return miss;
+        }
+        let b = self.objs[v as usize].env as int;
+        if id == NF_DV_GET {
+            let little = args.len() > 3 && truthy(&args[3]);
+            return Val::Num(self.dv_read(b, at, kind, little));
+        }
+        if args.len() < 4 {
+            return miss;
+        }
+        let x = match &args[3] {
+            Val::Num(x) => *x,
+            _ => {
+                return miss;
+            }
+        };
+        let little = args.len() > 4 && truthy(&args[4]);
+        self.dv_write(b, at, kind, x, little);
+        Val::Bool(true)
+    }
+
+    /// The byte position in its buffer of view `v`'s `idx` for a number
+    /// `kind`: -1 unless v is a DataView, idx a non-negative integer and
+    /// the view in bounds over a buffer that is not detached.
+    pub fn dv_at(&mut self, v: int, idx: &Val, kind: int) -> int {
+        if v < 0 || self.objs[v as usize].class != C_DATAVIEW || is_big(kind) {
+            return -1;
+        }
+        let i = match idx {
+            Val::Num(x) => {
+                let k = *x as int;
+                if (k as double) != *x || k < 0 {
+                    return -1;
+                }
+                k
+            }
+            _ => {
+                return -1;
+            }
+        };
+        let b = self.objs[v as usize].env as int;
+        if b < 0 || (self.objs[b as usize].pos & 1) != 0 {
+            return -1;
+        }
+        // the view's byte length as the prelude's dvLength
+        let blen = self.buf_size(b);
+        let off = self.objs[v as usize].func as int;
+        let fixed = self.objs[v as usize].pos as int;
+        if off > blen {
+            return -1;
+        }
+        let n = if fixed < 0 { blen - off } else if off + fixed > blen { -1 } else { fixed };
+        if n < 0 || i + kind_size(kind) > n {
+            return -1;
+        }
+        off + i
+    }
+
+    /// NF_DVM_GET / NF_DVM_SET of function `f` on the stack frame at fpos
+    /// (this at fpos + 1, the arguments after): true when done in place,
+    /// the result in stack[fpos].
+    pub fn dvm_fast(&mut self, id: int, f: int, fpos: int, argc: int) -> bool {
+        let kind = self.objs[f as usize].pos as int;
+        let bp = (fpos + 2) as usize;
+        let v = obj_of(&self.stack[bp - 1]);
+        if argc < 1 {
+            return false;
+        }
+        let idx = self.stack[bp].clone();
+        let at = self.dv_at(v, &idx, kind);
+        if at < 0 {
+            return false;
+        }
+        let b = self.objs[v as usize].env as int;
+        if id == NF_DVM_GET {
+            let little = argc > 1 && truthy(&self.stack[bp + 1]);
+            let r = self.dv_read(b, at, kind, little);
+            self.stack[fpos as usize] = Val::Num(r);
+            return true;
+        }
+        if argc < 2 {
+            return false;
+        }
+        let x = match &self.stack[bp + 1] {
+            Val::Num(x) => *x,
+            _ => {
+                return false;
+            }
+        };
+        let little = argc > 2 && truthy(&self.stack[bp + 2]);
+        self.dv_write(b, at, kind, x, little);
+        self.stack[fpos as usize] = Val::Undef;
+        true
+    }
+
+    /// buf_read for a DataView: integer kinds straight from the bytes.
+    fn dv_read(&mut self, b: int, at: int, kind: int, little: bool) -> double {
+        if kind == TK_FLOAT32 || kind == TK_FLOAT64 || kind == TK_FLOAT16 {
+            return self.buf_read(b, at, kind, little);
+        }
+        self.buf_to_bytes(b);
+        let size = kind_size(kind);
+        let c = self.objs[b as usize].cold as usize;
+        // in doubles: a 32-bit int (C++) would overflow at 4 bytes
+        let mut u: double = 0.0;
+        let mut k: int = 0;
+        while k < size {
+            let idx = if little { at + size - 1 - k } else { at + k };
+            u = u * 256.0 + self.colds[c].nums[idx as usize];
+            k += 1;
+        }
+        if kind == TK_INT8 && u >= 128.0 {
+            u -= 256.0;
+        } else if kind == TK_INT16 && u >= 32768.0 {
+            u -= 65536.0;
+        } else if kind == TK_INT32 && u >= 2147483648.0 {
+            u -= 4294967296.0;
+        }
+        u
+    }
+
+    /// buf_write for a DataView: integer kinds straight to the bytes.
+    fn dv_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
+        if kind == TK_FLOAT32 || kind == TK_FLOAT64 || kind == TK_FLOAT16 || !(x > -9007199254740992.0 && x < 9007199254740992.0) {
+            self.buf_write(b, at, kind, x, little);
+            return;
+        }
+        self.buf_to_bytes(b);
+        let size = kind_size(kind);
+        // ToInt8 … ToUint32: the low bits of the truncated number, in
+        // doubles (exact below 2^53; a 32-bit int would overflow)
+        let tr = if x < 0.0 { -((-x).floor()) } else { x.floor() };
+        let mut u = tr - (tr / 4294967296.0).floor() * 4294967296.0;
+        let c = self.objs[b as usize].cold as usize;
+        let mut k: int = 0;
+        while k < size {
+            let idx = if little { at + k } else { at + size - 1 - k };
+            let q = (u / 256.0).floor();
+            self.colds[c].nums[idx as usize] = u - q * 256.0;
+            u = q;
+            k += 1;
+        }
+    }
+
+    /// NF_TA_LEN: `this.length` for a typed array (0 when detached or out
+    /// of bounds), a TypeError otherwise. NF_TA_SET (target, source,
+    /// offset): `target.set(source, offset)` done here when the source is a
+    /// typed array of the same family (numbers or BigInts) or a plain array
+    /// without holes, the offset a non-negative integer and everything fits;
+    /// true then, false when the prelude's `set` has to do it.
+    pub fn call_native_ta(&mut self, id: int, this: &Val, args: &Vec<Val>) -> Val {
+        if id == NF_DV_MAKE || id == NF_DV_GET || id == NF_DV_SET {
+            return self.call_native_dv(id, args);
+        }
+        if id == NF_DV_METHOD {
+            let kind = if args.is_empty() { 0 } else { num(&args[0]) as int };
+            let slow = if args.len() > 1 { obj_of(&args[1]) } else { -1 };
+            let set = args.len() > 2 && truthy(&args[2]);
+            let name = if args.len() > 3 { self.to_string(&args[3]) } else { String::new() };
+            let len = if args.len() > 4 { num(&args[4]) as int } else { 0 };
+            let f = self.native_fn(name.as_str(), if set { NF_DVM_SET } else { NF_DVM_GET }, len);
+            self.objs[f as usize].pos = kind as i32;
+            if slow >= 0 {
+                self.put_env(f, slow);
+            }
+            return Val::Obj(f);
+        }
+        if id == NF_TA_KIND || id == NF_TA_SUB || id == NF_TA_NEW || id == NF_TA_SORT {
+            return self.call_native_ta2(id, args);
+        }
+        if id == NF_TA_LEN {
+            let t = obj_of(this);
+            if t < 0 || self.objs[t as usize].class != C_TYPED {
+                self.throw_type("TypedArray.prototype.length: this is not a typed array");
+                return Val::Undef;
+            }
+            return Val::Num(self.ta_length(t) as double);
+        }
+        if args.len() < 2 {
+            return Val::Bool(false);
+        }
+        let t = obj_of(&args[0]);
+        let src = obj_of(&args[1]);
+        if t < 0 || src < 0 || self.objs[t as usize].class != C_TYPED || self.ta_out_of_bounds(t) {
+            return Val::Bool(false);
+        }
+        let off = if args.len() > 2 {
+            match &args[2] {
+                Val::Undef => 0,
+                Val::Num(x) => {
+                    let i = *x as int;
+                    if (i as double) != *x || i < 0 {
+                        return Val::Bool(false);
+                    }
+                    i
+                }
+                _ => {
+                    return Val::Bool(false);
+                }
+            }
+        } else {
+            0
+        };
+        let tb = self.objs[t as usize].env as int;
+        if tb < 0 || (self.objs[tb as usize].pos & 1) != 0 {
+            return Val::Bool(false);
+        }
+        let tlen = self.ta_length(t);
+        let tkind = self.objs[t as usize].pos as int;
+        let sc = self.objs[src as usize].class;
+        let mut vals: Vec<Val> = Vec::new();
+        if sc == C_TYPED {
+            let sb = self.objs[src as usize].env as int;
+            if sb < 0 || (self.objs[sb as usize].pos & 1) != 0 || self.ta_out_of_bounds(src) {
+                return Val::Bool(false);
+            }
+            let skind = self.objs[src as usize].pos as int;
+            if is_big(skind) != is_big(tkind) {
+                return Val::Bool(false);
+            }
+            let n = self.ta_length(src);
+            if off + n > tlen {
+                return Val::Bool(false);
+            }
+            if n == 0 {
+                return Val::Bool(true);
+            }
+            // the same element kind, both buffers holding it: the numbers
+            // as they are (through a copy when the buffers are one)
+            let s0 = self.ta_slot(src, 0);
+            let d0 = self.ta_slot(t, off);
+            if s0 >= 0 && d0 >= 0 && skind == tkind && self.ta_slot(src, n - 1) == s0 + n - 1 && self.ta_slot(t, off + n - 1) == d0 + n - 1 {
+                let sbc = self.objs[sb as usize].cold as usize;
+                let tbc = self.objs[tb as usize].cold as usize;
+                self.colds[tbc].home = tkind;
+                copy_nums(&mut self.colds, sbc, s0 as usize, tbc, d0 as usize, n as usize);
+                return Val::Bool(true);
+            }
+            let mut i: int = 0;
+            while i < n {
+                vals.push(self.ta_get_fast(src, i));
+                i += 1;
+            }
+        } else if sc == C_ARRAY {
+            let ob = &self.objs[src as usize];
+            if ob.pos == 3 || self.idx_protos || !self.colds[ob.cold as usize].elems2.is_empty() {
+                return Val::Bool(false);
+            }
+            let ev = ob.elems as usize;
+            let n = self.evecs[ev].v.len() as int;
+            if off + n > tlen {
+                return Val::Bool(false);
+            }
+            let mut i: int = 0;
+            while i < n {
+                vals.push(self.evecs[ev].v[i as usize].clone());
+                i += 1;
+            }
+        } else {
+            return Val::Bool(false);
+        }
+        let mut j: int = 0;
+        while j < (vals.len() as int) {
+            let v = vals[j as usize].clone();
+            let done = match v {
+                Val::Num(x) => self.ta_put_num(t, off + j, x),
+                _ => false,
+            };
+            if !done {
+                self.ta_set(t, off + j, &v);
+                if self.throwing {
+                    return Val::Undef;
+                }
+            }
+            j += 1;
+        }
+        Val::Bool(true)
     }
 
     pub fn call_native_typed(&mut self, id: int, args: &Vec<Val>) -> Val {
@@ -606,7 +1314,7 @@ impl Vm {
             a.push(Val::Undef);
         }
         if id == NF_BUF_NEW {
-            // (byteLength, prototype, shared)
+            // (byteLength, prototype, shared, maxByteLength, kind)
             let n = num(&a[0]) as int;
             if n > 1000000000 {
                 self.throw_range("Array buffer allocation failed");
@@ -614,15 +1322,19 @@ impl Vm {
             }
             let proto = obj_of(&a[1]);
             let b = self.alloc(C_ARRAYBUFFER, proto);
-            let mut bytes: Vec<double> = Vec::with_capacity(n as usize);
-            let mut i = 0;
-            while i < n {
-                bytes.push(0.0);
-                i += 1;
+            // (…, kind): the buffer of a new typed array of that kind, made
+            // holding its elements at once (zeros, no bytes to convert)
+            let mut home = -1;
+            if let Val::Num(k) = &a[4] {
+                let kind = *k as int;
+                if !is_big(kind) && n % kind_size(kind) == 0 {
+                    home = kind;
+                }
             }
+            let bytes = zeros(if home >= 0 { n / kind_size(home) } else { n });
             { let c = self.cold_id(b) as usize; self.colds[c].nums = bytes; }
             let cid = self.cold_id(b) as usize;
-            self.colds[cid].home = -1;
+            self.colds[cid].home = home;
             if truthy(&a[2]) {
                 self.objs[b as usize].pos = 2;
             }
@@ -745,12 +1457,7 @@ impl Vm {
             if ms > TK_UINT8 || ms == TK_INT8 {
                 let size = kind_size(ms);
                 if md < 0 && ts == 0 && n == self.buf_size(d) && n % size == 0 {
-                    let mut z: Vec<double> = Vec::new();
-                    let mut j = 0;
-                    while j < n / size {
-                        z.push(0.0);
-                        j += 1;
-                    }
+                    let z = zeros(n / size);
                     { let c = self.cold_id(d) as usize; self.colds[c].nums = z; }
                     let cid = self.cold_id(d) as usize;
                     self.colds[cid].home = ms;
@@ -808,13 +1515,13 @@ impl Vm {
             let len = num(&a[3]) as int;
             let tracking = matches!(a[3], Val::Undef);
             // the first view over all of a new buffer: it holds this kind
-            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
-                let mut z: Vec<double> = Vec::new();
-                let mut j = 0;
-                while j < len {
-                    z.push(0.0);
-                    j += 1;
-                }
+            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) && (kind == TK_UINT8 || kind == TK_UINT8C || (kind == TK_INT8 && self.buf_zero(b))) {
+                // one byte per element: the bytes are the elements as they
+                // are (an Int8Array's when all are 0)
+                let cid = self.cold_id(b) as usize;
+                self.colds[cid].home = kind;
+            } else if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
+                let z = zeros(len);
                 { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
                 let cid = self.cold_id(b) as usize;
                 self.colds[cid].home = kind;

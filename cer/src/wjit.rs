@@ -155,6 +155,9 @@ pub struct Layout {
     /// Cold.prim (an arrow's this)
     pub cold_prim: u32,
     pub vm_global: u32,
+    /// Cold.nums' buffer and length words (a typed array's buffer)
+    pub cold_nums_p: u32,
+    pub cold_nums_l: u32,
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
@@ -273,6 +276,8 @@ pub fn probe() -> Layout {
         cold_e2_len: 0,
         cold_prim: 0,
         vm_global: 0,
+        cold_nums_p: 0,
+        cold_nums_l: 0,
     };
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
@@ -459,6 +464,10 @@ pub fn probe() -> Layout {
         l.elems_vc = std::mem::offset_of!(crate::value::Elems, v) as u32 + (12 - vp - vl);
         l.cold_e2_len = std::mem::offset_of!(crate::value::Cold, elems2) as u32 + vl;
         l.cold_prim = std::mem::offset_of!(crate::value::Cold, prim) as u32;
+        // Vec<double> is laid out as Vec<Val> is (the buffer and length
+        // words found above)
+        l.cold_nums_p = std::mem::offset_of!(crate::value::Cold, nums) as u32 + vp;
+        l.cold_nums_l = std::mem::offset_of!(crate::value::Cold, nums) as u32 + vl;
     }
     l
 }
@@ -576,6 +585,7 @@ const I32_AND: u8 = 0x71;
 const I32_OR: u8 = 0x72;
 const I32_XOR: u8 = 0x73;
 const I32_SHL: u8 = 0x74;
+const I32_SHR_U: u8 = 0x76;
 const I32_SHR_S: u8 = 0x75;
 const F64_NEG: u8 = 0x9a;
 const F64_ADD: u8 = 0xa0;
@@ -738,6 +748,148 @@ struct Cg<'a> {
     /// in an inlined callee: where its this is, from the caller's sp
     /// (L_SSP), and whether it is strict
     inl_this: Option<(u32, bool)>,
+    /// by pc: an arithmetic op that never saw anything but numbers in the
+    /// interpreter (note_nonnum): written without a slow path, a check
+    /// that fails returns its pc (the frame is the interpreter's, so that
+    /// is the whole deoptimization) and the interpreter's slow path then
+    /// marks the site and sends the function back to be compiled again
+    spec: Vec<bool>,
+    /// by register: the f64 local (KN0 ..) that holds its number, -1 for
+    /// none; known since the block began (the registers in memory stay
+    /// written, so any exit leaves the frame right)
+    kn: Vec<i32>,
+    kn_regs: Vec<u32>,
+    kn_next: u32,
+    /// by register: its fixed local (KN0 ..) when it is one of the
+    /// registers whose numbers are kept across blocks (kn_plan), -1 else
+    kn_fix: Vec<i32>,
+}
+
+/// the f64 locals that keep registers known to be numbers (Cg.kn)
+const KN0: u32 = 25;
+const KN_N: u32 = 16;
+/// i32: 1 until the first block's start has run (the code was entered from
+/// outside, where the interpreter may have left anything in a register)
+const L_FRESH: u32 = 41;
+
+/// What an op does to the registers known to hold numbers (kn_plan and
+/// the code agree on it): Spec its speculated arithmetic (its operands and
+/// result known after it), Kill registers it may write, All when it may
+/// write any.
+enum KnFx {
+    Same,
+    Spec(i32, i32, i32),
+    Kill(i32, i32),
+    All,
+}
+
+/// The op's KnFx; `spec` says whether its pc speculates.
+fn kn_fx(ins: Op, spec: bool) -> KnFx {
+    let kind = (ins.code & 255) as int;
+    let sub = ((ins.code >> 8) & 255) as int;
+    if spec && ins.a >= 0 && (kind == R_ADD || kind == R_SUB || kind == R_MUL || (kind == R_ARITH && (sub == OP_SUB || sub == OP_MUL || sub == OP_DIV))) {
+        return KnFx::Spec(ins.a, ins.b, ins.c);
+    }
+    match kind {
+        R_NOP | R_JUMP | R_LOOP | R_JF | R_JT | R_CMP_JF | R_CMP_JT | R_CMP_JFK | R_CMP_JTK => KnFx::Same,
+        R_MOVE | R_GET_ELEM | R_GET_PROP | R_GET_THIS_PROP | R_GET_ENV | R_GET_GLOBAL | R_THIS | R_TYPEOF | R_NOT | R_TONUM | R_CMP | R_ADD | R_SUB | R_MUL | R_ARITH | R_SET_PROP | R_SET_ELEM | R_SET_ENV => KnFx::Kill(ins.a, ins.a + 1),
+        R_LOAD2 => KnFx::Kill(ins.a, ins.a + 1),
+        _ => KnFx::All,
+    }
+}
+
+/// The registers (at most KN_N) whose numbers are kept in fixed locals:
+/// those of the speculated arithmetic, most used first. Each block's set
+/// known on entry (a bit per kept register): what every jump or fall into
+/// it brings (a forward must-analysis); an entry from outside checks them
+/// (Cg::kn_block).
+fn kn_plan(code: &[Op], rtab: &[int], spec: &[bool], starts: &[bool], skip_to: &[usize], fsize: u32) -> (Vec<i32>, Vec<u32>) {
+    let n = code.len();
+    let mut uses = vec![0u32; fsize as usize + 2];
+    for (i, ins) in code.iter().enumerate() {
+        if let KnFx::Spec(d, x, y) = kn_fx(*ins, i < spec.len() && spec[i]) {
+            for r in [d, x, y] {
+                if r >= 0 && (r as usize) < uses.len() {
+                    uses[r as usize] += 1;
+                }
+            }
+        }
+    }
+    let mut regs: Vec<usize> = (0..uses.len()).filter(|r| uses[*r] > 0).collect();
+    regs.sort_by(|a, b| uses[*b].cmp(&uses[*a]));
+    regs.truncate(KN_N as usize);
+    let mut fix = vec![-1i32; uses.len()];
+    for (k, r) in regs.iter().enumerate() {
+        fix[*r] = k as i32;
+    }
+    let bit = |r: i32| -> u32 { if r >= 0 && (r as usize) < fix.len() && fix[r as usize] >= 0 { 1u32 << fix[r as usize] } else { 0 } };
+    let step = |set: u32, i: usize| -> u32 {
+        match kn_fx(code[i], i < spec.len() && spec[i]) {
+            KnFx::Same => set,
+            KnFx::Spec(d, x, y) => set | bit(d) | bit(x) | bit(y),
+            KnFx::Kill(a, b) => set & !bit(a) & !bit(b),
+            KnFx::All => 0,
+        }
+    };
+    // in[pc] for block starts; all bits until a path says otherwise
+    let full: u32 = if regs.is_empty() { 0 } else { u32::MAX };
+    let mut inb = vec![full; n];
+    if regs.is_empty() {
+        return (fix, vec![0; n]);
+    }
+    let mut changed = true;
+    let mut rounds = 0;
+    while changed && rounds < 64 {
+        changed = false;
+        rounds += 1;
+        let mut out: Vec<u32> = vec![full; n];
+        let mut seen = vec![false; n];
+        let mut set: u32 = 0;
+        let mut live = false;
+        for i in 0..n {
+            if starts[i] {
+                // the fall from the op before is one of its ways in
+                if live {
+                    out[i] &= set;
+                    seen[i] = true;
+                }
+                set = inb[i];
+                live = true;
+            }
+            if !live {
+                continue;
+            }
+            set = step(set, i);
+            let mut ts = Vec::new();
+            targets(code[i], i, rtab, &mut ts);
+            if skip_to[i] > 0 {
+                ts.push(skip_to[i]);
+            }
+            for t in ts {
+                if t < n {
+                    out[t] &= set;
+                    seen[t] = true;
+                }
+            }
+            let k = (code[i].code & 255) as int;
+            if k == R_JUMP || k == R_LOOP {
+                live = false;
+            }
+        }
+        for i in 0..n {
+            if starts[i] {
+                let v = if seen[i] { out[i] } else { 0 };
+                if v != inb[i] {
+                    inb[i] = v;
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        return (vec![-1i32; uses.len()], vec![0; n]);
+    }
+    (fix, inb)
 }
 
 /// A callee to write in place of its call (call_op): straight register
@@ -1843,8 +1995,33 @@ impl<'a> Cg<'a> {
         self.get(L_SP);
         self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
         self.obj_addr();
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T2 as u64);
+        self.set(L_T2);
+        let typed = MASK.with(|m| m.get()) & (1u64 << 61) == 0;
+        let tdone = self.extra + 1;
+        if typed {
+            // a typed array's element (Vm::ta_slot's checks, typed_at)
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.get(L_T2);
+            self.mem(I32_LOAD, 2, l.off_class);
+            self.i32c(C_TYPED as i64);
+            self.op(I32_EQ);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.index_key(key, pc);
+            self.typed_at(pc);
+            self.get(L_T4);
+            self.mem(F64_LOAD, 3, 0);
+            self.set(L_A);
+            self.store_num(dst, L_A);
+            self.op(BR);
+            self.w.u((self.extra - tdone) as u64);
+            self.extra -= 1;
+            self.op(END);
+        }
+        self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_class);
         self.i32c(C_ARRAY as i64);
         self.op(I32_NE);
@@ -1905,9 +2082,245 @@ impl<'a> Cg<'a> {
         self.mem(I64_LOAD, 3, 8);
         self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
+        if typed {
+            self.extra -= 1;
+            self.op(END);
+        }
         if skey.is_some() {
             self.extra -= 1;
             self.op(END);
+        }
+        true
+    }
+    /// The key, a whole number 0 <= k < 2^31, into L_T3 (after need_num)
+    fn index_key(&mut self, key: Opnd, pc: i64) {
+        self.num(key);
+        self.set(L_A);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&0f64.to_le_bytes());
+        self.op(F64_GE);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&2147483647f64.to_le_bytes());
+        self.op(F64_LE);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        self.get(L_A);
+        self.op(I32_TRUNC_F64_S);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T3 as u64);
+        self.op(F64_CONVERT_I32_S);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.fail_if(pc);
+    }
+    /// For the typed array at L_T2 and the index in L_T3: the address of
+    /// its element's number in L_T4, as Vm::ta_slot finds it (a fixed-length
+    /// view of a buffer neither detached nor resizable that holds this
+    /// kind, the index inside both); fails otherwise. Uses L_T5, L_T6.
+    fn typed_at(&mut self, pc: i64) {
+        let l = self.lay;
+        // the buffer: an object, not detached (pos bit 0)
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_env);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.i32c(0);
+        self.op(I32_LT_S);
+        self.fail_if(pc);
+        self.get(L_T5);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.i32c(1);
+        self.op(I32_AND);
+        self.fail_if(pc);
+        // the view's length (Cold.prim a number): index < length
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_cold);
+        self.i32c(l.cold_size as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T6 as u64);
+        self.mem(I32_LOAD8_U, 0, l.cold_prim);
+        self.i32c(l.t_num as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.get(L_T3);
+        self.op(F64_CONVERT_I32_U);
+        self.get(L_T6);
+        self.mem(F64_LOAD, 3, l.cold_prim + l.off_num);
+        self.op(F64_GE);
+        self.fail_if(pc);
+        // the buffer's cold part: there, not resizable, home == kind
+        self.get(L_T5);
+        self.mem(I32_LOAD, 2, l.off_cold);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T6 as u64);
+        self.i32c(0);
+        self.op(I32_LE_S);
+        self.fail_if(pc);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+        self.get(L_T6);
+        self.i32c(l.cold_size as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T6 as u64);
+        self.mem(I32_LOAD8_U, 0, l.cold_prim);
+        self.i32c(l.t_num as i64);
+        self.op(I32_EQ);
+        self.fail_if(pc);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_home);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        // log2 of the element size: (kind >= 3) + (kind >= 5) + (kind >= 8)
+        // - 2 (kind == 11, Float16)
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.set(L_T5);
+        for k in [3i64, 5, 8] {
+            self.get(L_T5);
+            self.i32c(k);
+            self.op(I32_GE_S);
+        }
+        self.op(I32_ADD);
+        self.op(I32_ADD);
+        self.get(L_T5);
+        self.i32c(11);
+        self.op(I32_EQ);
+        self.i32c(1);
+        self.op(I32_SHL);
+        self.op(I32_SUB);
+        self.set(L_T5);
+        // the element's index in nums: byteOffset >> log2 + index
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_func);
+        self.get(L_T5);
+        self.op(I32_SHR_U);
+        self.get(L_T3);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_nums_l);
+        self.op(I32_GE_U);
+        self.fail_if(pc);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_nums_p);
+        self.get(L_T5);
+        self.i32c(3);
+        self.op(I32_SHL);
+        self.op(I32_ADD);
+        self.set(L_T4);
+    }
+    /// R_SET_ELEM on a typed array by a whole number in range: a number
+    /// the element kind holds as it is (Float64 any, the integer kinds a
+    /// whole number in their range) stored, the rest to H_SET_ELEM. sub 1:
+    /// the value also into w1.
+    fn set_elem_typed(&mut self, ob: u32, key: Opnd, val: Opnd, keep: bool, pc: i64) -> bool {
+        let l = self.lay;
+        if keep && matches!(val, Opnd::Num(_)) {
+            return false;
+        }
+        self.need_obj(L_SP, ob * 16, pc);
+        self.need_num(key, pc);
+        self.need_num(val, pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_TYPED as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.index_key(key, pc);
+        self.typed_at(pc);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.set(L_T6);
+        self.num(val);
+        self.set(L_A);
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        let stored = self.extra;
+        // Float64: as it is
+        self.get(L_T6);
+        self.i32c(8);
+        self.op(I32_EQ);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(L_T4);
+        self.get(L_A);
+        self.mem(F64_STORE, 3, 0);
+        self.op(BR);
+        self.w.u((self.extra - stored) as u64);
+        self.extra -= 1;
+        self.op(END);
+        // the kind's range (an impossible one for Float32 / Float16)
+        let f = |cg: &mut Cg<'a>, x: f64| {
+            cg.op(F64_CONST);
+            cg.w.b.extend_from_slice(&x.to_le_bytes());
+        };
+        let chain = |cg: &mut Cg<'a>, vals: &[(i64, i64, f64)], dflt: f64| {
+            // kind in lo..=hi ? x : ... (selects, innermost last)
+            for v in vals.iter() {
+                f(cg, v.2);
+            }
+            f(cg, dflt);
+            for v in vals.iter().rev() {
+                cg.get(L_T6);
+                cg.i32c(v.0);
+                cg.op(I32_GE_S);
+                cg.get(L_T6);
+                cg.i32c(v.1);
+                cg.op(I32_LE_S);
+                cg.op(I32_AND);
+                cg.op(SELECT);
+            }
+        };
+        self.get(L_A);
+        chain(self, &[(0, 0, -128.0), (3, 3, -32768.0), (5, 5, -2147483648.0)], 0.0);
+        self.op(F64_GE);
+        self.get(L_A);
+        chain(self, &[(0, 0, 127.0), (1, 2, 255.0), (3, 3, 32767.0), (4, 4, 65535.0), (5, 6, 2147483647.0)], -1.0);
+        self.op(F64_LE);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        // a whole number: stored as the int's double (-0 as 0)
+        self.get(L_A);
+        self.op(I32_TRUNC_F64_S);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.op(F64_CONVERT_I32_S);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.fail_if(pc);
+        self.get(L_T4);
+        self.get(L_T5);
+        self.op(F64_CONVERT_I32_S);
+        self.mem(F64_STORE, 3, 0);
+        self.extra -= 1;
+        self.op(END);
+        if keep {
+            if !self.load_val(val, L_Q0) {
+                return false;
+            }
+            self.store_val(ob, L_Q0);
         }
         true
     }
@@ -4722,6 +5135,181 @@ impl<'a> Cg<'a> {
         if MASK.with(|m| m.get()) & (1u64 << k) != 0 && (ins.code & 255) < 64 {
             return false;
         }
+        if self.inlining {
+            return self.one_op(pc, ins);
+        }
+        let kind = (ins.code & 255) as int;
+        let sub = ((ins.code >> 8) & 255) as int;
+        if pc < self.spec.len() && self.spec[pc] && ins.a >= 0 {
+            let code = match kind {
+                R_ADD => OP_ADD,
+                R_SUB => OP_SUB,
+                R_MUL => OP_MUL,
+                R_ARITH if sub == OP_SUB || sub == OP_MUL || sub == OP_DIV => sub,
+                _ => -1,
+            };
+            if code >= 0 {
+                return self.spec_arith(code, ins.a, ins.b, ins.c, pc as i64);
+            }
+        }
+        let wrote = self.one_op(pc, ins);
+        match kn_fx(ins, false) {
+            KnFx::Same | KnFx::Spec(_, _, _) => {}
+            KnFx::Kill(a, b) => {
+                for r in [a, b] {
+                    if r >= 0 {
+                        self.kn_forget(r as u32);
+                    }
+                }
+            }
+            KnFx::All => self.kn_clear(),
+        }
+        wrote
+    }
+
+    /// A block's start: the registers of `set` (kn_plan's bits) are known.
+    /// Entered from outside (L_FRESH), their tags are checked (a number
+    /// else back to the interpreter at pc) and their numbers loaded.
+    fn kn_block(&mut self, pc: usize, set: u32) {
+        self.kn_clear();
+        if set != 0 {
+            let mut regs: Vec<u32> = Vec::new();
+            for r in 0..self.kn_fix.len() {
+                let f = self.kn_fix[r];
+                if f >= 0 && set & (1u32 << (f as u32 - KN0)) != 0 {
+                    regs.push(r as u32);
+                }
+            }
+            self.get(L_FRESH);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            for r in regs.iter() {
+                let o = Opnd::Reg(*r);
+                self.tag(o);
+                let t = self.lay.t_num as i64;
+                self.i32c(t);
+                self.op(I32_NE);
+                self.exit_if(pc as i64);
+                self.num(o);
+                let f = self.kn_fix[*r as usize] as u32;
+                self.set(f);
+            }
+            self.extra -= 1;
+            self.op(END);
+            for r in regs.iter() {
+                self.kn[*r as usize] = self.kn_fix[*r as usize];
+                self.kn_regs.push(*r);
+            }
+        }
+        self.i32c(0);
+        self.set(L_FRESH);
+    }
+
+    /// nothing known about any register (Cg.kn)
+    fn kn_clear(&mut self) {
+        for r in self.kn_regs.iter() {
+            self.kn[*r as usize] = -1;
+        }
+        self.kn_regs.clear();
+    }
+    fn kn_forget(&mut self, r: u32) {
+        if (r as usize) < self.kn.len() && self.kn[r as usize] >= 0 {
+            self.kn[r as usize] = -1;
+            self.kn_regs.retain(|x| *x != r);
+        }
+    }
+    /// a local for register r's number from now on (the oldest one is
+    /// taken back when all are in use)
+    fn kn_take(&mut self, r: u32) -> u32 {
+        self.kn_forget(r);
+        if !self.kn_fix.is_empty() {
+            // fixed locals (kn_plan): a register without one is not kept
+            let f = if (r as usize) < self.kn_fix.len() { self.kn_fix[r as usize] } else { -1 };
+            if f < 0 {
+                return L_A;
+            }
+            self.kn[r as usize] = f;
+            self.kn_regs.push(r);
+            return f as u32;
+        }
+        let l = KN0 + self.kn_next % KN_N;
+        self.kn_next += 1;
+        if let Some(k) = self.kn_regs.iter().position(|x| self.kn[*x as usize] == l as i32) {
+            let old = self.kn_regs.remove(k);
+            self.kn[old as usize] = -1;
+        }
+        if (r as usize) < self.kn.len() {
+            self.kn[r as usize] = l as i32;
+            self.kn_regs.push(r);
+        }
+        l
+    }
+    /// an operand's number on the wasm stack, its tag checked unless it is
+    /// known (a failed check returns pc); a register read from memory is
+    /// known after this
+    fn spec_num(&mut self, o: Opnd, pc: i64) {
+        match o {
+            Opnd::Num(n) => {
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&n.to_le_bytes());
+            }
+            Opnd::K(_) => {
+                self.exit_at(pc);
+                self.op(F64_CONST);
+                self.w.b.extend_from_slice(&0f64.to_le_bytes());
+            }
+            Opnd::Reg(r) => {
+                if (r as usize) < self.kn.len() && self.kn[r as usize] >= 0 {
+                    let l = self.kn[r as usize] as u32;
+                    self.get(l);
+                    return;
+                }
+                self.tag(o);
+                let t = self.lay.t_num as i64;
+                self.i32c(t);
+                self.op(I32_NE);
+                self.exit_if(pc);
+                self.num(o);
+                if (r as usize) < self.kn.len() {
+                    let l = self.kn_take(r);
+                    self.w.byte(LOCAL_TEE);
+                    self.w.u(l as u64);
+                }
+            }
+        }
+    }
+    /// A speculated + - * /: numbers or back to the interpreter at pc; the
+    /// result is written to its register and kept known.
+    fn spec_arith(&mut self, code: int, dst: i32, x: i32, y: i32, pc: i64) -> bool {
+        let fop = match code {
+            OP_ADD => F64_ADD,
+            OP_SUB => F64_SUB,
+            OP_MUL => F64_MUL,
+            _ => F64_DIV,
+        };
+        let a = self.opnd(x);
+        let b = self.opnd(y);
+        self.spec_num(a, pc);
+        self.spec_num(b, pc);
+        self.op(fop);
+        // a register known to hold a number has its tag in memory already
+        let was = (dst as usize) < self.kn.len() && self.kn[dst as usize] >= 0;
+        let l = self.kn_take(dst as u32);
+        self.set(l);
+        if was {
+            self.get(L_SP);
+            self.get(l);
+            let on = self.lay.off_num;
+            self.mem(F64_STORE, 3, dst as u32 * 16 + on);
+        } else {
+            self.store_num(dst as u32, l);
+        }
+        true
+    }
+
+    /// One op as it is written without speculation.
+    fn one_op(&mut self, pc: usize, ins: Op) -> bool {
         let w0 = ins.code;
         let (w1, w2, w3) = (ins.a, ins.b, ins.c);
         let kind = (w0 & 255) as int;
@@ -5036,6 +5624,16 @@ impl<'a> Cg<'a> {
                 }
                 self.with_helper(H_GET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.get_elem_fast(w1 as u32, w2 as u32, key, p))
             }
+            R_SET_ELEM if self.lay.obj_ok && w1 >= 0 && MASK.with(|m| m.get()) & (1u64 << 61) == 0 => {
+                // a typed array's element (set_elem_typed), else the helper
+                let key = self.opnd(w2);
+                let val = self.opnd(w3);
+                if key.is_k() || val.is_k() {
+                    self.helper(H_SET_ELEM, p, next);
+                    return true;
+                }
+                self.with_helper(H_SET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.set_elem_typed(w1 as u32, key, val, sub == 1, p))
+            }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && w3 == -4 => {
                 // a site that reads an array's length (rrun's c = -4)
                 self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.array_len(w1 as u32, w2 as u32, p))
@@ -5216,6 +5814,30 @@ impl<'a> Cg<'a> {
                 self.op(T_VOID);
                 self.extra += 1;
                 self.jump(to, to <= p);
+                self.extra -= 1;
+                self.op(END);
+                true
+            }
+            R_JNN_KEEP if sub == 1 => {
+                // `x?.`: undefined or null becomes undefined, and jumps
+                if w1 < 0 {
+                    return false;
+                }
+                let o = self.raw(w1);
+                self.tag(o);
+                self.set(L_TAG);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_undef as i64);
+                self.op(I32_EQ);
+                self.get(L_TAG);
+                self.i32c(self.lay.t_null as i64);
+                self.op(I32_EQ);
+                self.op(I32_OR);
+                self.op(IF);
+                self.op(T_VOID);
+                self.extra += 1;
+                self.store_undef(w1 as u32);
+                self.jump(w2 as i64, (w2 as i64) <= p);
                 self.extra -= 1;
                 self.op(END);
                 true
@@ -5577,7 +6199,7 @@ pub struct Compiled {
 
 /// The module for one function's register code `code` (rcode from its
 /// rbase), or None when it has no back edge this file can write.
-pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], pics: &[i32], atoms: &[i32], fsize: u32, inl: Vec<Option<Inl>>) -> Option<Compiled> {
+pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layout, pi: u32, rb: u32, entry: usize, caches: &[u32], pics: &[i32], atoms: &[i32], fsize: u32, inl: Vec<Option<Inl>>, spec: &[bool]) -> Option<Compiled> {
     if !lay.ok || code.is_empty() {
         return None;
     }
@@ -5642,6 +6264,7 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
     }
     let blocks: Vec<usize> = (0..n).filter(|i| starts[*i]).collect();
     let nb = blocks.len() as u32;
+    let (kn_fix, kn_in) = kn_plan(code, rtab, spec, &starts, &skip_to, fsize);
     let mut cg = Cg {
         w: WBuf::new(),
         lay,
@@ -5665,10 +6288,15 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
         inlining: false,
         inl_bad: false,
         inl_this: None,
+        spec: spec.to_vec(),
+        kn: vec![-1; fsize as usize + 2],
+        kn_regs: Vec::new(),
+        kn_next: 0,
+        kn_fix: kn_fix.iter().map(|k| if *k >= 0 { KN0 as i32 + *k } else { -1 }).collect(),
     };
     // locals: out, tag, looped (i32); a, b (f64); q0..q3 (i64); entry, c,
-    // t2..t6, ssp, sbp, senv (i32)
-    cg.w.u(4);
+    // t2..t6, ssp, sbp, senv (i32); KN_N f64 from KN0
+    cg.w.u(6);
     cg.w.u(3);
     cg.w.byte(T_I32);
     cg.w.u(2);
@@ -5677,8 +6305,14 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
     cg.w.byte(T_I64);
     cg.w.u(10);
     cg.w.byte(T_I32);
+    cg.w.u(KN_N as u64);
+    cg.w.byte(T_F64);
+    cg.w.u(1);
+    cg.w.byte(T_I32);
     cg.get(L_KEY);
     cg.set(L_ENTRY);
+    cg.i32c(1);
+    cg.set(L_FRESH);
     // loop $L / block $exit / block b_{nb-1} .. b_0
     cg.op(LOOP);
     cg.op(T_VOID);
@@ -5709,6 +6343,9 @@ pub fn compile(_name: &str, code: &[Op], kvals: &[Val], rtab: &[int], lay: Layou
         let stop = if k + 1 < blocks.len() { blocks[k + 1] } else { n };
         let mut pc = start;
         let mut open = true;
+        // what every way into the block brings (kn_plan); an entry from
+        // outside checks it
+        cg.kn_block(start, kn_in[start]);
         while pc < stop {
             let ins = code[pc];
             let b0 = cg.w.b.len();
@@ -5922,6 +6559,11 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
         inlining: false,
         inl_bad: false,
         inl_this: None,
+        spec: Vec::new(),
+        kn: Vec::new(),
+        kn_regs: Vec::new(),
+        kn_next: 0,
+        kn_fix: Vec::new(),
     };
     let hs = cg.hstore_body();
     let cx = cg.callx_body();
@@ -6585,8 +7227,16 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         if rb + n <= vm.rcode.len() {
             let name = format!("{}#{}", p.name, pi);
             let inl = inline_sites(vm, pi, rb, n);
+            // the arithmetic sites to speculate on: none in a function
+            // whose speculation failed too often, else the ones that have
+            // seen only numbers (debug: mask bit 42 off)
+            let spec: Vec<bool> = with_state(vm, |st| {
+                let fails = st.spec_fails.get(pi).cloned().unwrap_or(0);
+                let on = fails < SPEC_FAILS_MAX && MASK.with(|m| m.get()) & (1u64 << 42) == 0;
+                (0..n).map(|i| on && !st.nonnum.get(rb + i).cloned().unwrap_or(false)).collect()
+            });
             let p = &vm.protos[pi];
-            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &pics, &atoms, p.fsize as u32, inl) {
+            if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &pics, &atoms, p.fsize as u32, inl, &spec) {
                 f = PENDING;
                 let full = with_state(vm, |st| {
                     let t = &mut st.batch;
@@ -6647,6 +7297,83 @@ struct VmJit {
     id: i64,
     batch: Batch,
     mods: Mods,
+    /// by function: how often its speculation failed (spec_failed)
+    spec_fails: Vec<u8>,
+    /// by rcode index: an arithmetic op whose slow path has run (an
+    /// operand that was not a number): not speculated (note_nonnum)
+    nonnum: Vec<bool>,
+}
+
+/// a function whose speculation failed this often is compiled without
+const SPEC_FAILS_MAX: u8 = 4;
+
+/// The interpreter's slow path ran for the arithmetic op at rcode index
+/// ri of function pi (Vm::note_nonnum): the site is not speculated from
+/// now on, and code that speculated on it goes (spec_failed).
+pub fn note_nonnum(vm: &mut crate::vm::Vm, pi: usize, ri: usize) {
+    let first = with_state(vm, |st| {
+        if ri < st.nonnum.len() && st.nonnum[ri] {
+            return false;
+        }
+        if st.nonnum.len() <= ri {
+            st.nonnum.resize(ri + 1, false);
+        }
+        st.nonnum[ri] = true;
+        true
+    });
+    if first {
+        spec_failed(vm, pi);
+    }
+}
+
+/// Function pi's code speculated that an arithmetic site sees numbers and
+/// it did not (Vm::note_nonnum): a function waiting for its batch leaves
+/// it, a compiled one's module goes (evict, not counted against
+/// EVICT_MAX); either is compiled again once hot, without that site.
+pub fn spec_failed(vm: &mut crate::vm::Vm, pi: usize) {
+    if pi >= vm.jit_fn.len() || vm.jit_id == 0 {
+        return;
+    }
+    let f = vm.jit_fn[pi];
+    if f == PENDING {
+        with_state(vm, |st| {
+            if let Some(k) = st.batch.items.iter().position(|q| q.pi == pi) {
+                let q = st.batch.items.remove(k);
+                st.batch.bytes -= q.c.bytes.len();
+            }
+            if st.spec_fails.len() <= pi {
+                st.spec_fails.resize(pi + 1, 0);
+            }
+            st.spec_fails[pi] = st.spec_fails[pi].saturating_add(1);
+        });
+        vm.jit_fn[pi] = -1;
+        if pi < vm.jit_hot.len() {
+            vm.jit_hot[pi] = 0;
+        }
+        return;
+    }
+    if f < 0 {
+        return;
+    }
+    let m = with_state(vm, |st| {
+        if st.spec_fails.len() <= pi {
+            st.spec_fails.resize(pi + 1, 0);
+        }
+        st.spec_fails[pi] = st.spec_fails[pi].saturating_add(1);
+        let ms = &mut st.mods;
+        match ms.list.iter().position(|m| f >= m.base && f < m.base + m.pis.len() as i64) {
+            Some(k) => {
+                let m = ms.list.remove(k);
+                ms.bytes -= m.bytes;
+                Some(m)
+            }
+            None => None,
+        }
+    });
+    if let Some(m) = m {
+        let mut none: Vec<u8> = Vec::new();
+        evict_as(vm, &m, &mut none, false);
+    }
 }
 
 thread_local! {
@@ -6804,16 +7531,23 @@ thread_local! {
 /// `gone`, their records and the call sites' records that name them are
 /// cleared, and each must get hot again before it is compiled again.
 fn evict(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>) {
+    evict_as(vm, m, counts, true);
+}
+
+/// evict, counting each function's evictions (EVICT_MAX) when `count`
+fn evict_as(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>, count: bool) {
     let n = m.pis.len() as i64;
     host::drop_slots(m.base as i32, n as i32);
     let mine = |f: i64| f >= m.base && f < m.base + n;
     for &pi in m.pis.iter() {
         if pi < vm.jit_fn.len() && mine(vm.jit_fn[pi]) {
-            if counts.len() <= pi {
-                counts.resize(pi + 1, 0);
+            if count {
+                if counts.len() <= pi {
+                    counts.resize(pi + 1, 0);
+                }
+                counts[pi] = counts[pi].saturating_add(1);
             }
-            counts[pi] = counts[pi].saturating_add(1);
-            vm.jit_fn[pi] = if counts[pi] >= EVICT_MAX { -2 } else { -1 };
+            vm.jit_fn[pi] = if count && counts[pi] >= EVICT_MAX { -2 } else { -1 };
             calls_fill(vm, pi, -1);
             if pi < vm.jit_hot.len() {
                 vm.jit_hot[pi] = 0;
@@ -6983,9 +7717,20 @@ fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<
         }
         return None;
     }
-    if id == NF_NP_TOSTRING && argc == 0 {
-        if let Val::Num(n) = vm.stack[(fpos + 1) as usize] {
-            return Some(vm.string_val(crate::num::radix_string(n, 10)));
+    if id == NF_SP_CHARCODEAT && argc >= 1 {
+        let t = vm.stack[(fpos + 1) as usize];
+        let r = vm.char_code_fast(&t, &a0);
+        if !matches!(r, Val::Undef) {
+            return Some(r);
+        }
+        return None;
+    }
+    if id == NF_NP_TOSTRING && argc <= 1 {
+        let rx = if argc == 0 { Val::Num(10.0) } else { a0 };
+        if let (Val::Num(n), Val::Num(r)) = (vm.stack[(fpos + 1) as usize], rx) {
+            if r == 2.0 || r == 8.0 || r == 10.0 || r == 16.0 || r == 36.0 {
+                return Some(vm.string_val(crate::num::radix_string(n, r as int)));
+            }
         }
     }
     None
@@ -7014,6 +7759,17 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
             if i >= 0 && (i as usize) < ev.len() && (i as double) == *n {
                 r = ev[i as usize];
                 done = true;
+            }
+        } else if ob.class == C_TYPED {
+            // a typed array's element (Vm::ta_slot)
+            let i = *n as int;
+            if (i as double) == *n {
+                let sl = vm.ta_slot(*o, i);
+                if sl >= 0 {
+                    let bc = vm.objs[ob.env as usize].cold as usize;
+                    r = Val::Num(vm.colds[bc].nums[sl as usize]);
+                    done = true;
+                }
             }
         }
     }
@@ -7102,6 +7858,13 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
         Val::Num(x) => *x,
         _ => return false,
     };
+    if o >= 0 && vm.objs[o as usize].class == C_TYPED {
+        let i = n as int;
+        return match val {
+            Val::Num(x) => (i as double) == n && vm.ta_put_num(o, i, x),
+            _ => false,
+        };
+    }
     if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos >= 2 {
         return false;
     }
@@ -7436,6 +8199,8 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                         OP_SHL => crate::vm::wrap32(p << (q & 31)) as double,
                         _ => (p >> (q & 31)) as double,
                     }
+                } else if code >= OP_BAND && code <= OP_USHR {
+                    crate::rvm::bit_num(code, a, b)
                 } else {
                     crate::vm::arith_num(code, a, b)
                 };

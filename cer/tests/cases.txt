@@ -640,3 +640,244 @@ var r = [JSON.stringify([1, undefined, function () {}, Symbol('s'), { a: undefin
 }|{"c":3,"a":1}|{
  "b": 1
 }|[3,"s",false]
+
+==== js BigInt values around the small-value bound
+var a = [9007199254740991n + 1n, -9007199254740991n - 1n, 2n ** 53n === 9007199254740992n, 3037000499n * 3037000499n, -7n / 2n, -7n % 2n, 7n / -2n, (2n ** 53n + 1n) - 1n === 2n ** 53n, 0n === -0n, 5n === BigInt('5'), 12345678901234567n - 12345678901234566n === 1n];
+var x = 1n; for (var i = 0; i < 1000; i++) x = (x * 3n + 1n) % 1000000007n;
+a.push(x, typeof x, String(-123n), `${4567n}`, 10n > 9n, 3n == 3);
+a.join()
+----
+9007199254740992,-9007199254740992,true,9223372030926249001,-3,-1,-3,true,true,true,true,85332289,bigint,-123,4567,true,true
+
+==== js typed array length and subarray after the length getter is redefined
+var a = new Uint8Array(8), r = [];
+function L(x) { return x.length; }
+for (var i = 0; i < 3; i++) r.push(L(a));
+Object.defineProperty(a, 'length', { value: 42 }); r.push(L(a));
+var b = new Uint8Array(5); r.push(L(b));
+Object.defineProperty(Uint8Array.prototype, 'length', { get: function () { return -1; }, configurable: true }); r.push(L(b), L(new Int8Array(3)));
+var s = b.subarray(1, 3); r.push(s.byteLength, s[0] === 0);
+class U extends Uint8Array {}; var u = new U(4); r.push(u.subarray(1).constructor === U);
+r.join()
+----
+8,8,8,42,5,-1,3,2,true,true
+
+==== js integer keys in own-key order: shuffled insertion, 10-digit indices
+var o = {}; for (var i = 0; i < 2000; i++) o[(i * 7919) % 2000] = i;
+var last = -1, ok = true, c = 0; for (var k in o) { if (+k < last) ok = false; last = +k; c++; }
+var p = {b:1, 4294967295:1, 4294967294:1, '01':1, 1e9:1, 0:1, '-1':1};
+[ok, c, Object.keys(o).slice(0, 3).join('/'), Object.keys(p).join('/'), JSON.stringify(p)].join(';')
+----
+true;2000;0/1/2;0/1000000000/4294967294/b/4294967295/01/-1;{"0":1,"1000000000":1,"4294967294":1,"b":1,"4294967295":1,"01":1,"-1":1}
+
+==== js Number.isInteger and friends, isNaN and isFinite without and with coercion
+[Number.isInteger(5), Number.isInteger('5'), Number.isInteger(5.5), Number.isInteger(), Number.isSafeInteger(2 ** 53), Number.isSafeInteger(2 ** 53 - 1), Number.isFinite(Infinity), Number.isFinite('1'), Number.isNaN(NaN), Number.isNaN('x'), Number.isInteger(-0), isNaN(NaN), isNaN(1), isNaN('x'), isNaN('1'), isFinite(1 / 0), isFinite('3'), isFinite({}), isNaN()].join()
+----
+true,false,false,false,false,true,false,false,true,false,true,true,false,true,false,false,true,false,true
+
+==== js JSON.stringify of ordinary objects: key order, toJSON, replacer, hidden and inherited keys
+var o = {b:1, 10:2, a:{toJSON:function(k){return 'T'+k;}}, 2:[1,{x:undefined,y:null}], f:function(){}, u:undefined, n:new Number(5), get g(){return 'G';}};
+Object.defineProperty(o, 'h', {value: 1, enumerable: false});
+var c = Object.create({inh:1}); c.own = 2; var d = {}; for (var i = 0; i < 300; i++) d['k' + i] = i;
+[JSON.stringify(o), JSON.stringify(o, function(k, v){ return typeof v === 'number' ? v * 10 : v; }), JSON.stringify(c), JSON.stringify(d).length, new Function('return ' + JSON.stringify(d))().k299].join('|')
+----
+{"2":[1,{"y":null}],"10":2,"b":1,"a":"Ta","n":5,"g":"G"}|{"2":[10,{"y":null}],"10":20,"b":10,"a":"Ta","n":5,"g":"G"}|{"own":2}|3081|299
+
+==== js JSON.parse numbers, escapes, keys and syntax errors
+var r = [];
+['[1.5,-0.25,0.1,123.456,1e5,1.5e-3,12345678901234.5,9007199254740993,1.0]', '"\\u00e4\\ud83d\\ude00x\\n"', '{"a":"b","10":[],"k\\"":{"x":"y"}}', '01', '1.', '1.e3', '-', '[1,]', '"\\x"', '1 2', '"a\u0001"'].forEach(function (s) {
+  try { r.push(JSON.stringify(JSON.parse(s))); } catch (e) { r.push(e.name); }
+});
+r.join(';')
+----
+[1.5,-0.25,0.1,123.456,100000,0.0015,12345678901234.5,9007199254740992,1];"ä😀x\n";{"10":[],"a":"b","k\"":{"x":"y"}};SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError
+
+==== js DataView get/set as natives: in place, out of range, wrong receiver, coercion, BigInt
+var dv = new DataView(new ArrayBuffer(16)), r = [];
+dv.setUint32(0, 0xdeadbeef, true); r.push(dv.getUint32(0, true).toString(16), dv.getUint32(0).toString(16), dv.getUint8(0));
+dv.setFloat64(8, Math.PI); r.push(dv.getFloat64(8));
+dv.setInt16(2, -2); r.push(dv.getInt16(2), dv.getUint16(2, true));
+try { dv.getUint32(14); } catch (e) { r.push(e.name); }
+try { dv.getUint8(-1); } catch (e) { r.push(e.name); }
+try { DataView.prototype.getUint8.call({}, 0); } catch (e) { r.push(e.name); }
+try { new dv.getUint8(0); } catch (e) { r.push(e.name); }
+dv.setBigInt64(0, -5n); r.push(String(dv.getBigInt64(0)));
+dv.setUint8("1", 7); r.push(dv.getUint8(1.0), dv.getUint8("1"));
+dv.setUint8(3, "9"); r.push(dv.getUint8(3));
+r.push(dv.getUint32.name, dv.getUint32.length, dv.setUint32.name, dv.setUint32.length, typeof dv.setUint8(0, 1));
+r.join()
+----
+deadbeef,efbeadde,239,3.141592653589793,-2,65279,RangeError,RangeError,TypeError,TypeError,-5,7,7,9,getUint32,1,setUint32,2,undefined
+
+==== js template substitutions, slice/substring and length of strings, private fields read and written in place
+var d = new Date(0), o = {toString() { return "S"; }, valueOf() { return 42; }}, r = [];
+try { `${Symbol("q")}`; } catch (e) { r.push(e.name); }
+r.push(`a${1.5}b${-0}c${true}${null}${undefined}${10n}${o}${[1, 2]}${1e21}`, `${o}` + o);
+var s = "hello wörld😀x", L = "abc".repeat(100) + "é";
+r.push(s.slice(-3), s.slice(2, 5), s.substring(5, 2), s.substring(-2, 3), L.slice(298, 301), L.substring(301, 298), L.slice(-1).length, s.length, L.length, "".length);
+class P { #x = 0; #m() { return 1; } get #g() { return this.#x; } set #g(v) { this.#x = v; }
+  inc() { this.#x++; return this.#x; } t() { this.#g = 5; var q = [this.#g, this.#m()]; return q.join("/"); } }
+var p = new P(); p.inc(); p.inc();
+r.push(p.inc(), p.t());
+r.join("|")
+----
+TypeError|a1.5b0ctruenullundefined10S1,21e+21|S42|😀x|llo|llo|hel|bcé|bcé|1|14|301|0|3|5/1
+
+==== js WeakMap/WeakSet methods in place; Map and Set keys of every kind after many inserts and deletes
+var wm = new WeakMap(), ws = new WeakSet(), a = {}, b = [], s = Symbol("s"), r = [];
+r.push(wm.set(a, 1) === wm, wm.get(a), wm.get(b), wm.has(a), wm.get(1), wm.has("a"), wm.get(undefined));
+try { wm.set(1, 2); } catch (e) { r.push(e.name); }
+try { wm.set(Symbol.for("g"), 2); } catch (e) { r.push(e.name); }
+wm.set(s, 3); r.push(wm.get(s), wm.has(s));
+ws.add(b); r.push(ws.has(b), ws.has(a), ws.has(null));
+try { WeakMap.prototype.get.call(new Map(), a); } catch (e) { r.push(e.name); }
+try { WeakSet.prototype.has.call(new Set(), a); } catch (e) { r.push(e.name); }
+var m = new Map(), st = new Set(), objs = [];
+for (var i = 0; i < 3000; i++) { var o = { i: i }; objs.push(o); m.set(i, i); m.set("k" + i, -i); m.set(o, i * 2); st.add(i * 0.5); }
+for (var i = 0; i < 3000; i += 3) { m.delete(i); m.delete("k" + i); st.delete(i * 0.5); }
+m.set(NaN, "nan"); m.set(-0, "zero"); m.set(true, "t"); m.set(null, "n"); m.set(undefined, "u"); m.set(1e300, "big"); m.set(-7, "neg");
+r.push(m.size, st.size, m.get(1), m.get(3), m.get("k2"), m.get("k3"), m.get(objs[2999]), m.get(NaN), m.get(0), m.get(true), m.get(null), m.get(undefined), m.get(1e300), m.get(-7), m.get(2.5), st.has(1.5), st.has(1), st.has(1.0001));
+r.join()
+----
+true,1,,true,,false,,TypeError,TypeError,3,true,true,false,false,TypeError,TypeError,7007,2000,1,,-2,,5998,nan,zero,t,n,u,big,neg,,false,true,false
+
+==== js String replace/replaceAll/split as natives for texts, the prelude for the rest; padStart/padEnd
+var r = [], s = "a-b-c-d-é😀-x";
+r.push(s.replace("-", "+"), s.replaceAll("-", "+"), s.replace("é", "E"), s.replaceAll("😀", "S"), s.replace("-", "$&$&"), s.replaceAll("-", "[$`]").length, s.replace("zz", "q"), s.replace("", "^"), s.replaceAll("", ".").length);
+r.push(s.replace(/-/g, "_"), s.replace("-", function (m, i) { return i; }), s.replaceAll(/[a-c]/g, "$&$&"));
+r.push(s.split("-").length, s.split("").length, s.split("-", 2).join("/"), "x".split("x").length, s.split(/-/).length);
+var o = { [Symbol.replace](t, w) { return "R:" + t + w; }, [Symbol.split](t) { return ["S", t]; } };
+r.push("ab".replace(o, 1), "ab".split(o).join("/"), "ab".replace({ toString() { return "a"; } }, "z"));
+try { String.prototype.replace.call(null, "a", "b"); } catch (e) { r.push(e.name); }
+try { "a".replaceAll(/a/, "b"); } catch (e) { r.push(e.name); }
+try { new String.prototype.replace("a", "b"); } catch (e) { r.push(e.name); }
+r.push(String.prototype.replace.name, String.prototype.replace.length, String.prototype.split.length, String.prototype.replaceAll.name);
+r.push(String.prototype.replace.call(12321, "2", "x"), "123".padStart(8, "0"), "abc".padEnd(7, "xy"), "x".padStart(5, "😀"), "q".padStart(6, "abcd"), "é".padEnd(3, "_"));
+r.join("|")
+----
+a+b-c-d-é😀-x|a+b+c+d+é😀+x|a-b-c-d-E😀-x|a-b-c-d-éS-x|a--b-c-d-é😀-x|45|a-b-c-d-é😀-x|^a-b-c-d-é😀-x|27|a_b_c_d_é😀_x|a1b-c-d-é😀-x|aa-bb-cc-d-é😀-x|6|13|a/b|2|6|R:ab1|S/ab|zb|TypeError|TypeError|TypeError|replace|2|2|replaceAll|1x321|00000123|abcxyxy|😀😀x|abcdaq|é__
+
+==== js optional chaining as a register jump: undefined/null short-circuit, falsy values kept, calls, nested
+var r = [], o = { a: { b: 0, c: "", n: null, f() { return this.b; } }, z: false }, u, nl = null;
+for (var i = 0; i < 3; i++) {
+  r.push(o?.a?.b, o?.a?.c === "", o?.a?.n?.x, u?.x, nl?.x, o.z?.toString(), o?.a?.f(), o.q?.r.s.t, u?.[i], o.a?.["b"]);
+  var x = i == 1 ? null : { v: i }; r.push(x?.v);
+}
+function g(p) { return p?.k ?? "dflt"; } r.push(g(), g(null), g({ k: 0 }), g({ k: null }));
+r.join()
+----
+0,true,,,,false,0,,,0,0,0,true,,,,false,0,,,0,,0,true,,,,false,0,,,0,2,dflt,dflt,0,dflt
+
+==== js array destructuring read in place, Symbol.iterator check kept per shape, patched and own iterators, Map entries
+var r = [];
+var arr = [1, 2, 3]; var [a = 0, b = arr.pop(), c = 9] = arr; r.push(a, b, c, arr.length);
+var arr2 = [1, , 3]; var [x, y, z] = arr2; r.push(x, y, z);
+var [p, ...q] = [1, 2, 3, 4]; r.push(p, q.join("/"));
+var [s1, s2] = "hé"; r.push(s1, s2);
+var own = [5, 6]; own[Symbol.iterator] = function* () { yield "o"; }; var [o1, o2] = own; r.push(o1, o2);
+function swap() { var u = 1, w = 2; for (var i = 0; i < 3; i++) [u, w] = [w, u]; return u + "," + w; } r.push(swap());
+var saved = Array.prototype[Symbol.iterator];
+for (var k = 0; k < 3; k++) { var [m1, m2] = [k, k + 1]; r.push(m1 + m2); }
+Array.prototype[Symbol.iterator] = function* () { yield "patched"; };
+var [pa, pb] = [1, 2]; r.push(pa, pb); r.push([...[7, 8]].join("/"));
+Array.prototype[Symbol.iterator] = saved;
+var [na, nb] = [3, 4]; r.push(na, nb, Math.max(...[1, 5, 2]));
+class MyA extends Array {} var ma = MyA.from([4, 5]); var [ma1, ma2] = ma; r.push(ma1, ma2);
+var m = new Map([[1, "a"], [2, "b"]]); for (var [mk, mv] of m) r.push(mk + mv);
+r.join()
+----
+1,2,3,3,1,,3,1,2/3/4,h,é,o,,2,1,1,3,5,patched,,patched,3,4,5,4,5,1a,2b
+
+==== js number methods cached on Number.prototype, toString radix of integers, parseInt of ASCII texts, startsWith/endsWith as bytes
+var r = [], t = "héllo😀wörld";
+for (var x of [0, -0, 7, -255, 4096, 9007199254740991, -9007199254740991, 2.5]) r.push(x.toString(16), x.toString(2), x.toString(36));
+for (var s of ["ff7", " \n-0x1A", "0x", "+12px", "", "-", "077", "z9"]) r.push(parseInt(s), parseInt(s, 16), parseInt(s, 36), parseInt(s, 1));
+r.push(parseInt("  42"), parseInt("é5"), 1 / parseInt("-0"));
+r.push(t.startsWith("hé"), t.startsWith("h"), t.startsWith("x"), t.endsWith("rld"), t.endsWith("ld", 11), t.startsWith("llo", 2), t.endsWith(""), t.startsWith(""), "a😀".endsWith("😀"));
+r.push("abc".startsWith({ toString() { return "ab"; } }), "abc".indexOf("c"), "abc".includes("d", 1), "aXc".toLowerCase(), "x".repeat(3));
+try { "a".startsWith(/a/); } catch (e) { r.push(e.name); }
+var n = 5; r.push(n.toFixed(2), n.toString(), (12).toString(8));
+Number.prototype.toString = function (b) { return "P" + b; }; r.push(n.toString(16), (3).toString());
+Number.prototype.hex = function () { return "h" + this; }; r.push((10).hex(), n.hex());
+r.join()
+----
+0,0,0,0,0,0,7,111,7,-ff,-11111111,-73,1000,1000000000000,35s,1fffffffffffff,11111111111111111111111111111111111111111111111111111,2gosa7pa2gv,-1fffffffffffff,-11111111111111111111111111111111111111111111111111111,-2gosa7pa2gv,2.8,10.1,2.i,NaN,4087,19987,NaN,-26,-26,-42814,NaN,NaN,NaN,33,NaN,12,18,50181,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,77,119,259,NaN,NaN,NaN,1269,NaN,42,NaN,-Infinity,true,true,false,true,false,true,true,true,true,true,2,false,axc,xxx,TypeError,5.00,5,14,P16,Pundefined,h10,h5
+
+==== js generators: stack and slots saved in place, next lookup kept per shape, patched and own next, return/throw/finally
+var r = [];
+function* g(n) { for (var i = 0; i < n; i++) { var o = { v: i }; yield o.v; } return "end"; }
+var s = 0; for (var x of g(5)) s += x; r.push(s);
+var it = g(2); r.push(JSON.stringify([it.next(), it.next(), it.next(), it.next()]));
+function* h() { try { yield 1; yield 2; } finally { r.push("fin"); } }
+for (var y of h()) { r.push(y); break; }
+var it2 = h(); it2.next(); r.push(JSON.stringify(it2.return(7)));
+var it3 = h(); it3.next(); try { it3.throw(new Error("e")); } catch (e) { r.push(e.message); }
+var it4 = g(3); it4.next = function () { return { done: this.c++ > 1, value: "own" }; }; it4.c = 0;
+for (var z of it4) r.push(z);
+var GP = Object.getPrototypeOf(g.prototype); var saved = GP.next;
+GP.next = function () { var v = saved.call(this); if (!v.done) v.value = v.value * 10; return v; };
+for (var w of g(3)) r.push(w);
+GP.next = saved;
+for (var w2 of g(2)) r.push(w2);
+function* deep(a) { var t = [a, a + 1]; var str = "s" + a; yield t; yield str; yield* g(2); }
+for (var d of deep(4)) r.push(String(d));
+r.push([...g(4)].join("/"));
+r.join()
+----
+10,[{"value":0,"done":false},{"value":1,"done":false},{"value":"end","done":true},{"done":true}],1,fin,fin,{"value":7,"done":true},fin,e,own,own,0,10,20,0,1,4,5,s4,0,1,0/1/2/3
+
+==== js split on one separator byte, strings refilled into kept buffers, limits and empty parts
+var r = [];
+r.push(JSON.stringify("a,b,,c,".split(",")), JSON.stringify(",x".split(",")), JSON.stringify("".split(",")));
+r.push(JSON.stringify("a,b,c,d".split(",", 2)), JSON.stringify("a,b".split(",", 0)), JSON.stringify("abc".split("|")));
+r.push(JSON.stringify("é,ü".split(",")), JSON.stringify("1;2;3".split(";").map(Number)), JSON.stringify("a  b".split(" ")));
+var parts = "k=v&x=y".split("&"); for (var i = 0; i < 300; i++) parts = ("p" + i + "&" + parts.join("&")).split("&");
+r.push(parts.length, parts[0], parts[parts.length - 1]);
+var big = []; for (var j = 0; j < 100; j++) big.push("w" + j + "x".repeat(j)); var back = big.join(",").split(","); r.push(back.length, back[99].length, back[50] === big[50]);
+r.join()
+----
+["a","b","","c",""],["","x"],[""],["a","b"],[],["abc"],["é","ü"],[1,2,3],["a","","b"],302,p299,x=y,100,102,true
+
+==== js String replace with a plain RegExp taken natively, $-less text without captures, function and object replacements
+var r = [];
+var t = "hello world, hello there";
+r.push(t.replace(/hello/g, "bye"), t.replace(/hello/, "bye"), t.replace(/(h)(e)llo/g, "$2$1-$&-$$"), t.replaceAll(/o/g, "0"));
+r.push(t.replace(/(?<w>w\w+)/, "<$<w>>"), t.replace(/l+/g, function (m, p) { return m.length + "@" + p; }));
+var re = /o/g; re.lastIndex = 5; r.push(t.replace(re, "_"), re.lastIndex);
+try { t.replaceAll(/o/, "x"); } catch (e) { r.push(e.constructor.name); }
+r.push("é-ü-é".replace(/é/g, "e"), "aaa".replace(/a*?/g, "-"), "x".replace(/x/, { toString: function () { return "obj"; } }));
+var sub = Object.create(RegExp.prototype); r.push(typeof sub);
+class MyRe extends RegExp { [Symbol.replace](s, x) { return "mine:" + s; } }
+r.push("abc".replace(new MyRe("b"), "X"));
+r.join("|")
+----
+bye world, bye there|bye world, hello there|eh-hello-$ world, eh-hello-$ there|hell0 w0rld, hell0 there|hello <world>, hello there|he2@2o wor1@9d, he2@15o there|hell_ w_rld, hell_ there|0|TypeError|e-ü-e|-a-a-a-|obj|object|mine:abc
+
+==== js instanceof fast path and its fallbacks
+function A(){} function B(){} B.prototype = Object.create(A.prototype); var b = new B(), r = [];
+for (var i = 0; i < 3; i++) r.push(b instanceof A, b instanceof B, 1 instanceof A, null instanceof A, ({}) instanceof A);
+A.prototype = {}; r.push(b instanceof A); r.push(new Proxy(b, {}) instanceof B); r.push(b instanceof B.bind(null));
+function C(){} C.prototype = 5; try { b instanceof C; r.push('nothrow'); } catch (e) { r.push(e instanceof TypeError); }
+function D(){} Object.defineProperty(D, Symbol.hasInstance, { value: function(){ return true; } }); r.push(1 instanceof D);
+function E(){} var e = new E(); for (var j = 0; j < 2; j++) { r.push(e instanceof E); E.prototype = {}; }
+r.join()
+----
+true,true,false,false,false,true,true,false,false,false,true,true,false,false,false,false,true,true,true,true,true,false
+
+==== js RegExp.prototype.compile keeps the new regexp's properties
+var r = /a/g; r.lastIndex = 3; r.compile('b', 'g'); [r.lastIndex, r.source, r.global, r.test('xb')].join()
+----
+0,b,true,true
+
+==== js RegExp exec result arrays: index, input and groups shape kept, extra keys, named groups, indices
+var r = [];
+var m = /(\d+)-(\d+)/.exec("range 12-345 end"); r.push(m.length, m[0], m[1], m[2], m.index, m.input, m.groups, Object.keys(m).join("/"));
+var m2 = /(\d+)-(\d+)/.exec("x 1-2"); m2.extra = 1; r.push(Object.keys(m2).join("/"));
+var m3 = /(\d+)-(\d+)/.exec("7-8"); r.push(JSON.stringify(Object.getOwnPropertyDescriptor(m3, "index")), m3.hasOwnProperty("extra"));
+var n = /(?<a>\d)/.exec("q5"); r.push(n.groups.a, Object.keys(n).join("/"));
+var d = /(b)/d.exec("abc"); r.push(JSON.stringify(d.indices), Object.keys(d).join("/"));
+var g = /o/g, s = "foo boo", c = 0, mm; while ((mm = g.exec(s))) c += mm.index; r.push(c);
+r.push(JSON.stringify("a1b22".match(/\d+/)), JSON.stringify("a1b22".match(/\d+/g)));
+r.join("|")
+----
+3|12-345|12|345|6|range 12-345 end||0/1/2/index/input/groups|0/1/2/index/input/groups/extra|{"value":0,"writable":true,"enumerable":true,"configurable":true}|false|5|0/1/index/input/groups|[[1,2],[1,2]]|0/1/index/input/groups/indices|14|["1"]|["1","22"]

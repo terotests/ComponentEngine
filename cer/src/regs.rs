@@ -729,6 +729,9 @@ impl Tr {
                 };
                 self.set(i, rop, 0, ns + d - 1, (op.a as int), 0);
                 self.popn(1);
+            } else if (c as int) == OP_JNULLISH && op.b == 1 {
+                self.mat_all();
+                self.set(i, R_JNN_KEEP, 1, ns + d - 1, (op.a as int), 0);
             } else if (c as int) == OP_LOCAL_NULL_JF {
                 self.mat_all();
                 self.set(i, R_LOCAL_NULL_JF, 0, ((op.b / 256) as int), ((op.b % 256) as int), (op.a as int));

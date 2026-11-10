@@ -16,7 +16,7 @@ pub fn is_finite(x: double) -> bool {
 /// The decimal digits of a non-negative int below 2^31, without the
 /// formatting machinery: `"k" + i` in a loop spends most of its time here.
 #[ranger::target(rust)]
-fn int_to_string(i: int) -> String {
+pub fn int_to_string(i: int) -> String {
     let mut buf = [0u8; 20];
     let mut n = i as u64;
     let mut p = buf.len();
@@ -28,16 +28,43 @@ fn int_to_string(i: int) -> String {
             break;
         }
     }
-    let mut s = String::with_capacity(buf.len() - p);
-    for b in &buf[p..] {
-        s.push(*b as char);
+    // ASCII digits: valid UTF-8
+    String::from(std::str::from_utf8(&buf[p..]).unwrap_or("0"))
+}
+
+/// The text of a small whole number (0 <= v < 2^31) written onto `s`, and
+/// its length; -1 (nothing written) for any other number.
+#[ranger::target(rust)]
+pub fn push_small_int(s: &mut String, x: double) -> int {
+    if !(x >= 0.0 && x < 2147483647.0) || x != ((x as int) as double) {
+        return -1;
     }
-    s
+    let mut buf = [0u8; 10];
+    let mut n = x as u32;
+    let mut p = buf.len();
+    loop {
+        p -= 1;
+        buf[p] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // ASCII digits one by one: no UTF-8 check of the slice
+    for &c in &buf[p..] {
+        s.push(c as char);
+    }
+    (buf.len() - p) as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn push_small_int(_s: &mut String, _x: double) -> int {
+    -1
 }
 
 /// The other targets have a fast int-to-string of their own.
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn int_to_string(i: int) -> String {
+pub fn int_to_string(i: int) -> String {
     format!("{}", i)
 }
 
@@ -200,6 +227,18 @@ pub fn number_to_string(x: double) -> String {
 
 fn is_js_space(c: char) -> bool {
     c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u{b}' || c == '\u{c}' || c == '\u{a0}' || c == '\u{feff}' || c == '\u{2028}' || c == '\u{2029}' || (c as int > 127 && c.is_whitespace())
+}
+
+/// Whether trimming `s` (at its start, its end) removes anything; the
+/// other targets always trim.
+#[ranger::target(rust)]
+pub fn trim_needed(s: &str, start: bool, end: bool) -> bool {
+    (start && s.chars().next().map_or(false, is_js_space)) || (end && s.chars().next_back().map_or(false, is_js_space))
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn trim_needed(_s: &str, _start: bool, _end: bool) -> bool {
+    true
 }
 
 pub fn js_trim(s: &str) -> String {
@@ -433,6 +472,9 @@ pub fn parse_float(s: &str) -> double {
 
 /// parseInt(s, radix)
 pub fn parse_int(s: &str, radix_in: int) -> double {
+    if parse_int_ascii_ok(s) {
+        return parse_int_ascii(s, radix_in);
+    }
     let t = js_trim_start(s);
     let cs = t.chars().collect::<Vec<char>>();
     let n = cs.len() as int;
@@ -479,6 +521,83 @@ pub fn parse_int(s: &str, radix_in: int) -> double {
 
 fn floor(x: double) -> double {
     x.floor()
+}
+
+/// Rust: whether parse_int_ascii takes `s` (an ASCII text); false on the
+/// other targets.
+#[ranger::target(rust)]
+fn parse_int_ascii_ok(s: &str) -> bool {
+    s.is_ascii()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn parse_int_ascii_ok(_s: &str) -> bool {
+    false
+}
+
+/// Rust: parse_int of an ASCII text over its bytes (the same steps, no char
+/// vectors).
+#[ranger::target(rust)]
+fn parse_int_ascii(s: &str, radix_in: int) -> double {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0usize;
+    while i < n && (b[i] == b' ' || (b[i] >= 9 && b[i] <= 13)) {
+        i += 1;
+    }
+    let mut sign: double = 1.0;
+    if i < n && (b[i] == b'+' || b[i] == b'-') {
+        if b[i] == b'-' {
+            sign = -1.0;
+        }
+        i += 1;
+    }
+    let mut radix = radix_in;
+    let mut strip = true;
+    if radix != 0 {
+        if radix < 2 || radix > 36 {
+            return nan();
+        }
+        if radix != 16 {
+            strip = false;
+        }
+    } else {
+        radix = 10;
+    }
+    if strip && i + 1 < n && b[i] == b'0' && (b[i + 1] == b'x' || b[i + 1] == b'X') {
+        i += 2;
+        radix = 16;
+    }
+    let mut v: double = 0.0;
+    let mut any = false;
+    while i < n {
+        let c = b[i];
+        let d: int = if c >= b'0' && c <= b'9' {
+            (c - b'0') as int
+        } else if c >= b'a' && c <= b'z' {
+            (c - b'a') as int + 10
+        } else if c >= b'A' && c <= b'Z' {
+            (c - b'A') as int + 10
+        } else {
+            99
+        };
+        if d >= radix {
+            break;
+        }
+        v = v * (radix as double) + (d as double);
+        any = true;
+        i += 1;
+    }
+    if any {
+        sign * v
+    } else {
+        nan()
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn parse_int_ascii(_s: &str, _radix_in: int) -> double {
+    0.0
 }
 
 pub fn to_integer(x: double) -> double {
@@ -581,6 +700,26 @@ fn quick_radix(x: double, radix: int) -> String {
     const DIG: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let neg = x < 0.0;
     let v = if neg { -x } else { x };
+    if v < 9007199254740992.0 && v == v.floor() {
+        // a safe integer: its digits by integer division, no big buffer
+        let mut u = v as u64;
+        let r = radix as u64;
+        let mut small = [0u8; 66];
+        let mut p = small.len();
+        loop {
+            p -= 1;
+            small[p] = DIG[(u % r) as usize];
+            u /= r;
+            if u == 0 {
+                break;
+            }
+        }
+        if neg && v != 0.0 {
+            p -= 1;
+            small[p] = b'-';
+        }
+        return String::from(std::str::from_utf8(&small[p..]).unwrap_or(""));
+    }
     let mut ip = v.floor();
     let mut fp = v - ip;
     let r = radix as f64;
