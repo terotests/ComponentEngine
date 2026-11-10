@@ -858,6 +858,13 @@ impl Vm {
                     }
                 }
                 let p = self.to_str(&a0);
+                if (id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && matches!(a1, Val::Undef) {
+                    // no position: an ASCII text compared as bytes
+                    let q = ascii_affix(s.as_str(), p.as_str(), id == NF_SP_ENDSWITH);
+                    if q >= 0 {
+                        return Val::Bool(q == 1);
+                    }
+                }
                 let len = self.str_len(&s);
                 match id {
                     NF_SP_INDEXOF => {
@@ -1915,3 +1922,23 @@ pub fn to_exponential(x: double, d: int) -> String {
     }
 }
 
+/// Rust: whether `s` starts (ends, `end`) with an ASCII `p`, 1 or 0: an
+/// ASCII byte is a whole UTF-16 unit, so the bytes answer it. -1 when `p`
+/// is not ASCII, and on the other targets.
+#[ranger::target(rust)]
+pub fn ascii_affix(s: &str, p: &str, end: bool) -> int {
+    if !p.is_ascii() {
+        return -1;
+    }
+    let r = if end { s.as_bytes().ends_with(p.as_bytes()) } else { s.as_bytes().starts_with(p.as_bytes()) };
+    if r {
+        1
+    } else {
+        0
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn ascii_affix(_s: &str, _p: &str, _end: bool) -> int {
+    -1
+}
