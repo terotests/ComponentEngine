@@ -802,3 +802,15 @@ Number.prototype.hex = function () { return "h" + this; }; r.push((10).hex(), n.
 r.join()
 ----
 0,0,0,0,0,0,7,111,7,-ff,-11111111,-73,1000,1000000000000,35s,1fffffffffffff,11111111111111111111111111111111111111111111111111111,2gosa7pa2gv,-1fffffffffffff,-11111111111111111111111111111111111111111111111111111,-2gosa7pa2gv,2.8,10.1,2.i,NaN,4087,19987,NaN,-26,-26,-42814,NaN,NaN,NaN,33,NaN,12,18,50181,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,77,119,259,NaN,NaN,NaN,1269,NaN,42,NaN,-Infinity,true,true,false,true,false,true,true,true,true,true,2,false,axc,xxx,TypeError,5.00,5,14,P16,Pundefined,h10,h5
+
+==== js split on one separator byte, strings refilled into kept buffers, limits and empty parts
+var r = [];
+r.push(JSON.stringify("a,b,,c,".split(",")), JSON.stringify(",x".split(",")), JSON.stringify("".split(",")));
+r.push(JSON.stringify("a,b,c,d".split(",", 2)), JSON.stringify("a,b".split(",", 0)), JSON.stringify("abc".split("|")));
+r.push(JSON.stringify("é,ü".split(",")), JSON.stringify("1;2;3".split(";").map(Number)), JSON.stringify("a  b".split(" ")));
+var parts = "k=v&x=y".split("&"); for (var i = 0; i < 300; i++) parts = ("p" + i + "&" + parts.join("&")).split("&");
+r.push(parts.length, parts[0], parts[parts.length - 1]);
+var big = []; for (var j = 0; j < 100; j++) big.push("w" + j + "x".repeat(j)); var back = big.join(",").split(","); r.push(back.length, back[99].length, back[50] === big[50]);
+r.join()
+----
+["a","b","","c",""],["","x"],[""],["a","b"],[],["abc"],["é","ü"],[1,2,3],["a","","b"],302,p299,x=y,100,102,true

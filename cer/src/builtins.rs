@@ -1513,6 +1513,28 @@ impl Vm {
             return Val::Obj(a);
         }
         if jsstr::is_ascii(s.as_str()) && jsstr::is_ascii(sepstr.as_str()) {
+            if sepstr.as_bytes().len() == 1 {
+                // one separator byte: a scan, no substring search
+                let c = sepstr.as_bytes()[0];
+                let nb = s.as_bytes().len();
+                let mut a: usize = 0;
+                let mut i: usize = 0;
+                while i < nb {
+                    if s.as_bytes()[i] == c {
+                        if (out.len() as int) >= lim {
+                            break;
+                        }
+                        out.push(self.str_val(&s[a..i]));
+                        a = i + 1;
+                    }
+                    i += 1;
+                }
+                if (out.len() as int) < lim {
+                    out.push(self.str_val(&s[a..]));
+                }
+                let arr = self.new_array(out);
+                return Val::Obj(arr);
+            }
             for part in s.split(sepstr.as_str()) {
                 if (out.len() as int) >= lim {
                     break;

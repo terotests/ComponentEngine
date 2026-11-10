@@ -1387,7 +1387,9 @@ impl Vm {
         if s.is_empty() {
             return Val::Str(0);
         }
-        Val::Str(self.new_handle(Rc::new(String::from(s)), 0))
+        let h = self.take_handle(s.as_bytes().len() as int, 0);
+        rc_fill_str(&mut self.strs[h as usize].s, s);
+        Val::Str(h)
     }
 
     pub fn string_val(&mut self, s: String) -> Val {
@@ -9146,6 +9148,23 @@ pub fn rc_refill(rc: &mut Rc<String>, s: String) {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn rc_refill(rc: &mut Rc<String>, s: String) {
     *rc = Rc::new(s);
+}
+
+/// Slot `rc` takes a copy of `s`: into the buffer it kept (rc_vacate) when
+/// nothing else holds it (Rust), else a new one.
+#[ranger::target(rust)]
+pub fn rc_fill_str(rc: &mut Rc<String>, s: &str) {
+    if let Some(m) = Rc::get_mut(rc) {
+        m.clear();
+        m.push_str(s);
+        return;
+    }
+    *rc = Rc::new(String::from(s));
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_fill_str(rc: &mut Rc<String>, s: &str) {
+    *rc = Rc::new(String::from(s));
 }
 
 /// Rust: a string's buffer to its size when a quarter or more is spare
