@@ -625,6 +625,12 @@ impl Vm {
                             Val::Undef | Val::Null => true,
                             _ => false,
                         };
+                        if (w0 & 65280) != 0 {
+                            // sub 1, `x?.`: the jump when nullish (r_jnull)
+                            let to = self.r_jnull(bp, (w1 as int), (w2 as int));
+                            pc = if to >= 0 { to } else { pc + 1 + ((w0 >> 16) as int) };
+                            continue;
+                        }
                         if nullish {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
@@ -1295,6 +1301,18 @@ impl Vm {
                 pc = if npc >= 0 { npc } else { pc + 1 + ((op_at(&self.rcode, (rb + pc) as usize).code >> 16) as int) };
             }
         }
+    }
+
+    /// R_JNN_KEEP sub 1 (`x?.`): slot w1 undefined or null becomes undefined, and the
+    /// jump's target w2; -1 to fall through. Kept out of rrun's loop.
+    #[inline(never)]
+    pub fn r_jnull(&mut self, bp: int, w1: int, w2: int) -> int {
+        let i = (bp + w1) as usize;
+        if matches!(self.stack[i], Val::Undef | Val::Null) {
+            self.stack[i] = Val::Undef;
+            return w2;
+        }
+        -1
     }
 
     #[inline(never)]
