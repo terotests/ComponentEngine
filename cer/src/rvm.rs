@@ -106,7 +106,7 @@ impl Vm {
             self.put_elem(e, k, v);
             return;
         }
-        val_put(&mut evec_mut(&mut self.evecs, ev).v, k as usize, v);
+        elem_put_in(evec_mut(&mut self.evecs, ev), k as usize, v);
     }
 
     /// Register slot `i` (absolute) takes `v`, unchecked like rget.
@@ -857,7 +857,7 @@ impl Vm {
                                 if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos < 2 {
                                     old = obj_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
                                     old_s = str_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
-                                    val_put(&mut evec_mut(&mut self.evecs, ev).v, i as usize, val.clone());
+                                    elem_put_in(evec_mut(&mut self.evecs, ev), i as usize, val.clone());
                                     let oc = ob.cold as usize;
                                     if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
@@ -869,7 +869,7 @@ impl Vm {
                                             ob.elems = self.efree.pop().unwrap();
                                         } else {
                                             grow_evecs(&mut self.evecs);
-                                            self.evecs.push(Elems { v: Vec::new() });
+                                            self.evecs.push(elems_of(Vec::new()));
                                             ob.elems = (self.evecs.len() - 1) as i32;
                                         }
                                     }

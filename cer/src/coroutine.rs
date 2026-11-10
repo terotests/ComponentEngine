@@ -213,10 +213,10 @@ impl Vm {
                 let old = self.evecs[e].v[j];
                 if !same_ref(&old, &x) {
                     self.inc(&x);
-                    self.evecs[e].v[j] = x;
+                    elem_put(&mut self.evecs[e], j as usize, x);
                     self.dec(&old);
                 } else {
-                    self.evecs[e].v[j] = x;
+                    elem_put(&mut self.evecs[e], j as usize, x);
                 }
             } else {
                 self.inc(&x);

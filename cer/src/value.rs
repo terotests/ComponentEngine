@@ -129,8 +129,61 @@ impl Cold {
 
 /// An object's elements (`Vm.evecs`, by `JsObj.elems`): a struct, so each
 /// target writes them where they are, not into a copy.
+/// Rust: a Vec<Val> that drops its first value in O(1) (evec.rs, shift).
+#[ranger::target(rust)]
+pub struct Elems {
+    pub v: crate::evec::EVec,
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub struct Elems {
     pub v: Vec<Val>,
+}
+
+/// Elements holding `v`.
+#[ranger::target(rust)]
+pub fn elems_of(v: Vec<Val>) -> Elems {
+    Elems { v: crate::evec::EVec::from_vec(v) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn elems_of(v: Vec<Val>) -> Elems {
+    Elems { v: v }
+}
+
+/// `e.v[i] = x` (Rust: in place, the start kept).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn elem_put(e: &mut Elems, i: usize, x: Val) {
+    e.v.put(i, x);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn elem_put(e: &mut Elems, i: usize, x: Val) {
+    e.v[i] = x;
+}
+
+/// `e.v[i] = x` for an `i` the caller has checked (Rust: unchecked).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn elem_put_in(e: &mut Elems, i: usize, x: Val) {
+    e.v.put_unchecked(i, x);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn elem_put_in(e: &mut Elems, i: usize, x: Val) {
+    e.v[i] = x;
+}
+
+/// `e`'s values become `v`.
+#[ranger::target(rust)]
+pub fn elems_set(e: &mut Elems, v: Vec<Val>) {
+    e.v.set(v);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn elems_set(e: &mut Elems, v: Vec<Val>) {
+    e.v = v;
 }
 
 pub struct JsObj {

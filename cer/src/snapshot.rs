@@ -496,7 +496,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.colds.push(Cold::new());
     vm.free_colds = Vec::new();
     vm.evecs = Vec::new();
-    vm.evecs.push(Elems { v: Vec::new() });
+    vm.evecs.push(elems_of(Vec::new()));
     vm.efree = Vec::new();
     vm.zct = Vec::new();
     vm.freed = Vec::new();
@@ -521,7 +521,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         let attrs = get_ints(&mut r);
         let ev = get_vals(&mut r, &strs);
         if !ev.is_empty() {
-            vm.evecs.push(Elems { v: ev });
+            vm.evecs.push(elems_of(ev));
             o.elems = (vm.evecs.len() - 1) as i32;
         }
         let mut cold = Cold::new();
