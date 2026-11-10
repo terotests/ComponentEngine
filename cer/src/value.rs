@@ -10,10 +10,10 @@
 //! stay empty.
 
 use ranger::prelude::*;
-#[cfg(ranger)]
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 use std::collections::HashMap;
-// rustc: a Map's or Set's index hashes with FxHasher (fxmap.rs)
-#[cfg(not(ranger))]
+// Rust: a Map's or Set's index hashes with FxHasher (fxmap.rs)
+#[ranger::target(rust)]
 use crate::fxmap::HashMap;
 use std::rc::Rc;
 

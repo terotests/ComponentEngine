@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // A HashMap with a multiplicative hash (rustc-hash 2's FxHasher) for the
 // maps whose keys are machine-made: a Map's or Set's index (value.rs). Rust
-// only (lib.rs includes it under cfg(not(ranger))); Ranger's own Rust writer
-// already hashes its maps this way, the other targets keep their maps.
+// only (lib.rs includes it for the rust target); the other targets keep
+// their maps.
 
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::{Deref, DerefMut};

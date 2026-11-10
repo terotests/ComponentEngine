@@ -57,8 +57,8 @@ pub mod types;
 pub mod value;
 pub mod vm;
 /// a HashMap with a cheaper hash for the Map / Set index (fxmap.rs):
-/// rustc only, Ranger keeps std's maps
-#[cfg(not(ranger))]
+/// Rust only, the other targets keep their maps
+#[ranger::target(rust)]
 pub mod fxmap {
     include!("fxmap.rs");
 }
