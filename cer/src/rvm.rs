@@ -2104,8 +2104,21 @@ impl Vm {
     /// frames changed.
     #[inline(never)]
     pub fn r_win(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int, want: usize) -> int {
-        self.stack.truncate((bp + w1) as usize);
         let op = self.protos[pi].code[pc as usize];
+        let code = op.code as int;
+        if code == OP_TRY || code == OP_END_TRY {
+            // the handler's stack height is the window's top (what the
+            // truncation below would leave); the registers stay as they are
+            if code == OP_TRY {
+                let env = self.frames[fi].env;
+                self.handlers.push(Handler { frame: fi as int, catch_pc: (op.a as int), sp: bp + w1, env: env });
+            } else {
+                self.handlers.pop();
+            }
+            self.frames[fi].pc = pc + 1;
+            return pc + 1;
+        }
+        self.stack.truncate((bp + w1) as usize);
         let mut p2 = pc + 1;
         self.frames[fi].pc = p2;
         let changed = self.win_op(op, pi, bp, fi, &mut p2);
