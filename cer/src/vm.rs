@@ -326,6 +326,7 @@ pub struct Vm {
     /// R_GET_METHOD's method cache (rcode c <= -100000, entry -100000 - c):
     /// receiver shape, shape epoch, prototype, its shape, slot; 5 ints each
     pub mcache: Vec<i32>,
+    pub gn_memo: Vec<i32>,
     /// array_iter_plain's memo: an array's shape, the shape epoch, its
     /// prototype, the prototype's shape and its Symbol.iterator slot
     pub ai_memo: Vec<i32>,
@@ -657,6 +658,7 @@ impl Vm {
             rpic: Vec::new(),
             ic2: Vec::new(),
             mcache: Vec::new(),
+            gn_memo: Vec::new(),
             ai_memo: Vec::new(),
             pic: Vec::new(),
             shape_epoch: 0,
@@ -5103,13 +5105,14 @@ impl Vm {
             }
             return Some(v);
         }
-        let next = self.get(it, A_NEXT);
+        let plain = o >= 0 && self.objs[o as usize].class == C_GENERATOR && self.gen_plain_next(o);
+        let next = if plain { Val::Undef } else { self.get(it, A_NEXT) };
         if self.throwing {
             return None;
         }
         // a generator with its own next: resumed here, no result object
         let nf = obj_of(&next);
-        if o >= 0 && nf >= 0 && self.objs[nf as usize].class == C_NATIVE && (self.objs[nf as usize].func as int) == crate::coroutine::NF_GEN_NEXT && self.objs[o as usize].class == C_GENERATOR && !self.protos[self.objs[o as usize].func as usize].is_async {
+        if plain || (o >= 0 && nf >= 0 && self.objs[nf as usize].class == C_NATIVE && (self.objs[nf as usize].func as int) == crate::coroutine::NF_GEN_NEXT && self.objs[o as usize].class == C_GENERATOR && !self.protos[self.objs[o as usize].func as usize].is_async) {
             let v = self.gen_resume(o, crate::coroutine::GM_NEXT, Val::Undef);
             if self.throwing || self.gen_done {
                 return None;
@@ -5168,8 +5171,50 @@ impl Vm {
         out
     }
 
-    /// The first `n` values of an iterable; an iterator not done by then is
-    /// closed (array destructuring without a rest element).
+    /// Whether generator `o` (not async) takes `next` from
+    /// %GeneratorPrototype% as made: nothing named next on it or on its
+    /// function's prototype. The lookup is kept (gn_memo) for o's shape
+    /// while both prototypes' shapes and the slot's value stay.
+    pub fn gen_plain_next(&mut self, o: int) -> bool {
+        if self.protos[self.objs[o as usize].func as usize].is_async {
+            return false;
+        }
+        let p1 = self.objs[o as usize].proto;
+        if p1 < 0 {
+            return false;
+        }
+        let p2 = self.objs[p1 as usize].proto;
+        if p2 < 0 {
+            return false;
+        }
+        if self.gn_memo.len() == 7 && self.gn_memo[0] == self.objs[o as usize].shape && self.gn_memo[1] == (self.shape_epoch as i32) && self.gn_memo[2] == p1 && self.gn_memo[3] == self.objs[p1 as usize].shape && self.gn_memo[4] == p2 && self.gn_memo[5] == self.objs[p2 as usize].shape {
+            let f = obj_of(&self.objs[p2 as usize].get_slot(self.gn_memo[6] as usize));
+            return f >= 0 && self.objs[f as usize].class == C_NATIVE && (self.objs[f as usize].func as int) == crate::coroutine::NF_GEN_NEXT;
+        }
+        if self.find(o, A_NEXT) >= 0 || self.find(p1 as int, A_NEXT) >= 0 {
+            return false;
+        }
+        let slot = self.find(p2 as int, A_NEXT);
+        if slot < 0 || (self.attr_at(p2 as int, slot) & P_ACCESSOR) != 0 {
+            return false;
+        }
+        let f = obj_of(&self.objs[p2 as usize].get_slot(slot as usize));
+        if f < 0 || self.objs[f as usize].class != C_NATIVE || (self.objs[f as usize].func as int) != crate::coroutine::NF_GEN_NEXT {
+            return false;
+        }
+        while self.gn_memo.len() < 7 {
+            self.gn_memo.push(-1);
+        }
+        self.gn_memo[0] = self.objs[o as usize].shape;
+        self.gn_memo[1] = self.shape_epoch as i32;
+        self.gn_memo[2] = p1;
+        self.gn_memo[3] = self.objs[p1 as usize].shape;
+        self.gn_memo[4] = p2;
+        self.gn_memo[5] = self.objs[p2 as usize].shape;
+        self.gn_memo[6] = slot as i32;
+        true
+    }
+
     /// Whether array `o` iterates as its elements: no holes seen through
     /// prototypes and its Symbol.iterator Array.prototype.values. The
     /// lookup's answer is kept (ai_memo) for o's shape while its
@@ -5206,6 +5251,8 @@ impl Vm {
         true
     }
 
+    /// The first `n` values of an iterable; an iterator not done by then is
+    /// closed (array destructuring without a rest element).
     pub fn iterable_take(&mut self, v: &Val, n: int) -> Vec<Val> {
         if let Val::Obj(o) = v {
             if self.array_iter_plain(*o) {
