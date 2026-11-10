@@ -16,7 +16,7 @@ pub fn is_finite(x: double) -> bool {
 /// The decimal digits of a non-negative int below 2^31, without the
 /// formatting machinery: `"k" + i` in a loop spends most of its time here.
 #[ranger::target(rust)]
-fn int_to_string(i: int) -> String {
+pub fn int_to_string(i: int) -> String {
     let mut buf = [0u8; 20];
     let mut n = i as u64;
     let mut p = buf.len();
@@ -37,7 +37,7 @@ fn int_to_string(i: int) -> String {
 
 /// The other targets have a fast int-to-string of their own.
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn int_to_string(i: int) -> String {
+pub fn int_to_string(i: int) -> String {
     format!("{}", i)
 }
 

@@ -22,7 +22,7 @@ use crate::value::*;
 use crate::vm::*;
 
 /// Bumped when the text or what it holds changes.
-pub const SNAPSHOT_FORMAT: int = 2;
+pub const SNAPSHOT_FORMAT: int = 3;
 
 struct Strings {
     index: HashMap<String, int>,
@@ -339,6 +339,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, *v);
     }
     put_vals(&mut b, &mut st, vm, &vm.pending_jobs());
+    put_num(&mut b, vm.del_count);
     // the regular expressions by their cache key ("source/flags"), in order
     let mut keys: Vec<String> = Vec::new();
     let mut i: usize = 0;
@@ -405,6 +406,10 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.atoms = HashMap::new();
     vm.atom_names = Vec::new();
     vm.atom_cache = Vec::new();
+    vm.idx_keys = Vec::new();
+    vm.idx_vals = Vec::new();
+    vm.idx_count = 0;
+    vm.idx_seen = 0;
     vm.atom_vals = Vec::new();
     vm.char_vals = Vec::new();
     let na = r.num();
@@ -652,6 +657,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     }
     vm.jobs = get_vals(&mut r, &strs);
     vm.job_head = 0;
+    vm.del_count = r.num();
     vm.regexes = Vec::new();
     vm.regex_cache = HashMap::new();
     vm.regex_shown = Vec::new();
@@ -721,6 +727,26 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         unpack_code(&mut vm.protos[f.proto as usize]);
     }
     vm.find_setters();
+    // a Map's or Set's string keys are found by text, made again here
+    let mut o: usize = 0;
+    while o < vm.objs.len() {
+        let class = vm.objs[o].class;
+        if class == C_MAP || class == C_SET {
+            let c = vm.objs[o].cold as usize;
+            let e = vm.objs[o].elems as usize;
+            let mut j: usize = 0;
+            while j < vm.evecs[e].v.len() && j < vm.colds[c].marks.len() {
+                if vm.colds[c].marks[j] == 0 {
+                    if let Val::Str(h) = &vm.evecs[e].v[j] {
+                        let t = vm.sget(*h).as_ref().clone();
+                        vm.colds[c].sindex.insert(t, j as int);
+                    }
+                }
+                j += 1;
+            }
+        }
+        o += 1;
+    }
     // the counts are not in the text: made again from the heap
     vm.recount();
     true
