@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { Worker, MessageChannel, receiveMessageOnPort } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { makeWasi } from "../../playground/src/wasi.js";
 
@@ -48,6 +49,22 @@ const wasmModule = new WebAssembly.Module(fs.readFileSync(WASM));
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// --async=1: batch modules compiled by a worker thread (install answers a
+// ticket; install(ticket, 0) polls it with receiveMessageOnPort)
+let compiler = null;
+function getCompiler() {
+  if (compiler) return compiler;
+  const { port1, port2 } = new MessageChannel();
+  const w = new Worker(
+    `const { workerData } = require("node:worker_threads"); const port = workerData.port;
+     port.on("message", ({ id, bytes }) => { let m = null, err = null; try { m = new WebAssembly.Module(bytes); } catch (e) { err = String(e); } port.postMessage({ id, m, err }); });`,
+    { eval: true, workerData: { port: port2 }, transferList: [port2] },
+  );
+  w.unref();
+  compiler = { port: port1, next: 0, done: new Map() };
+  return compiler;
+}
+
 /** A fresh CErXes instance with the JIT host. */
 function engine() {
   const out = [];
@@ -64,16 +81,37 @@ function engine() {
       for (let k = 0; k < n; k++) t.set(base + k, jit.rt.gone);
       jit.evicted += n;
     },
+    polls: 0,
     install(ptr, len) {
       const t0 = performance.now();
-      const bytes = new Uint8Array(x.memory.buffer, ptr, len).slice();
       let m;
+      if (len === 0) {
+        jit.polls++;
+        const c = getCompiler();
+        for (let r; (r = receiveMessageOnPort(c.port)); ) c.done.set(r.message.id, r.message);
+        const r = c.done.get(ptr);
+        if (!r) return -2;
+        c.done.delete(ptr);
+        if (!r.m) return -1;
+        return jit.place(r.m, t0);
+      }
+      const bytes = new Uint8Array(x.memory.buffer, ptr, len).slice();
+      if (opt("async", "") === "1" && jit.rt) {
+        const c = getCompiler();
+        const id = ++c.next;
+        c.port.postMessage({ id, bytes }, [bytes.buffer]);
+        jit.compileMs += performance.now() - t0;
+        return -16 - id;
+      }
       try {
         m = new WebAssembly.Module(bytes);
       } catch (e) {
         fs.writeFileSync("/tmp/wjit-bad.wasm", bytes);
         throw new Error("wjit: invalid module (/tmp/wjit-bad.wasm): " + e.message);
       }
+      return jit.place(m, t0);
+    },
+    place(m, t0) {
       if (!jit.helpers) {
         // from the function table: an export of a wasip1 module runs the
         // constructors and destructors around every call
@@ -115,6 +153,11 @@ function engine() {
       let lo = 0, hi = 0;
       for (const k of mask) if (k < 32) lo |= 1 << k; else hi |= 1 << (k - 32);
       x.cerxes_jit_mask(lo, hi);
+      // --tune=k:v,...: experiment knobs (wjit.rs TUNE)
+      for (const kv of (process.env.WJIT_TUNE || opt("tune", "")).split(",").filter(Boolean)) {
+        const [k, v] = kv.split(":").map(Number);
+        x.cerxes_jit_tune(k, v);
+      }
       return x.cx_jit(e, on ? 1 : 0, m);
     },
     eval(src) {
@@ -175,7 +218,7 @@ if (args.includes("--octane")) {
     const best = { false: new Map(), true: new Map() };
     const rx = /^([A-Za-z]+): (.*)$/gm;
     for (let i = 0; i < runs; i++) {
-      for (const on of [false, true]) {
+      for (const on of opt("only-on", "") ? [true] : opt("only-off", "") ? [false] : [false, true]) {
         const e = engine();
         e.setJit(on, min);
         const r = e.eval(src);
@@ -187,6 +230,7 @@ if (args.includes("--octane")) {
     }
     const offs = [...best[false].entries()].map(([k, v]) => [null, k, v]);
     const ons = best[true];
+    if (!offs.length) for (const [k, w] of ons) console.log(`${k}\t-\t${w}`);
     for (const [, k, v] of offs) {
       const w = ons.get(k) ?? "missing";
       const ok = /^[0-9.]+$/.test(w);
@@ -207,7 +251,7 @@ if (opt("eval", "")) {
     e.setJit(on, on ? Number(opt("min", "0")) : 0, mask);
     const r = e.eval(src);
     console.log((on ? "on:  " : "off: ") + r.value + (r.output ? "\n" + r.output : ""));
-    if (on) console.log(JSON.stringify(e.stats()) + "\ncompileMs " + e.jit.compileMs.toFixed(1) + " modules " + e.jit.modules + " evicted " + e.jit.evicted);
+    if (on) console.log(JSON.stringify(e.stats()) + "\ncompileMs " + e.jit.compileMs.toFixed(1) + " polls " + e.jit.polls + " modules " + e.jit.modules + " evicted " + e.jit.evicted);
     if (on && e.out.length) console.log(e.out.join("\n"));
   }
   process.exit(0);

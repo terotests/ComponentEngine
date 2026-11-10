@@ -7099,6 +7099,13 @@ mod host {
         unsafe { release(base, n) }
     }
 
+    /// a module the host compiles apart (install's ticket): its first
+    /// slot, -1 it failed, -2 not yet
+    pub fn poll(ticket: i32) -> i32 {
+        // SAFETY: len 0: the host reads nothing (ptr is the ticket)
+        unsafe { install(ticket as usize as *const u8, 0) }
+    }
+
     pub fn call(idx: i32, sp: usize, kv: usize, pc: i32, budget: i32, vm: usize, bp: i32) -> i32 {
         // SAFETY: idx is a table index install returned for a function of
         // this type; on wasm32 a function pointer is its table index
@@ -7113,6 +7120,9 @@ mod host {
         -1
     }
     pub fn drop_slots(_base: i32, _n: i32) {}
+    pub fn poll(_ticket: i32) -> i32 {
+        -1
+    }
     pub fn call(_idx: i32, _sp: usize, _kv: usize, pc: i32, _budget: i32, _vm: usize, _bp: i32) -> i32 {
         pc
     }
@@ -7199,14 +7209,44 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
     let mut f = vm.jit_fn[pi];
     if f == PENDING {
         // waits for its batch: flushed when its functions keep coming
-        let hits = with_state(vm, |st| {
+        let (hits, poll) = with_state(vm, |st| {
             st.batch.hits += 1;
-            st.batch.hits
+            let p = !st.inflight.is_empty() && {
+                st.polls += 1;
+                st.polls >= 16
+            };
+            if p {
+                st.polls = 0;
+            }
+            (st.batch.hits, p)
         });
-        if hits >= BATCH_HITS {
+        if poll {
+            poll_inflight(vm);
+        }
+        if hits as i64 >= tune(1) {
             flush(vm);
         }
         return vm.jit_fn[pi];
+    }
+    if f == -1 && tune(3) != 0 {
+        let first = with_state(vm, |st| {
+            if st.gated.len() <= pi {
+                st.gated.resize(pi + 1, false);
+            }
+            let g = st.gated[pi];
+            st.gated[pi] = true;
+            !g
+        });
+        if first {
+            let d = gate_delay(vm, pi);
+            if d > 0 {
+                while vm.jit_hot.len() <= pi {
+                    vm.jit_hot.push(0);
+                }
+                vm.jit_hot[pi] = vm.jit_min - d;
+                return -1;
+            }
+        }
     }
     if f == -1 {
         let rb = vm.protos[pi].rbase as usize;
@@ -7243,7 +7283,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
                     t.bytes += c.bytes.len();
                     t.items.push(Pending { pi, name, c });
                     // debug: mask bit 45, each function in a module of its own
-                    t.items.len() >= BATCH_FNS || t.bytes >= BATCH_BYTES || MASK.with(|m| m.get()) & (1u64 << 45) != 0
+                    t.items.len() as i64 >= tune(2) || t.bytes >= BATCH_BYTES || MASK.with(|m| m.get()) & (1u64 << 45) != 0
                 });
                 vm.jit_fn[pi] = f;
                 if full {
@@ -7295,6 +7335,12 @@ struct Batch {
 #[derive(Default)]
 struct VmJit {
     id: i64,
+    /// batches the host compiles apart: (ticket, batch)
+    inflight: Vec<(i32, Batch)>,
+    /// hits of waiting functions since the last poll
+    polls: u32,
+    /// functions the gate (TUNE 3) has looked at
+    gated: Vec<bool>,
     batch: Batch,
     mods: Mods,
     /// by function: how often its speculation failed (spec_failed)
@@ -7438,6 +7484,46 @@ fn flush(vm: &mut crate::vm::Vm) {
     let bodies: Vec<&[u8]> = t.items.iter().map(|q| q.c.bytes.as_slice()).collect();
     let names: Vec<String> = t.items.iter().map(|q| q.name.clone()).collect();
     let base = if rt_ready(lay) { host::put(&module(&bodies, &names)) } else { -1 };
+    if base <= TICKET0 {
+        // the host compiles it apart (another thread): its slots come
+        // from poll_inflight; the functions wait as they are
+        let ticket = TICKET0 - base;
+        with_state(vm, |st| st.inflight.push((ticket, t)));
+        return;
+    }
+    finish(vm, t, base);
+}
+
+/// a host's install answer at or under this: the module is being compiled
+/// apart, ticket TICKET0 - answer (install(ticket, 0) asks for it)
+const TICKET0: i32 = -16;
+
+/// Modules the host compiled apart that are done get their slots (polled
+/// every TUNE-free 16 hits of a waiting function and at the machine's ends).
+fn poll_inflight(vm: &mut crate::vm::Vm) {
+    loop {
+        let next = with_state(vm, |st| {
+            let mut k = 0;
+            while k < st.inflight.len() {
+                let r = host::poll(st.inflight[k].0);
+                if r != -2 {
+                    let (_, t) = st.inflight.remove(k);
+                    return Some((t, r));
+                }
+                k += 1;
+            }
+            None
+        });
+        match next {
+            Some((t, r)) => finish(vm, t, r),
+            None => return,
+        }
+    }
+}
+
+/// The batch t's functions get their slots from base (or -2 each when
+/// the host refused the module).
+fn finish(vm: &mut crate::vm::Vm, t: Batch, base: i32) {
     for (k, q) in t.items.iter().enumerate() {
         let pi = q.pi;
         let c = &q.c;
@@ -7581,6 +7667,7 @@ pub fn flush_pending(vm: &mut crate::vm::Vm) {
     if vm.jit_id == 0 {
         return;
     }
+    poll_inflight(vm);
     if with_state(vm, |st| {
         let t = &mut st.batch;
         if !t.items.is_empty() {
@@ -9286,7 +9373,7 @@ pub fn hot_fn(vm: &mut crate::vm::Vm, tp: usize) -> i64 {
     while vm.jit_hot.len() <= tp {
         vm.jit_hot.push(0);
     }
-    if vm.jit_hot[tp] < vm.jit_min {
+    if vm.jit_hot[tp] < call_min(vm) {
         vm.jit_hot[tp] += 1;
         return -1;
     }
@@ -9373,6 +9460,16 @@ fn h_ret(vm: i32, bp: i32, r: i32, _pc: i32, _ri: i32) -> i32 {
     5
 }
 
+/// the hits a function called from compiled code waits for (TUNE 0)
+fn call_min(vm: &crate::vm::Vm) -> i64 {
+    let c = tune(0);
+    if c < 0 {
+        vm.jit_min
+    } else {
+        c
+    }
+}
+
 fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool {
     while vm.jit_hot.len() <= tp {
         vm.jit_hot.push(0);
@@ -9382,7 +9479,7 @@ fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool
         return false;
     }
     if f == -1 {
-        if vm.jit_hot[tp] < vm.jit_min {
+        if vm.jit_hot[tp] < call_min(vm) {
             vm.jit_hot[tp] += 1;
             return false;
         }
@@ -9432,6 +9529,64 @@ thread_local! {
     /// op kinds written as exits whatever they are (cerxes_jit_mask), to
     /// find which op's code goes wrong
     static MASK: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+thread_local! {
+    /// experiment knobs (cerxes_jit_tune): 0 call-entry threshold (-1: the
+    /// machine's jit_min), 1 batch hits, 2 batch functions, 3 gate on, 4
+    /// gate delay for heavy code, 5 light-op percent that counts as light,
+    /// 6 ops under which a function is tiny, 7 delay for tiny functions
+    pub static TUNE: std::cell::Cell<[i64; 8]> = const { std::cell::Cell::new([-1, BATCH_HITS as i64, BATCH_FNS as i64, 0, 0, 50, 0, 0]) };
+}
+
+fn tune(k: usize) -> i64 {
+    TUNE.with(|t| t.get()[k])
+}
+
+#[no_mangle]
+pub extern "C" fn cerxes_jit_tune(k: i32, v: i32) {
+    TUNE.with(|t| {
+        let mut a = t.get();
+        if (k as usize) < 8 {
+            a[k as usize] = v as i64;
+        }
+        t.set(a);
+    });
+}
+
+/// The extra hits function pi waits before it is compiled (gate, TUNE 3):
+/// code mostly of ops written inline without a call is compiled at the
+/// machine's jit_min, other code TUNE 4 hits later, tiny functions TUNE 7.
+fn gate_delay(vm: &crate::vm::Vm, pi: usize) -> i64 {
+    let rb = vm.protos[pi].rbase as usize;
+    let n = vm.protos[pi].code.len();
+    if rb + n > vm.rcode.len() {
+        return 0;
+    }
+    let mut light = 0i64;
+    let mut all = 0i64;
+    for op in vm.rcode[rb..rb + n].iter() {
+        let k = (op.code & 255) as int;
+        if k == R_NOP {
+            continue;
+        }
+        all += 1;
+        if light_op(k) {
+            light += 1;
+        }
+    }
+    let mut d = 0;
+    if light * 100 < all * tune(5) {
+        d = tune(4);
+    }
+    if all < tune(6) {
+        d = d.max(tune(7));
+    }
+    d
+}
+
+fn light_op(k: int) -> bool {
+    matches!(k, R_MOVE | R_LOAD2 | R_ADD | R_SUB | R_MUL | R_ARITH | R_CMP | R_CMP_JF | R_CMP_JT | R_JUMP | R_JF | R_JT | R_JF_KEEP | R_JT_KEEP | R_JNN_KEEP | R_LOOP | R_CMP_JFK | R_CMP_JTK | R_GET_ENV | R_SET_ENV | R_GET_ELEM | R_INC_LOCAL | R_POSTINC | R_INC | R_ADD_LOCAL_POP | R_LOCAL_NULL_JF | R_CASE_INT_JT | R_CASE_JT | R_SWITCH | R_TYPEOF | R_THIS | R_NOT | R_TONUM | R_CHECK | R_RET | R_RET_UNDEF)
 }
 
 #[no_mangle]

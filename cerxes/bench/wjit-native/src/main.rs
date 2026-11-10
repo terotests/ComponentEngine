@@ -27,6 +27,14 @@ struct Host {
     modules: u32,
     evicted: u32,
     compile_s: f64,
+    /// --async=1: batch modules compiled on other threads (install answers
+    /// a ticket, install(ticket, 0) polls it)
+    asynch: bool,
+    next: i32,
+    inflight: std::collections::HashMap<i32, std::sync::mpsc::Receiver<Result<Module>>>,
+    /// time the polls found a module done, summed (wall time compiling apart)
+    bg_s: f64,
+    polls: u64,
 }
 
 fn table_of(c: &mut Caller<'_, Host>) -> Table {
@@ -35,13 +43,47 @@ fn table_of(c: &mut Caller<'_, Host>) -> Table {
 
 fn install(mut c: Caller<'_, Host>, ptr: i32, len: i32) -> Result<i32> {
     let t0 = Instant::now();
+    if len == 0 {
+        // poll a ticket
+        c.data_mut().polls += 1;
+        let r = match c.data().inflight.get(&ptr) {
+            None => return Ok(-1),
+            Some(rx) => match rx.try_recv() {
+                Ok(r) => r,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(-2),
+                Err(_) => return Ok(-1),
+            },
+        };
+        c.data_mut().inflight.remove(&ptr);
+        let module = r?;
+        let r = place(c, module, t0);
+        return r;
+    }
     let mem = c.get_export("memory").and_then(|e| e.into_memory()).ok_or_else(|| anyhow!("memory"))?;
-    let table = table_of(&mut c);
     let bytes = mem.data(&c)[ptr as usize..(ptr + len) as usize].to_vec();
+    if c.data().asynch && c.data().rt.is_some() {
+        let engine = c.engine().clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Module::new(&engine, &bytes));
+        });
+        let h = c.data_mut();
+        h.next += 1;
+        let t = h.next;
+        h.inflight.insert(t, rx);
+        h.compile_s += t0.elapsed().as_secs_f64();
+        return Ok(-16 - t);
+    }
     let module = Module::new(c.engine(), &bytes).map_err(|e| {
         let _ = std::fs::write("/tmp/wjit-bad.wasm", &bytes);
         anyhow!("wjit: invalid module (/tmp/wjit-bad.wasm): {e}")
     })?;
+    place(c, module, t0)
+}
+
+fn place(mut c: Caller<'_, Host>, module: Module, t0: Instant) -> Result<i32> {
+    let mem = c.get_export("memory").and_then(|e| e.into_memory()).ok_or_else(|| anyhow!("memory"))?;
+    let table = table_of(&mut c);
     if c.data().helpers.is_empty() {
         // from the function table: an export of a wasip1 module runs the
         // constructors and destructors around every call
@@ -120,11 +162,16 @@ fn main() -> Result<()> {
     let min: i32 = opt(&args, "min").unwrap_or("64").parse()?;
     let runs: u32 = opt(&args, "runs").unwrap_or("1").parse()?;
     let quiet = args.iter().any(|a| a == "--quiet");
+    let asynch = opt(&args, "async").unwrap_or("0") == "1";
+    let tune: Vec<(i32, i32)> = opt(&args, "tune").map(|m| m.split(',').filter(|s| !s.is_empty()).map(|s| { let (a, b) = s.split_once(':').unwrap(); (a.parse().unwrap(), b.parse().unwrap()) }).collect()).unwrap_or_default();
     let mask: Vec<u32> = opt(&args, "mask").map(|m| m.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().unwrap()).collect()).unwrap_or_default();
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
     let mut cfg = Config::new();
     cfg.cranelift_opt_level(OptLevel::Speed);
+    if opt(&args, "par").unwrap_or("1") == "0" {
+        cfg.parallel_compilation(false);
+    }
     let engine = Engine::new(&cfg)?;
     let t0 = Instant::now();
     // --cwasm=path: the compiled CErXes kept there (made on the first run),
@@ -150,7 +197,7 @@ fn main() -> Result<()> {
         let mut best = f64::INFINITY;
         for run in 0..runs {
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build_p1();
-            let mut store = Store::new(&engine, Host { wasi, rt: None, helpers: Vec::new(), modules: 0, evicted: 0, compile_s: 0.0 });
+            let mut store = Store::new(&engine, Host { wasi, rt: None, helpers: Vec::new(), modules: 0, evicted: 0, compile_s: 0.0, asynch, next: 0, inflight: Default::default(), bg_s: 0.0, polls: 0 });
             let inst = linker.instantiate(&mut store, &cerxes)?;
             if let Some(init) = inst.get_typed_func::<(), ()>(&mut store, "_initialize").ok() {
                 init.call(&mut store, ())?;
@@ -162,6 +209,12 @@ fn main() -> Result<()> {
                 if *k < 32 { lo |= 1 << k } else { hi |= 1 << (k - 32) }
             }
             inst.get_typed_func::<(i32, i32), ()>(&mut store, "cerxes_jit_mask")?.call(&mut store, (lo, hi))?;
+            if !tune.is_empty() {
+                let tf = inst.get_typed_func::<(i32, i32), ()>(&mut store, "cerxes_jit_tune")?;
+                for (k, v) in &tune {
+                    tf.call(&mut store, (*k, *v))?;
+                }
+            }
             let ok = inst.get_typed_func::<(i32, i32, i32), i32>(&mut store, "cx_jit")?.call(&mut store, (e, jit as i32, min))?;
             if jit && ok == 0 {
                 return Err(anyhow!("this build cannot run compiled code"));
@@ -185,7 +238,7 @@ fn main() -> Result<()> {
                 }
                 println!("{f}: {}{}", if failed != 0 { "FAILED " } else { "" }, value.chars().take(200).collect::<String>());
                 let h = store.data();
-                println!("time {:.1} ms (best {:.1}), jit {} modules {} evicted {} compile {:.1} ms", dt * 1e3, best * 1e3, jit, h.modules, h.evicted, h.compile_s * 1e3);
+                println!("time {:.1} ms (best {:.1}), jit {} modules {} evicted {} compile {:.1} ms polls {} inflight {}", dt * 1e3, best * 1e3, jit, h.modules, h.evicted, h.compile_s * 1e3, h.polls, h.inflight.len());
             }
         }
     }
