@@ -708,3 +708,17 @@ r.push(dv.getUint32.name, dv.getUint32.length, dv.setUint32.name, dv.setUint32.l
 r.join()
 ----
 deadbeef,efbeadde,239,3.141592653589793,-2,65279,RangeError,RangeError,TypeError,TypeError,-5,7,7,9,getUint32,1,setUint32,2,undefined
+
+==== js template substitutions, slice/substring and length of strings, private fields read and written in place
+var d = new Date(0), o = {toString() { return "S"; }, valueOf() { return 42; }}, r = [];
+try { `${Symbol("q")}`; } catch (e) { r.push(e.name); }
+r.push(`a${1.5}b${-0}c${true}${null}${undefined}${10n}${o}${[1, 2]}${1e21}`, `${o}` + o);
+var s = "hello wörld😀x", L = "abc".repeat(100) + "é";
+r.push(s.slice(-3), s.slice(2, 5), s.substring(5, 2), s.substring(-2, 3), L.slice(298, 301), L.substring(301, 298), L.slice(-1).length, s.length, L.length, "".length);
+class P { #x = 0; #m() { return 1; } get #g() { return this.#x; } set #g(v) { this.#x = v; }
+  inc() { this.#x++; return this.#x; } t() { this.#g = 5; var q = [this.#g, this.#m()]; return q.join("/"); } }
+var p = new P(); p.inc(); p.inc();
+r.push(p.inc(), p.t());
+r.join("|")
+----
+TypeError|a1.5b0ctruenullundefined10S1,21e+21|S42|😀x|llo|llo|hel|bcé|bcé|1|14|301|0|3|5/1

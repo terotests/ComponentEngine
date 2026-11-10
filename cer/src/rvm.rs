@@ -1334,6 +1334,13 @@ impl Vm {
     #[inline(never)]
     pub fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
         let atom = self.ratom(pi, pc);
+        if o < 0 && atom == A_LENGTH && (w0 & 255) == R_GET_PROP {
+            if let Val::Str(h) = *self.rget(bp, w2) {
+                let n = self.hlen(h) as double;
+                self.stack[(bp + w1) as usize] = Val::Num(n);
+                return false;
+            }
+        }
         let mut h0: int = -1;
         if o >= 0 && self.rcode[(rb + pc) as usize].c == -3 {
             // the site last read through the chain: its cache first (a hit
@@ -2138,7 +2145,35 @@ impl Vm {
         let mut changed = false;
         // a small BigInt literal: its text (on the window's top) read in place
         let mut done = false;
-        if code == OP_BIGINT && w1 > 0 {
+        if code == OP_GET_PRIVATE && op.b != -2 && w1 > 0 {
+            // obj.#x as an own data property (Vm::priv_get's first case)
+            let top = (bp + w1 - 1) as usize;
+            if let Val::Obj(o) = self.stack[top] {
+                let s = self.find(o, op.a as int);
+                if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
+                    self.stack[top] = self.objs[o as usize].get_slot(s as usize);
+                    done = true;
+                }
+            }
+        } else if code == OP_SET_PRIVATE && op.c != 1 && w1 > 1 {
+            // obj.#x = v for an own data property (Vm::priv_set's case)
+            let top = (bp + w1 - 1) as usize;
+            if let Val::Obj(o) = self.stack[top - 1] {
+                let s = self.find(o, op.a as int);
+                if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
+                    let val = self.stack[top];
+                    self.put_slot(o, s, val);
+                    self.stack.truncate(top);
+                    self.stack[top - 1] = val;
+                    done = true;
+                }
+            }
+        }
+        if done {
+        } else if code == OP_TOSTR && w1 > 0 && !matches!(self.stack[(bp + w1 - 1) as usize], Val::Obj(_)) {
+            // a template's primitive substitution: as is (Vm::quick_op)
+            done = true;
+        } else if code == OP_BIGINT && w1 > 0 {
             let top = (bp + w1 - 1) as usize;
             if let Val::Str(h) = self.stack[top] {
                 let n = crate::bigint::small_big_of(self.sref(h));
