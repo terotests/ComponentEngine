@@ -312,7 +312,7 @@ impl Vm {
             NF_AP_TOSTRING => {
                 let o = self.this_array(&this);
                 if self.objs[o as usize].class != C_ARRAY {
-                    let jf = self.get(&this, self.atoms["join"]);
+                    let jf = self.get(&this, self.atom_lookup("join"));
                     if self.is_callable(&jf) {
                         return self.call_fixed(jf, this.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
                     }
@@ -1247,7 +1247,7 @@ impl Vm {
                     _ => String::new(),
                 };
                 let holder = self.new_object();
-                self.add_own(holder, self.atoms[""], a0.clone(), 0);
+                self.add_own(holder, self.atom_lookup(""), a0.clone(), 0);
                 let mut out = String::new();
                 let mut stack: Vec<int> = Vec::new();
                 let sv1 = self.str_val("");
@@ -1274,7 +1274,7 @@ impl Vm {
                 }
                 if self.is_callable(&a1) {
                     let holder = self.new_object();
-                    self.add_own(holder, self.atoms[""], v, 0);
+                    self.add_own(holder, self.atom_lookup(""), v, 0);
                     let sv0 = self.str_val("");
                     return self.json_revive(&Val::Obj(holder), &sv0, &a1);
                 }
@@ -1308,13 +1308,13 @@ impl Vm {
                     let fl = if matches!(a1, Val::Undef) { self.string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
                     (src, fl)
                 } else if is_re {
-                    let a_source = self.intern("source");
+                    let a_source = self.atom_lookup("source");
                     let src = self.get(&a0, a_source);
                     if self.throwing {
                         return Val::Undef;
                     }
                     let fl = if matches!(a1, Val::Undef) {
-                        let a_flags = self.intern("flags");
+                        let a_flags = self.atom_lookup("flags");
                         self.get(&a0, a_flags)
                     } else {
                         a1
@@ -1361,9 +1361,9 @@ impl Vm {
                 m
             }
             NF_RP_TOSTRING => {
-                let src = self.get(&this, self.atoms["source"]);
+                let src = self.get(&this, self.atom_lookup("source"));
                 let ss = self.to_string(&src);
-                let fl = self.get(&this, self.atoms["flags"]);
+                let fl = self.get(&this, self.atom_lookup("flags"));
                 let fs = self.to_string(&fl);
                 self.string_val(format!("/{}/{}", ss, fs))
             }
