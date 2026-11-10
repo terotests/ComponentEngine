@@ -767,3 +767,23 @@ function g(p) { return p?.k ?? "dflt"; } r.push(g(), g(null), g({ k: 0 }), g({ k
 r.join()
 ----
 0,true,,,,false,0,,,0,0,0,true,,,,false,0,,,0,,0,true,,,,false,0,,,0,2,dflt,dflt,0,dflt
+
+==== js array destructuring read in place, Symbol.iterator check kept per shape, patched and own iterators, Map entries
+var r = [];
+var arr = [1, 2, 3]; var [a = 0, b = arr.pop(), c = 9] = arr; r.push(a, b, c, arr.length);
+var arr2 = [1, , 3]; var [x, y, z] = arr2; r.push(x, y, z);
+var [p, ...q] = [1, 2, 3, 4]; r.push(p, q.join("/"));
+var [s1, s2] = "hé"; r.push(s1, s2);
+var own = [5, 6]; own[Symbol.iterator] = function* () { yield "o"; }; var [o1, o2] = own; r.push(o1, o2);
+function swap() { var u = 1, w = 2; for (var i = 0; i < 3; i++) [u, w] = [w, u]; return u + "," + w; } r.push(swap());
+var saved = Array.prototype[Symbol.iterator];
+for (var k = 0; k < 3; k++) { var [m1, m2] = [k, k + 1]; r.push(m1 + m2); }
+Array.prototype[Symbol.iterator] = function* () { yield "patched"; };
+var [pa, pb] = [1, 2]; r.push(pa, pb); r.push([...[7, 8]].join("/"));
+Array.prototype[Symbol.iterator] = saved;
+var [na, nb] = [3, 4]; r.push(na, nb, Math.max(...[1, 5, 2]));
+class MyA extends Array {} var ma = MyA.from([4, 5]); var [ma1, ma2] = ma; r.push(ma1, ma2);
+var m = new Map([[1, "a"], [2, "b"]]); for (var [mk, mv] of m) r.push(mk + mv);
+r.join()
+----
+1,2,3,3,1,,3,1,2/3/4,h,é,o,,2,1,1,3,5,patched,,patched,3,4,5,4,5,1a,2b
