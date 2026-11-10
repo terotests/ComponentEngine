@@ -101,6 +101,8 @@ const CT_TRY: int = 3;
 const CT_ENV: int = 4;
 const CT_ITEM: int = 5;
 const CT_ITER: int = 6;
+/// an inlined function body (iife_here): `return` jumps to its end
+const CT_INLINE: int = 7;
 
 // what an expression was, for what follows it (an assignment, a call,
 // a condition)
@@ -3130,6 +3132,10 @@ impl PComp {
         let mut i = (f.ctl.len() as int) - 1;
         while i >= 0 {
             let c = &f.ctl[i as usize];
+            if c.kind == CT_INLINE {
+                // a function body's break may not leave it
+                return -1;
+            }
             if label.is_empty() {
                 if c.kind == CT_LOOP || (!cont && c.kind == CT_SWITCH) {
                     return i;
@@ -3322,6 +3328,10 @@ impl PComp {
             }
             if ws == "do" {
                 self.do_statement();
+                return;
+            }
+            if ws == "return" && self.inline_ctl() >= 0 {
+                self.inline_return();
                 return;
             }
             if ws == "return" {
@@ -5735,6 +5745,8 @@ impl PComp {
                 self.fail("unexpected super");
                 e = ex(E_OTHER);
             }
+        } else if self.iife_start() && self.iife_here() {
+            e = ex(E_OTHER);
         } else {
             e = self.primary();
         }
@@ -6331,6 +6343,265 @@ impl PComp {
         let p = self.function_rest(flags, name.as_str(), first);
         self.last_fn_name = name;
         p
+    }
+
+    /// The innermost inlined body of this function's code, or -1.
+    fn inline_ctl(&self) -> int {
+        let f = &self.fs[self.fs.len() - 1];
+        let mut i = (f.ctl.len() as int) - 1;
+        while i >= 0 {
+            if f.ctl[i as usize].kind == CT_INLINE {
+                return i;
+            }
+            i -= 1;
+        }
+        -1
+    }
+
+    /// `return` in an inlined body: its value into the body's result
+    /// binding (`scope` of the ctl entry) and a jump to the body's end.
+    fn inline_return(&mut self) {
+        self.next();
+        if !self.is(";") && !self.is("}") && self.kind() != T_EOF && !self.nl_before() {
+            self.expression();
+        } else {
+            self.op(OP_UNDEF);
+        }
+        self.semicolon();
+        let t = self.inline_ctl();
+        let b = self.f().ctl[t as usize].scope;
+        let name = self.binds[b as usize].name.clone();
+        let r = self.new_ref(name.as_str(), false, b);
+        self.emit3(PH_REF, r, M_STORE, 0);
+        self.op(OP_POP);
+        self.unwind_to(t);
+        let j = self.emit(OP_JUMP, 0, 0);
+        self.f().ctl[t as usize].breaks.push(j);
+    }
+
+    /// Whether the tokens from `a` to `b` (exclusive) may be compiled into
+    /// the code around them: nothing that sees the function itself
+    /// (`this`, `arguments`, `new.target`, `super`, a direct eval) and
+    /// nothing that would be hoisted out of a block (`var`, a function
+    /// declaration). Plain `function` bodies inside are their own and
+    /// skipped; arrows see the body's `this`, so they are not.
+    fn inline_ok(&self, a: int, b: int) -> bool {
+        let mut i = a;
+        while i < b {
+            let t = &self.toks[i as usize];
+            let k = t.kind as int;
+            if k == T_IDENT {
+                if (t.flags & PT_ESCAPED) != 0 {
+                    return false;
+                }
+                let w = self.names[t.v as usize].as_str();
+                if w == "function" {
+                    // a declaration hoists: where a statement starts
+                    let p = i - 1;
+                    if p < a || self.tok_is(p, ";") || self.tok_is(p, "{") || self.tok_is(p, "}") || self.tok_is(p, ")") || self.tok_is(p, "else") || self.tok_is(p, "do") {
+                        return false;
+                    }
+                    let p1 = p - 1;
+                    if self.tok_is(p, ":") && p1 >= a && (self.toks[p1 as usize].kind as int) == T_IDENT {
+                        let q = p - 2;
+                        if q < a || self.tok_is(q, ";") || self.tok_is(q, "{") || self.tok_is(q, "}") || self.tok_is(q, ")") {
+                            return false;
+                        }
+                    }
+                    // skip its name, parameters and body
+                    let mut j = i + 1;
+                    if self.tok_is(j, "*") {
+                        j += 1;
+                    }
+                    if j < b && (self.toks[j as usize].kind as int) == T_IDENT && !self.tok_is(j, "(") {
+                        j += 1;
+                    }
+                    if !self.tok_is(j, "(") {
+                        return false;
+                    }
+                    let pc = self.mate_of(j);
+                    let ob = pc + 1;
+                    if !self.tok_is(ob, "{") {
+                        return false;
+                    }
+                    i = self.mate_of(ob) + 1;
+                    continue;
+                }
+                if w == "this" || w == "arguments" || w == "super" || w == "yield" || w == "await" || w == "eval" || w == "var" {
+                    return false;
+                }
+                let i1 = i + 1;
+                if w == "new" && self.tok_is(i1, ".") {
+                    return false;
+                }
+            } else if k == T_TEMPLATE {
+                let xi = t.x;
+                if xi >= 0 {
+                    for e in self.xs[xi as usize].exprs.iter() {
+                        let es = e.as_str();
+                        if es.contains("this") || es.contains("arguments") || es.contains("super") || es.contains("yield") || es.contains("await") || es.contains("eval") || es.contains("var") || es.contains("function") || es.contains("new") {
+                            return false;
+                        }
+                    }
+                }
+            } else if k != T_PUNCT && k != T_NUM && k != T_STR && k != T_REGEX {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// `function (a, b) { … }(x, y)` or `(function (…) { … })(…)`: an
+    /// anonymous function called where it is made runs as a block of the
+    /// code around it, with no function object, scope object or call. Its
+    /// parameters are `let` bindings of the block given the arguments,
+    /// `return` stores into a result binding and jumps to the block's end.
+    /// Only for bodies `inline_ok` accepts, simple parameters and
+    /// arguments without spread.
+    fn iife_start(&self) -> bool {
+        // cheap: a word of 8 letters or a one-letter punctuator
+        let t = &self.toks[self.pos as usize];
+        let tk = t.kind as int;
+        let tl = self.names[t.v as usize].as_bytes().len();
+        (tk == T_IDENT && tl == 8) || (tk == T_PUNCT && tl == 1)
+    }
+
+    #[inline(never)]
+    fn iife_here(&mut self) -> bool {
+        let at = self.pos;
+        if self.ts || self.in_params || !self.error.is_empty() || self.fs.is_empty() {
+            return false;
+        }
+        let wrapped = self.is("(");
+        let f0 = if wrapped { at + 1 } else { at };
+        let po = f0 + 1;
+        if !self.tok_is(f0, "function") || !self.tok_is(po, "(") {
+            return false;
+        }
+        let pc = self.mate_of(po);
+        let mut params: Vec<String> = Vec::new();
+        let mut j = f0 + 2;
+        while j < pc {
+            let t = &self.toks[j as usize];
+            if (t.kind as int) != T_IDENT || (t.flags & PT_ESCAPED) != 0 {
+                return false;
+            }
+            let w = self.names[t.v as usize].clone();
+            if is_reserved(w.as_str()) || is_strict_reserved(w.as_str()) || w.as_str() == "eval" || w.as_str() == "arguments" || w.as_str() == "let" || w.as_str() == "yield" || w.as_str() == "await" || w.as_str() == "async" {
+                return false;
+            }
+            for q in params.iter() {
+                if q.as_str() == w.as_str() {
+                    return false;
+                }
+            }
+            params.push(w);
+            j += 1;
+            if j < pc {
+                if !self.tok_is(j, ",") {
+                    return false;
+                }
+                j += 1;
+                if j == pc {
+                    // a trailing comma
+                    break;
+                }
+            }
+        }
+        let bo = pc + 1;
+        if !self.tok_is(bo, "{") {
+            return false;
+        }
+        let bc = self.mate_of(bo);
+        let mut call = bc + 1;
+        if wrapped {
+            if !self.tok_is(call, ")") || self.mate_of(at) != call {
+                return false;
+            }
+            call += 1;
+        }
+        if !self.tok_is(call, "(") {
+            return false;
+        }
+        let ac = self.mate_of(call);
+        let mut k = call;
+        k += 1;
+        while k < ac {
+            if self.tok_is(k, "...") {
+                return false;
+            }
+            k += 1;
+        }
+        // a directive prologue may make the body strict
+        let b1 = bo + 1;
+        if (self.toks[b1 as usize].kind as int) == T_STR {
+            return false;
+        }
+        if !self.inline_ok(b1, bc) {
+            return false;
+        }
+        // the arguments, in the scope around
+        self.goto(call);
+        let n = self.call_args();
+        if n < 0 || !self.error.is_empty() {
+            return true;
+        }
+        let end = self.pos;
+        let saved = self.cur_scope;
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        self.emit(PH_HOIST, s, 0);
+        let np = params.len() as int;
+        let mut pb: Vec<int> = Vec::new();
+        for w in params.iter() {
+            let b = self.declare(s, w.as_str(), K_LET);
+            pb.push(b);
+        }
+        let mut i = n - 1;
+        while i >= 0 {
+            if i < np {
+                self.emit_bind_init(pb[i as usize]);
+            }
+            self.op(OP_POP);
+            i -= 1;
+        }
+        i = n;
+        while i < np {
+            self.op(OP_UNDEF);
+            self.emit_bind_init(pb[i as usize]);
+            self.op(OP_POP);
+            i += 1;
+        }
+        for b in pb.iter() {
+            self.mark_inited(*b);
+        }
+        let rname = format!("%iife{}", self.binds.len());
+        let rb = self.declare(s, rname.as_str(), K_LET);
+        self.op(OP_UNDEF);
+        self.emit_bind_init(rb);
+        self.op(OP_POP);
+        self.mark_inited(rb);
+        let mut c = new_ctl(CT_INLINE);
+        c.scope = rb;
+        self.f().ctl.push(c);
+        self.goto(b1);
+        let (mark, saved_end) = self.using_open(bc);
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.using_here = true;
+            self.statement();
+        }
+        self.using_close(mark, saved_end);
+        let ctl = self.f().ctl.pop().unwrap();
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        let r = self.new_ref(rname.as_str(), false, rb);
+        self.emit3(PH_REF, r, M_LOAD, 0);
+        self.leave_block(s, saved);
+        self.goto(end);
+        true
     }
 
     fn arrow(&mut self) -> Ex {

@@ -708,3 +708,11 @@ s1111111111111111111,30xxxxxxxxxx,26,7,29,o,1 1 14 7 26 7 26 7
 var h = ([s, t, u = t]) => s + t + u; var g = ({ a, b = a }) => a + b; function m(a, b) { a = 9; arguments[1] = 7; return a + ',' + b + ',' + arguments[0]; } [h(['a', 'b']), g({ a: 2 }), m(1, 2), { '#N/A': 1 }['#N/A']].join(' ')
 ----
 abb 4 9,7,9 1
+
+# a function called where it is made runs inline (pcomp iife_here):
+# arguments first, missing ones undefined, return from loops / try,
+# fresh parameter bindings per run, break cannot leave the body
+==== js
+var o = []; function a(x) { return function (t, e) { return t + e; }(x, 1); } o.push(a(1)); o.push((function (q) { if (q > 1) return 'big'; return 'small'; })(5)); o.push(function (a, b, c) { return [a, b, c].join('-'); }(1)); o.push(function (a) { return a; }(1, 2, o.push('s'))); var fs = []; for (let i = 0; i < 3; i++) { fs.push(function (v) { return () => v * 10; }(i)); } o.push(fs.map(f => f()).join(',')); o.push(function (arr) { for (const x of arr) { if (x == 2) return 'f' + x; } return 'none'; }([1, 2, 3])); var lg = []; o.push(function () { try { return 't'; } finally { lg.push('fin'); } }()); o.push(lg[0]); o.push(1 + function (x) { return x * 2; }(3) + 4); o.push(function () { return arguments.length; }(1, 2)); o.push(function (x) { switch (x) { case 1: return 'one'; default: return 'z'; } }(1)); o.join('|')
+----
+2|big|1--|s|1|0,10,20|f2|t|fin|11|2|one
