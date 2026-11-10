@@ -1392,6 +1392,15 @@ impl Vm {
                 self.rcode[(rb + pc) as usize].c = -3;
                 let g = self.evecs[self.objs[obj_of(&r) as usize].elems as usize].v[0];
                 let go = obj_of(&g);
+                if go >= 0 && self.objs[go as usize].class == C_NATIVE && (self.objs[go as usize].func as int) == crate::typed::NF_TA_LEN {
+                    // TypedArray.prototype.length's own getter on a typed array
+                    let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
+                    let ro = obj_of(&recv);
+                    if ro >= 0 && self.objs[ro as usize].class == C_TYPED {
+                        self.stack[(bp + w1) as usize] = Val::Num(self.ta_length(ro) as double);
+                        return false;
+                    }
+                }
                 if go >= 0 && self.objs[go as usize].class == C_FUNCTION {
                     let gp = self.objs[go as usize].func as usize;
                     let plain = {
@@ -1623,6 +1632,10 @@ impl Vm {
         let c = self.objs[x as usize].class;
         if c == C_OBJECT {
             return true;
+        }
+        if c == C_TYPED {
+            // a typed array's length is TypedArray.prototype's getter
+            return atom != A_NAME && atom != A_PROTOTYPE;
         }
         c != C_PROXY && c != C_STRING && atom != A_LENGTH && atom != A_NAME && atom != A_PROTOTYPE
     }
