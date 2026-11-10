@@ -837,3 +837,18 @@ var big = []; for (var j = 0; j < 100; j++) big.push("w" + j + "x".repeat(j)); v
 r.join()
 ----
 ["a","b","","c",""],["","x"],[""],["a","b"],[],["abc"],["é","ü"],[1,2,3],["a","","b"],302,p299,x=y,100,102,true
+
+==== js String replace with a plain RegExp taken natively, $-less text without captures, function and object replacements
+var r = [];
+var t = "hello world, hello there";
+r.push(t.replace(/hello/g, "bye"), t.replace(/hello/, "bye"), t.replace(/(h)(e)llo/g, "$2$1-$&-$$"), t.replaceAll(/o/g, "0"));
+r.push(t.replace(/(?<w>w\w+)/, "<$<w>>"), t.replace(/l+/g, function (m, p) { return m.length + "@" + p; }));
+var re = /o/g; re.lastIndex = 5; r.push(t.replace(re, "_"), re.lastIndex);
+try { t.replaceAll(/o/, "x"); } catch (e) { r.push(e.constructor.name); }
+r.push("é-ü-é".replace(/é/g, "e"), "aaa".replace(/a*?/g, "-"), "x".replace(/x/, { toString: function () { return "obj"; } }));
+var sub = Object.create(RegExp.prototype); r.push(typeof sub);
+class MyRe extends RegExp { [Symbol.replace](s, x) { return "mine:" + s; } }
+r.push("abc".replace(new MyRe("b"), "X"));
+r.join("|")
+----
+bye world, bye there|bye world, hello there|eh-hello-$ world, eh-hello-$ there|hell0 w0rld, hell0 there|hello <world>, hello there|he2@2o wor1@9d, he2@15o there|hell_ w_rld, hell_ there|0|TypeError|e-ü-e|-a-a-a-|obj|object|mine:abc
