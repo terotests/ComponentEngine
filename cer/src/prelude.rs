@@ -1104,16 +1104,21 @@ function allocBuffer(nt, dflt, n, max, shared) {
   if (max !== undefined && n > max) throw new RangeError('Invalid array buffer length: ' + n + ' is larger than maxByteLength ' + max);
   return bufNew(n, protoFrom(nt, dflt), shared, max);
 }
-function ArrayBuffer(length) {
+// options as a parameter (length 1 set below): `arguments` would make an
+// arguments object on every construction
+function ArrayBuffer(length, options) {
   if (new.target === undefined) throw new TypeError("Constructor ArrayBuffer requires 'new'");
+  if (options === undefined && new.target === ArrayBuffer && typeof length === 'number' && length >= 0 && length <= 2147483647 && length === (length | 0)) return bufNew(length, ArrayBuffer.prototype, false, undefined);
   var n = toIndex(length, 'array buffer length');
-  return allocBuffer(new.target, ArrayBuffer.prototype, n, maxLengthOption(arguments[1]), false);
+  return allocBuffer(new.target, ArrayBuffer.prototype, n, maxLengthOption(options), false);
 }
-function SharedArrayBuffer(length) {
+function SharedArrayBuffer(length, options) {
   if (new.target === undefined) throw new TypeError("Constructor SharedArrayBuffer requires 'new'");
   var n = toIndex(length, 'array buffer length');
-  return allocBuffer(new.target, SharedArrayBuffer.prototype, n, maxLengthOption(arguments[1]), true);
+  return allocBuffer(new.target, SharedArrayBuffer.prototype, n, maxLengthOption(options), true);
 }
+defineProperty(ArrayBuffer, 'length', { value: 1, writable: false, enumerable: false, configurable: true });
+defineProperty(SharedArrayBuffer, 'length', { value: 1, writable: false, enumerable: false, configurable: true });
 function bufferSlice(Default, shared, name) {
   return function slice(start, end) {
     var len = bufLength(this, shared, name + '.prototype.slice');
@@ -1249,19 +1254,23 @@ function defineTA(kind, C) {
   defineProperty(C, 'BYTES_PER_ELEMENT', { value: SIZES[kind], writable: false, enumerable: false, configurable: false });
   defineProperty(C.prototype, 'BYTES_PER_ELEMENT', { value: SIZES[kind], writable: false, enumerable: false, configurable: false });
   hide(globalThis, KINDS[kind], C);
+  TA_PROTOS[kind] = C.prototype;
 }
-defineTA(0, function Int8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int8Array requires 'new'"); return construct(0, new.target, a, b, c); });
-defineTA(1, function Uint8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8Array requires 'new'"); return construct(1, new.target, a, b, c); });
-defineTA(2, function Uint8ClampedArray(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8ClampedArray requires 'new'"); return construct(2, new.target, a, b, c); });
-defineTA(3, function Int16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int16Array requires 'new'"); return construct(3, new.target, a, b, c); });
-defineTA(4, function Uint16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint16Array requires 'new'"); return construct(4, new.target, a, b, c); });
-defineTA(5, function Int32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int32Array requires 'new'"); return construct(5, new.target, a, b, c); });
-defineTA(6, function Uint32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint32Array requires 'new'"); return construct(6, new.target, a, b, c); });
-defineTA(7, function Float32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float32Array requires 'new'"); return construct(7, new.target, a, b, c); });
-defineTA(8, function Float64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float64Array requires 'new'"); return construct(8, new.target, a, b, c); });
-defineTA(9, function BigInt64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigInt64Array requires 'new'"); return construct(9, new.target, a, b, c); });
-defineTA(10, function BigUint64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigUint64Array requires 'new'"); return construct(10, new.target, a, b, c); });
-defineTA(11, function Float16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float16Array requires 'new'"); return construct(11, new.target, a, b, c); });
+// new Uint8Array(n) and the like with the constructor itself: straight to
+// the native (prototypes fixed, non-writable)
+var TA_PROTOS = [], ABUF_PROTO = ArrayBuffer.prototype;
+defineTA(0, function Int8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int8Array requires 'new'"); if (typeof a === 'number' && new.target === Int8Array) { var t = taNew(0, a, TA_PROTOS[0], ABUF_PROTO); if (t !== undefined) return t; } return construct(0, new.target, a, b, c); });
+defineTA(1, function Uint8Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8Array requires 'new'"); if (typeof a === 'number' && new.target === Uint8Array) { var t = taNew(1, a, TA_PROTOS[1], ABUF_PROTO); if (t !== undefined) return t; } return construct(1, new.target, a, b, c); });
+defineTA(2, function Uint8ClampedArray(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint8ClampedArray requires 'new'"); if (typeof a === 'number' && new.target === Uint8ClampedArray) { var t = taNew(2, a, TA_PROTOS[2], ABUF_PROTO); if (t !== undefined) return t; } return construct(2, new.target, a, b, c); });
+defineTA(3, function Int16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int16Array requires 'new'"); if (typeof a === 'number' && new.target === Int16Array) { var t = taNew(3, a, TA_PROTOS[3], ABUF_PROTO); if (t !== undefined) return t; } return construct(3, new.target, a, b, c); });
+defineTA(4, function Uint16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint16Array requires 'new'"); if (typeof a === 'number' && new.target === Uint16Array) { var t = taNew(4, a, TA_PROTOS[4], ABUF_PROTO); if (t !== undefined) return t; } return construct(4, new.target, a, b, c); });
+defineTA(5, function Int32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Int32Array requires 'new'"); if (typeof a === 'number' && new.target === Int32Array) { var t = taNew(5, a, TA_PROTOS[5], ABUF_PROTO); if (t !== undefined) return t; } return construct(5, new.target, a, b, c); });
+defineTA(6, function Uint32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Uint32Array requires 'new'"); if (typeof a === 'number' && new.target === Uint32Array) { var t = taNew(6, a, TA_PROTOS[6], ABUF_PROTO); if (t !== undefined) return t; } return construct(6, new.target, a, b, c); });
+defineTA(7, function Float32Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float32Array requires 'new'"); if (typeof a === 'number' && new.target === Float32Array) { var t = taNew(7, a, TA_PROTOS[7], ABUF_PROTO); if (t !== undefined) return t; } return construct(7, new.target, a, b, c); });
+defineTA(8, function Float64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float64Array requires 'new'"); if (typeof a === 'number' && new.target === Float64Array) { var t = taNew(8, a, TA_PROTOS[8], ABUF_PROTO); if (t !== undefined) return t; } return construct(8, new.target, a, b, c); });
+defineTA(9, function BigInt64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigInt64Array requires 'new'"); if (typeof a === 'number' && new.target === BigInt64Array) { var t = taNew(9, a, TA_PROTOS[9], ABUF_PROTO); if (t !== undefined) return t; } return construct(9, new.target, a, b, c); });
+defineTA(10, function BigUint64Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor BigUint64Array requires 'new'"); if (typeof a === 'number' && new.target === BigUint64Array) { var t = taNew(10, a, TA_PROTOS[10], ABUF_PROTO); if (t !== undefined) return t; } return construct(10, new.target, a, b, c); });
+defineTA(11, function Float16Array(a, b, c) { if (new.target === undefined) throw new TypeError("Constructor Float16Array requires 'new'"); if (typeof a === 'number' && new.target === Float16Array) { var t = taNew(11, a, TA_PROTOS[11], ABUF_PROTO); if (t !== undefined) return t; } return construct(11, new.target, a, b, c); });
 var f16cell = new Float16Array(1);
 hide(Math, 'f16round', function f16round(x) { f16cell[0] = x; return f16cell[0]; });
 getter(TypedArray, Symbol.species, speciesSelf);
@@ -2123,7 +2132,10 @@ function arrayThis(t) {
 hide(AP, 'forEach', setLength(function forEach(f, t) {
   var o = arrayThis(this), n = toLength(o.length);
   if (typeof f !== 'function') throw new TypeError('callback is not a function');
-  for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
+  // no thisArg: a plain call, which passes undefined as `this` the same
+  // way and runs in the caller's loop (call() goes through a native)
+  if (t === undefined) { for (var i = 0; i < n; i++) if (i in o) f(o[i], i, o); }
+  else for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
 }, 1));
 hide(AP, 'map', setLength(function map(f, t) {
   var o = arrayThis(this), n = toLength(o.length);
@@ -2132,7 +2144,7 @@ hide(AP, 'map', setLength(function map(f, t) {
   if (plain) A = new Array(n);
   for (var i = 0; i < n; i++) {
     if (i in o) {
-      var v = fcall.call(f, t, o[i], i, o);
+      var v = t === undefined ? f(o[i], i, o) : fcall.call(f, t, o[i], i, o);
       if (plain) A[i] = v; else defineProperty(A, i, { value: v, writable: true, enumerable: true, configurable: true });
     }
   }

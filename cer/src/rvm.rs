@@ -2041,6 +2041,20 @@ impl Vm {
     #[inline(never)]
     pub fn r_step_k(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let k = (w0 >> 8) & 255;
+        if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_IN {
+            // `i in arr` for an element of a plain array: no stack trip
+            let ov = self.rget(bp, w3).clone();
+            let nv = self.rget(bp, w2).clone();
+            if let Val::Obj(o) = ov {
+                if let Val::Num(n) = nv {
+                    let i = n as int;
+                    if (i as double) == n && i >= 0 && self.objs[o as usize].class == C_ARRAY && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
+                        self.stack[(bp + w1) as usize] = Val::Bool(true);
+                        return;
+                    }
+                }
+            }
+        }
         if k >= 1 {
             let x = self.rget(bp, w2).clone();
             self.stack.push(x);
