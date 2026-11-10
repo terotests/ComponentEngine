@@ -730,6 +730,9 @@ impl Vm {
 
     fn str_cache(&mut self, s: &Rc<String>) {
         if self.sc_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.sc_s, s) {
+            // the same text in another box: that box from now on, so the
+            // next calls with it are a pointer compare, not a byte compare
+            self.sc_s = s.clone();
             return;
         }
         self.sc_s = s.clone();
@@ -746,6 +749,7 @@ impl Vm {
     /// Fills `rx_units` with `s`'s UTF-16 units, unless it holds them.
     pub fn rx_cache(&mut self, s: &Rc<String>) {
         if self.rx_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s, s) {
+            self.rx_s = s.clone();
             return;
         }
         self.rx_s = s.clone();
@@ -6137,6 +6141,35 @@ impl Vm {
                 return true;
             }
         }
+        // "s".slice(a, b) / substring(a, b) with whole-number (or no) bounds
+        if (id == crate::builtins::NF_SP_SLICE || id == crate::builtins::NF_SP_SUBSTRING) && argc <= 2 {
+            if let Val::Str(h) = self.stack[(fpos + 1) as usize] {
+                let a0 = if argc >= 1 { self.stack[bp as usize] } else { Val::Undef };
+                let a1 = if argc >= 2 { self.stack[(bp + 1) as usize] } else { Val::Undef };
+                if slice_bound_ok(&a0) && slice_bound_ok(&a1) {
+                    let s = self.sget(h);
+                    let len = self.str_len(&s);
+                    let slice = id == crate::builtins::NF_SP_SLICE;
+                    let mut a = slice_at(&a0, 0, len, slice);
+                    let mut b = slice_at(&a1, len, len, slice);
+                    if !slice && a > b {
+                        let c = a;
+                        a = b;
+                        b = c;
+                    }
+                    let r = if a <= 0 && b >= len {
+                        Val::Str(h)
+                    } else if a >= b {
+                        Val::Str(0)
+                    } else {
+                        let tw = self.str_slice(&s, a, b);
+                        self.string_val(tw)
+                    };
+                    self.stack[fpos as usize] = r;
+                    return true;
+                }
+            }
+        }
         // "s".charCodeAt(i) and n.toString(): no argument vector
         if id == crate::builtins::NF_SP_CHARCODEAT && argc >= 1 {
             let t = self.stack[(fpos + 1) as usize];
@@ -6556,7 +6589,10 @@ impl Vm {
                 done = true;
             }
         } else if (op.code as int) == OP_TOSTR {
-            if let Val::Str(_) = &self.stack[n - 1] {
+            // a template's substitution: an ADD onto a string always comes
+            // next, and for a primitive (no symbol: symbols are objects) it
+            // gives what ToString would: the value stays as it is
+            if !matches!(self.stack[n - 1], Val::Obj(_)) {
                 done = true;
             }
         } else if let Val::Num(x) = self.stack[n - 1] {
@@ -9193,4 +9229,33 @@ pub fn str_hash(s: &str) -> int {
         h = ((h ^ (x as int)) * 16777619) & 4294967295;
     }
     h
+}
+
+/// A bound native_fast's slice/substring takes: undefined or a whole
+/// number (the rest is the builtin's coercion).
+pub fn slice_bound_ok(v: &Val) -> bool {
+    match v {
+        Val::Undef => true,
+        Val::Num(x) => x.abs() < 1e9 && *x == ((*x as int) as double),
+        _ => false,
+    }
+}
+
+/// Bound `v` (undefined: dflt) clamped to [0, len]; slice counts a
+/// negative one from the end, substring takes it as 0.
+pub fn slice_at(v: &Val, dflt: int, len: int, slice: bool) -> int {
+    let n = match v {
+        Val::Num(x) => *x as int,
+        _ => dflt,
+    };
+    if slice && n < 0 {
+        return if len + n < 0 { 0 } else { len + n };
+    }
+    if n < 0 {
+        return 0;
+    }
+    if n > len {
+        return len;
+    }
+    n
 }
