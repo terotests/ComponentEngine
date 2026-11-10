@@ -337,6 +337,10 @@ pub struct Vm {
     pub hi_fp: int,
     pub hi_op: int,
     pub hi_epoch: int,
+    /// instanceof_fast's memo: a function shape (not owned, so it never
+    /// changes) without @@hasInstance, its data `prototype` slot (-1 none)
+    pub io_shape: int,
+    pub io_slot: int,
     /// the atom of "apply" (fwd_target), -1 before its first use
     pub a_apply: int,
     /// a collection or reclaim is due at the next safe point (gc_due)
@@ -665,6 +669,8 @@ impl Vm {
             hi_fp: -1,
             hi_op: -1,
             hi_epoch: -1,
+            io_shape: -1,
+            io_slot: -1,
             a_apply: -1,
             gc_flag: false,
             pic_way: 0,
@@ -4072,6 +4078,59 @@ impl Vm {
             cur = self.proto_of(cur);
         }
         false
+    }
+
+    /// `v instanceof f` for a script function `f` straight on an unchanged
+    /// Function.prototype (instance_of's `plain` case) whose `prototype` is
+    /// a data property: 1 / 0, or -1 for instance_of to answer. A memo of
+    /// the function's shape saves the two key lookups.
+    #[inline(always)]
+    pub fn instanceof_fast(&mut self, v: &Val, f: &Val) -> int {
+        let fo = match f {
+            Val::Obj(o) => *o,
+            _ => return -1,
+        };
+        if self.objs[fo as usize].class != C_FUNCTION {
+            return -1;
+        }
+        let fp = self.function_proto;
+        let op = self.object_proto;
+        if fp < 0 || op < 0 || self.objs[fo as usize].proto as int != fp || self.objs[fp as usize].proto as int != op || self.hi_epoch != self.shape_epoch || self.hi_fp != self.objs[fp as usize].shape as int || self.hi_op != self.objs[op as usize].shape as int {
+            return -1;
+        }
+        let sh = self.objs[fo as usize].shape as int;
+        if sh != self.io_shape {
+            if self.shapes[sh as usize].owned || self.find(fo, A_HASINSTANCE) >= 0 {
+                return -1;
+            }
+            let ps = self.find(fo, A_PROTOTYPE);
+            self.io_shape = sh;
+            self.io_slot = if ps >= 0 && (self.attr_at(fo, ps) & (P_ACCESSOR | P_MAPPED)) == 0 { ps } else { -1 };
+        }
+        if self.io_slot < 0 {
+            return -1;
+        }
+        let o = match v {
+            Val::Obj(o) => *o,
+            _ => return 0,
+        };
+        let proto = match self.objs[fo as usize].get_slot(self.io_slot as usize) {
+            Val::Obj(p) => p,
+            _ => return -1,
+        };
+        let mut cur = o;
+        loop {
+            if self.objs[cur as usize].class == C_PROXY {
+                return -1;
+            }
+            cur = self.objs[cur as usize].proto as int;
+            if cur < 0 {
+                return 0;
+            }
+            if cur == proto {
+                return 1;
+            }
+        }
     }
 
     /// [[GetPrototypeOf]]: a proxy asks its handler.

@@ -2126,6 +2126,15 @@ impl Vm {
     #[inline(never)]
     pub fn r_step_k(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let k = (w0 >> 8) & 255;
+        if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_INSTANCEOF {
+            let a = *self.rget(bp, w2);
+            let b = *self.rget(bp, w3);
+            let r = self.instanceof_fast(&a, &b);
+            if r >= 0 {
+                self.stack[(bp + w1) as usize] = Val::Bool(r == 1);
+                return;
+            }
+        }
         if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_IN {
             // `i in arr` for an element of a plain array: no stack trip
             let ov = self.rget(bp, w3).clone();
