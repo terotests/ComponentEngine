@@ -32,8 +32,6 @@ struct Host {
     asynch: bool,
     next: i32,
     inflight: std::collections::HashMap<i32, std::sync::mpsc::Receiver<Result<Module>>>,
-    /// time the polls found a module done, summed (wall time compiling apart)
-    bg_s: f64,
     polls: u64,
 }
 
@@ -163,7 +161,6 @@ fn main() -> Result<()> {
     let runs: u32 = opt(&args, "runs").unwrap_or("1").parse()?;
     let quiet = args.iter().any(|a| a == "--quiet");
     let asynch = opt(&args, "async").unwrap_or("0") == "1";
-    let tune: Vec<(i32, i32)> = opt(&args, "tune").map(|m| m.split(',').filter(|s| !s.is_empty()).map(|s| { let (a, b) = s.split_once(':').unwrap(); (a.parse().unwrap(), b.parse().unwrap()) }).collect()).unwrap_or_default();
     let mask: Vec<u32> = opt(&args, "mask").map(|m| m.split(',').filter(|s| !s.is_empty()).map(|s| s.parse().unwrap()).collect()).unwrap_or_default();
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
@@ -197,7 +194,7 @@ fn main() -> Result<()> {
         let mut best = f64::INFINITY;
         for run in 0..runs {
             let wasi = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build_p1();
-            let mut store = Store::new(&engine, Host { wasi, rt: None, helpers: Vec::new(), modules: 0, evicted: 0, compile_s: 0.0, asynch, next: 0, inflight: Default::default(), bg_s: 0.0, polls: 0 });
+            let mut store = Store::new(&engine, Host { wasi, rt: None, helpers: Vec::new(), modules: 0, evicted: 0, compile_s: 0.0, asynch, next: 0, inflight: Default::default(), polls: 0 });
             let inst = linker.instantiate(&mut store, &cerxes)?;
             if let Some(init) = inst.get_typed_func::<(), ()>(&mut store, "_initialize").ok() {
                 init.call(&mut store, ())?;
@@ -209,12 +206,6 @@ fn main() -> Result<()> {
                 if *k < 32 { lo |= 1 << k } else { hi |= 1 << (k - 32) }
             }
             inst.get_typed_func::<(i32, i32), ()>(&mut store, "cerxes_jit_mask")?.call(&mut store, (lo, hi))?;
-            if !tune.is_empty() {
-                let tf = inst.get_typed_func::<(i32, i32), ()>(&mut store, "cerxes_jit_tune")?;
-                for (k, v) in &tune {
-                    tf.call(&mut store, (*k, *v))?;
-                }
-            }
             let ok = inst.get_typed_func::<(i32, i32, i32), i32>(&mut store, "cx_jit")?.call(&mut store, (e, jit as i32, min))?;
             if jit && ok == 0 {
                 return Err(anyhow!("this build cannot run compiled code"));

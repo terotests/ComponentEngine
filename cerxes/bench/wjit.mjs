@@ -153,11 +153,6 @@ function engine() {
       let lo = 0, hi = 0;
       for (const k of mask) if (k < 32) lo |= 1 << k; else hi |= 1 << (k - 32);
       x.cerxes_jit_mask(lo, hi);
-      // --tune=k:v,...: experiment knobs (wjit.rs TUNE)
-      for (const kv of (process.env.WJIT_TUNE || opt("tune", "")).split(",").filter(Boolean)) {
-        const [k, v] = kv.split(":").map(Number);
-        x.cerxes_jit_tune(k, v);
-      }
       return x.cx_jit(e, on ? 1 : 0, m);
     },
     eval(src) {
