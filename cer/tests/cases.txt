@@ -675,6 +675,14 @@ true;2000;0/1/2;0/1000000000/4294967294/b/4294967295/01/-1;{"0":1,"1000000000":1
 ----
 true,false,false,false,false,true,false,false,true,false,true,true,false,true,false,false,true,false,true
 
+==== js JSON.stringify of ordinary objects: key order, toJSON, replacer, hidden and inherited keys
+var o = {b:1, 10:2, a:{toJSON:function(k){return 'T'+k;}}, 2:[1,{x:undefined,y:null}], f:function(){}, u:undefined, n:new Number(5), get g(){return 'G';}};
+Object.defineProperty(o, 'h', {value: 1, enumerable: false});
+var c = Object.create({inh:1}); c.own = 2; var d = {}; for (var i = 0; i < 300; i++) d['k' + i] = i;
+[JSON.stringify(o), JSON.stringify(o, function(k, v){ return typeof v === 'number' ? v * 10 : v; }), JSON.stringify(c), JSON.stringify(d).length, new Function('return ' + JSON.stringify(d))().k299].join('|')
+----
+{"2":[1,{"y":null}],"10":2,"b":1,"a":"Ta","n":5,"g":"G"}|{"2":[10,{"y":null}],"10":20,"b":10,"a":"Ta","n":5,"g":"G"}|{"own":2}|3081|299
+
 ==== js JSON.parse numbers, escapes, keys and syntax errors
 var r = [];
 ['[1.5,-0.25,0.1,123.456,1e5,1.5e-3,12345678901234.5,9007199254740993,1.0]', '"\\u00e4\\ud83d\\ude00x\\n"', '{"a":"b","10":[],"k\\"":{"x":"y"}}', '01', '1.', '1.e3', '-', '[1,]', '"\\x"', '1 2', '"a\u0001"'].forEach(function (s) {
