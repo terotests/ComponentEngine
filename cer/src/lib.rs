@@ -46,6 +46,13 @@ pub mod uniprops;
 pub mod unit;
 pub mod value;
 pub mod vm;
+/// a HashMap with a cheaper hash for the Map / Set index (fxmap.rs):
+/// Rust only, the other targets keep their maps
+#[ranger::target(rust)]
+pub mod fxmap {
+    include!("fxmap.rs");
+}
+
 /// the baseline JIT (wjit.rs): Rust only
 #[ranger::target(rust)]
 pub mod wjit {

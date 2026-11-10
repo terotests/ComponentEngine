@@ -723,6 +723,40 @@ r.join("|")
 ----
 TypeError|a1.5b0ctruenullundefined10S1,21e+21|S42|😀x|llo|llo|hel|bcé|bcé|1|14|301|0|3|5/1
 
+==== js WeakMap/WeakSet methods in place; Map and Set keys of every kind after many inserts and deletes
+var wm = new WeakMap(), ws = new WeakSet(), a = {}, b = [], s = Symbol("s"), r = [];
+r.push(wm.set(a, 1) === wm, wm.get(a), wm.get(b), wm.has(a), wm.get(1), wm.has("a"), wm.get(undefined));
+try { wm.set(1, 2); } catch (e) { r.push(e.name); }
+try { wm.set(Symbol.for("g"), 2); } catch (e) { r.push(e.name); }
+wm.set(s, 3); r.push(wm.get(s), wm.has(s));
+ws.add(b); r.push(ws.has(b), ws.has(a), ws.has(null));
+try { WeakMap.prototype.get.call(new Map(), a); } catch (e) { r.push(e.name); }
+try { WeakSet.prototype.has.call(new Set(), a); } catch (e) { r.push(e.name); }
+var m = new Map(), st = new Set(), objs = [];
+for (var i = 0; i < 3000; i++) { var o = { i: i }; objs.push(o); m.set(i, i); m.set("k" + i, -i); m.set(o, i * 2); st.add(i * 0.5); }
+for (var i = 0; i < 3000; i += 3) { m.delete(i); m.delete("k" + i); st.delete(i * 0.5); }
+m.set(NaN, "nan"); m.set(-0, "zero"); m.set(true, "t"); m.set(null, "n"); m.set(undefined, "u"); m.set(1e300, "big"); m.set(-7, "neg");
+r.push(m.size, st.size, m.get(1), m.get(3), m.get("k2"), m.get("k3"), m.get(objs[2999]), m.get(NaN), m.get(0), m.get(true), m.get(null), m.get(undefined), m.get(1e300), m.get(-7), m.get(2.5), st.has(1.5), st.has(1), st.has(1.0001));
+r.join()
+----
+true,1,,true,,false,,TypeError,TypeError,3,true,true,false,false,TypeError,TypeError,7007,2000,1,,-2,,5998,nan,zero,t,n,u,big,neg,,false,true,false
+
+==== js String replace/replaceAll/split as natives for texts, the prelude for the rest; padStart/padEnd
+var r = [], s = "a-b-c-d-é😀-x";
+r.push(s.replace("-", "+"), s.replaceAll("-", "+"), s.replace("é", "E"), s.replaceAll("😀", "S"), s.replace("-", "$&$&"), s.replaceAll("-", "[$`]").length, s.replace("zz", "q"), s.replace("", "^"), s.replaceAll("", ".").length);
+r.push(s.replace(/-/g, "_"), s.replace("-", function (m, i) { return i; }), s.replaceAll(/[a-c]/g, "$&$&"));
+r.push(s.split("-").length, s.split("").length, s.split("-", 2).join("/"), "x".split("x").length, s.split(/-/).length);
+var o = { [Symbol.replace](t, w) { return "R:" + t + w; }, [Symbol.split](t) { return ["S", t]; } };
+r.push("ab".replace(o, 1), "ab".split(o).join("/"), "ab".replace({ toString() { return "a"; } }, "z"));
+try { String.prototype.replace.call(null, "a", "b"); } catch (e) { r.push(e.name); }
+try { "a".replaceAll(/a/, "b"); } catch (e) { r.push(e.name); }
+try { new String.prototype.replace("a", "b"); } catch (e) { r.push(e.name); }
+r.push(String.prototype.replace.name, String.prototype.replace.length, String.prototype.split.length, String.prototype.replaceAll.name);
+r.push(String.prototype.replace.call(12321, "2", "x"), "123".padStart(8, "0"), "abc".padEnd(7, "xy"), "x".padStart(5, "😀"), "q".padStart(6, "abcd"), "é".padEnd(3, "_"));
+r.join("|")
+----
+a+b-c-d-é😀-x|a+b+c+d+é😀+x|a-b-c-d-E😀-x|a-b-c-d-éS-x|a--b-c-d-é😀-x|45|a-b-c-d-é😀-x|^a-b-c-d-é😀-x|27|a_b_c_d_é😀_x|a1b-c-d-é😀-x|aa-bb-cc-d-é😀-x|6|13|a/b|2|6|R:ab1|S/ab|zb|TypeError|TypeError|TypeError|replace|2|2|replaceAll|1x321|00000123|abcxyxy|😀😀x|abcdaq|é__
+
 ==== js optional chaining as a register jump: undefined/null short-circuit, falsy values kept, calls, nested
 var r = [], o = { a: { b: 0, c: "", n: null, f() { return this.b; } }, z: false }, u, nl = null;
 for (var i = 0; i < 3; i++) {

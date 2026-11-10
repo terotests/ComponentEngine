@@ -1959,12 +1959,45 @@ impl Vm {
                 self.stack[dst as usize] = v;
                 return false;
             }
+            if id != crate::builtins::NF_CALL && id != crate::builtins::NF_APPLY && id != crate::typed::NF_FAST_WRAP && !self.throwing {
+                // the native's full call, as call_op makes it (native_fast
+                // not tried a second time); its result to dst
+                self.stack.truncate((fpos + argc + 2) as usize);
+                let mut args: Vec<Val> = take_args(&mut self.arg_pool);
+                let mut i = 0;
+                while i < argc {
+                    args.push(self.stack[(fpos + 2 + i) as usize]);
+                    i += 1;
+                }
+                let this = self.stack[(fpos + 1) as usize];
+                self.stack.truncate(fpos as usize);
+                self.native_depth += 1;
+                let r = self.call_native(id, fo, this, &args, false, Val::Undef);
+                self.native_depth -= 1;
+                give_args(&mut self.arg_pool, args);
+                self.stack.push(r);
+                if self.throwing {
+                    return false;
+                }
+                if self.stack.len() < want {
+                    grow_stack(&mut self.stack, want);
+                }
+                if dst != fpos {
+                    self.stack[dst as usize] = r;
+                }
+                return false;
+            }
         }
         let nf = self.frames.len();
         self.stack.truncate((fpos + argc + 2) as usize);
         let mut fo = fo;
         let mut fpos = fpos;
         let mut argc = argc;
+        if fo >= 0 && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::typed::NF_FAST_WRAP && (self.ob(fo).env as int) >= 0 {
+            // a __fastWrap method's other cases: its prelude function, entered here
+            fo = self.ob(fo).env as int;
+            self.stack[fpos as usize] = Val::Obj(fo);
+        }
         while fo >= 0 && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_CALL {
             // f.call(this, a…): [call, f, this, a…] is already [f, this, a…]
             // one slot on, so f is called there (its result still goes to dst)

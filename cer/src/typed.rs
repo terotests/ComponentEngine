@@ -83,6 +83,9 @@ pub const NF_TA_SORT: int = 978;
 pub const NF_DV_METHOD: int = 979;
 pub const NF_DVM_GET: int = 980;
 pub const NF_DVM_SET: int = 981;
+/// a prelude method (its function in env) whose plain cases a native runs
+/// (its id in pos): __fastWrap(native, slowFn, name, length), fast_wrap
+pub const NF_FAST_WRAP: int = 982;
 
 /// The default typed array order: NaN last, -0 before +0.
 pub fn num_before(a: double, b: double) -> bool {
@@ -864,6 +867,7 @@ impl Vm {
         self.method(g, "__dvGet", NF_DV_GET, 4);
         self.method(g, "__dvSet", NF_DV_SET, 5);
         self.method(g, "__dvMethod", NF_DV_METHOD, 5);
+        self.method(g, "__fastWrap", NF_FAST_WRAP, 4);
         self.method(g, "__taKind", NF_TA_KIND, 1);
         self.method(g, "__taSub", NF_TA_SUB, 4);
         self.method(g, "__taNew", NF_TA_NEW, 4);
