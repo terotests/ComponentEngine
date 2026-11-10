@@ -32,6 +32,33 @@ pub fn int_to_string(i: int) -> String {
     String::from(std::str::from_utf8(&buf[p..]).unwrap_or("0"))
 }
 
+/// The text of a small whole number (0 <= v < 2^31) written onto `s`, and
+/// its length; -1 (nothing written) for any other number.
+#[ranger::target(rust)]
+pub fn push_small_int(s: &mut String, x: double) -> int {
+    if !(x >= 0.0 && x < 2147483647.0) || x != ((x as int) as double) {
+        return -1;
+    }
+    let mut buf = [0u8; 12];
+    let mut n = x as u64;
+    let mut p = buf.len();
+    loop {
+        p -= 1;
+        buf[p] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    s.push_str(std::str::from_utf8(&buf[p..]).unwrap_or("0"));
+    (buf.len() - p) as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn push_small_int(_s: &mut String, _x: double) -> int {
+    -1
+}
+
 /// The other targets have a fast int-to-string of their own.
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn int_to_string(i: int) -> String {

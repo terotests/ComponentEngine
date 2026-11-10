@@ -168,6 +168,14 @@ pub struct Vm {
     /// index atoms made by index_atom that are not in `atoms` yet (intern
     /// finds them through the index table); atoms_sync puts them there
     pub idx_pending: Vec<int>,
+    /// intern's own table over atom_names[0..fa_seen]: open addressing
+    /// (atom ids, -1 empty) by str_hash, atom_hash[a] each name's hash (-1
+    /// for an index atom left to the index table); new atoms go into
+    /// `atoms` (the compilers' map) through idx_pending and atoms_sync
+    pub fa_tab: Vec<int>,
+    pub atom_hash: Vec<int>,
+    pub fa_seen: int,
+    pub fa_count: int,
     pub idx_vals: Vec<int>,
     pub idx_count: int,
     /// own properties removed so far (remove_own): a for-in over a plain
@@ -554,6 +562,10 @@ impl Vm {
             atom_cache: Vec::new(),
             idx_keys: Vec::new(),
             idx_pending: Vec::new(),
+            fa_tab: Vec::new(),
+            atom_hash: Vec::new(),
+            fa_seen: 0,
+            fa_count: 0,
             idx_vals: Vec::new(),
             idx_count: 0,
             del_count: 0,
@@ -1794,23 +1806,114 @@ impl Vm {
         if c >= 0 && (c as usize) < self.atom_names.len() && self.atom_names[c as usize].as_str() == s {
             return c;
         }
-        let a = match self.atoms.get(s) {
-            Some(a) => *a,
-            None => {
-                // an array index: its atom may be in the index table only
-                let ix = if n > 0 && n <= 9 && s.as_bytes()[0] >= 48 && s.as_bytes()[0] <= 57 { jsstr::array_index(s) } else { -1 };
-                if ix >= 0 {
-                    self.index_atom(ix as int)
-                } else {
-                    let a = self.atom_names.len() as int;
-                    self.atom_names.push(String::from(s));
-                    self.atoms.insert(String::from(s), a);
-                    a
-                }
+        self.fa_catch_up();
+        let hs = str_hash(s);
+        let f = self.fa_find(s, hs);
+        let a = if f >= 0 {
+            f
+        } else {
+            // an array index: its atom may be in the index table only
+            let ix = if n > 0 && n <= 9 && s.as_bytes()[0] >= 48 && s.as_bytes()[0] <= 57 { jsstr::array_index(s) } else { -1 };
+            if ix >= 0 {
+                self.index_atom(ix as int)
+            } else {
+                let a = self.atom_names.len() as int;
+                self.atom_names.push(String::from(s));
+                self.atom_hash.push(hs);
+                self.fa_insert(a, hs);
+                self.fa_seen = a + 1;
+                self.idx_pending.push(a);
+                a
             }
         };
         self.atom_cache[k] = a;
         a
+    }
+
+    /// Indexes the atoms made elsewhere (a compiler's, a snapshot's) in
+    /// intern's table.
+    fn fa_catch_up(&mut self) {
+        let n = self.atom_names.len() as int;
+        while self.fa_seen < n {
+            let a = self.fa_seen;
+            let h = str_hash(self.atom_names[a as usize].as_str());
+            self.atom_hash.push(h);
+            self.fa_insert(a, h);
+            self.fa_seen += 1;
+        }
+    }
+
+    fn fa_insert(&mut self, a: int, h: int) {
+        let n = self.fa_tab.len() as int;
+        if (self.fa_count + 1) * 2 > n {
+            let nn: int = if n == 0 { 4096 } else { n * 2 };
+            let mut nt: Vec<int> = Vec::with_capacity(nn as usize);
+            let mut j: int = 0;
+            while j < nn {
+                nt.push(-1);
+                j += 1;
+            }
+            let old = self.fa_tab.clone();
+            self.fa_tab = nt;
+            self.fa_count = 0;
+            let mut q: usize = 0;
+            while q < old.len() {
+                let b = old[q];
+                if b >= 0 {
+                    let hb = self.atom_hash[b as usize];
+                    self.fa_put(b, hb);
+                }
+                q += 1;
+            }
+        }
+        self.fa_put(a, h);
+    }
+
+    fn fa_put(&mut self, a: int, h: int) {
+        let mask = (self.fa_tab.len() as int) - 1;
+        let mut i = h & mask;
+        while self.fa_tab[i as usize] >= 0 {
+            i = (i + 1) & mask;
+        }
+        self.fa_tab[i as usize] = a;
+        self.fa_count += 1;
+    }
+
+    fn fa_find(&self, s: &str, h: int) -> int {
+        if self.fa_count == 0 {
+            return -1;
+        }
+        let mask = (self.fa_tab.len() as int) - 1;
+        let mut i = h & mask;
+        loop {
+            let a = self.fa_tab[i as usize];
+            if a < 0 {
+                return -1;
+            }
+            if self.atom_hash[a as usize] == h && self.atom_names[a as usize].as_str() == s {
+                return a;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    /// The atom named `s` when there is one (nothing is made), else -1.
+    pub fn atom_lookup(&self, s: &str) -> int {
+        let f = self.fa_find(s, str_hash(s));
+        if f >= 0 {
+            return f;
+        }
+        let mut a = self.fa_seen;
+        while a < (self.atom_names.len() as int) {
+            if self.atom_names[a as usize].as_str() == s {
+                return a;
+            }
+            a += 1;
+        }
+        match self.atoms.get(s) {
+            Some(x) => *x,
+            None => -1,
+        }
     }
 
     /// Puts the index atoms only the index table knows into `atoms` (before
@@ -2446,6 +2549,11 @@ impl Vm {
         self.idx_put(i, a);
         self.idx_pending.push(a);
         self.idx_seen = a + 1;
+        if self.fa_seen == a {
+            // left out of intern's table (intern finds it by its digits)
+            self.atom_hash.push(-1);
+            self.fa_seen = a + 1;
+        }
         a
     }
 
@@ -2521,10 +2629,7 @@ impl Vm {
         if i > 999999999 {
             // past what array_index reads (9 digits)
             let s = format!("{}", i);
-            return match self.atoms.get(&s) {
-                Some(a) => *a,
-                None => -1,
-            };
+            return self.atom_lookup(s.as_str());
         }
         let n = self.atom_names.len() as int;
         while self.idx_seen < n {
@@ -3693,6 +3798,49 @@ impl Vm {
         out
     }
 
+    /// own_keys(o, false, false) of an ordinary object (no elements, not a
+    /// proxy) as atoms: integer keys ascending, then the rest in order.
+    pub fn own_string_atoms(&mut self, o: int) -> Vec<int> {
+        let sh = self.objs[o as usize].shape as int;
+        let nk = self.shapes[sh as usize].nkeys as usize;
+        let hk = self.holder(sh);
+        let mut ints: Vec<int> = Vec::new();
+        let mut others: Vec<int> = Vec::with_capacity(nk);
+        let mut k: usize = 0;
+        while k < nk {
+            let a = self.shapes[hk].keys[k];
+            if (self.shapes[hk].attrs[k] & P_HIDDEN) == 0 {
+                let kind = self.atom_kind(a);
+                if kind == 2 {
+                    ints.push(a);
+                } else if kind == 1 {
+                    others.push(a);
+                }
+            }
+            k += 1;
+        }
+        if ints.len() > 1 {
+            let mut keys: Vec<double> = Vec::with_capacity(ints.len());
+            let mut sorted = true;
+            let mut i: usize = 0;
+            while i < ints.len() {
+                let kv = index_value(self.atom_names[ints[i] as usize].as_str());
+                if i > 0 && kv < keys[i - 1] {
+                    sorted = false;
+                }
+                keys.push(kv);
+                i += 1;
+            }
+            if !sorted {
+                sort_ids_by_keys(&mut ints, &keys);
+            }
+        }
+        for a in others {
+            ints.push(a);
+        }
+        ints
+    }
+
     /// Keys a for-in visits: own and inherited enumerable string keys.
     /// Whether for-in iterator `it` checks each key is still there: not
     /// while no own property was removed since it began (ITER_KEYS).
@@ -3944,6 +4092,20 @@ impl Vm {
                 return Val::Str(h);
             }
             (Val::Str(x), Val::Num(y)) => {
+                // "k" + i: a small whole number's digits straight onto the copy
+                if *y >= 0.0 && *y < 2147483647.0 && *y == ((*y as int) as double) {
+                    let n = self.sref(*x).as_bytes().len() + 10;
+                    let h = self.take_handle(n as int, 0);
+                    let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
+                    s.push_str(self.sref(*x));
+                    if push_small_int(&mut s, *y) >= 0 {
+                        rc_refill(&mut self.strs[h as usize].s, s);
+                        return Val::Str(h);
+                    }
+                    s.push_str(number_to_string(*y).as_str());
+                    rc_refill(&mut self.strs[h as usize].s, s);
+                    return Val::Str(h);
+                }
                 let t = number_to_string(*y);
                 let n = self.sref(*x).as_bytes().len() + t.as_bytes().len();
                 let h = self.take_handle(n as int, 0);
@@ -9022,4 +9184,13 @@ pub fn sort_ids_by_keys(ids: &mut Vec<int>, keys: &Vec<double>) {
         }
         w = w * 2;
     }
+}
+
+/// FNV-1a over the bytes, 32 bits: intern's table hash.
+pub fn str_hash(s: &str) -> int {
+    let mut h: int = 2166136261;
+    for x in s.bytes() {
+        h = ((h ^ (x as int)) * 16777619) & 4294967295;
+    }
+    h
 }

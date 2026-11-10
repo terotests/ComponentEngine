@@ -436,7 +436,7 @@ impl Vm {
         let unscop_sym = self.well_known_symbol(a_unscop, "Symbol.unscopables");
 
         // globals
-        self.add_own(g, self.atoms["globalThis"], Val::Obj(g), P_HIDDEN);
+        self.add_own(g, self.atom_lookup("globalThis"), Val::Obj(g), P_HIDDEN);
         self.value_prop(g, "NaN", Val::Num(nan()));
         self.value_prop(g, "Infinity", Val::Num(infinity()));
         self.value_prop(g, "undefined", Val::Undef);
@@ -913,7 +913,7 @@ impl Vm {
     pub fn error_ctor_proto(&self, kind: int) -> int {
         let names = vec!["Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError", "SuppressedError"];
         let g = self.global;
-        let a = self.atoms[names[kind as usize]];
+        let a = self.atom_lookup(names[kind as usize]);
         let slot = self.find(g, a);
         let c = obj_of(&self.objs[g as usize].get_slot(slot as usize));
         let ps = self.find(c, A_PROTOTYPE);
@@ -2366,6 +2366,48 @@ impl Vm {
                         out.push_str(indent);
                     }
                     out.push(']');
+                } else if allow.is_empty() && self.objs[o as usize].class == C_OBJECT && self.objs[o as usize].elems == 0 {
+                    // an ordinary object: its keys as atoms, no key strings
+                    // unless toJSON or the replacer is given one
+                    let atoms = self.own_string_atoms(o);
+                    let rep = self.is_callable(replacer);
+                    out.push('{');
+                    let mut first = true;
+                    for a in atoms {
+                        let item = self.get(&v, a);
+                        if self.throwing {
+                            return false;
+                        }
+                        let kv = if rep || is_obj(&item) { self.atom_val(a) } else { Val::Undef };
+                        let iv = self.json_val(&v, &kv, -1, item, replacer);
+                        if self.throwing {
+                            return false;
+                        }
+                        if self.json_skip(&iv) {
+                            continue;
+                        }
+                        if !first {
+                            out.push(',');
+                        }
+                        first = false;
+                        if !gap.is_empty() {
+                            out.push('\n');
+                            out.push_str(inner.as_str());
+                        }
+                        self.json_quote(self.atom_names[a as usize].as_str(), out);
+                        out.push(':');
+                        if !gap.is_empty() {
+                            out.push(' ');
+                        }
+                        if !self.json_write(iv, replacer, allow, gap, inner.as_str(), stack, out) {
+                            return false;
+                        }
+                    }
+                    if !first && !gap.is_empty() {
+                        out.push('\n');
+                        out.push_str(indent);
+                    }
+                    out.push('}');
                 } else {
                     let keys = if allow.is_empty() {
                         self.own_keys(o, false, false)
@@ -3192,10 +3234,10 @@ impl Vm {
     /// Symbol.isConcatSpreadable, a proxy, an array with holes or its own
     /// properties.
     fn concat_generic(&mut self, this: &Val, args: &Vec<Val>) -> bool {
-        let sa = match self.atoms.get("@@isConcatSpreadable") {
-            Some(a) => *a,
-            None => return false,
-        };
+        let sa = self.atom_lookup("@@isConcatSpreadable");
+        if sa < 0 {
+            return false;
+        }
         let o = obj_of(this);
         if o >= 0 && self.objs[o as usize].shape != 0 && self.find(o, sa) >= 0 {
             return true;

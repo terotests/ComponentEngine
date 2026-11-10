@@ -226,10 +226,7 @@ pub fn snapshot(vm: &Vm) -> String {
         let mut vals = o.slots();
         let mut attrs = vm.shape_attrs(o.shape as int);
         if vm.shapes[o.shape as usize].ndead > 0 {
-            let tomb = match vm.atoms.get(TOMB_NAME) {
-                Some(t) => *t,
-                None => -1,
-            };
+            let tomb = vm.atom_lookup(TOMB_NAME);
             let mut k2: Vec<int> = Vec::new();
             let mut v2: Vec<Val> = Vec::new();
             let mut a2: Vec<int> = Vec::new();
@@ -415,6 +412,10 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     }
     vm.atoms = HashMap::new();
     vm.idx_pending = Vec::new();
+    vm.fa_tab = Vec::new();
+    vm.atom_hash = Vec::new();
+    vm.fa_seen = 0;
+    vm.fa_count = 0;
     vm.atom_names = Vec::new();
     vm.atom_cache = Vec::new();
     vm.idx_keys = Vec::new();

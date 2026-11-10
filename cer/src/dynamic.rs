@@ -63,7 +63,7 @@ impl Vm {
         let gf = self.native_fn("GeneratorFunction", NF_GENERATOR_FUNCTION, 1);
         self.add_prop(gf, A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
-        let fc = self.get_obj(self.global, self.atoms["Function"], &Val::Obj(self.global));
+        let fc = self.get_obj(self.global, self.atom_lookup("Function"), &Val::Obj(self.global));
         if let Val::Obj(f) = fc {
             self.put_proto(gf, f);
         }
@@ -358,8 +358,8 @@ impl Vm {
             }
             let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
             let (src, fl) = if self.class_of(&a0) == C_REGEXP {
-                let s = self.get(&a0, self.atoms["source"]);
-                let f = self.get(&a0, self.atoms["flags"]);
+                let s = self.get(&a0, self.atom_lookup("source"));
+                let f = self.get(&a0, self.atom_lookup("flags"));
                 (s, f)
             } else {
                 (if matches!(a0, Val::Undef) { self.str_val("") } else { a0.clone() }, a1)
