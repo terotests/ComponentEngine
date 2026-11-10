@@ -1062,9 +1062,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
 // ---- ArrayBuffer, SharedArrayBuffer, the typed arrays, DataView, Atomics:
 // the bytes and the element access are native (typed.rs), the rest is here
 var bufNew = globalThis.__bufNew, bufInfo = globalThis.__bufInfo, bufGet = globalThis.__bufGet, bufSet = globalThis.__bufSet;
-var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew, taSort = globalThis.__taSort;
+var bufCopy = globalThis.__bufCopy, bufDetach = globalThis.__bufDetach, taMake = globalThis.__taMake, taInfo = globalThis.__taInfo, taLength = globalThis.__taLength, taSetFast = globalThis.__taSetFast, dvMake = globalThis.__dvMake, dvGetFast = globalThis.__dvGet, dvSetFast = globalThis.__dvSet, dvMethod = globalThis.__dvMethod, taKind = globalThis.__taKind, taSub = globalThis.__taSub, taNew = globalThis.__taNew, taSort = globalThis.__taSort;
 var bufMax = globalThis.__bufMax, bufResize = globalThis.__bufResize;
-['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__taKind', '__taSub', '__taNew', '__taSort', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
+['__bufNew', '__bufInfo', '__bufGet', '__bufSet', '__bufCopy', '__bufDetach', '__taMake', '__taInfo', '__taLength', '__taSetFast', '__dvMake', '__dvGet', '__dvSet', '__dvMethod', '__taKind', '__taSub', '__taNew', '__taSort', '__bufMax', '__bufResize'].forEach(function (k) { delete globalThis[k]; });
 function toIndex(v, what) {
   if (v === undefined) return 0;
   var n = toIntegerOrInfinity(v);
@@ -1530,25 +1530,20 @@ getter(DVP, 'byteOffset', function () { var d = dv(this, 'DataView.prototype.byt
 tag(DVP, 'DataView');
 ['Int8', 'Uint8', '', 'Int16', 'Uint16', 'Int32', 'Uint32', 'Float32', 'Float64', 'BigInt64', 'BigUint64', 'Float16'].forEach(function (name, kind) {
   if (!name) return;
-  hide(DVP, 'get' + name, function (index, little) {
-    var r = dvGetFast(this, index, kind, little);
-    if (r !== undefined) return r;
+  hide(DVP, 'get' + name, dvMethod(kind, function (index, little) {
     var d = dv(this, 'DataView.prototype.get' + name); var i = toIndex(index, 'offset');
     var n = dvLength(d);
     if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.get' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
     if (i + SIZES[kind] > n) throw new RangeError('Offset is outside the bounds of the DataView');
     return bufGet(d[0], d[1] + i, kind, !!little);
-  });
-  hide(DVP, 'set' + name, function (index, value, little) {
-    if (dvSetFast(this, index, kind, value, little)) return;
+  }, false, 'get' + name, 1));
+  hide(DVP, 'set' + name, dvMethod(kind, function (index, value, little) {
     var d = dv(this, 'DataView.prototype.set' + name); var i = toIndex(index, 'offset'); var x = elemOf(kind)(value);
     var n = dvLength(d);
     if (n < 0) throw new TypeError(bufInfo(d[0]) === -2 ? 'Cannot perform DataView.prototype.set' + name + ' on a detached ArrayBuffer' : 'DataView is out of bounds');
     if (i + SIZES[kind] > n) throw new RangeError('Offset is outside the bounds of the DataView');
     bufSet(d[0], d[1] + i, kind, x, !!little);
-  });
-  setLength(DVP['get' + name], 1);
-  setLength(DVP['set' + name], 2);
+  }, true, 'set' + name, 2));
 });
 hide(globalThis, 'DataView', DataView);
 

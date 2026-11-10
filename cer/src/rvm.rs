@@ -1778,7 +1778,8 @@ impl Vm {
                     if self.ob(p).shape == self.mcache[k + 3] {
                         let f = slot_at(self.ob(p), self.mcache[k + 4] as usize);
                         if let Val::Obj(fo) = f {
-                            if self.ob(fo).class == C_FUNCTION {
+                            let fc = self.ob(fo).class;
+                            if fc == C_FUNCTION || fc == C_NATIVE {
                                 self.rset((bp + w1) as usize, f);
                                 self.rset((bp + w1 + 1) as usize, v);
                                 return;
@@ -1848,7 +1849,7 @@ impl Vm {
     /// Keeps a method found one prototype up (holder h, slot) in the
     /// site's mcache entry, taking a new entry the first time.
     fn mc_learn(&mut self, site: int, o: int, h: int, slot: i32, w3: int, f: &Val) {
-        let fun = if let Val::Obj(fo) = f { self.ob(*fo).class == C_FUNCTION } else { false };
+        let fun = if let Val::Obj(fo) = f { self.ob(*fo).class == C_FUNCTION || self.ob(*fo).class == C_NATIVE } else { false };
         if !fun || slot < 0 {
             return;
         }
