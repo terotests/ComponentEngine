@@ -669,3 +669,8 @@ var p = {b:1, 4294967295:1, 4294967294:1, '01':1, 1e9:1, 0:1, '-1':1};
 [ok, c, Object.keys(o).slice(0, 3).join('/'), Object.keys(p).join('/'), JSON.stringify(p)].join(';')
 ----
 true;2000;0/1/2;0/1000000000/4294967294/b/4294967295/01/-1;{"0":1,"1000000000":1,"4294967294":1,"b":1,"4294967295":1,"01":1,"-1":1}
+
+==== js Number.isInteger and friends, isNaN and isFinite without and with coercion
+[Number.isInteger(5), Number.isInteger('5'), Number.isInteger(5.5), Number.isInteger(), Number.isSafeInteger(2 ** 53), Number.isSafeInteger(2 ** 53 - 1), Number.isFinite(Infinity), Number.isFinite('1'), Number.isNaN(NaN), Number.isNaN('x'), Number.isInteger(-0), isNaN(NaN), isNaN(1), isNaN('x'), isNaN('1'), isFinite(1 / 0), isFinite('3'), isFinite({}), isNaN()].join()
+----
+true,false,false,false,false,true,false,false,true,false,true,true,false,true,false,false,true,false,true
