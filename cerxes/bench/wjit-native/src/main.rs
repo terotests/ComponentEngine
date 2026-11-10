@@ -127,7 +127,17 @@ fn main() -> Result<()> {
     cfg.cranelift_opt_level(OptLevel::Speed);
     let engine = Engine::new(&cfg)?;
     let t0 = Instant::now();
-    let cerxes = Module::from_file(&engine, &wasm)?;
+    // --cwasm=path: the compiled CErXes kept there (made on the first run),
+    // so that a run under valgrind counts the script, not Cranelift
+    let cerxes = match opt(&args, "cwasm") {
+        Some(c) if std::path::Path::new(c).exists() => unsafe { Module::deserialize_file(&engine, c)? },
+        Some(c) => {
+            let m = Module::from_file(&engine, &wasm)?;
+            std::fs::write(c, m.serialize()?)?;
+            m
+        }
+        None => Module::from_file(&engine, &wasm)?,
+    };
     eprintln!("cerxes.wasm compiled in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
 
     let mut linker: Linker<Host> = Linker::new(&engine);

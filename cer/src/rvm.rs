@@ -116,6 +116,15 @@ impl Vm {
         val_put(&mut self.stack, i, v);
     }
 
+    /// The arithmetic op at pc of frame fi took its slow path: the JIT
+    /// stops speculating that it sees numbers there (wjit.rs Cg.spec).
+    #[inline(never)]
+    pub fn note_nonnum(&mut self, fi: usize, pc: int) {
+        let pi = self.frames[fi].proto as usize;
+        let ri = self.protos[pi].rbase + pc;
+        jit_note_nonnum(self, pi, ri);
+    }
+
     /// A back edge to pc with the JIT on: once the function is hot its
     /// compiled code (wjit.rs) runs from pc; the pc the interpreter goes on
     /// at, or -1 when the time slice ended there (the frame is stopped).
@@ -1317,6 +1326,9 @@ impl Vm {
 
     #[inline(never)]
     pub fn r_add_slow(&mut self, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+        if self.jit_on {
+            self.note_nonnum(fi, pc);
+        }
         let a = self.rget(bp, w2).clone();
         let b = self.rget(bp, w3).clone();
         // a longer string whose buffer nothing else holds grows in place
@@ -1339,6 +1351,9 @@ impl Vm {
 
     #[inline(never)]
     pub fn r_arith_slow(&mut self, code: int, bp: int, fi: usize, pc: int, w1: int, w2: int, w3: int) {
+        if self.jit_on {
+            self.note_nonnum(fi, pc);
+        }
         let a = self.rget(bp, w2).clone();
         let b = self.rget(bp, w3).clone();
         self.frames[fi].pc = pc + 1;
@@ -2751,6 +2766,16 @@ pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bo
 pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _head: bool) -> int {
     pc
 }
+
+/// Vm::note_nonnum's mark, kept by the JIT (wjit.rs note_nonnum, which
+/// also sends code that speculated on the site back). Only Rust compiles.
+#[ranger::target(rust)]
+pub fn jit_note_nonnum(vm: &mut Vm, pi: usize, ri: int) {
+    crate::wjit::note_nonnum(vm, pi, ri as usize);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_note_nonnum(_vm: &mut Vm, _pi: usize, _ri: int) {}
 
 /// The machine has run to its end (no frames left): functions compiled
 /// and waiting for their batch go to the host now (wjit.rs). Only Rust
