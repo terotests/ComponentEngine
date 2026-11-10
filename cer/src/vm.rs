@@ -326,6 +326,9 @@ pub struct Vm {
     /// R_GET_METHOD's method cache (rcode c <= -100000, entry -100000 - c):
     /// receiver shape, shape epoch, prototype, its shape, slot; 5 ints each
     pub mcache: Vec<i32>,
+    /// array_iter_plain's memo: an array's shape, the shape epoch, its
+    /// prototype, the prototype's shape and its Symbol.iterator slot
+    pub ai_memo: Vec<i32>,
     pub pic: Vec<i32>,
     pub shape_epoch: int,
     /// instanceof: Function.prototype's and Object.prototype's shapes and
@@ -654,6 +657,7 @@ impl Vm {
             rpic: Vec::new(),
             ic2: Vec::new(),
             mcache: Vec::new(),
+            ai_memo: Vec::new(),
             pic: Vec::new(),
             shape_epoch: 0,
             hi_fp: -1,
@@ -4956,8 +4960,8 @@ impl Vm {
         if let Val::Obj(o) = v {
             let class = self.objs[*o as usize].class;
             if class == C_ARRAY || class == C_ARGUMENTS {
-                let f = self.get_obj(*o, A_ITERATOR, v);
-                if obj_of(&f) == self.array_values_fn || class == C_ARGUMENTS {
+                let plain = class == C_ARGUMENTS || self.array_iter_plain(*o) || obj_of(&self.get_obj(*o, A_ITERATOR, v)) == self.array_values_fn;
+                if plain {
                     let ip = self.iter_proto;
                     let it = self.alloc(C_ITER, ip);
                     self.put_env(it, *o);
@@ -5141,11 +5145,8 @@ impl Vm {
 
     pub fn iterable_to_vec(&mut self, v: &Val) -> Vec<Val> {
         if let Val::Obj(o) = v {
-            if self.objs[*o as usize].class == C_ARRAY && (self.objs[*o as usize].pos != 3 && !self.idx_protos || self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty()) {
-                let f = self.get_obj(*o, A_ITERATOR, v);
-                if obj_of(&f) == self.array_values_fn {
-                    return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
-                }
+            if self.array_iter_plain(*o) {
+                return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
             }
         }
         let it = self.iter_values(v);
@@ -5169,13 +5170,46 @@ impl Vm {
 
     /// The first `n` values of an iterable; an iterator not done by then is
     /// closed (array destructuring without a rest element).
+    /// Whether array `o` iterates as its elements: no holes seen through
+    /// prototypes and its Symbol.iterator Array.prototype.values. The
+    /// lookup's answer is kept (ai_memo) for o's shape while its
+    /// prototype's shape and slot stay.
+    pub fn array_iter_plain(&mut self, o: int) -> bool {
+        if self.objs[o as usize].class != C_ARRAY || !(self.objs[o as usize].pos != 3 && !self.idx_protos || self.colds[self.objs[o as usize].cold as usize].elems2.is_empty()) {
+            return false;
+        }
+        let p = self.objs[o as usize].proto;
+        if self.ai_memo.len() == 5 && p >= 0 && self.ai_memo[0] == self.objs[o as usize].shape && self.ai_memo[1] == (self.shape_epoch as i32) && self.ai_memo[2] == p && self.ai_memo[3] == self.objs[p as usize].shape {
+            let f = self.objs[p as usize].get_slot(self.ai_memo[4] as usize);
+            if obj_of(&f) == self.array_values_fn {
+                return true;
+            }
+        }
+        let v = Val::Obj(o);
+        let f = self.get_obj(o, A_ITERATOR, &v);
+        if obj_of(&f) != self.array_values_fn {
+            return false;
+        }
+        if p >= 0 && self.find(o, A_ITERATOR) < 0 {
+            let slot = self.find(p as int, A_ITERATOR);
+            if slot >= 0 && (self.attr_at(p as int, slot) & P_ACCESSOR) == 0 {
+                while self.ai_memo.len() < 5 {
+                    self.ai_memo.push(-1);
+                }
+                self.ai_memo[0] = self.objs[o as usize].shape;
+                self.ai_memo[1] = self.shape_epoch as i32;
+                self.ai_memo[2] = p;
+                self.ai_memo[3] = self.objs[p as usize].shape;
+                self.ai_memo[4] = slot as i32;
+            }
+        }
+        true
+    }
+
     pub fn iterable_take(&mut self, v: &Val, n: int) -> Vec<Val> {
         if let Val::Obj(o) = v {
-            if self.objs[*o as usize].class == C_ARRAY && (self.objs[*o as usize].pos != 3 && !self.idx_protos || self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty()) {
-                let f = self.get_obj(*o, A_ITERATOR, v);
-                if obj_of(&f) == self.array_values_fn {
-                    return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
-                }
+            if self.array_iter_plain(*o) {
+                return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
             }
         }
         let it = self.iter_values(v);
@@ -7678,6 +7712,12 @@ impl Vm {
                 let v = self.pop();
                 if matches!(v, Val::Undef) || matches!(v, Val::Null) {
                     self.throw_type("value is not iterable");
+                    return false;
+                }
+                if op.a > 0 && obj_of(&v) >= 0 && self.array_iter_plain(obj_of(&v)) {
+                    // destructuring a plain array: its elements read from it
+                    // in place (as its iterator would read them), no copy
+                    self.stack.push(v);
                     return false;
                 }
                 let items = if op.a > 0 { self.iterable_take(&v, ((op.a - 1) as int)) } else { self.iterable_to_vec(&v) };
