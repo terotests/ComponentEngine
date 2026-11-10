@@ -5862,6 +5862,37 @@ impl Vm {
                 return true;
             }
         }
+        // Number.isInteger / isSafeInteger / isFinite / isNaN: no coercion,
+        // anything but a number is false
+        if id >= crate::builtins::NF_N_ISINTEGER && id <= crate::builtins::NF_N_ISNAN {
+            let r = if argc >= 1 {
+                if let Val::Num(n) = self.stack[bp as usize] {
+                    if id == crate::builtins::NF_N_ISINTEGER {
+                        is_finite(n) && n == to_integer(n)
+                    } else if id == crate::builtins::NF_N_ISSAFEINTEGER {
+                        is_finite(n) && n == to_integer(n) && n.abs() <= 9007199254740991.0
+                    } else if id == crate::builtins::NF_N_ISFINITE {
+                        is_finite(n)
+                    } else {
+                        is_nan(n)
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            self.stack[fpos as usize] = Val::Bool(r);
+            return true;
+        }
+        // isNaN / isFinite of a number (others coerce: the full call)
+        if (id == crate::builtins::NF_ISNAN || id == crate::builtins::NF_ISFINITE) && argc >= 1 {
+            if let Val::Num(n) = self.stack[bp as usize] {
+                let r = if id == crate::builtins::NF_ISNAN { is_nan(n) } else { is_finite(n) };
+                self.stack[fpos as usize] = Val::Bool(r);
+                return true;
+            }
+        }
         // Math.min / Math.max of numbers
         if (which == 31 || which == 32) && argc <= 8 {
             let mut r = if which == 31 { infinity() } else { -infinity() };
