@@ -28,11 +28,8 @@ pub fn int_to_string(i: int) -> String {
             break;
         }
     }
-    let mut s = String::with_capacity(buf.len() - p);
-    for b in &buf[p..] {
-        s.push(*b as char);
-    }
-    s
+    // ASCII digits: valid UTF-8
+    String::from(std::str::from_utf8(&buf[p..]).unwrap_or("0"))
 }
 
 /// The other targets have a fast int-to-string of their own.

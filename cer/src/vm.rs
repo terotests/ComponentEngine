@@ -165,6 +165,9 @@ pub struct Vm {
     /// of format + intern): open addressing, keys stored as index + 1 (0 is
     /// empty), the atom beside each
     pub idx_keys: Vec<int>,
+    /// index atoms made by index_atom that are not in `atoms` yet (intern
+    /// finds them through the index table); atoms_sync puts them there
+    pub idx_pending: Vec<int>,
     pub idx_vals: Vec<int>,
     pub idx_count: int,
     /// own properties removed so far (remove_own): a for-in over a plain
@@ -545,6 +548,7 @@ impl Vm {
             atoms: HashMap::new(),
             atom_cache: Vec::new(),
             idx_keys: Vec::new(),
+            idx_pending: Vec::new(),
             idx_vals: Vec::new(),
             idx_count: 0,
             del_count: 0,
@@ -1785,14 +1789,34 @@ impl Vm {
         let a = match self.atoms.get(s) {
             Some(a) => *a,
             None => {
-                let a = self.atom_names.len() as int;
-                self.atom_names.push(String::from(s));
-                self.atoms.insert(String::from(s), a);
-                a
+                // an array index: its atom may be in the index table only
+                let ix = if n > 0 && n <= 9 && s.as_bytes()[0] >= 48 && s.as_bytes()[0] <= 57 { jsstr::array_index(s) } else { -1 };
+                if ix >= 0 {
+                    self.index_atom(ix as int)
+                } else {
+                    let a = self.atom_names.len() as int;
+                    self.atom_names.push(String::from(s));
+                    self.atoms.insert(String::from(s), a);
+                    a
+                }
             }
         };
         self.atom_cache[k] = a;
         a
+    }
+
+    /// Puts the index atoms only the index table knows into `atoms` (before
+    /// a compiler gets a copy of it).
+    pub fn atoms_sync(&mut self) {
+        let n = self.idx_pending.len();
+        let mut j: usize = 0;
+        while j < n {
+            let a = self.idx_pending[j];
+            let name = self.atom_names[a as usize].clone();
+            self.atoms.insert(name, a);
+            j += 1;
+        }
+        self.idx_pending.clear();
     }
 
     /// The name of atom `a` as a string value, shared.
@@ -1809,7 +1833,7 @@ impl Vm {
             4
         } else if self.symbol_atoms.contains_key(&a) {
             3
-        } else if jsstr::array_index(self.atom_names[a as usize].as_str()) >= 0 {
+        } else if is_index_key(self.atom_names[a as usize].as_str()) {
             2
         } else {
             1
@@ -2394,10 +2418,22 @@ impl Vm {
             return c;
         }
         let s = int_to_string(i);
-        let a = self.intern(s.as_str());
-        if i <= 999999999 {
-            self.idx_put(i, a);
+        if i > 999999999 {
+            return self.intern(s.as_str());
         }
+        // an atom of this name made elsewhere (a compiler's) and not seen yet
+        if self.idx_seen < (self.atom_names.len() as int) {
+            let c2 = self.index_atom_if(i);
+            if c2 >= 0 {
+                return c2;
+            }
+        }
+        // a new one: in the index table only, no string hashing (and seen)
+        let a = self.atom_names.len() as int;
+        self.atom_names.push(s);
+        self.idx_put(i, a);
+        self.idx_pending.push(a);
+        self.idx_seen = a + 1;
         a
     }
 
@@ -3539,7 +3575,7 @@ impl Vm {
                     if mixed {
                         elem_ix.push(i as int);
                     } else {
-                        out.push(self.string_val(format!("{}", i)));
+                        out.push(self.string_val(int_to_string(i as int)));
                     }
                 }
                 i += 1;
@@ -3551,7 +3587,7 @@ impl Vm {
                 let n = jsstr::len(s.as_str());
                 let mut i: int = 0;
                 while i < n {
-                    out.push(self.string_val(format!("{}", i)));
+                    out.push(self.string_val(int_to_string(i as int)));
                     i += 1;
                 }
             }
@@ -3560,7 +3596,7 @@ impl Vm {
             let n = self.ta_length(o);
             let mut i: int = 0;
             while i < n {
-                out.push(self.string_val(format!("{}", i)));
+                out.push(self.string_val(int_to_string(i as int)));
                 i += 1;
             }
         }
@@ -3592,26 +3628,30 @@ impl Vm {
             k += 1;
         }
         if ints.len() > 1 {
-            // insertion sort by numeric value
-            let mut i: usize = 1;
+            // by numeric value: in order already (keys added ascending), else
+            // a merge sort (n log n; insertion order can be anything)
+            let mut keys: Vec<double> = Vec::with_capacity(ints.len());
+            let mut sorted = true;
+            let mut i: usize = 0;
             while i < ints.len() {
-                let mut j = i;
-                while j > 0 && jsstr::array_index(self.atom_names[ints[j - 1] as usize].as_str()) > jsstr::array_index(self.atom_names[ints[j] as usize].as_str()) {
-                    let t = ints[j];
-                    ints[j] = ints[j - 1];
-                    ints[j - 1] = t;
-                    j -= 1;
+                let kv = index_value(self.atom_names[ints[i] as usize].as_str());
+                if i > 0 && kv < keys[i - 1] {
+                    sorted = false;
                 }
+                keys.push(kv);
                 i += 1;
+            }
+            if !sorted {
+                sort_ids_by_keys(&mut ints, &keys);
             }
         }
         if mixed {
             // elements and element properties (pos 3), in index order
             let mut j: usize = 0;
             for a in ints {
-                let ix = jsstr::array_index(self.atom_names[a as usize].as_str());
-                while j < elem_ix.len() && (elem_ix[j] as double) < (ix as double) {
-                    let ev = self.string_val(format!("{}", elem_ix[j]));
+                let ix = index_value(self.atom_names[a as usize].as_str());
+                while j < elem_ix.len() && (elem_ix[j] as double) < ix {
+                    let ev = self.string_val(int_to_string(elem_ix[j]));
                     out.push(ev);
                     j += 1;
                 }
@@ -3619,7 +3659,7 @@ impl Vm {
                 out.push(v);
             }
             while j < elem_ix.len() {
-                let ev = self.string_val(format!("{}", elem_ix[j]));
+                let ev = self.string_val(int_to_string(elem_ix[j]));
                 out.push(ev);
                 j += 1;
             }
@@ -8846,5 +8886,70 @@ pub fn srcs_of(v: &Vec<SEnt>) -> Vec<i32> {
 pub fn slot_room(ob: &mut JsObj, most: usize) {
     if ob.nv >= 2 && crate::rvm::vals_full(&ob.vals) {
         grow_vals(&mut ob.vals, if most > 2 { most - 2 } else { 0 });
+    }
+}
+
+/// Whether `s` is an array index's canonical text (0 .. 2^32 - 2): such
+/// keys come first in own-key order, ascending.
+pub fn is_index_key(s: &str) -> bool {
+    let n = s.as_bytes().len();
+    if n == 0 || n > 10 {
+        return false;
+    }
+    let mut first = true;
+    for x in s.bytes() {
+        if x < 48 || x > 57 || (first && x == 48 && n > 1) {
+            return false;
+        }
+        first = false;
+    }
+    n < 10 || index_value(s) <= 4294967294.0
+}
+
+/// The value of a canonical integer key's text (all its digits).
+pub fn index_value(s: &str) -> double {
+    let mut v: double = 0.0;
+    for x in s.bytes() {
+        v = v * 10.0 + ((x as int) - 48) as double;
+    }
+    v
+}
+
+/// `ids` ordered by `keys` (keys[i] belongs to ids[i]): a stable merge sort.
+pub fn sort_ids_by_keys(ids: &mut Vec<int>, keys: &Vec<double>) {
+    let n = ids.len();
+    let mut kv: Vec<double> = keys.clone();
+    let mut tk: Vec<double> = keys.clone();
+    let mut ti: Vec<int> = ids.clone();
+    let mut w: usize = 1;
+    while w < n {
+        let mut lo: usize = 0;
+        while lo < n {
+            let mid = if lo + w < n { lo + w } else { n };
+            let hi = if lo + 2 * w < n { lo + 2 * w } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            while k < hi {
+                if i < mid && (j >= hi || kv[i] <= kv[j]) {
+                    tk[k] = kv[i];
+                    ti[k] = ids[i];
+                    i += 1;
+                } else {
+                    tk[k] = kv[j];
+                    ti[k] = ids[j];
+                    j += 1;
+                }
+                k += 1;
+            }
+            lo = hi;
+        }
+        let mut q: usize = 0;
+        while q < n {
+            kv[q] = tk[q];
+            ids[q] = ti[q];
+            q += 1;
+        }
+        w = w * 2;
     }
 }
