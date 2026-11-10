@@ -200,27 +200,58 @@ impl Vm {
         let fi = self.frames.len() - 1;
         let bp = self.frames[fi].bp;
         let start = (bp - 2) as usize;
-        let mut saved: Vec<Val> = Vec::new();
+        // the frame's stack into the generator's elements, in place (the
+        // buffer kept from the last resume)
+        let e = self.elems_id(g);
+        let n_old = self.evecs[e].v.len();
+        if n_old > 0 {
+            let mut j: usize = 0;
+            while j < n_old {
+                let x = self.evecs[e].v[j];
+                self.dec(&x);
+                j += 1;
+            }
+            self.evecs[e].v.clear();
+        }
         let mut i = start;
         while i < self.stack.len() {
-            saved.push(self.stack[i].clone());
+            let x = self.stack[i];
+            self.inc(&x);
+            self.evecs[e].v.push(x);
             i += 1;
         }
         self.stack.truncate(start);
-        let promise = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_PROMISE { self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
-        let awaiting = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_AWAIT { self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
-        let mut rest: Vec<Val> = Vec::new();
-        {
+        let (pc, this_val, new_target, fobj, env, args_obj) = {
             let f = &self.frames[fi];
-            rest.push(Val::Num(f.pc as double));
-            rest.push(f.this_val.clone());
-            rest.push(f.new_target.clone());
-            rest.push(obj_val(f.fobj));
-            rest.push(obj_val(f.env));
-            rest.push(obj_val(f.args_obj));
+            (f.pc, f.this_val.clone(), f.new_target.clone(), f.fobj, f.env, f.args_obj)
+        };
+        if self.colds[self.objs[g as usize].cold as usize].elems2.len() < G_HANDLERS {
+            // first save: the slots made, the promise and the await flag
+            // kept where an async function set them
+            let promise = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_PROMISE { self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
+            let awaiting = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_AWAIT { self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
+            let rest: Vec<Val> = vec![Val::Undef, Val::Undef, Val::Undef, Val::Undef, Val::Undef, Val::Undef, promise, awaiting];
+            self.put_elems2(g, rest);
+        } else {
+            self.cut_elems2(g, G_HANDLERS as int);
         }
-        rest.push(promise);
-        rest.push(awaiting);
+        // slots 0..5 (pc, this, new.target, function, env, arguments): the
+        // same objects as last time, mostly, so only a changed one is counted
+        let vals: Vec<Val> = vec![Val::Num(pc as double), this_val, new_target, obj_val(fobj), obj_val(env), obj_val(args_obj)];
+        let c = self.objs[g as usize].cold as usize;
+        let mut k: usize = 0;
+        while k < 6 {
+            let old = self.colds[c].elems2[k];
+            let nv = vals[k];
+            if !same_ref(&old, &nv) {
+                self.inc(&nv);
+                self.colds[c].elems2[k] = nv;
+                self.dec(&old);
+            } else {
+                self.colds[c].elems2[k] = nv;
+            }
+            k += 1;
+        }
         // the frame's handlers, innermost last
         let depth = fi as int;
         let mut first = self.handlers.len();
@@ -229,15 +260,16 @@ impl Vm {
         }
         let mut h = first;
         while h < self.handlers.len() {
-            rest.push(Val::Num(self.handlers[h].catch_pc as double));
-            rest.push(Val::Num((self.handlers[h].sp - (start as int)) as double));
-            rest.push(obj_val(self.handlers[h].env));
+            let cpc = self.handlers[h].catch_pc;
+            let sp = self.handlers[h].sp - (start as int);
+            let henv = self.handlers[h].env;
+            self.push_elem2(g, Val::Num(cpc as double));
+            self.push_elem2(g, Val::Num(sp as double));
+            self.push_elem2(g, obj_val(henv));
             h += 1;
         }
         self.handlers.truncate(first);
         self.frames.pop();
-        self.put_elems(g, saved);
-        self.put_elems2(g, rest);
     }
 
     /// Runs `g` from where it stopped with `v` as the value of its `yield`
@@ -262,22 +294,42 @@ impl Vm {
         }
         let base = self.frames.len() as int;
         let start = self.stack.len() as int;
-        let saved = self.evecs[self.objs[g as usize].elems as usize].v.clone();
-        for x in saved {
+        // the saved stack back onto the stack; the buffer stays for the
+        // next save
+        let e = self.elems_id(g);
+        let ns = self.evecs[e].v.len();
+        let mut j: usize = 0;
+        while j < ns {
+            let x = self.evecs[e].v[j];
             self.stack.push(x);
+            j += 1;
         }
-        let rest = self.colds[self.objs[g as usize].cold as usize].elems2.clone();
-        let args_obj = obj_of(&rest[G_ARGS]);
+        j = 0;
+        while j < ns {
+            let x = self.evecs[e].v[j];
+            self.dec(&x);
+            j += 1;
+        }
+        self.evecs[e].v.clear();
+        let gc = self.objs[g as usize].cold as usize;
+        let r_args = self.colds[gc].elems2[G_ARGS];
+        let r_fobj = self.colds[gc].elems2[G_FOBJ];
+        let r_pc = self.colds[gc].elems2[G_PC];
+        let r_env = self.colds[gc].elems2[G_ENV];
+        let r_this = self.colds[gc].elems2[G_THIS];
+        let r_nt = self.colds[gc].elems2[G_NEW_TARGET];
+        let nrest = self.colds[gc].elems2.len();
+        let args_obj = obj_of(&r_args);
         let gp = self.objs[g as usize].func as int;
         unpack_code(&mut self.protos[gp as usize]);
         self.frames.push(Frame {
             proto: self.objs[g as usize].func as int,
-            fobj: obj_of(&rest[G_FOBJ]),
-            pc: num_of(&rest[G_PC]),
+            fobj: obj_of(&r_fobj),
+            pc: num_of(&r_pc),
             bp: start + 2,
-            env: obj_of(&rest[G_ENV]),
-            this_val: rest[G_THIS].clone(),
-            new_target: rest[G_NEW_TARGET].clone(),
+            env: obj_of(&r_env),
+            this_val: r_this,
+            new_target: r_nt,
             args_obj: args_obj,
             construct: false,
             gen: g,
@@ -286,16 +338,19 @@ impl Vm {
             mv_to: -1,
         });
         let mut i = G_HANDLERS;
-        while i + 2 < rest.len() {
+        while i + 2 < nrest {
+            let c = self.objs[g as usize].cold as usize;
+            let hpc = num_of(&self.colds[c].elems2[i]);
+            let hsp = num_of(&self.colds[c].elems2[i + 1]);
+            let henv = obj_of(&self.colds[c].elems2[i + 2]);
             self.handlers.push(Handler {
                 frame: base,
-                catch_pc: num_of(&rest[i]),
-                sp: start + num_of(&rest[i + 1]),
-                env: obj_of(&rest[i + 2]),
+                catch_pc: hpc,
+                sp: start + hsp,
+                env: henv,
             });
             i += 3;
         }
-        self.put_elems(g, Vec::new());
         self.objs[g as usize].pos = GS_RUNNING as i32;
         if state == GS_YIELD {
             self.stack.push(v);
@@ -750,4 +805,22 @@ impl Vm {
         }
         self.temp_roots.pop();
     }
+}
+
+/// Whether two values hold the same counted reference (the same object or
+/// string handle), or neither holds one.
+fn same_ref(a: &Val, b: &Val) -> bool {
+    if let Val::Obj(x) = a {
+        if let Val::Obj(y) = b {
+            return *x == *y;
+        }
+        return false;
+    }
+    if let Val::Str(x) = a {
+        if let Val::Str(y) = b {
+            return *x == *y;
+        }
+        return false;
+    }
+    !matches!(b, Val::Obj(_) | Val::Str(_))
 }
