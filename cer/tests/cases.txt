@@ -640,3 +640,16 @@ var r = [JSON.stringify([1, undefined, function () {}, Symbol('s'), { a: undefin
 }|{"c":3,"a":1}|{
  "b": 1
 }|[3,"s",false]
+
+==== js typed array length and subarray after the length getter is redefined
+var a = new Uint8Array(8), r = [];
+function L(x) { return x.length; }
+for (var i = 0; i < 3; i++) r.push(L(a));
+Object.defineProperty(a, 'length', { value: 42 }); r.push(L(a));
+var b = new Uint8Array(5); r.push(L(b));
+Object.defineProperty(Uint8Array.prototype, 'length', { get: function () { return -1; }, configurable: true }); r.push(L(b), L(new Int8Array(3)));
+var s = b.subarray(1, 3); r.push(s.byteLength, s[0] === 0);
+class U extends Uint8Array {}; var u = new U(4); r.push(u.subarray(1).constructor === U);
+r.join()
+----
+8,8,8,42,5,-1,3,2,true,true
