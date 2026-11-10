@@ -94,12 +94,16 @@ A page with three tabs: **Game**, **TSX** and **CSS**. The TSX tab holds a
 game in TypeScript with JSX, the CSS tab its stylesheet; the Example menu (or
 `?game=`) picks one of two:
 
-- **Scaffold Scramble** (`scaffold`): a climbing game. A construction bot
-  climbs slanted girders to a kitten while Grumble the crane-bot rolls cable
-  spools down at it; jump them, or pick up a wrench and smash them. Every
-  sprite is a small tree of boxes dressed by the stylesheet. The girders and
-  ladders are built once: the runtime serializes an unchanged JSX element
-  only once, which keeps a 200-element frame at about 2.5 ms in CErXes.
+- **Scaffold Scramble** (`scaffold`): a climbing game. Pip the builder
+  climbs slanted girders to a kitten while Grumble, a big crane-bot on
+  treads, rolls cable spools down at them; jump them, or pick up a wrench and
+  smash them. Every sprite is a small tree of boxes dressed by the
+  stylesheet (gradients, rounded corners, rotation). The night sky, the city,
+  the girders and the ladders are built once: the runtime serializes an
+  unchanged JSX element only once, which keeps a 350-element frame at about
+  2.5 ms in CErXes. On a touch screen the page shows arrow and JUMP buttons;
+  **Play full screen** (or `?game=scaffold&play`) leaves only the game and
+  the buttons, laid out for a phone held either way.
 - **Breakout** (`breakout`). Run
 (Ctrl+Enter) compiles the script and starts the loop; editing the CSS
 restyles the running game.

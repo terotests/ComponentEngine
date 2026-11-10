@@ -1,15 +1,21 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// From terotests/componentengine, playground/src/evg/games/scaffold.tsx.
+//
 // Scaffold Scramble: a climbing game in TypeScript + JSX, run by CErXes,
 // laid out by EVG with the CSS tab's stylesheet, painted as SVG.
 //
-// A kitten is stuck at the top of the night-shift scaffold, and Grumble the
-// crane-bot keeps rolling cable spools down the girders. Climb up to it.
+// Grumble the crane-bot has rolled up the night-shift scaffold and a kitten
+// is stuck on the beam above him. He keeps rolling cable spools down the
+// girders. Help Pip the builder climb up to the kitten.
 //
 //   ← →  walk        ↑ ↓  climb a ladder        Space  jump a spool
+//   On a phone: the buttons under the game, or tap the game to jump.
 //   Pick up a wrench to smash spools for a few seconds (no climbing then).
 //
 // The page calls tick(dt, input) and view() every frame; onKeyDown(key) on a
 // key press. Everything is boxes: sprites are small trees of divs, placed with
-// inline style and dressed by the classes in the CSS tab.
+// inline style and dressed by the classes in the CSS tab (gradients, rounded
+// corners, rotation, opacity).
 
 type Girder = { x0: number; x1: number; yL: number; yR: number };
 type Ladder = { x: number; lo: number; hi: number; broken: boolean };
@@ -19,7 +25,8 @@ type Mode = "title" | "play" | "dying" | "cleared" | "over";
 
 const W = 640;
 const H = 480;
-const R = 9; // spool radius
+const R = 9; // spool radius (for hits; drawn a little larger)
+const THROW_X = 142; // where Grumble puts a spool down
 
 // girders from the bottom (0) to Grumble's (5); the kitten's perch is 6
 const G: Girder[] = [
@@ -166,6 +173,7 @@ function tick(dt: number, input: any) {
 
 function die() {
   if (mode !== "play") return;
+  pop(P.x - 6, P.y - 44, "OUCH!");
   lives--;
   mode = "dying";
   modeClock = 0;
@@ -274,7 +282,7 @@ function grumble(dt: number) {
   if (throwClock <= 0) {
     throwClock = Math.max(1.1, 2.6 - level * 0.25) + Math.random() * 1.2;
     throwAnim = 0.4;
-    spools.push({ g: 5, x: 120, y: sy(5, 120) - R, dir: 1, fall: false, vy: 0, down: 0, checked: -1, jumped: false, spin: 0 });
+    spools.push({ g: 5, x: THROW_X, y: sy(5, THROW_X) - R, dir: 1, fall: false, vy: 0, down: 0, checked: -1, jumped: false, spin: 0 });
   }
 }
 
@@ -286,9 +294,46 @@ function pad(n: number, w: number) {
   return s;
 }
 
-// The girders and ladders never change: built once, and the runtime
-// serializes an unchanged element only once.
+// a little pseudo-random sequence, so the stars and windows are the same
+// every time the scene is built
+let seed = 7;
+function rnd() {
+  seed = (seed * 16807) % 2147483647;
+  return (seed % 10000) / 10000;
+}
+
+// The sky, the city, the girders and the ladders never change: built once,
+// and the runtime serializes an unchanged element only once.
 let scene: any = null;
+
+function Sky() {
+  const out: any[] = [<div className="sky" />];
+  for (let i = 0; i < 26; i++) {
+    const big = rnd() < 0.25;
+    out.push(<div className={big ? "star big" : "star"} style={{ left: Math.floor(rnd() * 630), top: Math.floor(30 + rnd() * 260) }} />);
+  }
+  out.push(<div className="moon-glow" style={{ left: 452, top: 26 }} />);
+  out.push(<div className="moon" style={{ left: 466, top: 40 }} />);
+  out.push(<div className="crater" style={{ left: 478, top: 50, width: 8, height: 8 }} />);
+  out.push(<div className="crater" style={{ left: 492, top: 64, width: 6, height: 6 }} />);
+  return out;
+}
+
+// the city behind the scaffold: towers with a few lit windows
+function City() {
+  const out: any[] = [];
+  const towers = [[0, 360, 70], [64, 330, 54], [112, 390, 80], [186, 300, 46], [226, 350, 74], [296, 320, 60],
+    [352, 372, 84], [430, 286, 52], [478, 340, 70], [544, 310, 50], [590, 360, 50]];
+  for (const [x, top, w] of towers) {
+    out.push(<div className="tower" style={{ left: x, top, width: w, height: 480 - top }} />);
+    for (let y = top + 10; y < 470; y += 16) {
+      for (let wx = x + 6; wx < x + w - 8; wx += 12) {
+        if (rnd() < 0.18) out.push(<div className={rnd() < 0.3 ? "win warm" : "win"} style={{ left: wx, top: y }} />);
+      }
+    }
+  }
+  return out;
+}
 
 function Girders() {
   const out: any[] = [];
@@ -307,79 +352,137 @@ function Ladders() {
     const top = sy(l.hi, l.x) + 10, bottom = sy(l.lo, l.x);
     const segs = l.broken ? [[top, top + 14], [bottom - 14, bottom]] : [[top, bottom]];
     for (const [a, b] of segs) {
-      out.push(<div className="rail" style={{ left: l.x - 9, top: a, height: b - a }} />);
+      out.push(<div className="rail" style={{ left: l.x - 10, top: a, height: b - a }} />);
       out.push(<div className="rail" style={{ left: l.x + 7, top: a, height: b - a }} />);
-      for (let y = a + 4; y < b - 1; y += 10) out.push(<div className="rung" style={{ left: l.x - 8, top: y }} />);
+      for (let y = a + 4; y < b - 1; y += 9) out.push(<div className="rung" style={{ left: l.x - 8, top: y }} />);
     }
   }
   return out;
 }
 
-function Bot() {
+// a stack of spare cable spools, Grumble's supply
+function Stack() {
+  const top = sy(5, 10) - 20;
+  return [[0, top], [20, top], [10, top - 19]].map(([x, y]) => (
+    <div className="spool" style={{ left: x, top: y }}>
+      <div className="spool-spoke" />
+      <div className="spool-hub" />
+    </div>
+  ));
+}
+
+// Pip the builder: a hard hat, red overalls, boots. From behind on a ladder.
+function Hero() {
   const flash = mode === "dying" && Math.floor(modeClock * 10) % 2 === 0;
   const step = Math.floor(P.walk) % 2;
-  const cls = "bot" + (P.face < 0 ? " left" : "") + (P.climb >= 0 ? " climbing" : "");
+  const climbing = P.climb >= 0;
+  const right = P.face > 0;
+  const swing = P.vx !== 0 || climbing ? step : 0;
+  const hold = P.wrench > 0;
+  const up = Math.floor(clock * 8) % 2;
   return (
-    <div className={cls} style={{ left: P.x, top: P.y - 26 }}>
-      <div className="bot-helmet" />
-      <div className="bot-visor" style={{ left: P.face < 0 ? 2 : 7 }} />
-      <div className={flash ? "bot-body hurt" : "bot-body"} />
-      <div className="bot-leg" style={{ left: 3, top: step ? 19 : 20 }} />
-      <div className="bot-leg" style={{ left: 9, top: step ? 20 : 19 }} />
-      {P.wrench > 0 && <div className={"wrench-held" + (Math.floor(clock * 8) % 2 ? " up" : "")}
-        style={{ left: P.face < 0 ? -9 : 16, top: Math.floor(clock * 8) % 2 ? 2 : 8 }} />}
+    <div className="hero" style={{ left: P.x - 2, top: P.y - 30 }}>
+      {hold && <div className="power" style={{ left: -8, top: -6, opacity: 0.25 + 0.2 * up }} />}
+      <div className="hero-boot" style={{ left: 3, top: swing ? 25 : 26 }} />
+      <div className="hero-boot" style={{ left: 11, top: swing ? 26 : 25 }} />
+      <div className="hero-arm" style={{ left: 0, top: climbing ? (step ? 8 : 12) : (swing ? 15 : 14) }} />
+      <div className="hero-arm" style={{ left: 16, top: climbing ? (step ? 12 : 8) : (swing ? 14 : 15) }} />
+      <div className={flash ? "hero-body hurt" : "hero-body"} />
+      <div className="hero-strap" style={{ left: 7 }} />
+      <div className="hero-strap" style={{ left: 11 }} />
+      <div className={climbing ? "hero-face back" : "hero-face"} />
+      {!climbing && <div className="hero-eye" style={{ left: right ? 11 : 6 }} />}
+      {!climbing && <div className="hero-cheek" style={{ left: right ? 13 : 5 }} />}
+      <div className="hero-hat" />
+      <div className="hero-brim" style={{ left: climbing ? 3 : right ? 8 : 2 }} />
+      {hold && <div className="wrench-held" style={{ left: right ? 17 : -9, top: up ? 4 : 10, transform: up ? "rotate(-40deg)" : "rotate(20deg)" }} />}
     </div>
   );
 }
 
-// Grumble: a crane-bot on treads, with a hook arm that swings up to throw.
+// Grumble: a big crane-bot on treads, with a cab for a head and a boom arm.
+// Now and then his lamp flashes and he honks; when he puts a spool down the
+// boom swings up with the spool on its hook.
 function Grumble() {
   const throwing = throwAnim > 0;
-  const blink = Math.floor(clock * 3) % 9 === 0;
+  const honking = !throwing && clock % 7 > 5.6;
+  const beat = Math.floor(clock * 7) % 2;
+  const blink = !throwing && Math.floor(clock * 3) % 11 === 0;
+  const look = throwing ? 2 : Math.floor(clock / 2) % 3 - 1;
+  const cross = throwing || honking;
+  const cheer = mode === "dying";
+  const lampOn = cross ? beat === 1 : cheer;
+  const roll = Math.floor(clock * 6) % 2;
   return (
-    <div className="grumble" style={{ left: 34, top: sy(5, 60) - 58 }}>
-      <div className={throwing ? "grumble-lamp on" : "grumble-lamp"} />
-      <div className="grumble-antenna" />
-      <div className="grumble-head" />
-      <div className={blink ? "grumble-eye shut" : "grumble-eye"} style={{ left: throwing ? 20 : 17 }} />
-      <div className={blink ? "grumble-eye shut" : "grumble-eye"} style={{ left: throwing ? 35 : 32 }} />
-      <div className="grumble-grille" style={{ left: 22 }} />
-      <div className="grumble-grille" style={{ left: 27 }} />
-      <div className="grumble-grille" style={{ left: 32 }} />
-      <div className="grumble-body" />
-      <div className="grumble-bolt" style={{ left: 12, top: 28 }} />
-      <div className="grumble-bolt" style={{ left: 46, top: 28 }} />
-      <div className="grumble-panel" />
-      <div className="grumble-arm" style={{ left: 0, top: 24 }} />
-      <div className="grumble-boom" style={{ left: 55, top: throwing ? 8 : 26 }} />
-      <div className="grumble-hook" style={{ left: 66, top: throwing ? 4 : 30 }} />
-      <div className="grumble-tread" />
-      <div className="grumble-wheel" style={{ left: 8 }} />
-      <div className="grumble-wheel" style={{ left: 24 }} />
-      <div className="grumble-wheel" style={{ left: 40 }} />
+    <div className="crane" style={{ left: 30, top: sy(5, 60) - 86 + (honking && beat ? 1 : 0) }}>
+      <div className="crane-tread" />
+      {[8, 26, 44, 62, 80].map((x) => <div className="crane-wheel" style={{ left: x + (roll ? 1 : 0) }} />)}
+      <div className="crane-body" />
+      <div className="crane-stripe" />
+      <div className="crane-bolt" style={{ left: 22, top: 48 }} />
+      <div className="crane-bolt" style={{ left: 84, top: 48 }} />
+      {/* the boom: down and resting, or up with a spool on the hook */}
+      <div className="crane-boom" style={{ left: 86, top: throwing ? 14 : 34, transform: throwing ? "rotate(-35deg)" : "rotate(10deg)" }} />
+      <div className="crane-cable" style={{ left: 108, top: throwing ? 4 : 38 }} />
+      {throwing ? <div className="spool held" style={{ left: 99, top: 14 }}>
+        <div className="spool-spoke" style={{ transform: "rotate(90deg)" }} />
+        <div className="spool-hub" />
+      </div> : <div className="crane-hook" style={{ left: 104, top: 50 }} />}
+      <div className="crane-arm" style={{ left: 2, top: cheer ? 26 : 34 }} />
+      <div className="crane-claw" style={{ left: 0, top: cheer ? 22 : 56 }} />
+      <div className="crane-cab" />
+      <div className="crane-screen" />
+      <div className={blink ? "crane-eye shut" : "crane-eye"} style={{ left: 40 + look }} />
+      <div className={blink ? "crane-eye shut" : "crane-eye"} style={{ left: 58 + look }} />
+      {cross && <div className="crane-brow" style={{ left: 38, transform: "rotate(15deg)" }} />}
+      {cross && <div className="crane-brow" style={{ left: 56, transform: "rotate(-15deg)" }} />}
+      <div className={cross || cheer ? "crane-grille open" : "crane-grille"} />
+      <div className="crane-antenna" />
+      <div className={lampOn ? "crane-lamp on" : "crane-lamp"} />
+      {honking && <span className="roar-text" style={{ left: 96, top: 2 }}>HONK!</span>}
+      {cheer && <span className="roar-text" style={{ left: 96, top: 2 }}>BEEP BEEP!</span>}
     </div>
   );
 }
 
 function Spools() {
   return spools.map((s) => (
-    <div className="spool" style={{ left: s.x - R, top: s.y - R }}>
-      <div className={Math.floor(s.spin * 2) % 2 ? "spool-hub turned" : "spool-hub"} />
+    <div className="spool" style={{ left: s.x - 10, top: s.y - 10 }}>
+      <div className="spool-spoke" style={{ transform: "rotate(" + Math.round((s.spin * 57.3) % 360) + "deg)" }} />
+      <div className="spool-hub" />
     </div>
   ));
 }
 
 function Kitten() {
   const blink = Math.floor(clock * 2) % 6 === 0;
+  const wag = Math.floor(clock * 3) % 2;
   return (
-    <div className="kitten" style={{ left: 282, top: 22 }}>
-      <div className="kitten-ear" style={{ left: 1 }} />
-      <div className="kitten-ear" style={{ left: 9 }} />
-      <div className="kitten-head" />
-      <div className={blink ? "kitten-eyes closed" : "kitten-eyes"} />
+    <div className="kitten" style={{ left: 280, top: 20 }}>
+      <div className="kitten-tail" style={{ left: wag ? 19 : 20, top: wag ? 9 : 10, transform: wag ? "rotate(20deg)" : "rotate(-10deg)" }} />
       <div className="kitten-body" />
-      <div className="kitten-tail" />
-      {Math.floor(clock) % 4 === 0 && <span className="help" style={{ left: 22, top: -6 }}>mew!</span>}
+      <div className="kitten-ear" style={{ left: 2 }} />
+      <div className="kitten-ear" style={{ left: 11 }} />
+      <div className="kitten-head" />
+      <div className="kitten-stripe" />
+      <div className={blink ? "kitten-eye closed" : "kitten-eye"} style={{ left: 5 }} />
+      <div className={blink ? "kitten-eye closed" : "kitten-eye"} style={{ left: 12 }} />
+      <div className="kitten-nose" />
+      {Math.floor(clock) % 4 < 2 && mode !== "cleared" && (
+        <div className="bubble" style={{ left: -44, top: -14 }}><span className="bubble-text">help!</span></div>
+      )}
+      {mode === "cleared" && <div className="bubble" style={{ left: -44, top: -14 }}><span className="bubble-text">purr!</span></div>}
+    </div>
+  );
+}
+
+function Wrench(props: { x: number; y: number }) {
+  const glow = 0.18 + 0.12 * Math.sin(clock * 6);
+  return (
+    <div className="wrench" style={{ left: props.x - 12, top: props.y }}>
+      <div className="wrench-glow" style={{ opacity: glow }} />
+      <div className="wrench-handle" style={{ transform: "rotate(35deg)" }} />
+      <div className="wrench-head" />
     </div>
   );
 }
@@ -388,46 +491,43 @@ function Hud() {
   return (
     <div className="hud">
       <div className="hud-col">
-        <span className="hud-label">1UP</span>
+        <span className="hud-label">SCORE</span>
         <span className="hud-value">{pad(score, 6)}</span>
       </div>
       <div className="hud-col">
         <span className="hud-label">BEST</span>
         <span className="hud-value">{pad(Math.max(best, score), 6)}</span>
       </div>
-      <div className="spacer" />
-      <div className="lives">
-        {[0, 1, 2, 3, 4].filter((i) => i < lives - 1).map(() => <div className="life" />)}
-      </div>
       <div className="bonus-box">
         <span className="hud-label">BONUS</span>
         <span className={bonus <= 1000 ? "bonus-value low" : "bonus-value"}>{pad(bonus, 4)}</span>
       </div>
-      <span className="hud-level">L{pad(level, 2)}</span>
+      <div className="lives">
+        {[0, 1, 2, 3, 4].filter((i) => i < lives - 1).map(() => <div className="life" />)}
+      </div>
+      <span className="hud-level">L{level}</span>
     </div>
   );
 }
 
-function Banner(props: { title: string; lines: string[] }) {
+function Banner(props: { title: string; lines: string[]; tall?: boolean }) {
   return (
-    <div className="banner" style={{ left: W / 2 - 170, top: 190 }}>
+    <div className="banner" style={{ left: W / 2 - 200, top: props.tall ? 150 : 180 }}>
       <span className="banner-title">{props.title}</span>
-      {props.lines.map((l) => <span className="banner-line">{l}</span>)}
+      {props.lines.map((l, i) => <span className={i === props.lines.length - 1 ? "banner-line go" : "banner-line"}>{l}</span>)}
     </div>
   );
 }
 
 function Scene() {
+  seed = 7;
   return (
     <div className="scene">
-      <div className="moon" />
+      <Sky />
+      <City />
       <Girders />
       <Ladders />
-      <div className="spool-pile" style={{ left: 2, top: sy(5, 10) - 40 }}>
-        <div className="pile-spool" style={{ left: 0, top: 20 }} />
-        <div className="pile-spool" style={{ left: 16, top: 20 }} />
-        <div className="pile-spool" style={{ left: 8, top: 2 }} />
-      </div>
+      <Stack />
     </div>
   );
 }
@@ -440,16 +540,18 @@ function view() {
       {scene}
       <Grumble />
       <Kitten />
-      {wrenches.filter((w) => !w.taken).map((w) => (
-        <div className="wrench" style={{ left: w.x - 5, top: sy(w.g, w.x) - 28 + Math.sin(clock * 4) * 2 }} />
-      ))}
+      {wrenches.filter((w) => !w.taken).map((w) => <Wrench x={w.x} y={sy(w.g, w.x) - 30 + Math.sin(clock * 4) * 2} />)}
       <Spools />
-      {mode !== "title" && <Bot />}
+      {mode !== "title" && <Hero />}
       {popups.map((p) => <span className="popup" style={{ left: p.x - 12, top: p.y }}>{p.text}</span>)}
       <Hud />
-      {mode === "title" && <Banner title="SCAFFOLD SCRAMBLE" lines={["Climb to the kitten. Jump the spools.", "← → walk   ↑ ↓ climb   Space jump", "Space or click to start"]} />}
+      {mode === "title" && <Banner tall title="SCAFFOLD SCRAMBLE" lines={[
+        "Grumble the crane-bot is rolling spools!",
+        "Climb up to the kitten and jump the spools.",
+        "← → walk   ↑ ↓ climb   Space jump",
+        "Tap, Space or JUMP to start"]} />}
       {mode === "cleared" && <Banner title="KITTEN SAVED!" lines={["Bonus " + bonus, "Next: level " + (level + 1)]} />}
-      {mode === "over" && <Banner title="GAME OVER" lines={["Score " + score, "Space or click to play again"]} />}
+      {mode === "over" && <Banner title="GAME OVER" lines={["Score " + score, "Tap, Space or JUMP to play again"]} />}
     </div>
   );
 }
