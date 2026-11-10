@@ -254,6 +254,11 @@ pub struct Vm {
     pub tdz_obj: int,
     /// BigInt values by their decimal text, and BigInt.prototype
     pub bigints: HashMap<String, int>,
+    /// the BigInts kept as a small value (bigint.rs), by that value; weak.
+    /// Open addressing, linear probing: bs_vals -1 is an empty slot
+    pub bs_keys: Vec<int>,
+    pub bs_vals: Vec<int>,
+    pub bs_count: int,
     pub bigint_proto: int,
     pub array_values_fn: int,
     pub roots: Vec<int>,
@@ -605,6 +610,9 @@ impl Vm {
             regex_shape: -1,
             tdz_obj: -1,
             bigints: HashMap::new(),
+            bs_keys: Vec::new(),
+            bs_vals: Vec::new(),
+            bs_count: 0,
             bigint_proto: -1,
             array_values_fn: -1,
             roots: Vec::new(),
@@ -2197,8 +2205,12 @@ impl Vm {
                     return Rc::new(String::new());
                 }
                 if self.objs[*o as usize].class == C_BIGINT {
-                    if let Val::Str(s) = self.colds[self.objs[*o as usize].cold as usize].prim {
+                    let pv = self.colds[self.objs[*o as usize].cold as usize].prim;
+                    if let Val::Str(s) = pv {
                         return self.sget(s);
+                    }
+                    if let Val::Num(n) = pv {
+                        return Rc::new(crate::bigint::int_text(n as int));
                     }
                 }
                 let p = self.to_primitive(v, "string");
@@ -3953,6 +3965,9 @@ impl Vm {
             }
             _ => {}
         }
+        if self.class_of(a) == C_BIGINT && self.class_of(b) == C_BIGINT {
+            return self.big_arith(OP_ADD, a, b);
+        }
         let pa = self.to_primitive(a, "default");
         if self.throwing {
             return Val::Undef;
@@ -4039,6 +4054,9 @@ impl Vm {
 
     pub fn arith(&mut self, code: int, a: &Val, b: &Val) -> Val {
         if is_obj(a) || is_obj(b) {
+            if self.class_of(a) == C_BIGINT && self.class_of(b) == C_BIGINT {
+                return self.big_arith(code, a, b);
+            }
             let pa = self.to_primitive(a, "number");
             if self.throwing {
                 return Val::Undef;
@@ -6386,9 +6404,16 @@ impl Vm {
             }
             OP_BIGINT => {
                 let v = self.pop();
-                let s = self.to_string(&v);
-                let b = self.bigint_val(s.as_str());
-                self.stack.push(b);
+                // a literal's text: small ones skip the copy
+                let n = if let Val::Str(h) = v { crate::bigint::small_big_of(self.sref(h)) } else { crate::bigint::small_big_limit() };
+                if n < crate::bigint::small_big_limit() {
+                    let b = self.bigint_small(n);
+                    self.stack.push(b);
+                } else {
+                    let s = self.to_string(&v);
+                    let b = self.bigint_val(s.as_str());
+                    self.stack.push(b);
+                }
             }
             OP_ITER_CLOSE => {
                 let it = self.pop();
@@ -7989,6 +8014,20 @@ impl Vm {
             }
             for k in dead {
                 self.bigints.remove(k.as_str());
+            }
+        }
+        if self.bs_count > 0 {
+            let mut dead2: Vec<int> = Vec::new();
+            let mut j: usize = 0;
+            while j < self.bs_vals.len() {
+                let v = self.bs_vals[j];
+                if v >= 0 && !self.objs[v as usize].marked {
+                    dead2.push(self.bs_keys[j]);
+                }
+                j += 1;
+            }
+            for k in dead2 {
+                self.bs_remove(k);
             }
         }
         if !self.strs.is_empty() {
