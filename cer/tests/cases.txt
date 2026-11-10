@@ -682,3 +682,20 @@ var c = Object.create({inh:1}); c.own = 2; var d = {}; for (var i = 0; i < 300; 
 [JSON.stringify(o), JSON.stringify(o, function(k, v){ return typeof v === 'number' ? v * 10 : v; }), JSON.stringify(c), JSON.stringify(d).length, new Function('return ' + JSON.stringify(d))().k299].join('|')
 ----
 {"2":[1,{"y":null}],"10":2,"b":1,"a":"Ta","n":5,"g":"G"}|{"2":[10,{"y":null}],"10":20,"b":10,"a":"Ta","n":5,"g":"G"}|{"own":2}|3081|299
+
+==== js DataView get/set as natives: in place, out of range, wrong receiver, coercion, BigInt
+var dv = new DataView(new ArrayBuffer(16)), r = [];
+dv.setUint32(0, 0xdeadbeef, true); r.push(dv.getUint32(0, true).toString(16), dv.getUint32(0).toString(16), dv.getUint8(0));
+dv.setFloat64(8, Math.PI); r.push(dv.getFloat64(8));
+dv.setInt16(2, -2); r.push(dv.getInt16(2), dv.getUint16(2, true));
+try { dv.getUint32(14); } catch (e) { r.push(e.name); }
+try { dv.getUint8(-1); } catch (e) { r.push(e.name); }
+try { DataView.prototype.getUint8.call({}, 0); } catch (e) { r.push(e.name); }
+try { new dv.getUint8(0); } catch (e) { r.push(e.name); }
+dv.setBigInt64(0, -5n); r.push(String(dv.getBigInt64(0)));
+dv.setUint8("1", 7); r.push(dv.getUint8(1.0), dv.getUint8("1"));
+dv.setUint8(3, "9"); r.push(dv.getUint8(3));
+r.push(dv.getUint32.name, dv.getUint32.length, dv.setUint32.name, dv.setUint32.length, typeof dv.setUint8(0, 1));
+r.join()
+----
+deadbeef,efbeadde,239,3.141592653589793,-2,65279,RangeError,RangeError,TypeError,TypeError,-5,7,7,9,getUint32,1,setUint32,2,undefined

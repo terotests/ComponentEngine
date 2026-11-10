@@ -3331,7 +3331,16 @@ impl Vm {
             let answer = self.host_sync.call(&req);
             return self.string_val(answer);
         }
-        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_TA_SORT) {
+        if id == crate::typed::NF_DVM_GET || id == crate::typed::NF_DVM_SET {
+            // not done in place (native_fast): the prelude's own method
+            let slow = if fobj >= 0 { self.objs[fobj as usize].env as int } else { -1 };
+            if slow < 0 {
+                self.throw_type("DataView method without its implementation");
+                return Val::Undef;
+            }
+            return self.call_value(Val::Obj(slow), this, args.clone());
+        }
+        if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_DV_METHOD) {
             return self.call_native_ta(id, &this, args);
         }
         if id >= 920 && id < 930 {
