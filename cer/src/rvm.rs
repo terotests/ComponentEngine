@@ -1807,10 +1807,11 @@ impl Vm {
                 }
             }
         } else if w3 <= -16 {
-            if let Val::Str(_) = v {
-                // a string's method: String.prototype's slot -16 - w3, its
-                // key checked as an inline cache's
-                let sp = self.string_proto;
+            if matches!(v, Val::Str(_)) || matches!(v, Val::Num(_)) {
+                // a string's (number's) method: String.prototype's
+                // (Number.prototype's) slot -16 - w3, its key checked as an
+                // inline cache's
+                let sp = if matches!(v, Val::Num(_)) { self.number_proto } else { self.string_proto };
                 let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
                 let slot = self.ic_slot(sp, atom, -16 - w3, false);
                 if slot >= 0 {
@@ -1915,10 +1916,11 @@ impl Vm {
             }
         }
         if !done {
-            if let Val::Str(_) = v {
+            if matches!(v, Val::Str(_)) || (matches!(v, Val::Num(_)) && self.number_proto >= 0) {
                 if atom != A_LENGTH {
-                    // String.prototype's own method: r_get_method's string path next time
-                    let sp = self.string_proto;
+                    // String.prototype's (Number.prototype's) own method:
+                    // r_get_method's primitive path next time
+                    let sp = if matches!(v, Val::Num(_)) { self.number_proto } else { self.string_proto };
                     let slot = self.find(sp, atom);
                     if slot >= 0 && slot < 65536 && (self.attr_at(sp, slot) & P_ACCESSOR) == 0 && self.is_callable(&self.objs[sp as usize].get_slot(slot as usize)) {
                         self.rcode[(rb + pc) as usize].c = (-16 - slot) as i32;
@@ -1972,7 +1974,18 @@ impl Vm {
                 let this = self.stack[(fpos + 1) as usize];
                 self.stack.truncate(fpos as usize);
                 self.native_depth += 1;
-                let r = self.call_native(id, fo, this, &args, false, Val::Undef);
+                // a String.prototype / Number.prototype method of primitive
+                // operands: call_native's checks (array, proxy, typed...)
+                // are not its, call_native2 answers it
+                let mut direct = (id >= crate::builtins::NF_SP_CHARAT && id <= crate::builtins::NF_SP_ITERATOR) || (id >= crate::builtins::NF_NP_TOSTRING && id <= crate::builtins::NF_NP_TOEXPONENTIAL);
+                let mut k = 0;
+                while direct && k < args.len() {
+                    if obj_of(&args[k]) >= 0 {
+                        direct = false;
+                    }
+                    k += 1;
+                }
+                let r = if direct { self.call_native2(id, fo, this, &args, false, Val::Undef) } else { self.call_native(id, fo, this, &args, false, Val::Undef) };
                 self.native_depth -= 1;
                 give_args(&mut self.arg_pool, args);
                 self.stack.push(r);
