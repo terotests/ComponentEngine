@@ -691,3 +691,20 @@ var r = [];
 r.join(';')
 ----
 [1.5,-0.25,0.1,123.456,100000,0.0015,12345678901234.5,9007199254740992,1];"ä😀x\n";{"10":[],"a":"b","k\"":{"x":"y"}};SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError;SyntaxError
+
+==== js DataView get/set as natives: in place, out of range, wrong receiver, coercion, BigInt
+var dv = new DataView(new ArrayBuffer(16)), r = [];
+dv.setUint32(0, 0xdeadbeef, true); r.push(dv.getUint32(0, true).toString(16), dv.getUint32(0).toString(16), dv.getUint8(0));
+dv.setFloat64(8, Math.PI); r.push(dv.getFloat64(8));
+dv.setInt16(2, -2); r.push(dv.getInt16(2), dv.getUint16(2, true));
+try { dv.getUint32(14); } catch (e) { r.push(e.name); }
+try { dv.getUint8(-1); } catch (e) { r.push(e.name); }
+try { DataView.prototype.getUint8.call({}, 0); } catch (e) { r.push(e.name); }
+try { new dv.getUint8(0); } catch (e) { r.push(e.name); }
+dv.setBigInt64(0, -5n); r.push(String(dv.getBigInt64(0)));
+dv.setUint8("1", 7); r.push(dv.getUint8(1.0), dv.getUint8("1"));
+dv.setUint8(3, "9"); r.push(dv.getUint8(3));
+r.push(dv.getUint32.name, dv.getUint32.length, dv.setUint32.name, dv.setUint32.length, typeof dv.setUint8(0, 1));
+r.join()
+----
+deadbeef,efbeadde,239,3.141592653589793,-2,65279,RangeError,RangeError,TypeError,TypeError,-5,7,7,9,getUint32,1,setUint32,2,undefined

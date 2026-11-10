@@ -39,8 +39,8 @@ pub fn push_small_int(s: &mut String, x: double) -> int {
     if !(x >= 0.0 && x < 2147483647.0) || x != ((x as int) as double) {
         return -1;
     }
-    let mut buf = [0u8; 12];
-    let mut n = x as u64;
+    let mut buf = [0u8; 10];
+    let mut n = x as u32;
     let mut p = buf.len();
     loop {
         p -= 1;
@@ -50,7 +50,10 @@ pub fn push_small_int(s: &mut String, x: double) -> int {
             break;
         }
     }
-    s.push_str(std::str::from_utf8(&buf[p..]).unwrap_or("0"));
+    // ASCII digits one by one: no UTF-8 check of the slice
+    for &c in &buf[p..] {
+        s.push(c as char);
+    }
     (buf.len() - p) as int
 }
 

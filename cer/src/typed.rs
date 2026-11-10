@@ -75,6 +75,14 @@ pub const NF_TA_NEW: int = 977;
 /// does (NaN last, -0 before +0) and gives true; false for anything
 /// __taKind refuses or a BigInt kind (the prelude sorts those).
 pub const NF_TA_SORT: int = 978;
+/// __dvMethod(kind, slow, isSet, name, length): DataView.prototype's
+/// get<Kind> / set<Kind> as a native (NF_DVM_GET / NF_DVM_SET, the kind in
+/// its pos, `slow` in its env): a number kind, an integer index and a view
+/// in bounds are done in place (Vm::native_fast), anything else calls
+/// `slow` (the prelude's checks and errors).
+pub const NF_DV_METHOD: int = 979;
+pub const NF_DVM_GET: int = 980;
+pub const NF_DVM_SET: int = 981;
 
 /// The default typed array order: NaN last, -0 before +0.
 pub fn num_before(a: double, b: double) -> bool {
@@ -855,6 +863,7 @@ impl Vm {
         self.method(g, "__dvMake", NF_DV_MAKE, 4);
         self.method(g, "__dvGet", NF_DV_GET, 4);
         self.method(g, "__dvSet", NF_DV_SET, 5);
+        self.method(g, "__dvMethod", NF_DV_METHOD, 5);
         self.method(g, "__taKind", NF_TA_KIND, 1);
         self.method(g, "__taSub", NF_TA_SUB, 4);
         self.method(g, "__taNew", NF_TA_NEW, 4);
@@ -1010,42 +1019,15 @@ impl Vm {
             return Val::Undef;
         }
         let miss = if id == NF_DV_GET { Val::Undef } else { Val::Bool(false) };
-        if v < 0 || args.len() < 3 || self.objs[v as usize].class != C_DATAVIEW {
+        if args.len() < 3 {
             return miss;
         }
-        let i = match &args[1] {
-            Val::Num(x) => {
-                let k = *x as int;
-                if (k as double) != *x || k < 0 {
-                    return miss;
-                }
-                k
-            }
-            _ => {
-                return miss;
-            }
-        };
         let kind = num(&args[2]) as int;
-        if is_big(kind) {
+        let at = self.dv_at(v, &args[1], kind);
+        if at < 0 {
             return miss;
         }
         let b = self.objs[v as usize].env as int;
-        if b < 0 || (self.objs[b as usize].pos & 1) != 0 {
-            return miss;
-        }
-        // the view's byte length as the prelude's dvLength
-        let blen = self.buf_size(b);
-        let off = self.objs[v as usize].func as int;
-        let fixed = self.objs[v as usize].pos as int;
-        if off > blen {
-            return miss;
-        }
-        let n = if fixed < 0 { blen - off } else if off + fixed > blen { -1 } else { fixed };
-        let size = kind_size(kind);
-        if n < 0 || i + size > n {
-            return miss;
-        }
-        let at = off + i;
         if id == NF_DV_GET {
             let little = args.len() > 3 && truthy(&args[3]);
             return Val::Num(self.dv_read(b, at, kind, little));
@@ -1064,6 +1046,80 @@ impl Vm {
         Val::Bool(true)
     }
 
+    /// The byte position in its buffer of view `v`'s `idx` for a number
+    /// `kind`: -1 unless v is a DataView, idx a non-negative integer and
+    /// the view in bounds over a buffer that is not detached.
+    pub fn dv_at(&mut self, v: int, idx: &Val, kind: int) -> int {
+        if v < 0 || self.objs[v as usize].class != C_DATAVIEW || is_big(kind) {
+            return -1;
+        }
+        let i = match idx {
+            Val::Num(x) => {
+                let k = *x as int;
+                if (k as double) != *x || k < 0 {
+                    return -1;
+                }
+                k
+            }
+            _ => {
+                return -1;
+            }
+        };
+        let b = self.objs[v as usize].env as int;
+        if b < 0 || (self.objs[b as usize].pos & 1) != 0 {
+            return -1;
+        }
+        // the view's byte length as the prelude's dvLength
+        let blen = self.buf_size(b);
+        let off = self.objs[v as usize].func as int;
+        let fixed = self.objs[v as usize].pos as int;
+        if off > blen {
+            return -1;
+        }
+        let n = if fixed < 0 { blen - off } else if off + fixed > blen { -1 } else { fixed };
+        if n < 0 || i + kind_size(kind) > n {
+            return -1;
+        }
+        off + i
+    }
+
+    /// NF_DVM_GET / NF_DVM_SET of function `f` on the stack frame at fpos
+    /// (this at fpos + 1, the arguments after): true when done in place,
+    /// the result in stack[fpos].
+    pub fn dvm_fast(&mut self, id: int, f: int, fpos: int, argc: int) -> bool {
+        let kind = self.objs[f as usize].pos as int;
+        let bp = (fpos + 2) as usize;
+        let v = obj_of(&self.stack[bp - 1]);
+        if argc < 1 {
+            return false;
+        }
+        let idx = self.stack[bp].clone();
+        let at = self.dv_at(v, &idx, kind);
+        if at < 0 {
+            return false;
+        }
+        let b = self.objs[v as usize].env as int;
+        if id == NF_DVM_GET {
+            let little = argc > 1 && truthy(&self.stack[bp + 1]);
+            let r = self.dv_read(b, at, kind, little);
+            self.stack[fpos as usize] = Val::Num(r);
+            return true;
+        }
+        if argc < 2 {
+            return false;
+        }
+        let x = match &self.stack[bp + 1] {
+            Val::Num(x) => *x,
+            _ => {
+                return false;
+            }
+        };
+        let little = argc > 2 && truthy(&self.stack[bp + 2]);
+        self.dv_write(b, at, kind, x, little);
+        self.stack[fpos as usize] = Val::Undef;
+        true
+    }
+
     /// buf_read for a DataView: integer kinds straight from the bytes.
     fn dv_read(&mut self, b: int, at: int, kind: int, little: bool) -> double {
         if kind == TK_FLOAT32 || kind == TK_FLOAT64 || kind == TK_FLOAT16 {
@@ -1072,21 +1128,22 @@ impl Vm {
         self.buf_to_bytes(b);
         let size = kind_size(kind);
         let c = self.objs[b as usize].cold as usize;
-        let mut u: int = 0;
+        // in doubles: a 32-bit int (C++) would overflow at 4 bytes
+        let mut u: double = 0.0;
         let mut k: int = 0;
         while k < size {
             let idx = if little { at + size - 1 - k } else { at + k };
-            u = u * 256 + (self.colds[c].nums[idx as usize] as int);
+            u = u * 256.0 + self.colds[c].nums[idx as usize];
             k += 1;
         }
-        if kind == TK_INT8 && u >= 128 {
-            u -= 256;
-        } else if kind == TK_INT16 && u >= 32768 {
-            u -= 65536;
-        } else if kind == TK_INT32 && u >= 2147483648 {
-            u -= 4294967296;
+        if kind == TK_INT8 && u >= 128.0 {
+            u -= 256.0;
+        } else if kind == TK_INT16 && u >= 32768.0 {
+            u -= 65536.0;
+        } else if kind == TK_INT32 && u >= 2147483648.0 {
+            u -= 4294967296.0;
         }
-        u as double
+        u
     }
 
     /// buf_write for a DataView: integer kinds straight to the bytes.
@@ -1097,15 +1154,17 @@ impl Vm {
         }
         self.buf_to_bytes(b);
         let size = kind_size(kind);
-        // ToInt8 … ToUint32: the low bits of the truncated number
-        let t = x as int;
-        let mut u = t & 4294967295;
+        // ToInt8 … ToUint32: the low bits of the truncated number, in
+        // doubles (exact below 2^53; a 32-bit int would overflow)
+        let tr = if x < 0.0 { -((-x).floor()) } else { x.floor() };
+        let mut u = tr - (tr / 4294967296.0).floor() * 4294967296.0;
         let c = self.objs[b as usize].cold as usize;
         let mut k: int = 0;
         while k < size {
             let idx = if little { at + k } else { at + size - 1 - k };
-            self.colds[c].nums[idx as usize] = (u & 255) as double;
-            u = u >> 8;
+            let q = (u / 256.0).floor();
+            self.colds[c].nums[idx as usize] = u - q * 256.0;
+            u = q;
             k += 1;
         }
     }
@@ -1119,6 +1178,19 @@ impl Vm {
     pub fn call_native_ta(&mut self, id: int, this: &Val, args: &Vec<Val>) -> Val {
         if id == NF_DV_MAKE || id == NF_DV_GET || id == NF_DV_SET {
             return self.call_native_dv(id, args);
+        }
+        if id == NF_DV_METHOD {
+            let kind = if args.is_empty() { 0 } else { num(&args[0]) as int };
+            let slow = if args.len() > 1 { obj_of(&args[1]) } else { -1 };
+            let set = args.len() > 2 && truthy(&args[2]);
+            let name = if args.len() > 3 { self.to_string(&args[3]) } else { String::new() };
+            let len = if args.len() > 4 { num(&args[4]) as int } else { 0 };
+            let f = self.native_fn(name.as_str(), if set { NF_DVM_SET } else { NF_DVM_GET }, len);
+            self.objs[f as usize].pos = kind as i32;
+            if slow >= 0 {
+                self.put_env(f, slow);
+            }
+            return Val::Obj(f);
         }
         if id == NF_TA_KIND || id == NF_TA_SUB || id == NF_TA_NEW || id == NF_TA_SORT {
             return self.call_native_ta2(id, args);

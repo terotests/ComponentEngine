@@ -6037,6 +6037,11 @@ impl Vm {
     /// it threw); the stack keeps its length.
     pub fn native_fast(&mut self, id: int, fpos: int, argc: int) -> bool {
         let bp = fpos + 2;
+        // DataView get<Kind> / set<Kind> in bounds
+        if id == crate::typed::NF_DVM_GET || id == crate::typed::NF_DVM_SET {
+            let f = obj_of(&self.stack[fpos as usize]);
+            return f >= 0 && self.dvm_fast(id, f, fpos, argc);
+        }
         // Math's functions of numbers, straight off the stack
         let which = id - crate::builtins::NF_MATH;
         if which >= 0 && which <= 30 && argc >= 1 {
