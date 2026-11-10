@@ -661,3 +661,11 @@ class U extends Uint8Array {}; var u = new U(4); r.push(u.subarray(1).constructo
 r.join()
 ----
 8,8,8,42,5,-1,3,2,true,true
+
+==== js integer keys in own-key order: shuffled insertion, 10-digit indices
+var o = {}; for (var i = 0; i < 2000; i++) o[(i * 7919) % 2000] = i;
+var last = -1, ok = true, c = 0; for (var k in o) { if (+k < last) ok = false; last = +k; c++; }
+var p = {b:1, 4294967295:1, 4294967294:1, '01':1, 1e9:1, 0:1, '-1':1};
+[ok, c, Object.keys(o).slice(0, 3).join('/'), Object.keys(p).join('/'), JSON.stringify(p)].join(';')
+----
+true;2000;0/1/2;0/1000000000/4294967294/b/4294967295/01/-1;{"0":1,"1000000000":1,"4294967294":1,"b":1,"4294967295":1,"01":1,"-1":1}

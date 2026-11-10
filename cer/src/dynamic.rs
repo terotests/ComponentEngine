@@ -147,6 +147,7 @@ impl Vm {
             self.throw_syntax(msg.as_str());
             return Val::Undef;
         }
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -180,6 +181,7 @@ impl Vm {
     /// proto, or -1 (nothing changed) and the error when pcomp cannot
     /// compile it.
     fn pcomp_program(&mut self, code: &str, strict: bool, is_eval: bool) -> (int, String) {
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -213,6 +215,7 @@ impl Vm {
         if !self.pcomp || src.starts_with("/*@cerxesModule ") {
             return self.eval_source(src, strict, true);
         }
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;
@@ -246,6 +249,7 @@ impl Vm {
     /// A module's function (`parser::module_source`) compiled with pcomp
     /// and linked: its proto, or -1 (nothing changed).
     fn pcomp_module(&mut self, ms: &parser::ModuleSource) -> int {
+        self.atoms_sync();
         let atoms = self.atoms.clone();
         let names = self.atom_names.clone();
         let base = self.protos.len() as int;

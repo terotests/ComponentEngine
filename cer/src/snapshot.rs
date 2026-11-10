@@ -414,6 +414,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         i += 1;
     }
     vm.atoms = HashMap::new();
+    vm.idx_pending = Vec::new();
     vm.atom_names = Vec::new();
     vm.atom_cache = Vec::new();
     vm.idx_keys = Vec::new();
