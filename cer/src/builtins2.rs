@@ -1259,17 +1259,23 @@ impl Vm {
             }
             NF_JSON_PARSE => {
                 let s = self.to_string(&a0);
-                let cs = s.chars().collect::<Vec<char>>();
-                let mut pos: usize = 0;
-                let v = self.json_parse_value(&cs, &mut pos);
+                let mut v = Val::Undef;
+                if !json_parse_fast(self, s.as_str(), &mut v) {
+                    let cs = s.chars().collect::<Vec<char>>();
+                    let mut pos: usize = 0;
+                    v = self.json_parse_value(&cs, &mut pos);
+                    if self.throwing {
+                        return Val::Undef;
+                    }
+                    while pos < cs.len() && (cs[pos] == ' ' || cs[pos] == '\t' || cs[pos] == '\n' || cs[pos] == '\r') {
+                        pos += 1;
+                    }
+                    if pos < cs.len() {
+                        self.throw_syntax("Unexpected non-whitespace character after JSON");
+                        return Val::Undef;
+                    }
+                }
                 if self.throwing {
-                    return Val::Undef;
-                }
-                while pos < cs.len() && (cs[pos] == ' ' || cs[pos] == '\t' || cs[pos] == '\n' || cs[pos] == '\r') {
-                    pos += 1;
-                }
-                if pos < cs.len() {
-                    self.throw_syntax("Unexpected non-whitespace character after JSON");
                     return Val::Undef;
                 }
                 if self.is_callable(&a1) {
