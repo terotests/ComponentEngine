@@ -67,6 +67,12 @@ const PH_ANNEX: int = 1008;
 const PH_NOP: int = 1009;
 /// a direct eval's call: `a` its scope, `b` the argument count
 const PH_EVAL: int = 1010;
+/// a known function's call compiled two ways (`a` the site, KSite): the
+/// inlined body from PH_KALT to PH_KMID, the call from there to PH_KEND;
+/// `finish` keeps one
+const PH_KALT: int = 1011;
+const PH_KMID: int = 1012;
+const PH_KEND: int = 1013;
 
 const M_LOAD: int = 0;
 const M_STORE: int = 1;
@@ -287,6 +293,54 @@ struct PCtl {
 
 /// The statements after a `using` declaration up to the end of its list:
 /// a try whose exits dispose of the list's resources
+/// A function declared once and only called (never written), whose calls
+/// with a closure argument may be inlined (`kcall_here`)
+struct KFn {
+    decl: int,
+    params: Vec<String>,
+    /// its body's braces
+    bo: int,
+    bc: int,
+}
+
+/// An inlined call of a KFn: which of its two codes `finish` keeps
+struct KSite {
+    name: String,
+    scope: int,
+    strict: bool,
+    /// the scopes made from here on are the inlined body's
+    s0: int,
+    /// refs: the inlined code's from r0, the call's from ra1 to rb1;
+    /// scopes the same from s0, sa1, sb1
+    r0: int,
+    sa1: int,
+    sb1: int,
+    ra1: int,
+    rb1: int,
+    /// the refs of the body's own tokens: from cb0 to cb1, but for the
+    /// closure's body (pairs in `ex`)
+    cb0: int,
+    cb1: int,
+    ex: Vec<int>,
+    /// 1 the inlined code, 0 the call
+    pick: int,
+}
+
+/// The closure parameter of an inlined body: its call `name()` compiles
+/// the closure's body (tokens `body` to `body_end`) in `scope`, the
+/// call site's
+struct KSub {
+    name: String,
+    bo: int,
+    bc: int,
+    body: int,
+    body_end: int,
+    scope: int,
+    active: bool,
+    hits: int,
+    site: int,
+}
+
 struct URegion {
     list: String,
     err: String,
@@ -616,6 +670,16 @@ pub struct PComp {
     xlabel: int,
     xpi: usize,
     xf: int,
+
+    // known functions inlined at calls with a closure argument
+    /// the program's own tokens (template substitutions' come after)
+    main_toks: int,
+    /// 0 not looked at, 1 may inline, -1 not (`with`, a direct eval)
+    kstate: int,
+    kcache: HashMap<String, int>,
+    kfns: Vec<KFn>,
+    ksites: Vec<KSite>,
+    ksubs: Vec<KSub>,
 }
 
 impl PComp {
@@ -721,6 +785,12 @@ impl PComp {
             xlabel: -1,
             xpi: 0,
             xf: 0,
+            main_toks: 0,
+            kstate: 0,
+            kcache: HashMap::new(),
+            kfns: Vec::new(),
+            ksites: Vec::new(),
+            ksubs: Vec::new(),
         };
         c.lex_tokens(&mut lx, 0);
         trim_toks(&mut c.toks);
@@ -729,6 +799,7 @@ impl PComp {
         }
         c.xs = lx.xs;
         c.pos = 0;
+        c.main_toks = c.toks.len() as int;
         c
     }
 
@@ -1795,9 +1866,25 @@ impl PComp {
 
     fn finish(&mut self) {
         let n = self.refs.len();
+        let dead = self.kpick();
         let mut i: usize = 0;
         while i < n {
-            self.resolve_ref(i);
+            if !dead.is_empty() && dead[2 * i] >= 0 {
+                // code that is not kept (its functions are still made):
+                // the names outside it are global ones, so nothing outside
+                // goes in a scope object for it
+                let lo = dead[2 * i];
+                let hi = dead[2 * i + 1];
+                let name = self.refs[i].name.clone();
+                let x = self.lookup_here(self.refs[i].scope, name.as_str());
+                if self.refs[i].direct < 0 && (x < 0 || self.binds[x as usize].scope < lo || self.binds[x as usize].scope >= hi) {
+                    self.refs[i].bind = -1;
+                } else {
+                    self.resolve_ref(i);
+                }
+            } else {
+                self.resolve_ref(i);
+            }
             i += 1;
         }
         if !self.eval_sites.is_empty() {
@@ -2564,6 +2651,25 @@ impl PComp {
             } else if (c as int) == PH_ANNEX {
                 self.x_annex((o.a as int));
             } else if (c as int) == PH_NOP {
+                // nothing
+            } else if (c as int) == PH_KALT || (c as int) == PH_KMID {
+                let k = o.a as usize;
+                let keep = if (c as int) == PH_KALT { 1 } else { 0 };
+                if self.ksites[k].pick != keep {
+                    // the code not kept, to its end mark
+                    let stop = if (c as int) == PH_KALT { PH_KMID } else { PH_KEND };
+                    let mut j = i;
+                    while j < n && !((code[j].code as int) == stop && (code[j].a as usize) == k) {
+                        if target[j] {
+                            self.xlabel = self.xo.len() as int;
+                        }
+                        map[j] = self.xo.len() as int;
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+            } else if (c as int) == PH_KEND {
                 // nothing
             } else if (c as int) == PH_EVAL {
                 let desc = self.x_eval_desc((o.a as int), (o.c as int));
@@ -5745,6 +5851,10 @@ impl PComp {
                 self.fail("unexpected super");
                 e = ex(E_OTHER);
             }
+        } else if !self.ksubs.is_empty() && self.ksub_here() {
+            e = ex(E_OTHER);
+        } else if self.kcall_start() && self.kcall_here() {
+            e = ex(E_OTHER);
         } else if self.iife_start() && self.iife_here() {
             e = ex(E_OTHER);
         } else {
@@ -6601,6 +6711,609 @@ impl PComp {
         self.emit3(PH_REF, r, M_LOAD, 0);
         self.leave_block(s, saved);
         self.goto(end);
+        true
+    }
+
+    /// `f(…)`: a call by a plain name, which `kcall_here` looks at.
+    fn kcall_start(&self) -> bool {
+        let t = &self.toks[self.pos as usize];
+        if (t.kind as int) != T_IDENT {
+            return false;
+        }
+        let p1 = self.pos + 1;
+        self.tok_is(p1, "(")
+    }
+
+    /// The tokens are the program's own and may be inlined into: no `with`
+    /// and no direct eval anywhere (they change what names mean).
+    fn kscan(&mut self) -> bool {
+        if self.kstate == 0 {
+            self.kstate = 1;
+            let mut j: int = 0;
+            while j < self.main_toks {
+                let t = &self.toks[j as usize];
+                let k = t.kind as int;
+                if k == T_IDENT {
+                    let w = self.names[t.v as usize].as_str();
+                    if w == "with" || w == "eval" {
+                        let p = j - 1;
+                        let n1 = j + 1;
+                        if !self.tok_is(p, ".") && !self.tok_is(p, "?.") && (w == "with" || self.tok_is(n1, "(")) {
+                            self.kstate = -1;
+                            return false;
+                        }
+                    }
+                } else if k == T_TEMPLATE {
+                    let xi = t.x;
+                    if xi >= 0 {
+                        for e in self.xs[xi as usize].exprs.iter() {
+                            if e.contains("eval") || e.contains("with") {
+                                self.kstate = -1;
+                                return false;
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+        self.kstate == 1
+    }
+
+    /// The function declared as `name` (KFn), or -1: declared once, a
+    /// plain function, every other use of the name a call (so never
+    /// written), and a small body `inline_ok` accepts with no functions
+    /// in it.
+    fn kcallee(&mut self, name: &str) -> int {
+        if let Some(k) = self.kcache.get(name) {
+            return *k;
+        }
+        let k = self.kcallee_scan(name);
+        self.kcache.insert(String::from(name), k);
+        k
+    }
+
+    fn kcallee_scan(&mut self, name: &str) -> int {
+        let nid = match self.name_ids.get(name) {
+            Some(i) => *i,
+            None => -1,
+        };
+        if nid < 0 || is_reserved(name) || is_strict_reserved(name) || name == "async" || name == "eval" || name == "arguments" || name == "let" {
+            return -1;
+        }
+        let mut decl: int = -1;
+        let mut j: int = 0;
+        while j < self.main_toks {
+            let t = &self.toks[j as usize];
+            let k = t.kind as int;
+            if k == T_TEMPLATE {
+                let xi = t.x;
+                if xi >= 0 {
+                    for e in self.xs[xi as usize].exprs.iter() {
+                        if e.contains(name) {
+                            return -1;
+                        }
+                    }
+                }
+            } else if k == T_IDENT && (t.v as int) == nid {
+                if (t.flags & PT_ESCAPED) != 0 {
+                    return -1;
+                }
+                let p = j - 1;
+                let n1 = j + 1;
+                if self.tok_is(p, ".") || self.tok_is(p, "?.") {
+                    // a property
+                } else if self.tok_is(p, "function") {
+                    if decl >= 0 {
+                        return -1;
+                    }
+                    decl = j;
+                } else if !self.tok_is(n1, "(") || self.tok_is(p, "new") {
+                    return -1;
+                }
+            }
+            j += 1;
+        }
+        if decl < 0 {
+            return -1;
+        }
+        // a statement: `function name(…) {…}`, not async
+        let q = decl - 2;
+        if q >= 0 && !self.tok_is(q, ";") && !self.tok_is(q, "{") && !self.tok_is(q, "}") {
+            return -1;
+        }
+        let po = decl + 1;
+        if !self.tok_is(po, "(") {
+            return -1;
+        }
+        let pc = self.mate_of(po);
+        let mut params: Vec<String> = Vec::new();
+        let mut i = po + 1;
+        while i < pc {
+            let t = &self.toks[i as usize];
+            if (t.kind as int) != T_IDENT || (t.flags & PT_ESCAPED) != 0 {
+                return -1;
+            }
+            let w = self.names[t.v as usize].clone();
+            if is_reserved(w.as_str()) || is_strict_reserved(w.as_str()) || w.as_str() == "eval" || w.as_str() == "arguments" || w.as_str() == "let" || w.as_str() == "yield" || w.as_str() == "await" || w.as_str() == "async" {
+                return -1;
+            }
+            for x in params.iter() {
+                if x.as_str() == w.as_str() {
+                    return -1;
+                }
+            }
+            params.push(w);
+            i += 1;
+            if i < pc {
+                if !self.tok_is(i, ",") {
+                    return -1;
+                }
+                i += 1;
+            }
+        }
+        let bo = pc + 1;
+        if !self.tok_is(bo, "{") {
+            return -1;
+        }
+        let bc = self.mate_of(bo);
+        let b1 = bo + 1;
+        if bc - bo > 120 || (self.toks[b1 as usize].kind as int) == T_STR {
+            return -1;
+        }
+        if !self.inline_ok(b1, bc) {
+            return -1;
+        }
+        // no functions inside: the body's bindings stay out of scope objects
+        i = b1;
+        while i < bc {
+            let t = &self.toks[i as usize];
+            let k = t.kind as int;
+            if k == T_IDENT && (self.tok_is(i, "function") || self.tok_is(i, "class")) {
+                return -1;
+            }
+            if k == T_PUNCT && self.tok_is(i, "=>") {
+                return -1;
+            }
+            if k == T_TEMPLATE {
+                let xi = t.x;
+                if xi >= 0 {
+                    for e in self.xs[xi as usize].exprs.iter() {
+                        if e.contains("=>") || e.contains("class") {
+                            return -1;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        self.kfns.push(KFn { decl: decl, params: params, bo: bo, bc: bc });
+        (self.kfns.len() as int) - 1
+    }
+
+    /// The end of the argument starting at `a` (a `,` or the call's `)`
+    /// at `ac`), or -1 for a spread.
+    fn karg_end(&self, a: int, ac: int) -> int {
+        let mut k = a;
+        while k < ac {
+            if self.tok_is(k, "(") || self.tok_is(k, "[") || self.tok_is(k, "{") {
+                k = self.mate_of(k) + 1;
+            } else if self.tok_is(k, ",") {
+                return k;
+            } else if self.tok_is(k, "...") {
+                return -1;
+            } else {
+                k += 1;
+            }
+        }
+        ac
+    }
+
+    /// `f(x, y, () => e)` where f is a KFn whose body calls its parameter
+    /// once as `g()`: the body runs as a block of the code around it
+    /// (parameters `let` bindings given the arguments, `return` a jump to
+    /// the end) and `g()` is `e`, compiled in the call's scope: no closure,
+    /// and the names the closure saw stay in registers. Whether `f` is
+    /// that function where the call is (and the body's other names mean
+    /// there what they mean where it is declared) is known at the end, so
+    /// the call is compiled too and `finish` keeps one (PH_KALT).
+    #[inline(never)]
+    fn kcall_here(&mut self) -> bool {
+        let at = self.pos;
+        if self.ts || self.in_params || !self.error.is_empty() || self.fs.is_empty() || !self.outer_desc.is_empty() || at >= self.main_toks || self.ksubs.len() > 1 || self.escaped() {
+            return false;
+        }
+        let call = at + 1;
+        let ac = self.mate_of(call);
+        // most calls: no `() =>` among the arguments
+        let mut q = call + 1;
+        let mut seen = false;
+        while q < ac {
+            if self.tok_is(q, "=>") {
+                let q1 = q - 1;
+                let q2 = q - 2;
+                if self.tok_is(q1, ")") && self.tok_is(q2, "(") {
+                    seen = true;
+                    break;
+                }
+            }
+            if self.tok_is(q, "(") || self.tok_is(q, "[") || self.tok_is(q, "{") {
+                let m = self.mate_of(q);
+                let m1 = q + 1;
+                // `(() =>` and `((() =>` are looked at inside
+                if !self.tok_is(m1, "(") {
+                    q = m;
+                }
+            }
+            q += 1;
+        }
+        if !seen {
+            return false;
+        }
+        // the arguments: one closure `() => e`, the rest small and plain
+        let mut starts: Vec<int> = Vec::new();
+        let mut ends: Vec<int> = Vec::new();
+        let mut ci: int = -1;
+        let mut cb: int = -1;
+        let mut ce: int = -1;
+        let mut a = call + 1;
+        while a < ac {
+            let e = self.karg_end(a, ac);
+            if e < 0 || e == a {
+                return false;
+            }
+            let mut s0 = a;
+            let mut e0 = e;
+            while self.tok_is(s0, "(") && self.mate_of(s0) == e0 - 1 {
+                s0 += 1;
+                e0 -= 1;
+            }
+            let s1 = s0 + 1;
+            let s2 = s0 + 2;
+            let s3 = s0 + 3;
+            if self.tok_is(s0, "(") && self.tok_is(s1, ")") && self.tok_is(s2, "=>") && s3 < e0 && !self.tok_is(s3, "{") {
+                if ci >= 0 {
+                    return false;
+                }
+                ci = starts.len() as int;
+                cb = s3;
+                ce = e0;
+            } else if e - a > 16 {
+                return false;
+            }
+            starts.push(a);
+            ends.push(e);
+            a = if e < ac { e + 1 } else { e };
+        }
+        if ci < 0 {
+            return false;
+        }
+        // the closure's body: one expression, nothing only a function has
+        let mut k = cb;
+        while k < ce {
+            let t = &self.toks[k as usize];
+            let tk = t.kind as int;
+            if tk == T_IDENT && (self.tok_is(k, "yield") || self.tok_is(k, "await")) {
+                return false;
+            }
+            if tk == T_TEMPLATE {
+                let xi = t.x;
+                if xi >= 0 {
+                    for e in self.xs[xi as usize].exprs.iter() {
+                        if e.contains("yield") || e.contains("await") {
+                            return false;
+                        }
+                    }
+                }
+            }
+            if self.tok_is(k, "(") || self.tok_is(k, "[") || self.tok_is(k, "{") {
+                k = self.mate_of(k);
+            } else if self.tok_is(k, ",") {
+                return false;
+            }
+            k += 1;
+        }
+        // the other arguments: nothing compiled twice that makes things
+        let na = starts.len() as int;
+        let mut i: int = 0;
+        while i < na {
+            if i != ci {
+                let mut q = starts[i as usize];
+                while q < ends[i as usize] {
+                    let tk = self.toks[q as usize].kind as int;
+                    if tk == T_TEMPLATE || self.tok_is(q, "function") || self.tok_is(q, "class") || self.tok_is(q, "=>") || self.tok_is(q, "yield") || self.tok_is(q, "await") {
+                        return false;
+                    }
+                    q += 1;
+                }
+            }
+            i += 1;
+        }
+        if !self.kscan() {
+            return false;
+        }
+        let name = self.text();
+        let kf = self.kcallee(name.as_str());
+        if kf < 0 {
+            return false;
+        }
+        let bo = self.kfns[kf as usize].bo;
+        let bc = self.kfns[kf as usize].bc;
+        let params = self.kfns[kf as usize].params.clone();
+        let np = params.len() as int;
+        if ci >= np || (at >= bo && at <= bc) {
+            return false;
+        }
+        // the closure parameter: called once, `g()`, and used no other way
+        let pname = params[ci as usize].clone();
+        let mut hits: int = 0;
+        let mut j = bo + 1;
+        while j < bc {
+            let t = &self.toks[j as usize];
+            if (t.kind as int) == T_IDENT && self.names[t.v as usize].as_str() == pname.as_str() {
+                let p = j - 1;
+                let n1 = j + 1;
+                let n2 = j + 2;
+                if !self.tok_is(p, ".") && !self.tok_is(p, "?.") {
+                    if !self.tok_is(n1, "(") || !self.tok_is(n2, ")") || self.tok_is(p, "new") {
+                        return false;
+                    }
+                    hits += 1;
+                }
+            }
+            j += 1;
+        }
+        if hits != 1 {
+            return false;
+        }
+        let site = self.ksites.len() as int;
+        let strict = self.f().proto.strict;
+        let saved = self.cur_scope;
+        self.ksites.push(KSite { name: name.clone(), scope: saved, strict: strict, s0: self.scopes.len() as int, r0: self.refs.len() as int, sa1: 0, sb1: 0, ra1: 0, rb1: 0, cb0: 0, cb1: 0, ex: Vec::new(), pick: 0 });
+        self.emit(PH_KALT, site, 0);
+        // inlined: the arguments, in the scope around
+        let saved_in = self.no_in;
+        self.no_in = false;
+        let mut given: Vec<int> = Vec::new();
+        i = 0;
+        while i < na {
+            if i != ci {
+                self.goto(starts[i as usize]);
+                self.assign();
+                if self.pos != ends[i as usize] && self.error.is_empty() {
+                    self.fail("inlined call: bad argument");
+                }
+                given.push(i);
+            }
+            i += 1;
+        }
+        self.no_in = saved_in;
+        if !self.error.is_empty() {
+            return true;
+        }
+        let s = self.new_scope(saved, false, false);
+        self.enter_block(s);
+        self.emit(PH_HOIST, s, 0);
+        let mut pb: Vec<int> = Vec::new();
+        i = 0;
+        while i < np {
+            if i == ci {
+                pb.push(-1);
+            } else {
+                let b = self.declare(s, params[i as usize].as_str(), K_LET);
+                pb.push(b);
+            }
+            i += 1;
+        }
+        let ng = given.len() as int;
+        let mut g = ng - 1;
+        while g >= 0 {
+            let pi = given[g as usize];
+            if pi < np {
+                self.emit_bind_init(pb[pi as usize]);
+            }
+            self.op(OP_POP);
+            g -= 1;
+        }
+        i = na;
+        while i < np {
+            if i != ci {
+                self.op(OP_UNDEF);
+                self.emit_bind_init(pb[i as usize]);
+                self.op(OP_POP);
+            }
+            i += 1;
+        }
+        for b in pb.iter() {
+            if *b >= 0 {
+                self.mark_inited(*b);
+            }
+        }
+        let rname = format!("%iife{}", self.binds.len());
+        let rb = self.declare(s, rname.as_str(), K_LET);
+        self.op(OP_UNDEF);
+        self.emit_bind_init(rb);
+        self.op(OP_POP);
+        self.mark_inited(rb);
+        let mut c = new_ctl(CT_INLINE);
+        c.scope = rb;
+        self.f().ctl.push(c);
+        self.ksubs.push(KSub { name: pname, bo: bo, bc: bc, body: cb, body_end: ce, scope: saved, active: true, hits: 0, site: site });
+        let cb0 = self.refs.len() as int;
+        self.ksites[site as usize].cb0 = cb0;
+        let b1 = bo + 1;
+        self.goto(b1);
+        let (mark, saved_end) = self.using_open(bc);
+        while !self.is("}") && self.kind() != T_EOF && self.error.is_empty() {
+            self.list_stmt = true;
+            self.using_here = true;
+            self.statement();
+        }
+        self.using_close(mark, saved_end);
+        let cb1 = self.refs.len() as int;
+        self.ksites[site as usize].cb1 = cb1;
+        let sub = self.ksubs.pop().unwrap();
+        if sub.hits != 1 && self.error.is_empty() {
+            self.fail("inlined call: closure not reached");
+        }
+        let ctl = self.f().ctl.pop().unwrap();
+        for x in ctl.breaks.iter() {
+            self.patch(*x);
+        }
+        let r = self.new_ref(rname.as_str(), false, rb);
+        self.emit3(PH_REF, r, M_LOAD, 0);
+        self.leave_block(s, saved);
+        let ra1 = self.refs.len() as int;
+        self.ksites[site as usize].ra1 = ra1;
+        let sa1 = self.scopes.len() as int;
+        self.ksites[site as usize].sa1 = sa1;
+        self.emit(PH_KMID, site, 0);
+        // the call
+        self.goto(at);
+        let e = self.primary();
+        if self.error.is_empty() {
+            self.call(e, false);
+        }
+        let rb1 = self.refs.len() as int;
+        self.ksites[site as usize].rb1 = rb1;
+        let sb1 = self.scopes.len() as int;
+        self.ksites[site as usize].sb1 = sb1;
+        self.emit(PH_KEND, site, 0);
+        let end = ac + 1;
+        self.goto(end);
+        true
+    }
+
+    /// In a body `kcall_here` inlines: the closure parameter's call, the
+    /// closure's body in a block of the call site's scope (the body's
+    /// own names hidden from it).
+    #[inline(never)]
+    fn ksub_here(&mut self) -> bool {
+        let top = self.ksubs.len() - 1;
+        let at = self.pos;
+        if !self.ksubs[top].active || at <= self.ksubs[top].bo || at >= self.ksubs[top].bc {
+            return false;
+        }
+        let t = &self.toks[at as usize];
+        if (t.kind as int) != T_IDENT || self.names[t.v as usize].as_str() != self.ksubs[top].name.as_str() {
+            return false;
+        }
+        let a1 = at + 1;
+        let a2 = at + 2;
+        if !self.tok_is(a1, "(") || !self.tok_is(a2, ")") {
+            return false;
+        }
+        let site = self.ksubs[top].site as usize;
+        let body = self.ksubs[top].body;
+        let body_end = self.ksubs[top].body_end;
+        let outer = self.ksubs[top].scope;
+        self.ksubs[top].active = false;
+        self.ksubs[top].hits += 1;
+        let x0 = self.refs.len() as int;
+        let saved = self.cur_scope;
+        let s = self.new_scope(outer, false, false);
+        self.enter_block(s);
+        self.emit(PH_HOIST, s, 0);
+        self.goto(body);
+        self.assign();
+        if self.pos != body_end && self.error.is_empty() {
+            self.fail("inlined call: bad closure body");
+        }
+        self.leave_block(s, saved);
+        let x1 = self.refs.len() as int;
+        self.ksites[site].ex.push(x0);
+        self.ksites[site].ex.push(x1);
+        self.ksubs[top].active = true;
+        let end = at + 3;
+        self.goto(end);
+        true
+    }
+
+    /// Which code of each inlined call to keep (KSite `pick`): the
+    /// inlined one when the name is the function's where the call is, it
+    /// is as strict as the call's function, and the names its body uses
+    /// mean the same there as where it is declared. The answer: the refs
+    /// of the code not kept, two for each: the scopes made there (from
+    /// and to), -1 for the others (none when there are no inlined calls).
+    fn kpick(&mut self) -> Vec<int> {
+        let mut dead: Vec<int> = Vec::new();
+        if self.ksites.is_empty() {
+            return dead;
+        }
+        let n = self.refs.len();
+        let mut i: usize = 0;
+        while i < n {
+            dead.push(-1);
+            dead.push(-1);
+            i += 1;
+        }
+        let ns = self.ksites.len();
+        let mut k: usize = 0;
+        while k < ns {
+            let ok = self.kpick_ok(k);
+            self.ksites[k].pick = if ok { 1 } else { 0 };
+            let a = if ok { self.ksites[k].ra1 } else { self.ksites[k].r0 };
+            let b = if ok { self.ksites[k].rb1 } else { self.ksites[k].ra1 };
+            let lo = if ok { self.ksites[k].sa1 } else { self.ksites[k].s0 };
+            let hi = if ok { self.ksites[k].sb1 } else { self.ksites[k].sa1 };
+            let mut r = a;
+            while r < b {
+                // an inlined call inside one not kept: the outer one's
+                let d = (2 * r) as usize;
+                if dead[d] < 0 {
+                    dead[d] = lo;
+                    dead[d + 1] = hi;
+                }
+                r += 1;
+            }
+            k += 1;
+        }
+        dead
+    }
+
+    fn kpick_ok(&self, k: usize) -> bool {
+        let name = self.ksites[k].name.clone();
+        let b = self.lookup_here(self.ksites[k].scope, name.as_str());
+        if b < 0 || self.binds[b as usize].global || self.binds[b as usize].kind != K_FUNC {
+            return false;
+        }
+        let ds = self.binds[b as usize].scope;
+        let mut proto: int = -1;
+        for h in self.scopes[ds as usize].hoists.iter() {
+            if self.hoists[*h as usize].name.as_str() == name.as_str() {
+                proto = self.hoists[*h as usize].proto;
+            }
+        }
+        if proto < 0 {
+            return false;
+        }
+        let pi = proto - self.proto_base;
+        if pi < 0 || pi >= (self.protos.len() as int) || self.protos[pi as usize].strict != self.ksites[k].strict {
+            return false;
+        }
+        let s0 = self.ksites[k].s0;
+        let mut r = self.ksites[k].cb0;
+        let cb1 = self.ksites[k].cb1;
+        let ex = self.ksites[k].ex.clone();
+        while r < cb1 {
+            let mut skip = false;
+            let mut e: usize = 0;
+            while e + 1 < ex.len() {
+                if r >= ex[e] && r < ex[e + 1] {
+                    skip = true;
+                }
+                e += 2;
+            }
+            let ref_ = &self.refs[r as usize];
+            if !skip && ref_.direct < 0 {
+                let x = self.lookup_here(ref_.scope, ref_.name.as_str());
+                let inner = x >= 0 && self.binds[x as usize].scope >= s0;
+                if !inner && x != self.lookup_here(ds, ref_.name.as_str()) {
+                    return false;
+                }
+            }
+            r += 1;
+        }
         true
     }
 
