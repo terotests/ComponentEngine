@@ -825,3 +825,15 @@ r.push([...g(4)].join("/"));
 r.join()
 ----
 10,[{"value":0,"done":false},{"value":1,"done":false},{"value":"end","done":true},{"done":true}],1,fin,fin,{"value":7,"done":true},fin,e,own,own,0,10,20,0,1,4,5,s4,0,1,0/1/2/3
+
+==== js split on one separator byte, strings refilled into kept buffers, limits and empty parts
+var r = [];
+r.push(JSON.stringify("a,b,,c,".split(",")), JSON.stringify(",x".split(",")), JSON.stringify("".split(",")));
+r.push(JSON.stringify("a,b,c,d".split(",", 2)), JSON.stringify("a,b".split(",", 0)), JSON.stringify("abc".split("|")));
+r.push(JSON.stringify("é,ü".split(",")), JSON.stringify("1;2;3".split(";").map(Number)), JSON.stringify("a  b".split(" ")));
+var parts = "k=v&x=y".split("&"); for (var i = 0; i < 300; i++) parts = ("p" + i + "&" + parts.join("&")).split("&");
+r.push(parts.length, parts[0], parts[parts.length - 1]);
+var big = []; for (var j = 0; j < 100; j++) big.push("w" + j + "x".repeat(j)); var back = big.join(",").split(","); r.push(back.length, back[99].length, back[50] === big[50]);
+r.join()
+----
+["a","b","","c",""],["","x"],[""],["a","b"],[],["abc"],["é","ü"],[1,2,3],["a","","b"],302,p299,x=y,100,102,true
