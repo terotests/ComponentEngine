@@ -2134,7 +2134,22 @@ impl Vm {
         self.stack.truncate((bp + w1) as usize);
         let mut p2 = pc + 1;
         self.frames[fi].pc = p2;
-        let changed = self.win_op(op, pi, bp, fi, &mut p2);
+        let mut changed = false;
+        // a small BigInt literal: its text (on the window's top) read in place
+        let mut done = false;
+        if code == OP_BIGINT && w1 > 0 {
+            let top = (bp + w1 - 1) as usize;
+            if let Val::Str(h) = self.stack[top] {
+                let n = crate::bigint::small_big_of(self.sref(h));
+                if n < crate::bigint::small_big_limit() {
+                    self.stack[top] = self.bigint_small(n);
+                    done = true;
+                }
+            }
+        }
+        if !done {
+            changed = self.win_op(op, pi, bp, fi, &mut p2);
+        }
         if self.throwing {
             return 0;
         }
