@@ -14,7 +14,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REV="${HERMES_REV:-51ae2a08ce8cb06fcfa718cddab9c94ea9eee7f6}"
+REV="${HERMES_REV:-d28938a0172bdd55b3e9fd177cc0d2792347ca91}"
 WORK="${HERMES_WORK:-$HERE/work}"
 : "${EMSDK:?activate emsdk first (source <emsdk>/emsdk_env.sh)}"
 
@@ -68,6 +68,7 @@ cp "$HERE/host.cpp" "$WORK/src/tools/playground/host.cpp"
 cat > "$WORK/src/tools/playground/CMakeLists.txt" <<'CM'
 set(HERMES_ENABLE_EH ON)
 add_hermes_tool(hermes-playground host.cpp LINK_OBJLIBS hermesvm_a)
+target_link_libraries(hermes-playground compileJS)
 CM
 grep -q 'add_subdirectory(playground)' "$WORK/src/tools/CMakeLists.txt" ||
   echo 'add_subdirectory(playground)' >> "$WORK/src/tools/CMakeLists.txt"
