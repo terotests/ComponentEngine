@@ -1,16 +1,16 @@
 # CEr — ComponentEngine's JavaScript evaluator as a strict Rust module
 
-An experiment beside the Ranger ComponentEngine ([`../engine`](../engine)), which it does not replace: a
-JavaScript engine written once in Rust (`src/`, a strict module in the sense
-of Ranger's [`docs/plans/PLAN_RUST_SYNTAX.md`](https://github.com/terotests/Ranger/blob/master/docs/plans/PLAN_RUST_SYNTAX.md)) and built two ways:
+CEr is ComponentEngine's JavaScript engine written once in Rust (`src/`, a
+strict module in the sense of Ranger's [`docs/plans/PLAN_RUST_SYNTAX.md`](https://github.com/terotests/Ranger/blob/master/docs/plans/PLAN_RUST_SYNTAX.md)),
+beside the Ranger engine ([`../engine`](../engine)), and built two ways:
 
 - by **cargo** into native code (`cargo run --release --bin cer -- file.js`);
 - by **`rgrc`** into the Ranger targets, like any `.rs` module:
   `npm run cer:build` writes `bin/Cer.cjs`, and `bench/CerMain.rgr` — a
   Ranger program importing `src/lib.rs` — builds for C++ and Go.
 
-The questions: how much of what ComponentEngine runs does it run, and how
-fast is it, natively and as Ranger output, next to ComponentEngine itself?
+`bench/` measures how much of what ComponentEngine runs it runs, and how
+fast, natively and as Ranger output, next to the Ranger engine.
 
 ```sh
 npm run cer:test             # unit tests: tests/cases.txt (values from Node)
