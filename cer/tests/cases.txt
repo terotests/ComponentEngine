@@ -1046,3 +1046,16 @@ var m4 = new Map([["a", 1]]); m4.clear(); m4.set("a", 5); r.push(m4.get("a"), m4
 r.join("|")
 ----
 30000|200|k293,k295,k296,k298,k299,k0,k3|-3|2|3|4|false|86|s50,s51,s52,s53,s54|view|2|5|1
+
+==== js Promise.resolve and the combinators natively for the intrinsic Promise: subclasses, the same promise back, a thenable, constructor read once, an overridden Promise.resolve still called, a reassigned global
+var r = [];
+class P extends Promise {} r.push(P.resolve(1) instanceof P, Promise.resolve(1) instanceof P, P.all([1]) instanceof P);
+var p0 = Promise.resolve(5); r.push(Promise.resolve(p0) === p0, P.resolve(p0) === p0);
+var thenable = { then: function (ok) { r.push("thenable called"); ok(7); } };
+var pt = Promise.resolve(thenable); r.push(pt instanceof Promise, "sync");
+var get = 0; var pc = Promise.resolve(1); Object.defineProperty(pc, "constructor", { get: function () { get++; return Promise; } }); Promise.resolve(pc); Promise.all([pc]); r.push(get);
+var orig = Promise.resolve; var calls = 0; Promise.resolve = function (v) { calls++; return orig.call(this, v); }; Promise.all([1, 2, 3]); Promise.race([1]); Promise.resolve = orig; r.push(calls);
+var G = Promise; globalThis.Promise = P; r.push(G.resolve.call(P, 1) instanceof P); globalThis.Promise = G;
+r.join("|")
+----
+true|false|true|true|false|true|sync|3|4|true
