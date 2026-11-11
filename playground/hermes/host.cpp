@@ -5,8 +5,14 @@
 // and not the start and teardown of a whole VM. build.sh adds this file to
 // Hermes's tools as the hermes-playground target.
 //
+// A script is compiled to bytecode with Hermes's optimizer (compileJS, what
+// `hermes -O` and React Native's build do) and the bytecode is run; a script
+// that does not compile is given to the runtime as source, which throws its
+// SyntaxError.
+//
 //   hermes_eval(src)  0 when the script ran, 1 when it threw (hermes_error())
 //   hermes_reset()    a new runtime: a fresh realm
+#include "hermes/CompileJS.h"
 #include "hermes/hermes.h"
 
 #include <emscripten/emscripten.h>
@@ -19,6 +25,21 @@ using namespace facebook;
 
 static std::unique_ptr<jsi::Runtime> rt;
 static std::string error;
+
+/// Bytecode made by compileJS, kept alive as long as the runtime uses it.
+class Bytecode : public jsi::Buffer {
+ public:
+  explicit Bytecode(std::string s) : s_(std::move(s)) {}
+  size_t size() const override {
+    return s_.size();
+  }
+  const uint8_t *data() const override {
+    return reinterpret_cast<const uint8_t *>(s_.data());
+  }
+
+ private:
+  std::string s_;
+};
 
 static void install(jsi::Runtime &r) {
   auto print = jsi::Function::createFromHostFunction(
@@ -67,8 +88,14 @@ EMSCRIPTEN_KEEPALIVE void hermes_reset() {
 EMSCRIPTEN_KEEPALIVE int hermes_eval(const char *src) {
   error.clear();
   try {
-    rt->evaluateJavaScript(
-        std::make_shared<jsi::StringBuffer>(std::string(src)), "script.js");
+    std::string source(src);
+    std::string bytecode;
+    if (::hermes::compileJS(source, "script.js", bytecode, true))
+      rt->evaluateJavaScript(
+          std::make_shared<Bytecode>(std::move(bytecode)), "script.js");
+    else
+      rt->evaluateJavaScript(
+          std::make_shared<jsi::StringBuffer>(std::move(source)), "script.js");
     rt->drainMicrotasks();
     return 0;
   } catch (const jsi::JSError &e) {

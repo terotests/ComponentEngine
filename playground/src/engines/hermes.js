@@ -6,7 +6,7 @@
 export default {
   id: "hermes",
   name: "Hermes · C++ → WASM",
-  about: "Meta's Hermes, the bytecode VM of React Native, in C++, compiled by emscripten (playground/hermes/build.sh), through its JSI API.",
+  about: "Meta's Hermes, the bytecode VM of React Native, in C++, compiled by emscripten (playground/hermes/build.sh). Scripts are compiled with its optimizer (as hermes -O) and run through the JSI API; no JIT in WebAssembly.",
   async load(base) {
     const { default: factory } = await import(base + "wasm/hermes.mjs");
     const module = await WebAssembly.compileStreaming(fetch(base + "wasm/hermes.wasm"));
