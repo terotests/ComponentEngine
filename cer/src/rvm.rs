@@ -2153,6 +2153,16 @@ impl Vm {
     #[inline(never)]
     pub fn r_step_k(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let k = (w0 >> 8) & 255;
+        if k == 1 && (self.protos[pi].code[pc as usize].code as int) == OP_TO_ARRAY {
+            // destructuring a plain array: read in place (OP_TO_ARRAY's case)
+            let v = *self.rget(bp, w2);
+            if let Val::Obj(o) = v {
+                if self.array_iter_plain(o) {
+                    self.stack[(bp + w1) as usize] = v;
+                    return;
+                }
+            }
+        }
         if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_INSTANCEOF {
             let a = *self.rget(bp, w2);
             let b = *self.rget(bp, w3);
@@ -2200,6 +2210,18 @@ impl Vm {
     pub fn r_iter_next(&mut self, bp: int, fi: usize, pc: int, w1: int, w3: int) -> bool {
         let it = self.stack[(bp + w1) as usize].clone();
         let o = obj_of(&it);
+        if o >= 0 && self.objs[o as usize].class == C_ITER && (self.objs[o as usize].pos & 32) != 0 && (self.objs[o as usize].pos & 3) != 3 && self.objs[o as usize].env >= 0 {
+            // a Map / Set iterator (coll_next)
+            self.frames[fi].pc = pc + 1;
+            let (m, i, k) = (self.objs[o as usize].env as int, self.objs[o as usize].func as int, self.objs[o as usize].pos as int);
+            return match self.coll_next(o, m, i, k) {
+                Some(v) => {
+                    self.stack[(bp + w3) as usize] = v;
+                    true
+                }
+                None => false,
+            };
+        }
         let src_obj = if o >= 0 { self.colds[self.objs[o as usize].cold as usize].home } else { -1 };
         self.frames[fi].pc = pc + 1;
         loop {

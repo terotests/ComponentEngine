@@ -245,6 +245,9 @@ pub struct Vm {
     /// the prelude's generic Array.prototype methods (an array by native
     /// id - NF_AP_PUSH), for receivers that are not plain arrays
     pub array_generic: int,
+    /// per function (Proto index): 0 not looked at, 1 an ordinary
+    /// comparator, 2 `(a, b) => a - b`, 3 `(a, b) => b - a` (sort_kind)
+    pub cmp_kinds: Vec<i32>,
     /// the prelude's proxy hooks (an array), -1 before
     pub proxy_hooks: int,
     /// %ThrowTypeError%
@@ -618,6 +621,7 @@ impl Vm {
             async_generator_function_proto: -1,
             async_from_sync: -1,
             array_generic: -1,
+            cmp_kinds: Vec::new(),
             proxy_hooks: -1,
             thrower: -1,
             callee_pair: -1,
@@ -5267,6 +5271,9 @@ impl Vm {
             }
             if (kind & 3) == 3 {
                 return self.for_in_next(o, src, i, kind >> 2);
+            }
+            if (kind & 32) != 0 {
+                return self.coll_next(o, src, i, kind);
             }
             if (kind & 8) != 0 {
                 return self.array_like_next(o, src, i, kind & 3);

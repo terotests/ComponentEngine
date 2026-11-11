@@ -978,3 +978,42 @@ var keep = []; for (var j = 0; j < 100; j++) keep.push([..."ab" + j]); r.push(ke
 r.join("|")
 ----
 1200|1|s1|1|598|600|0|t299|1880|51|true|3|true||3|false|h|é|l|l|o|3,4|1,2,9|2|5,6,5,6,5,6|5,6,7,5,6,7|3|1,2,3,4|ab99
+
+==== js sort of numbers: (a, b) => a - b / b - a comparators recognised from their text (no calls), sort() with each number's string made once; NaN, -0, undefined, mixed values, look-alike texts
+var r = [];
+function mk(n) { var a = []; for (var i = 0; i < n; i++) a.push((i * 7919) % n - n / 2); return a; }
+var a = mk(500); a.sort(function (x, y) { return x - y; }); r.push(a[0], a[1], a[499]);
+var b = mk(500); b.sort((p, q) => q - p); r.push(b[0], b[499]);
+var c = [3, -0, 0, NaN, 1, NaN, -Infinity, 2, Infinity, 0.5]; c.sort(function cmp(x,y){return x-y}); r.push(c.map(function (v) { return Object.is(v, -0) ? "-0" : String(v); }).join());
+var d = [3, 1, 2]; d.sort(function (x, y) { returnx - y; var returnx; }); r.push(d.join());
+var e = [3, 1, "2", 10]; e.sort((x, y) => x - y); r.push(e.join());
+var f = [3, 1, 2]; f.sort((x, y) => { return y - x }); r.push(f.join());
+var g = [3, 1, 2, undefined, 0]; g.sort((x, y) => x - y); r.push(g.join());
+var h = [5, 4, 3].toSorted((x, y) => x - y); r.push(h.join());
+var calls = 0; var o = { valueOf: function () { calls++; return 1; } }; var m = [2, o, 0]; m.sort((x, y) => x - y); r.push(calls > 0, m[0], m[2]);
+var big = mk(5000); big.sort(function(x,y){ return x - y; }); var ok = true; for (var i = 1; i < big.length; i++) if (big[i-1] > big[i]) ok = false; r.push(ok);
+var w = [3, 1, 2]; w.sort((x, y) => x - y /* c */); r.push(w.join());
+var z = [1, 3, 2]; z.sort((y, x) => x - y); r.push(z.join());
+var ds = [10, 9, 1, -1, -0, 0, NaN, 1e21, 0.1, 2, -10, 1e-7, 100, Infinity, -Infinity]; ds.sort(); r.push(ds.map(function (v) { return Object.is(v, -0) ? "-0" : String(v); }).join());
+var du = [3, undefined, 20, 1]; du.sort(); r.push(du.join(), mk(3000).sort().slice(0, 5).join());
+r.join("|")
+----
+-250|-249|249|249|-250|-Infinity,-0,0,0.5,1,3,NaN,NaN,2,Infinity|3,1,2|1,2,3,10|3,2,1|0,1,2,3,|3,4,5|true|0|2|true|1,2,3|3,2,1|-1,-10,-Infinity,-0,0,0.1,1,10,100,1e+21,1e-7,2,9,Infinity,NaN|1,20,3,|-1,-10,-100,-1000,-1001
+
+==== js Map and Set iterators are live: entries added while iterating are reached, deleted ones skipped, clear starts over (for-of, forEach, next), destructuring [k, v] in place
+var r = [];
+var m = new Map([[1, "a"], [2, "b"]]); var seen = []; for (var [k, v] of m) { seen.push(k + v); if (k < 4) m.set(k + 2, "x"); } r.push(seen.join());
+var m2 = new Map([[1, 1], [2, 2], [3, 3]]); var s2 = []; for (var [k] of m2) { s2.push(k); if (k == 1 && s2.length == 1) { m2.delete(2); m2.delete(1); m2.set(1, 9); } } r.push(s2.join());
+var st = new Set(["p"]); var s3 = []; for (var x of st) { s3.push(x); if (x.length < 4) st.add(x + "q"); } r.push(s3.join());
+var m4 = new Map([[1, 1], [2, 2]]); var s4 = []; for (var [k] of m4) { s4.push(k); if (k == 1) { m4.clear(); m4.set(5, 5); m4.set(6, 6); } } r.push(s4.join());
+var m5 = new Map([[1, 1], [2, 2]]); var s5 = []; m5.forEach(function (v, k) { s5.push(k); if (k == 1) { m5.clear(); m5.set(7, 7); } }); r.push(s5.join());
+var it = new Map([["a", 1]]).entries(); var n1 = it.next(), n2 = it.next(), n3 = it.next(); r.push(JSON.stringify([n1, n2, n3]));
+var m6 = new Map([[1, 1]]); var it6 = m6.keys(); m6.clear(); m6.set(3, 3); r.push(JSON.stringify(it6.next()), JSON.stringify(it6.next()));
+var m7 = new Map([[1, 1]]); var it7 = m7.values(); it7.next(); it7.next(); m7.set(2, 2); r.push(JSON.stringify(it7.next()));
+var big = new Map(); for (var i = 0; i < 1000; i++) big.set("k" + i, i); var sum = 0; for (var [k, v] of big) sum += v; for (var v2 of big.values()) sum += v2; for (var k2 of big.keys()) sum += k2.length; r.push(sum);
+r.push([...new Map([[1, 2], [3, 4]])].join("|"), Array.from(new Set([5, 5, 6])).join(), new Map(new Map([[8, 9]])).get(8), [...new Set([1, 2]).entries()].join("|"));
+var s8 = new Set([1, 2, 3]); var o8 = []; for (var x of s8) { o8.push(x); s8.delete(x); } r.push(o8.join(), s8.size);
+var ws = new WeakMap(); var key = {}; ws.set(key, 1); r.push(ws.get(key), Object.prototype.toString.call(new Map().entries()), typeof new Set().values().next);
+r.join("|")
+----
+1a,2b,3x,4x,5x|1,3,1|p,pq,pqq,pqqq|1,5,6|1,7|[{"value":["a",1],"done":false},{"done":true},{"done":true}]|{"value":3,"done":false}|{"done":true}|{"done":true}|1002890|1,2|3,4|5,6|9|1,1|2,2|1,2,3|0|1|[object Map Iterator]|function
