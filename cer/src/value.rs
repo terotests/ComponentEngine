@@ -849,6 +849,8 @@ pub struct Proto {
     pub rest: int,
     /// `function() { this.m.apply(this, arguments) }` (pcomp): m's atom,
     /// -1 for any other function; `new` of it enters m itself
+    /// -2: a class's default derived constructor,
+    /// `constructor(...args) { super(...args); }` (Vm::ctor_target)
     pub fwd_atom: int,
     /// no `return` with a value (pcomp; false when not known)
     pub void_ret: bool,

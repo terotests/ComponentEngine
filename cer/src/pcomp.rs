@@ -8062,6 +8062,11 @@ impl PComp {
             }
             let p = self.function_rest(mf, name.as_str(), -1);
             self.pop_tokens(&saved_tok);
+            if derived {
+                // `new` of the class may enter its parent (Vm::ctor_target)
+                let pi = (p - self.proto_base) as usize;
+                self.protos[pi].fwd_atom = -2;
+            }
             self.set_op(c_at, OP_CLOSURE, p, 0);
             ctor = p;
         }

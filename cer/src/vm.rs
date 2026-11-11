@@ -4704,6 +4704,26 @@ impl Vm {
         Val::Obj(o)
     }
 
+    /// The constructor `new f(…)` enters: f, or, when f is a class with the
+    /// default derived constructor (Proto.fwd_atom -2) and no fields, its
+    /// parent class, which that constructor would call with the same
+    /// arguments, `this` and new.target (and so on up). The parent is read
+    /// as super(…) reads it: f's prototype now.
+    #[inline(never)]
+    pub fn ctor_target(&self, fo: int) -> int {
+        let mut c = fo;
+        loop {
+            if self.protos[self.objs[c as usize].func as usize].fwd_atom != -2 || !self.colds[self.objs[c as usize].cold as usize].elems2.is_empty() {
+                return c;
+            }
+            let par = self.objs[c as usize].proto as int;
+            if par < 0 || self.objs[par as usize].class != C_FUNCTION || !self.protos[self.objs[par as usize].func as usize].constructible() {
+                return c;
+            }
+            c = par;
+        }
+    }
+
     /// `new f(…)` of a forwarder f (Proto.fwd_atom: its body is just
     /// `this.m.apply(this, arguments)`) whose new object is `this`: m when
     /// that call can be m's own frame (a construct frame of m: m returns
@@ -6740,7 +6760,11 @@ impl Vm {
             }
             let this = self.make_this(&f);
             self.stack.insert((fpos + 1) as usize, this);
-            self.enter_function(fo, argc, true, f.clone());
+            let t = self.ctor_target(fo);
+            if t != fo {
+                self.stack[fpos as usize] = Val::Obj(t);
+            }
+            self.enter_function(t, argc, true, f.clone());
             return true;
         }
         let mut args: Vec<Val> = Vec::new();
