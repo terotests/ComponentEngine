@@ -3415,11 +3415,22 @@ impl<'a> Cg<'a> {
                 self.op(I32_ADD);
                 self.set(lt);
             }
+            // SEnt.len is the byte length only for a prefix view (up >= 0),
+            // 0 for a whole buffer: compare it when both are views
+            let o_upv = std::mem::offset_of!(crate::vm::SEnt, up) as u32;
             self.get(L_T3);
             self.mem(I32_LOAD, 2, o_len);
             self.get(L_T4);
             self.mem(I32_LOAD, 2, o_len);
             self.op(I32_NE);
+            self.get(L_T3);
+            self.mem(I32_LOAD, 2, o_upv);
+            self.get(L_T4);
+            self.mem(I32_LOAD, 2, o_upv);
+            self.op(I32_OR);
+            self.i32c(0);
+            self.op(I32_GE_S);
+            self.op(I32_AND);
             self.op(IF);
             self.op(T_VOID);
             self.extra += 1;

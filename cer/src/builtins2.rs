@@ -226,10 +226,11 @@ impl Vm {
             }
             NF_AP_UNSHIFT => {
                 let o = self.this_array(&this);
-                let mut i: usize = 0;
-                for a in args.iter() {
-                    self.insert_elem(o, i as int, *a);
-                    i += 1;
+                // the last first, each at 0 (the vector's front room)
+                let mut i = args.len();
+                while i > 0 {
+                    i -= 1;
+                    self.insert_elem(o, 0, args[i]);
                 }
                 Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double)
             }
@@ -286,14 +287,32 @@ impl Vm {
             }
             NF_AP_CONCAT => {
                 let o = self.this_array(&this);
-                let mut out = self.elems_of(o);
+                // one buffer of the final size, filled once (not a clone
+                // grown by pushes): a = a.concat(x) in a loop copies a once
+                let mut total: usize = args.len();
+                let plain = o >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && self.colds[self.objs[o as usize].cold as usize].elems2.is_empty();
+                if plain {
+                    total += self.evecs[self.objs[o as usize].elems as usize].v.len();
+                }
                 for a in args.iter() {
                     if let Val::Obj(x) = &a {
                         if self.objs[*x as usize].class == C_ARRAY {
-                            let items = self.evecs[self.objs[*x as usize].elems as usize].v.clone();
-                            for it in items {
-                                out.push(it);
-                            }
+                            total += self.evecs[self.objs[*x as usize].elems as usize].v.len();
+                        }
+                    }
+                }
+                let mut out: Vec<Val> = Vec::with_capacity(total);
+                if plain {
+                    let e = self.objs[o as usize].elems as usize;
+                    elems_append(&mut out, &self.evecs[e]);
+                } else {
+                    out = self.elems_of(o);
+                }
+                for a in args.iter() {
+                    if let Val::Obj(x) = &a {
+                        if self.objs[*x as usize].class == C_ARRAY {
+                            let e = self.objs[*x as usize].elems as usize;
+                            elems_append(&mut out, &self.evecs[e]);
                             continue;
                         }
                     }
