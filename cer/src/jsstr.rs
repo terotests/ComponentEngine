@@ -263,6 +263,18 @@ pub fn prefix(s: &str, _n: int) -> &str {
     s
 }
 
+/// The `n` bytes of `s` from byte `a` (a front view's text, Vm::sref_front;
+/// Rust only, like prefix).
+#[ranger::target(rust)]
+pub fn mid(s: &str, a: int, n: int) -> &str {
+    &s[(a as usize)..((a + n) as usize)]
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn mid(s: &str, _a: int, _n: int) -> &str {
+    s
+}
+
 /// Byte `i` of an ASCII string, i in range.
 pub fn byte_at(s: &str, i: int) -> int {
     let r: int = ranger::native!(rust: { s.as_bytes()[i as usize] as int }, es6: "{s}.charCodeAt({i})");

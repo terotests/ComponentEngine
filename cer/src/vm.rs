@@ -1360,6 +1360,7 @@ impl Vm {
         rc_vacate(&mut self.strs[i].s, &self.sempty);
         self.strs[i].up = -1;
         self.strs[i].len = 0;
+        self.strs[i].off = 0;
         self.strs[i].flag = 2;
         self.strs[i].inz = false;
         self.sfreed.push(h);
@@ -1423,12 +1424,24 @@ impl Vm {
         }
     }
 
+    #[inline(never)]
     fn sref_up(&self, h: int) -> &str {
+        if self.strs[h as usize].off != 0 {
+            return self.sref_front(h);
+        }
         let mut x = self.strs[h as usize].up;
         while self.strs[x as usize].up >= 0 {
             x = self.strs[x as usize].up;
         }
         jsstr::prefix(self.strs[x as usize].s.as_str(), self.strs[h as usize].len as int)
+    }
+
+    /// A front view's text (str_prepend): `len` bytes from `off` of its
+    /// buffer's handle (always `up` itself).
+    #[inline(never)]
+    fn sref_front(&self, h: int) -> &str {
+        let x = self.strs[h as usize].up;
+        jsstr::mid(self.strs[x as usize].s.as_str(), self.strs[h as usize].off as int, self.strs[h as usize].len as int)
     }
 
     /// String handle `h` as a shared string.
@@ -1493,6 +1506,73 @@ impl Vm {
         // h's text now lies in h2's buffer: h holds h2
         self.strs[h2 as usize].rc += 1;
         h2
+    }
+
+    /// A string's length in bytes.
+    pub fn hbytes(&self, h: int) -> int {
+        if self.strs[h as usize].up < 0 {
+            return self.strs[h as usize].s.as_bytes().len() as int;
+        }
+        self.strs[h as usize].len as int
+    }
+
+    /// `b` + string `y` without copying y each time (`s = x + s` in a
+    /// loop): the text goes into a buffer with room before it, held by a
+    /// handle of its own that no value has, and the result is a view of
+    /// it (up, off, len). When y is such a view starting at its buffer's
+    /// text and nothing else holds the buffer, b is written into the room
+    /// before it; otherwise y moves into a new buffer whose room is an
+    /// eighth of the text (all of it when y was a view whose room ran
+    /// out, so a long run of prepends copies each byte O(1) times). Rust
+    /// only (prepend_ok); -1 when it does not apply.
+    #[inline(never)]
+    pub fn str_prepend(&mut self, b: &str, y: int) -> int {
+        if !prepend_ok() || y <= 0 {
+            return -1;
+        }
+        let yi = y as usize;
+        let bl = b.as_bytes().len() as int;
+        let r = self.strs[yi].up as int;
+        let view = r >= 0 && self.strs[r as usize].up < 0 && self.strs[r as usize].flag == 0 && self.strs[yi].off > 0;
+        if view {
+            let ri = r as usize;
+            let off = self.strs[yi].off as int;
+            if off == (self.strs[ri].len as int) && off >= bl && rc_front_write(&mut self.strs[ri].s, off - bl, b) {
+                self.strs[ri].len = (off - bl) as i32;
+                let n = (self.strs[yi].len as int) + bl;
+                return self.str_view(r, off - bl, n, y, b);
+            }
+        }
+        let yt = self.sget(y);
+        let total = bl + (yt.as_bytes().len() as int);
+        let room = if view { total } else if total / 8 > 64 { total / 8 } else { 64 };
+        let mut s = String::new();
+        let mut k: int = 0;
+        while k < room {
+            s.push(' ');
+            k += 1;
+        }
+        s.push_str(b);
+        s.push_str(yt.as_str());
+        let root = self.new_handle(Rc::new(s), 0);
+        self.strs[root as usize].len = room as i32;
+        self.str_view(root, room, total, y, b)
+    }
+
+    /// A new handle for the `n` bytes at `off` of handle `root`'s buffer:
+    /// `b` before the text of `y`.
+    fn str_view(&mut self, root: int, off: int, n: int, y: int, b: &str) -> int {
+        let h = self.take_handle(b.as_bytes().len() as int, 0);
+        let i = h as usize;
+        self.strs[i].s = self.sempty.clone();
+        self.strs[i].up = root as i32;
+        self.strs[i].off = off as i32;
+        self.strs[i].len = n as i32;
+        if self.strs[y as usize].ulen >= 0 {
+            self.strs[i].ulen = self.strs[y as usize].ulen + jsstr::len(b) as i32;
+        }
+        self.strs[root as usize].rc += 1;
+        h
     }
 
     /// Links the strings of protos from a compiler (Proto.cstrs): their
@@ -1630,6 +1710,7 @@ impl Vm {
             if self.strs[i].flag == 0 && !self.strs[i].mark {
                 rc_vacate(&mut self.strs[i].s, &self.sempty);
                 self.strs[i].up = -1;
+                self.strs[i].off = 0;
                 self.strs[i].flag = 2;
                 self.sfreed.push(i as int);
             } else if self.strs[i].flag != 2 {
@@ -4185,6 +4266,15 @@ impl Vm {
                 }
                 if *y == 0 {
                     return Val::Str(*x);
+                }
+                // a short string before a long one: into the room before it
+                let yb = self.hbytes(*y);
+                if yb >= 32 && self.hbytes(*x) * 4 <= yb {
+                    let xt = self.sget(*x);
+                    let r = self.str_prepend(xt.as_str(), *y);
+                    if r >= 0 {
+                        return Val::Str(r);
+                    }
                 }
                 let n = self.sref(*x).as_bytes().len() + self.sref(*y).as_bytes().len();
                 let h = self.take_handle(n as int, 0);
@@ -9356,6 +9446,44 @@ pub fn rc_push(_rc: &mut Rc<String>, _b: &str) -> bool {
     false
 }
 
+/// `b` written over the bytes at `at` of the buffer (room of ASCII spaces
+/// before a front view's text, Vm::str_prepend) when nothing else holds
+/// it: whole characters over whole characters, so the text stays UTF-8.
+#[ranger::target(rust)]
+pub fn rc_front_write(rc: &mut Rc<String>, at: int, b: &str) -> bool {
+    if let Some(s) = Rc::get_mut(rc) {
+        let a = at as usize;
+        let n = b.len();
+        if a + n > s.len() || !s.as_bytes()[a..a + n].iter().all(|c| *c == b' ') {
+            return false;
+        }
+        // SAFETY: bytes a..a+n are ASCII spaces (each a whole character);
+        // b is UTF-8, so the buffer stays UTF-8
+        unsafe {
+            s.as_bytes_mut()[a..a + n].copy_from_slice(b.as_bytes());
+        }
+        return true;
+    }
+    false
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_front_write(_rc: &mut Rc<String>, _at: int, _b: &str) -> bool {
+    false
+}
+
+/// Whether str_prepend's front-room buffers are used (Rust: their room is
+/// written in place; the other targets' strings are immutable values).
+#[ranger::target(rust)]
+pub fn prepend_ok() -> bool {
+    true
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn prepend_ok() -> bool {
+    false
+}
+
 /// Back jumps between two reads of the clock while slices are on.
 pub const SLICE_TICKS: int = 1000;
 
@@ -9367,7 +9495,12 @@ pub struct SEnt {
     /// >= 0 when an append in place moved the buffer on to that newer
     /// handle (this one is then its first `len` bytes)
     pub up: i32,
+    /// with up >= 0: the text is `len` bytes from byte `off` of that
+    /// handle's buffer (off 0 for a prefix; a front view's start, see
+    /// str_prepend); a front-room buffer's own handle keeps its text's
+    /// start in `len`
     pub len: i32,
+    pub off: i32,
     /// the text's length in UTF-16 units, -1 until asked (Vm::hlen); an
     /// append in place carries it on, so `s += x; s.length` is not a scan
     pub ulen: i32,
@@ -9388,7 +9521,7 @@ pub struct SEnt {
 
 impl SEnt {
     pub fn new(s: Rc<String>, flag: i32) -> SEnt {
-        SEnt { s: s, up: -1, len: 0, ulen: -1, flag: flag, rc: 0, atom: -1, mark: false, inz: false }
+        SEnt { s: s, up: -1, len: 0, off: 0, ulen: -1, flag: flag, rc: 0, atom: -1, mark: false, inz: false }
     }
 }
 
