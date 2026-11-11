@@ -1773,32 +1773,55 @@ impl Vm {
     }
 
     pub fn collection_iter(&mut self, m: int, kind: int) -> Val {
-        // a snapshot array iterated by an ITER object
-        let mut items: Vec<Val> = Vec::new();
-        let n = self.evecs[self.objs[m as usize].elems as usize].v.len();
+        // live over the entries (coll_next): ones added while iterating are
+        // reached, deleted ones skipped; pos holds the kind (32 | 0 keys,
+        // 1 values, 2 entries) and the map's clear count (coll_gen) above
         let is_set = self.objs[m as usize].class == C_SET;
-        let mut i: usize = 0;
-        while i < n {
-            if self.colds[self.objs[m as usize].cold as usize].marks[i] == 0 {
-                let k = self.evecs[self.objs[m as usize].elems as usize].v[i].clone();
-                let v = if is_set { k.clone() } else { self.colds[self.objs[m as usize].cold as usize].elems2[i].clone() };
-                if kind == 0 {
-                    items.push(k);
-                } else if kind == 1 {
-                    items.push(v);
-                } else {
-                    let p = self.new_array(vec![k, v]);
-                    items.push(Val::Obj(p));
-                }
-            }
-            i += 1;
-        }
-        let arr = self.new_array(items);
         let ip = if is_set { self.set_iter_proto } else { self.map_iter_proto };
         let it = self.alloc(C_ITER, ip);
-        self.put_env(it, arr);
+        self.put_env(it, m);
         self.objs[it as usize].func = 0;
+        self.objs[it as usize].pos = (32 | kind | (self.coll_gen(m) << 8)) as i32;
         Val::Obj(it)
+    }
+
+    /// How many times Map / Set `m` was cleared (kept in its func: -1 at
+    /// first, then 0, 2, 4...; 1 marks a weak one), 22 bits.
+    pub fn coll_gen(&self, m: int) -> int {
+        ((self.objs[m as usize].func as int) >> 1) & 4194303
+    }
+
+    /// The next entry of a Map / Set iterator (collection_iter): from
+    /// position i the first one not deleted; after a clear, from the start.
+    pub fn coll_next(&mut self, o: int, m: int, i0: int, kind: int) -> Option<Val> {
+        let mut i = i0;
+        let g = self.coll_gen(m);
+        if (kind >> 8) != g {
+            i = 0;
+            self.objs[o as usize].pos = ((kind & 255) | (g << 8)) as i32;
+        }
+        let e = self.objs[m as usize].elems as usize;
+        let c = self.objs[m as usize].cold as usize;
+        let len = self.evecs[e].v.len() as int;
+        while i < len && self.colds[c].marks[i as usize] != 0 {
+            i += 1;
+        }
+        if i >= len {
+            self.put_env(o, -1);
+            return None;
+        }
+        self.objs[o as usize].func = (i + 1) as i32;
+        let k = self.evecs[e].v[i as usize];
+        let sub = kind & 3;
+        if sub == 0 {
+            return Some(k);
+        }
+        let v = if self.objs[m as usize].class == C_SET { k } else { self.colds[c].elems2[i as usize] };
+        if sub == 1 {
+            return Some(v);
+        }
+        let p = self.new_array(vec![k, v]);
+        Some(Val::Obj(p))
     }
 
     // ---- property descriptors

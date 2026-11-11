@@ -847,8 +847,8 @@ impl Tr {
                     // it throws; nothing after it on this path
                     self.mat_all();
                 }
-            } else if (c as int) == OP_INSTANCEOF || (c as int) == OP_IN || (c as int) == OP_DEL_ELEM || (c as int) == OP_SET_NAME || (c as int) == OP_ITER_KEYS || ((c as int) == OP_NEW_ARRAY && op.a <= 2) {
-                let k: int = if (c as int) == OP_NEW_ARRAY { op.a as int } else if (c as int) == OP_SET_NAME || (c as int) == OP_ITER_KEYS { 1 } else { 2 };
+            } else if (c as int) == OP_INSTANCEOF || (c as int) == OP_IN || (c as int) == OP_DEL_ELEM || (c as int) == OP_SET_NAME || (c as int) == OP_ITER_KEYS || ((c as int) == OP_NEW_ARRAY && op.a <= 2) || ((c as int) == OP_TO_ARRAY && op.a > 0) {
+                let k: int = if (c as int) == OP_NEW_ARRAY { op.a as int } else if (c as int) == OP_SET_NAME || (c as int) == OP_ITER_KEYS || (c as int) == OP_TO_ARRAY { 1 } else { 2 };
                 let x = if k >= 1 { self.opnd(d - k) } else { 0 };
                 let y = if k >= 2 { self.opnd(d - 1) } else { 0 };
                 self.result(i, R_STEP_K, k, k, x, y);
