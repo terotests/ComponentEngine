@@ -5272,6 +5272,9 @@ impl Vm {
             if (kind & 3) == 3 {
                 return self.for_in_next(o, src, i, kind >> 2);
             }
+            if (kind & 32) != 0 {
+                return self.coll_next(o, src, i, kind);
+            }
             if (kind & 8) != 0 {
                 return self.array_like_next(o, src, i, kind & 3);
             }

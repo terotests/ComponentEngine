@@ -1665,6 +1665,9 @@ impl Vm {
                     NF_MP_HAS => Val::Bool(self.map_find(o, &a0) >= 0),
                     NF_MP_DELETE => Val::Bool(self.map_delete(o, &a0)),
                     NF_MP_CLEAR => {
+                        // live iterators start over (coll_gen); func stays
+                        // other than 1 (-1, 0, 2, 4...: 1 is a weak one)
+                        self.objs[o as usize].func = (self.objs[o as usize].func | 1) + 1;
                         self.put_elems(o, Vec::new());
                         self.put_elems2(o, Vec::new());
                         self.free_cold(o);
@@ -1678,6 +1681,7 @@ impl Vm {
                         }
                         let is_set = self.objs[o as usize].class == C_SET;
                         let mut i: usize = 0;
+                        let mut g = self.coll_gen(o);
                         while i < self.evecs[self.objs[o as usize].elems as usize].v.len() {
                             if self.colds[self.objs[o as usize].cold as usize].marks[i] == 0 {
                                 let k = self.evecs[self.objs[o as usize].elems as usize].v[i].clone();
@@ -1685,6 +1689,12 @@ impl Vm {
                                 self.call_fixed(a0.clone(), a1.clone(), 3, v, k, this.clone());
                                 if self.throwing {
                                     return Val::Undef;
+                                }
+                                if self.coll_gen(o) != g {
+                                    // cleared by the callback: what is there now
+                                    g = self.coll_gen(o);
+                                    i = 0;
+                                    continue;
                                 }
                             }
                             i += 1;
