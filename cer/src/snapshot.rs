@@ -16,6 +16,7 @@ use ranger::prelude::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::jsstr;
 use crate::num::*;
 use crate::unit::*;
 use crate::value::*;
@@ -744,8 +745,8 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             while j < vm.evecs[e].v.len() && j < vm.colds[c].marks.len() {
                 if vm.colds[c].marks[j] == 0 {
                     if let Val::Str(h) = &vm.evecs[e].v[j] {
-                        let t = vm.sget(*h).as_ref().clone();
-                        vm.colds[c].sindex.insert(t, j as int);
+                        let hash = jsstr::str_hash(vm.sref(*h));
+                        vm.stab_add(o as int, j as int, hash);
                     }
                 }
                 j += 1;

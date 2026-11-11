@@ -1690,13 +1690,91 @@ impl Vm {
         2 * self.intern(s.as_str()) + 1
     }
 
+    /// The pair in map `m`'s string table (Cold.stab) holding key text
+    /// `k` (hash `hash`), -1 none.
+    pub fn stab_slot(&self, m: int, k: int, hash: int) -> int {
+        let t = &self.colds[self.objs[m as usize].cold as usize].stab;
+        if t.is_empty() {
+            return -1;
+        }
+        let keys = &self.evecs[self.objs[m as usize].elems as usize].v;
+        let mask = ((t.len() / 2) as int) - 1;
+        let mut i = hash & mask;
+        loop {
+            let e = t[(i * 2) as usize];
+            if e == 0 {
+                return -1;
+            }
+            if e > 0 && t[(i * 2 + 1) as usize] == hash {
+                if let Val::Str(h2) = &keys[(e - 1) as usize] {
+                    if *h2 == k || self.sref(*h2) == self.sref(k) {
+                        return i;
+                    }
+                }
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    /// Adds entry `pos` (a string key absent from the table) to map `m`'s
+    /// string table, growing it to keep it at most half full.
+    pub fn stab_add(&mut self, m: int, pos: int, hash: int) {
+        let c = self.cold_id(m) as usize;
+        let cap = (self.colds[c].stab.len() / 2) as int;
+        if (self.colds[c].sused + 1) * 2 > cap {
+            let mut spare: Vec<int> = Vec::new();
+            let old = take_ints(&mut self.colds[c].stab, &mut spare);
+            let mut live: int = 0;
+            let mut j: usize = 0;
+            while j < old.len() {
+                if old[j] > 0 {
+                    live += 1;
+                }
+                j += 2;
+            }
+            let mut n: int = 8;
+            while n < (live + 1) * 4 {
+                n *= 2;
+            }
+            let mut t = zero_ints((n * 2) as usize);
+            let mask = n - 1;
+            j = 0;
+            while j < old.len() {
+                if old[j] > 0 {
+                    let mut i = old[j + 1] & mask;
+                    while t[(i * 2) as usize] != 0 {
+                        i = (i + 1) & mask;
+                    }
+                    t[(i * 2) as usize] = old[j];
+                    t[(i * 2 + 1) as usize] = old[j + 1];
+                }
+                j += 2;
+            }
+            self.colds[c].stab = t;
+            self.colds[c].sused = live;
+        }
+        let t = &mut self.colds[c].stab;
+        let mask = ((t.len() / 2) as int) - 1;
+        let mut i = hash & mask;
+        while t[(i * 2) as usize] > 0 {
+            i = (i + 1) & mask;
+        }
+        if t[(i * 2) as usize] == 0 {
+            self.colds[c].sused += 1;
+        }
+        let t = &mut self.colds[c].stab;
+        t[(i * 2) as usize] = pos + 1;
+        t[(i * 2 + 1) as usize] = hash;
+    }
+
     pub fn map_find(&mut self, m: int, k: &Val) -> int {
         if let Val::Str(h) = k {
-            let s = self.sget(*h);
-            return match self.colds[self.objs[m as usize].cold as usize].sindex.get(s.as_str()) {
-                Some(i) => *i,
-                None => -1,
-            };
+            let hash = jsstr::str_hash(self.sref(*h));
+            let i = self.stab_slot(m, *h, hash);
+            if i < 0 {
+                return -1;
+            }
+            return self.colds[self.objs[m as usize].cold as usize].stab[(i * 2) as usize] - 1;
         }
         let key = self.map_key(k);
         match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
@@ -1708,8 +1786,10 @@ impl Vm {
     pub fn map_set(&mut self, m: int, k: Val, v: Val) {
         let is_str = matches!(k, Val::Str(_));
         let key = if is_str { 0 } else { self.map_key(&k) };
-        let found = if is_str {
-            self.map_find(m, &k)
+        let hash = if let Val::Str(h) = &k { jsstr::str_hash(self.sref(*h)) } else { 0 };
+        let found = if let Val::Str(h) = &k {
+            let i = self.stab_slot(m, *h, hash);
+            if i < 0 { -1 } else { self.colds[self.objs[m as usize].cold as usize].stab[(i * 2) as usize] - 1 }
         } else {
             match self.colds[self.objs[m as usize].cold as usize].index.get(&key) {
                 Some(i) => *i,
@@ -1721,7 +1801,6 @@ impl Vm {
             return;
         }
         let pos = self.evecs[self.objs[m as usize].elems as usize].v.len() as int;
-        let text = if let Val::Str(h) = &k { self.sget(*h).as_ref().clone() } else { String::new() };
         let kk = if let Val::Num(n) = k {
             if n == 0.0 {
                 Val::Num(0.0)
@@ -1736,7 +1815,7 @@ impl Vm {
         let c = self.cold_id(m) as usize;
         self.colds[c].marks.push(0);
         if is_str {
-            self.colds[c].sindex.insert(text, pos);
+            self.stab_add(m, pos, hash);
         } else {
             self.colds[c].index.insert(key, pos);
         }
@@ -1750,8 +1829,11 @@ impl Vm {
         }
         let c = self.cold_id(m) as usize;
         if let Val::Str(h) = k {
-            let s = self.sget(*h);
-            self.colds[c].sindex.remove(s.as_str());
+            let hash = jsstr::str_hash(self.sref(*h));
+            let slot = self.stab_slot(m, *h, hash);
+            if slot >= 0 {
+                self.colds[c].stab[(slot * 2) as usize] = -1;
+            }
         } else {
             let key = self.map_key(k);
             self.colds[c].index.remove(&key);
@@ -3669,6 +3751,14 @@ impl Vm {
         }
         if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_DV_METHOD) {
             return self.call_native_ta(id, &this, args);
+        }
+        if id == crate::proxy::NF_PROMISE_OF {
+            let p = self.new_promise();
+            self.temp_roots.push(Val::Obj(p));
+            let x = if args.is_empty() { Val::Undef } else { args[0].clone() };
+            self.settle(p, 1, x);
+            self.temp_roots.pop();
+            return Val::Obj(p);
         }
         if id >= 920 && id < 930 {
             return self.call_native_typed(id, args);

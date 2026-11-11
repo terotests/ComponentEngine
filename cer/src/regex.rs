@@ -1308,6 +1308,36 @@ impl RParser {
     }
 }
 
+/// The alternatives' texts when every one is only characters (or
+/// empty), at most 4096 units in all; empty otherwise.
+fn lit_strings(p: &RParser, list: &Vec<int>) -> Vec<Vec<int>> {
+    let mut out: Vec<Vec<int>> = Vec::new();
+    let mut total: usize = 0;
+    for x in list.iter() {
+        let nd = &p.nodes[*x as usize];
+        let mut s: Vec<int> = Vec::new();
+        if nd.kind == R_CHAR {
+            s.push(nd.c);
+        } else if nd.kind == R_SEQ {
+            for y in nd.list.iter() {
+                let c = &p.nodes[*y as usize];
+                if c.kind != R_CHAR {
+                    return Vec::new();
+                }
+                s.push(c.c);
+            }
+        } else if nd.kind != R_EMPTY {
+            return Vec::new();
+        }
+        total += s.len();
+        if total > 4096 {
+            return Vec::new();
+        }
+        out.push(s);
+    }
+    out
+}
+
 struct Gen {
     code: Vec<Inst>,
     nregs: int,
@@ -1317,6 +1347,73 @@ impl Gen {
     fn emit(&mut self, op: int, a: int, b: int) -> int {
         self.code.push(Inst { op: op, a: a, b: b });
         (self.code.len() as int) - 1
+    }
+
+    /// The alternation of literal strings `strs` (all sharing their first
+    /// `depth` units, already matched) as a trie: the strings that go on
+    /// with the same unit share it. Alternatives with different next units
+    /// never both match, so grouping them keeps the order matches are
+    /// tried in; a string that ends here is a barrier no group crosses.
+    fn gen_lits(&mut self, strs: &Vec<Vec<int>>, depth: usize) {
+        // the branches in order: (next unit or -1 for an end, members)
+        let mut keys: Vec<int> = Vec::new();
+        let mut members: Vec<Vec<int>> = Vec::new();
+        let mut seg_start: usize = 0;
+        let mut i: usize = 0;
+        while i < strs.len() {
+            let s = &strs[i];
+            if s.len() == depth {
+                keys.push(-1);
+                members.push(vec![i as int]);
+                seg_start = keys.len();
+            } else {
+                let c = s[depth];
+                let mut found: int = -1;
+                let mut j = seg_start;
+                while j < keys.len() {
+                    if keys[j] == c {
+                        found = j as int;
+                        break;
+                    }
+                    j += 1;
+                }
+                if found >= 0 {
+                    members[found as usize].push(i as int);
+                } else {
+                    keys.push(c);
+                    members.push(vec![i as int]);
+                }
+            }
+            i += 1;
+        }
+        let cnt = keys.len();
+        let mut ends: Vec<int> = Vec::new();
+        let mut b: usize = 0;
+        while b < cnt {
+            let split = if b + 1 < cnt { self.emit(I_SPLIT, 0, 0) } else { -1 };
+            if split >= 0 {
+                self.code[split as usize].a = split + 1;
+            }
+            if keys[b] >= 0 {
+                self.emit(I_CHAR, keys[b], 0);
+                let mut sub: Vec<Vec<int>> = Vec::new();
+                for m in members[b].iter() {
+                    sub.push(strs[*m as usize].clone());
+                }
+                self.gen_lits(&sub, depth + 1);
+            }
+            if split >= 0 {
+                let j = self.emit(I_JMP, 0, 0);
+                ends.push(j);
+                let here = self.code.len() as int;
+                self.code[split as usize].b = here;
+            }
+            b += 1;
+        }
+        let here = self.code.len() as int;
+        for j in ends {
+            self.code[j as usize].a = here;
+        }
     }
 
     fn gen(&mut self, p: &RParser, n: int, flags: int, backward: bool) {
@@ -1362,6 +1459,14 @@ impl Gen {
         }
         if k == R_ALT {
             let list = nd.list.clone();
+            // alternatives that are only characters: a trie (lit_alts)
+            if !backward && ic == 0 && list.len() >= 4 {
+                let strs = lit_strings(p, &list);
+                if !strs.is_empty() {
+                    self.gen_lits(&strs, 0);
+                    return;
+                }
+            }
             let mut ends: Vec<int> = Vec::new();
             let cnt = list.len();
             let mut i: usize = 0;
