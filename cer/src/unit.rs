@@ -337,6 +337,10 @@ pub fn encode(u: &Unit, input: &str) -> String {
                     put_num(&mut out, 5);
                     put_str(&mut out, p.cstrs[*k as usize].as_str());
                 }
+                Val::Big(x) => {
+                    put_num(&mut out, 6);
+                    put_num(&mut out, *x as int);
+                }
                 Val::Obj(_) => return String::new(),
             }
         }
@@ -482,6 +486,8 @@ pub fn decode(text: &str, input: &str) -> Unit {
                 let k = p.cstrs.len() as int;
                 p.cstrs.push(Rc::new(r.string()));
                 Val::Str(k)
+            } else if t == 6 {
+                Val::Big((r.num() as double) + 0.0)
             } else {
                 Val::Undef
             };

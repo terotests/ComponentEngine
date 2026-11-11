@@ -1793,6 +1793,31 @@ impl PComp {
         self.emit(OP_CONST, c, 0);
     }
 
+    /// A BigInt literal (its decimal digits): a small one is a constant
+    /// Val::Big, a larger one its text and OP_BIGINT.
+    fn push_bigint(&mut self, digits: &str) {
+        let n = crate::bigint::small_big_of(digits);
+        if n >= crate::bigint::small_big_limit() {
+            self.push_str(digits);
+            self.op(OP_BIGINT);
+            return;
+        }
+        let key = format!("big:{}", digits);
+        let f = self.fs[self.fs.len() - 1].fnid as usize;
+        let mut c = match self.fns[f].num_consts.get(&key) {
+            Some(i) => *i,
+            None => -1,
+        };
+        if c < 0 {
+            let top = self.fs.len() - 1;
+            let p = &mut self.fs[top].proto;
+            c = p.consts.len() as int;
+            p.consts.push(Val::Big(n + 0.0));
+            self.fns[f].num_consts.insert(key, c);
+        }
+        self.emit(OP_CONST, c, 0);
+    }
+
     /// new.target here: inside a function (not an arrow's alone), or in a
     /// direct eval's code where its caller may name it.
     fn new_target_ok(&self) -> bool {
@@ -6091,8 +6116,7 @@ impl PComp {
             if raw.starts_with("n:") {
                 let digits: String = String::from(&raw[2..]);
                 self.next();
-                self.push_str(digits.as_str());
-                self.op(OP_BIGINT);
+                self.push_bigint(digits.as_str());
                 return ex(E_LITERAL);
             }
             let v = self.tok_num(self.pos);

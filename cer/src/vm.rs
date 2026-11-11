@@ -260,13 +260,9 @@ pub struct Vm {
     pub regex_shape: int,
     /// the marker of a binding in its temporal dead zone
     pub tdz_obj: int,
-    /// BigInt values by their decimal text, and BigInt.prototype
+    /// large BigInt values (objects) by their decimal text (weak), and
+    /// BigInt.prototype
     pub bigints: HashMap<String, int>,
-    /// the BigInts kept as a small value (bigint.rs), by that value; weak.
-    /// Open addressing, linear probing: bs_vals -1 is an empty slot
-    pub bs_keys: Vec<int>,
-    pub bs_vals: Vec<int>,
-    pub bs_count: int,
     pub bigint_proto: int,
     pub array_values_fn: int,
     pub roots: Vec<int>,
@@ -414,8 +410,6 @@ pub struct Vm {
     /// a native's frame depth whose failed writes throw as in strict code
     /// (Object.assign's Set(.., true)); -1 for none
     pub strict_at: int,
-    /// the BigInt 0n (interned), the one falsy object; -1 until made
-    pub big_zero: int,
     /// the last class id unit::link gave private keys
     pub priv_seq: int,
     /// the atoms some object has as a setter or a read-only property (by
@@ -533,17 +527,15 @@ pub fn truthy(v: &Val) -> bool {
         Val::Num(n) => *n != 0.0 && *n == *n,
         Val::Str(h) => *h != 0,
         Val::Obj(_) => true,
+        Val::Big(n) => *n != 0.0,
     }
 }
 
 impl Vm {
-    /// ToBoolean: `truthy`, with 0n false.
+    /// ToBoolean (0n is a Val::Big, `truthy` has it).
     #[inline]
     pub fn truthy_v(&self, v: &Val) -> bool {
-        match v {
-            Val::Obj(o) => *o != self.big_zero,
-            _ => truthy(v),
-        }
+        truthy(v)
     }
 
     pub fn new() -> Vm {
@@ -633,9 +625,6 @@ impl Vm {
             regex_shape: -1,
             tdz_obj: -1,
             bigints: HashMap::new(),
-            bs_keys: Vec::new(),
-            bs_vals: Vec::new(),
-            bs_count: 0,
             bigint_proto: -1,
             array_values_fn: -1,
             roots: Vec::new(),
@@ -709,7 +698,6 @@ impl Vm {
             any_setter: false,
             idx_protos: false,
             strict_at: -1,
-            big_zero: -1,
             priv_seq: 0,
             setter_atoms: Vec::new(),
             proxy_made: false,
@@ -979,6 +967,9 @@ impl Vm {
 
     /// `v` + d (d 1 or -1) for ++ / --, BigInts too.
     pub fn inc_val(&mut self, v: Val, d: double) -> Val {
+        if let Val::Big(n) = v {
+            return self.big_step(n, d);
+        }
         if self.class_of(&v) == C_BIGINT {
             let t = self.big_text(&v);
             let r = if d > 0.0 { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
@@ -2177,6 +2168,7 @@ impl Vm {
     pub fn class_of(&self, v: &Val) -> i32 {
         match v {
             Val::Obj(o) => self.objs[*o as usize].class,
+            Val::Big(_) => C_BIGINT,
             _ => -1,
         }
     }
@@ -2217,6 +2209,7 @@ impl Vm {
             Val::Bool(_) => 2,
             Val::Num(_) => 3,
             Val::Str(_) => 4,
+            Val::Big(_) => 7,
             Val::Obj(o) => {
                 let c = self.objs[*o as usize].class;
                 if c == C_FUNCTION || c == C_NATIVE || c == C_BOUND || (c == C_PROXY && (self.objs[*o as usize].pos & 1) != 0) {
@@ -2296,6 +2289,10 @@ impl Vm {
                 }
             }
             Val::Str(s) => string_to_number(self.sref(*s)),
+            Val::Big(_) => {
+                self.throw_type("Cannot convert a BigInt value to a number");
+                nan()
+            }
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_SYMBOL {
                     self.throw_type("Cannot convert a Symbol value to a number");
@@ -2321,6 +2318,7 @@ impl Vm {
             Val::Undef => Rc::new(String::from("undefined")),
             Val::Null => Rc::new(String::from("null")),
             Val::Bool(b) => Rc::new(String::from(if *b { "true" } else { "false" })),
+            Val::Big(n) => Rc::new(crate::bigint::int_text(*n as int)),
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_SYMBOL {
                     self.throw_type("Cannot convert a Symbol value to a string");
@@ -2330,9 +2328,6 @@ impl Vm {
                     let pv = self.colds[self.objs[*o as usize].cold as usize].prim;
                     if let Val::Str(s) = pv {
                         return self.sget(s);
-                    }
-                    if let Val::Num(n) = pv {
-                        return Rc::new(crate::bigint::int_text(n as int));
                     }
                 }
                 let p = self.to_primitive(v, "string");
@@ -2371,6 +2366,12 @@ impl Vm {
                 self.throw_type("Cannot convert undefined or null to object");
                 -1
             }
+            Val::Big(_) => {
+                let p = self.bigint_proto;
+                let b = self.alloc(C_OBJECT, p);
+                self.put_prim(b, v.clone());
+                b
+            }
             Val::Bool(_) => {
                 let p = self.boolean_proto;
                 let o = self.alloc(C_BOOLEAN, p);
@@ -2400,6 +2401,7 @@ impl Vm {
             (Val::Null, Val::Null) => true,
             (Val::Bool(x), Val::Bool(y)) => x == y,
             (Val::Obj(x), Val::Obj(y)) => x == y,
+            (Val::Big(x), Val::Big(y)) => x == y,
             _ => false,
         }
     }
@@ -2434,6 +2436,7 @@ impl Vm {
             (Val::Num(x), Val::Num(y)) => return x == y,
             (Val::Str(x), Val::Str(y)) => return x == y || self.sref(*x) == self.sref(*y),
             (Val::Bool(x), Val::Bool(y)) => return x == y,
+            (Val::Big(x), Val::Big(y)) => return x == y,
             (Val::Obj(x), Val::Obj(y)) => {
                 if x == y {
                     return true;
@@ -2466,6 +2469,10 @@ impl Vm {
             (Val::Str(s), Val::Num(y)) => return string_to_number(self.sref(*s)) == *y,
             _ => {}
         }
+        if self.class_of(a) == C_BIGINT && self.class_of(b) == C_BIGINT {
+            // a small one (Val::Big) and a large one (an object) differ
+            return self.strict_equals(a, b);
+        }
         if (self.class_of(a) == C_BIGINT) != (self.class_of(b) == C_BIGINT) && !(is_obj(a) && self.class_of(a) != C_BIGINT) && !(is_obj(b) && self.class_of(b) != C_BIGINT) {
             return self.big_loose_eq(a, b);
         }
@@ -2497,6 +2504,23 @@ impl Vm {
     /// A property key: (array index, atom). The index is -1 when the key is
     /// not one; the atom is -1 when it was not interned (an index).
     pub fn to_key(&mut self, k: &Val) -> (int, int) {
+        // a string first (the common key), outside the match: a match on
+        // every Val kind compiles to a jump table here
+        if let Val::Str(s) = k {
+            let h = *s as usize;
+            let known = self.strs[h].atom;
+            if known >= 0 {
+                return (-1, known as int);
+            }
+            let i = jsstr::array_index(self.sref(*s));
+            if i >= 0 {
+                return (i, -1);
+            }
+            let t = self.sget(*s);
+            let a = self.intern(t.as_str());
+            self.strs[h].atom = a as i32;
+            return (-1, a);
+        }
         match k {
             Val::Num(n) => {
                 if *n >= 0.0 && *n < 1000000000.0 {
@@ -2509,24 +2533,12 @@ impl Vm {
                 let a = self.intern(s.as_str());
                 (-1, a)
             }
-            Val::Str(s) => {
-                let h = *s as usize;
-                let known = self.strs[h].atom;
-                if known >= 0 {
-                    return (-1, known as int);
-                }
-                let i = jsstr::array_index(self.sref(*s));
-                if i >= 0 {
-                    return (i, -1);
-                }
-                let t = self.sget(*s);
-                let a = self.intern(t.as_str());
-                self.strs[h].atom = a as i32;
-                (-1, a)
-            }
             Val::Obj(o) => {
                 if self.objs[*o as usize].class == C_SYMBOL {
                     return (-1, self.objs[*o as usize].pos as int);
+                }
+                if self.objs[*o as usize].class == C_BIGINT {
+                    return self.big_key(k);
                 }
                 let p = self.to_primitive(k, "string");
                 if self.throwing {
@@ -2534,12 +2546,27 @@ impl Vm {
                 }
                 self.to_key(&p)
             }
+            Val::Big(_) => self.big_key(k),
             _ => {
                 let s = self.to_string(k);
                 let a = self.intern(s.as_str());
                 (-1, a)
             }
         }
+    }
+
+    /// to_key of a BigInt: a small one below 10^9 an index, as a number
+    /// would be; otherwise its text (a large one is never an index).
+    #[inline(never)]
+    fn big_key(&mut self, k: &Val) -> (int, int) {
+        if let Val::Big(n) = k {
+            if *n >= 0.0 && *n < 1000000000.0 {
+                return (*n as int, -1);
+            }
+        }
+        let t = self.big_text(k);
+        let a = self.intern(t.as_str());
+        (-1, a)
     }
 
     pub fn index_atom(&mut self, i: int) -> int {
@@ -2830,6 +2857,10 @@ impl Vm {
             }
             Val::Bool(_) => {
                 let p = self.boolean_proto;
+                self.get_obj(p, atom, v)
+            }
+            Val::Big(_) => {
+                let p = self.bigint_proto;
                 self.get_obj(p, atom, v)
             }
             _ => {
@@ -4308,6 +4339,9 @@ impl Vm {
                 return Val::Undef;
             }
             return Val::Num(arith_num(code, x, y));
+        }
+        if matches!(a, Val::Big(_)) || matches!(b, Val::Big(_)) {
+            return self.big_arith(code, a, b);
         }
         let x = match a {
             Val::Num(n) => *n,
@@ -5990,6 +6024,10 @@ impl Vm {
     /// ToNumeric(v) and it plus `delta`: numbers or BigInts.
     pub fn numeric_step(&mut self, v: &Val, delta: int) -> (Val, Val) {
         let p = if is_obj(v) { self.to_primitive(v, "number") } else { v.clone() };
+        if let Val::Big(n) = p {
+            let b = self.big_step(n, delta as double);
+            return (p, b);
+        }
         if self.class_of(&p) == C_BIGINT {
             let t = self.big_text(&p);
             let r = crate::bigint::add(t.as_str(), format!("{}", delta).as_str());
@@ -7138,8 +7176,23 @@ impl Vm {
             }
             OP_BNOT => {
                 let v = self.pop();
-                let n = self.to_number(&v);
-                self.stack.push(Val::Num((-to_int32(n) - 1) as double));
+                let p = if is_obj(&v) { self.to_primitive(&v, "number") } else { v };
+                if self.throwing {
+                    return false;
+                }
+                if let Val::Big(x) = p {
+                    // ~x is -x - 1
+                    let b = self.big_step(-x, -1.0);
+                    self.stack.push(b);
+                } else if self.class_of(&p) == C_BIGINT {
+                    let t = self.big_text(&p);
+                    let r = crate::bigint::sub(crate::bigint::negate(t.as_str()).as_str(), "1");
+                    let b = self.bigint_val(r.as_str());
+                    self.stack.push(b);
+                } else {
+                    let n = self.to_number(&p);
+                    self.stack.push(Val::Num((-to_int32(n) - 1) as double));
+                }
             }
             OP_TYPEOF => {
                 let v = self.pop();
@@ -7148,6 +7201,11 @@ impl Vm {
             }
             OP_INC | OP_DEC => {
                 let v = self.pop();
+                if let Val::Big(n) = v {
+                    let b = self.big_step(n, if (op.code as int) == OP_INC { 1.0 } else { -1.0 });
+                    self.stack.push(b);
+                    return false;
+                }
                 if self.class_of(&v) == C_BIGINT {
                     let t = self.big_text(&v);
                     let r = if (op.code as int) == OP_INC { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
@@ -8424,20 +8482,6 @@ impl Vm {
             }
             for k in dead {
                 self.bigints.remove(k.as_str());
-            }
-        }
-        if self.bs_count > 0 {
-            let mut dead2: Vec<int> = Vec::new();
-            let mut j: usize = 0;
-            while j < self.bs_vals.len() {
-                let v = self.bs_vals[j];
-                if v >= 0 && !self.objs[v as usize].marked {
-                    dead2.push(self.bs_keys[j]);
-                }
-                j += 1;
-            }
-            for k in dead2 {
-                self.bs_remove(k);
             }
         }
         if !self.strs.is_empty() {
