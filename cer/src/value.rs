@@ -88,8 +88,11 @@ pub const SHAPE_HASH_AT: int = 8;
 pub struct Cold {
     /// a Map's or Set's entries by map_key, and which are deleted (1)
     pub index: HashMap<int, int>,
-    /// a Map's or Set's string keys by their text (no atom per key)
-    pub sindex: HashMap<String, int>,
+    /// a Map's or Set's string keys by their text (no atom or String copy
+    /// per key): open addressing, pairs (entry + 1, text hash), entry 0
+    /// empty and -1 deleted; `sused` counts the pairs not empty
+    pub stab: Vec<int>,
+    pub sused: int,
     pub marks: Vec<int>,
     /// an ArrayBuffer's contents: its bytes, or the elements of the one
     /// typed array kind that has used it (typed.rs)
@@ -111,16 +114,18 @@ pub fn drop_indexes(c: &mut Cold) {
     if c.index.capacity() > 0 {
         c.index = HashMap::new();
     }
-    if c.sindex.capacity() > 0 {
-        c.sindex = HashMap::new();
+    if c.stab.capacity() > 0 {
+        c.stab = Vec::new();
     }
+    c.sused = 0;
 }
 
 impl Cold {
     pub fn new() -> Cold {
         Cold {
             index: HashMap::new(),
-            sindex: HashMap::new(),
+            stab: Vec::new(),
+            sused: 0,
             marks: Vec::new(),
             nums: Vec::new(),
             elems2: Vec::new(),
@@ -806,6 +811,21 @@ impl Unpacker {
             -(z + 1) / 2
         }
     }
+}
+
+/// `n` zeros.
+#[ranger::target(rust)]
+pub fn zero_ints(n: usize) -> Vec<int> {
+    vec![0; n]
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn zero_ints(n: usize) -> Vec<int> {
+    let mut v: Vec<int> = Vec::new();
+    while v.len() < n {
+        v.push(0);
+    }
+    v
 }
 
 /// Room for `n` ints (Rust; the other targets grow as they push).

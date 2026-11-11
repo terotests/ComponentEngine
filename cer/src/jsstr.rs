@@ -546,3 +546,30 @@ pub fn array_index(s: &str) -> int {
     }
     v
 }
+
+/// A hash of a string's text (Map / Set string keys): 31 bits, >= 0.
+#[ranger::target(rust)]
+pub fn str_hash(s: &str) -> int {
+    let b = s.as_bytes();
+    let mut h: u64 = b.len() as u64;
+    let mut i: usize = 0;
+    while i + 8 <= b.len() {
+        let w = u64::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3], b[i + 4], b[i + 5], b[i + 6], b[i + 7]]);
+        h = (h.rotate_left(5) ^ w).wrapping_mul(0x517cc1b727220a95);
+        i += 8;
+    }
+    while i < b.len() {
+        h = (h.rotate_left(5) ^ (b[i] as u64)).wrapping_mul(0x517cc1b727220a95);
+        i += 1;
+    }
+    (h >> 33) as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn str_hash(s: &str) -> int {
+    let mut h: int = 0;
+    for c in s.chars() {
+        h = (h * 31 + (c as int)) % 1073741789;
+    }
+    h
+}
