@@ -962,3 +962,24 @@ var big = "-".repeat(1000); for (var i = 0; i < 2000; i++) big = String.fromChar
 r.join("|")
 ----
 900|3ab2ab1ab|1ab0ab|12|98|Axx|Bxx|CAx|DAx|true|42|true|70|ö|ö|é|ööéé|%C3%B6%C3%A9|140|143|yyEND|true|true|1|"zzzzzyyyyy"|2|41|7|82|true|-1|200|191817|63|3000|3000|xwvut|a|1999
+
+==== js sort of numbers: (a, b) => a - b / b - a comparators recognised from their text (no calls), sort() with each number's string made once; NaN, -0, undefined, mixed values, look-alike texts
+var r = [];
+function mk(n) { var a = []; for (var i = 0; i < n; i++) a.push((i * 7919) % n - n / 2); return a; }
+var a = mk(500); a.sort(function (x, y) { return x - y; }); r.push(a[0], a[1], a[499]);
+var b = mk(500); b.sort((p, q) => q - p); r.push(b[0], b[499]);
+var c = [3, -0, 0, NaN, 1, NaN, -Infinity, 2, Infinity, 0.5]; c.sort(function cmp(x,y){return x-y}); r.push(c.map(function (v) { return Object.is(v, -0) ? "-0" : String(v); }).join());
+var d = [3, 1, 2]; d.sort(function (x, y) { returnx - y; var returnx; }); r.push(d.join());
+var e = [3, 1, "2", 10]; e.sort((x, y) => x - y); r.push(e.join());
+var f = [3, 1, 2]; f.sort((x, y) => { return y - x }); r.push(f.join());
+var g = [3, 1, 2, undefined, 0]; g.sort((x, y) => x - y); r.push(g.join());
+var h = [5, 4, 3].toSorted((x, y) => x - y); r.push(h.join());
+var calls = 0; var o = { valueOf: function () { calls++; return 1; } }; var m = [2, o, 0]; m.sort((x, y) => x - y); r.push(calls > 0, m[0], m[2]);
+var big = mk(5000); big.sort(function(x,y){ return x - y; }); var ok = true; for (var i = 1; i < big.length; i++) if (big[i-1] > big[i]) ok = false; r.push(ok);
+var w = [3, 1, 2]; w.sort((x, y) => x - y /* c */); r.push(w.join());
+var z = [1, 3, 2]; z.sort((y, x) => x - y); r.push(z.join());
+var ds = [10, 9, 1, -1, -0, 0, NaN, 1e21, 0.1, 2, -10, 1e-7, 100, Infinity, -Infinity]; ds.sort(); r.push(ds.map(function (v) { return Object.is(v, -0) ? "-0" : String(v); }).join());
+var du = [3, undefined, 20, 1]; du.sort(); r.push(du.join(), mk(3000).sort().slice(0, 5).join());
+r.join("|")
+----
+-250|-249|249|249|-250|-Infinity,-0,0,0.5,1,3,NaN,NaN,2,Infinity|3,1,2|1,2,3,10|3,2,1|0,1,2,3,|3,4,5|true|0|2|true|1,2,3|3,2,1|-1,-10,-Infinity,-0,0,0.1,1,10,100,1e+21,1e-7,2,9,Infinity,NaN|1,20,3,|-1,-10,-100,-1000,-1001
