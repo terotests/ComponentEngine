@@ -428,6 +428,26 @@ impl Vm {
                             i = if end > i { end } else { i };
                         }
                     }
+                    // a string: handles, then lengths, then text
+                    if let Val::Str(h) = a0 {
+                        let e = self.objs[o as usize].elems as usize;
+                        let n = self.evecs[e].v.len() as int;
+                        let end = if n < len { n } else { len };
+                        let needle = self.sref(h);
+                        let nb = needle.as_bytes().len();
+                        let mut k = i;
+                        while k < end {
+                            if let Val::Str(h2) = self.evecs[e].v[k as usize] {
+                                let st = &self.strs[h2 as usize];
+                                let l2 = if st.up < 0 { st.s.as_bytes().len() } else { st.len as usize };
+                                if h2 == h || (l2 == nb && self.sref(h2) == needle) {
+                                    return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(k as double) };
+                                }
+                            }
+                            k += 1;
+                        }
+                        i = if end > i { end } else { i };
+                    }
                 }
                 while i < len {
                     let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {

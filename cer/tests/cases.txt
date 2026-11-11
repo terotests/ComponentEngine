@@ -1060,6 +1060,18 @@ r.join("|")
 ----
 true|false|true|true|false|true|sync|3|4|true
 
+==== js Array includes / indexOf of a string in a plain array: handles, lengths, then text; views, holes, wrappers, array-likes
+var r = [];
+var a = []; for (var i = 0; i < 50; i++) a.push("k" + i); var big = "x".repeat(30); a.push(big + "!", "é", 3, NaN, undefined);
+r.push(a.includes("k7"), a.indexOf("k49"), a.includes("k50"), a.indexOf("x"), a.includes(big + "!"), a.indexOf("é"), a.includes("3"), a.indexOf(3));
+r.push(a.includes("k1", 2), a.indexOf("k1", 1), a.indexOf("k10", -50), a.includes(NaN), a.indexOf(NaN), a.includes(undefined));
+var s = ("abc" + "defghijklmnopqrstuvwxyz0123456789").slice(3, 10); r.push(["q", s].indexOf("defghij"), ["q", "defghij"].includes(s));
+var h = ["a", , "b"]; r.push(h.includes(undefined), h.indexOf(undefined), h.indexOf("b"), [new String("a")].includes("a"));
+var o = { length: 3, 0: "x", 1: "y", 2: "z" }; r.push(Array.prototype.indexOf.call(o, "z"), Array.prototype.includes.call("abc", "b"));
+r.join("|")
+----
+true|49|false|-1|true|51|false|52|false|1|10|true|-1|true|1|true|true|-1|2|false|2|true
+
 ==== js An alternation of only characters compiles to a trie: alternatives that end early keep their place (ab|a|abc, a|ab|abc), empty alternatives, \b words, unicode, ignore-case left as is, lookbehind, split
 var r = [];
 function m(re, s) { var x = s.match(re); return x === null ? "null" : x.join(","); }
