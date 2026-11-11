@@ -1033,3 +1033,15 @@ var v = JSON.parse('[{"a":1,"b":"x"},{"a":2,"b":"y"},{"b":3,"a":4},{"a":5,"a":6}
 r.join("|")
 ----
 [{"i":1,"s":"x"},{"i":2,"s":"y\"q"},{"i":-3.5},{"i":1e+21,"s":null}]|[/ {/  "i": 1,/  "s": "x"/ },/ {/  "i": 2,/  "s": "y\"q"/ },/ {/  "i": -3.5/ },/ {/  "i": 1e+21,/  "s": null/ }/]|[{"i":1},{"i":2},{"i":-3.5},{"i":1e+21}]|[{"i":2,"s":"x"},{"i":4,"s":"y\"q"},{"i":-7},{"i":2e+21,"s":null}]|[{"a":1},{"a":2,"b":"T"},"P"]|{"x":1,"y":2,"q":4}|{"x":1,"y":2,"z":"G"}|[{"a":1,"b":7},{"a":1,"b":7},{"a":1}]|{"1":"a","2":"b","k":"c"}|["hid",{"a":1}]|[{"a":1,"b":"[{\"a\":9,\"b\":8}]"},{"a":2,"b":3}]|[{"a":1},{"a":2}]|"np"|[{"a":1}]|[{"a":1,"b":"x"},{"a":2,"b":"y"},{"b":3,"a":4},{"a":6},{"1":1,"a":2},{"a":1,"b":{"a":[{"a":1}]}},{"":1,"a":2,"a\n":3}]|a6|b,a
+
+==== js Array includes / indexOf of a string in a plain array: handles, lengths, then text; views, holes, wrappers, array-likes
+var r = [];
+var a = []; for (var i = 0; i < 50; i++) a.push("k" + i); var big = "x".repeat(30); a.push(big + "!", "é", 3, NaN, undefined);
+r.push(a.includes("k7"), a.indexOf("k49"), a.includes("k50"), a.indexOf("x"), a.includes(big + "!"), a.indexOf("é"), a.includes("3"), a.indexOf(3));
+r.push(a.includes("k1", 2), a.indexOf("k1", 1), a.indexOf("k10", -50), a.includes(NaN), a.indexOf(NaN), a.includes(undefined));
+var s = ("abc" + "defghijklmnopqrstuvwxyz0123456789").slice(3, 10); r.push(["q", s].indexOf("defghij"), ["q", "defghij"].includes(s));
+var h = ["a", , "b"]; r.push(h.includes(undefined), h.indexOf(undefined), h.indexOf("b"), [new String("a")].includes("a"));
+var o = { length: 3, 0: "x", 1: "y", 2: "z" }; r.push(Array.prototype.indexOf.call(o, "z"), Array.prototype.includes.call("abc", "b"));
+r.join("|")
+----
+true|49|false|-1|true|51|false|52|false|1|10|true|-1|true|1|true|true|-1|2|false|2|true
