@@ -332,6 +332,17 @@ pub struct Vm {
     /// array_iter_plain's memo: an array's shape, the shape epoch, its
     /// prototype, the prototype's shape and its Symbol.iterator slot
     pub ai_memo: Vec<i32>,
+    /// JSON.stringify's plans for ordinary objects (json_plan): (shape,
+    /// start, len) triples, start -1 when the shape has no plan; an entry's
+    /// own keys in output order are js_atoms/js_slots[start..start+len] and
+    /// js_kq holds each one quoted. Kept while shape_epoch is js_epoch.
+    pub js_plan: Vec<i32>,
+    pub js_slots: Vec<i32>,
+    pub js_atoms: Vec<i32>,
+    pub js_kq: Vec<String>,
+    pub js_epoch: int,
+    pub js_depth: int,
+    pub js_pshape: int,
     pub pic: Vec<i32>,
     pub shape_epoch: int,
     /// instanceof: Function.prototype's and Object.prototype's shapes and
@@ -661,6 +672,13 @@ impl Vm {
             rx_shapes: Vec::new(),
             gn_memo: Vec::new(),
             ai_memo: Vec::new(),
+            js_plan: Vec::new(),
+            js_slots: Vec::new(),
+            js_atoms: Vec::new(),
+            js_kq: Vec::new(),
+            js_epoch: -1,
+            js_depth: 0,
+            js_pshape: -1,
             pic: Vec::new(),
             shape_epoch: 0,
             hi_fp: -1,
@@ -9737,7 +9755,8 @@ pub fn json_parse_fast(vm: &mut Vm, s: &str, out: &mut Val) -> bool {
     let b = s.as_bytes();
     let mut pos: usize = 0;
     let mut buf = String::new();
-    let v = jf_value(vm, s, b, &mut pos, &mut buf);
+    let mut memo: Vec<int> = vec![-1; 128];
+    let v = jf_value(vm, s, b, &mut pos, &mut buf, &mut memo);
     if vm.throwing {
         return true;
     }
@@ -9945,7 +9964,7 @@ fn jf_str_val(vm: &mut Vm, t: &str) -> Val {
 }
 
 #[ranger::target(rust)]
-fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String) -> Val {
+fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, memo: &mut Vec<int>) -> Val {
     jf_ws(b, pos);
     let n = b.len();
     if *pos >= n {
@@ -9975,14 +9994,25 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String) -
                 vm.temp_roots.pop();
                 return Val::Undef;
             }
-            // the key straight to its atom: no string value in between
+            // the key straight to its atom: no string value in between. The
+            // key a shared shape last gained in this text (objects of one
+            // shape in a row; `memo`, direct-mapped by shape: shape, atom)
+            // is that atom, and new to o.
+            let sh0 = vm.objs[o as usize].shape as int;
+            let mi = ((sh0 & 63) * 2) as usize;
+            let mut fresh = false;
             let atom = {
                 let k: &str = if kesc { buf.as_str() } else { &s[ka..kb] };
-                let ki = jsstr::array_index(k);
-                if ki >= 0 {
-                    vm.index_atom(ki)
+                if memo[mi] == sh0 && vm.atom_names[memo[mi + 1] as usize].as_str() == k {
+                    fresh = true;
+                    memo[mi + 1]
                 } else {
-                    vm.intern(k)
+                    let ki = jsstr::array_index(k);
+                    if ki >= 0 {
+                        vm.index_atom(ki)
+                    } else {
+                        vm.intern(k)
+                    }
                 }
             };
             jf_ws(b, pos);
@@ -9992,12 +10022,22 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String) -
                 return Val::Undef;
             }
             *pos += 1;
-            let v = jf_value(vm, s, b, pos, buf);
+            let v = jf_value(vm, s, b, pos, buf, memo);
             if vm.throwing {
                 vm.temp_roots.pop();
                 return Val::Undef;
             }
-            vm.define(o, atom, v, 0);
+            if fresh {
+                vm.add_own(o, atom, v, 0);
+            } else {
+                vm.define(o, atom, v, 0);
+                // a key new to a shared shape (o was not given an owned one)
+                let sh1 = vm.objs[o as usize].shape as int;
+                if sh1 != sh0 && !vm.shapes[sh0 as usize].owned && !vm.shapes[sh1 as usize].owned {
+                    memo[mi] = sh0;
+                    memo[mi + 1] = atom;
+                }
+            }
             jf_ws(b, pos);
             if *pos < n && b[*pos] == b',' {
                 *pos += 1;
@@ -10025,7 +10065,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String) -
             return Val::Obj(a);
         }
         loop {
-            let v = jf_value(vm, s, b, pos, buf);
+            let v = jf_value(vm, s, b, pos, buf, memo);
             if vm.throwing {
                 vm.temp_roots.pop();
                 return Val::Undef;

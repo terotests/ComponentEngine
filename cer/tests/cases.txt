@@ -1017,3 +1017,19 @@ var ws = new WeakMap(); var key = {}; ws.set(key, 1); r.push(ws.get(key), Object
 r.join("|")
 ----
 1a,2b,3x,4x,5x|1,3,1|p,pq,pqq,pqqq|1,5,6|1,7|[{"value":["a",1],"done":false},{"done":true},{"done":true}]|{"value":3,"done":false}|{"done":true}|{"done":true}|1002890|1,2|3,4|5,6|9|1,1|2,2|1,2,3|0|1|[object Map Iterator]|function
+
+==== js JSON.stringify of objects of one shape reads their slots by a plan; toJSON (own, hidden, on Object.prototype, added midway), getters, a holder changed by a nested toJSON, nested stringify; JSON.parse keys by the shape's last new key
+var r = [];
+var a = [{i:1,s:"x"},{i:2,s:"y\"q"},{i:-3.5,s:undefined},{i:1e21,s:null,f:function(){}}]; r.push(JSON.stringify(a), JSON.stringify(a, null, 1).split("\n").join("/"), JSON.stringify(a, ["i"]), JSON.stringify(a, function (k, v) { return typeof v === "number" ? v * 2 : v; }));
+var b = [{a:1},{a:2,b:{toJSON:function(){ Object.prototype.toJSON = function(){ return "P"; }; return "T"; }}},{a:3}]; r.push(JSON.stringify(b)); delete Object.prototype.toJSON;
+var h = {x:1, y:{toJSON:function(){ delete h.z; h.w = 5; return 2; }}, z:3, q:4}; r.push(JSON.stringify(h));
+var h2 = {x:1, y:{toJSON:function(){ Object.defineProperty(h2, "z", {get:function(){ return "G"; }, enumerable:true}); return 2; }}, z:3}; r.push(JSON.stringify(h2));
+var g = {a:1}; Object.defineProperty(g, "b", {get:function(){ return 7; }, enumerable:true}); var ne = {a:1}; Object.defineProperty(ne, "h", {value:2, enumerable:false}); r.push(JSON.stringify([g, g, ne]), JSON.stringify({2:"b", 1:"a", k:"c"}));
+var t = {a:1}; Object.defineProperty(t, "toJSON", {value:function(){ return "hid"; }, enumerable:false}); r.push(JSON.stringify([t, {a:1}]));
+var n = [{a:1, b:{toJSON:function(){ return JSON.stringify([{a:9, b:8}]); }}}, {a:2, b:3}]; r.push(JSON.stringify(n));
+Object.prototype.b = 1; r.push(JSON.stringify([{a:1}, {a:2}])); delete Object.prototype.b;
+Object.defineProperty(Object.prototype, "toJSON", {value:function(){ return "np"; }, configurable:true}); r.push(JSON.stringify([{a:1}])); delete Object.prototype.toJSON; r.push(JSON.stringify([{a:1}]));
+var v = JSON.parse('[{"a":1,"b":"x"},{"a":2,"b":"y"},{"b":3,"a":4},{"a":5,"a":6},{"1":1,"a":2},{"a":1,"b":{"a":[{"a":1}]}},{"":1,"\\u0061":2,"a\\n":3}]'); r.push(JSON.stringify(v), Object.keys(v[3]).join() + v[3].a, Object.keys(v[2]).join());
+r.join("|")
+----
+[{"i":1,"s":"x"},{"i":2,"s":"y\"q"},{"i":-3.5},{"i":1e+21,"s":null}]|[/ {/  "i": 1,/  "s": "x"/ },/ {/  "i": 2,/  "s": "y\"q"/ },/ {/  "i": -3.5/ },/ {/  "i": 1e+21,/  "s": null/ }/]|[{"i":1},{"i":2},{"i":-3.5},{"i":1e+21}]|[{"i":2,"s":"x"},{"i":4,"s":"y\"q"},{"i":-7},{"i":2e+21,"s":null}]|[{"a":1},{"a":2,"b":"T"},"P"]|{"x":1,"y":2,"q":4}|{"x":1,"y":2,"z":"G"}|[{"a":1,"b":7},{"a":1,"b":7},{"a":1}]|{"1":"a","2":"b","k":"c"}|["hid",{"a":1}]|[{"a":1,"b":"[{\"a\":9,\"b\":8}]"},{"a":2,"b":3}]|[{"a":1},{"a":2}]|"np"|[{"a":1}]|[{"a":1,"b":"x"},{"a":2,"b":"y"},{"b":3,"a":4},{"a":6},{"1":1,"a":2},{"a":1,"b":{"a":[{"a":1}]}},{"":1,"a":2,"a\n":3}]|a6|b,a
