@@ -1340,8 +1340,9 @@ impl Vm {
         let b = self.rget(bp, w3).clone();
         // a longer string whose buffer nothing else holds grows in place
         // (str_append: a keeps its text as a prefix), as `s += x` does
-        if let (Val::Str(h), Val::Str(_)) = (&a, &b) {
-            if self.strs[*h as usize].s.as_bytes().len() >= 32 {
+        let b_ok = matches!(b, Val::Str(_)) || matches!(b, Val::Num(_));
+        if let Val::Str(h) = &a {
+            if b_ok && self.strs[*h as usize].s.as_bytes().len() >= 32 {
                 let r = self.append_val(a, b);
                 if r >= 0 {
                     self.stack[(bp + w1) as usize] = Val::Str(r);

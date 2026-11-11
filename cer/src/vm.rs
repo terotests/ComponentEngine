@@ -6656,6 +6656,11 @@ impl Vm {
             let bs = self.sget(hb);
             return self.str_append(h, bs.as_str());
         }
+        if let (Val::Str(h), Val::Num(y)) = (cur, b) {
+            // a number's text (a template's `${s}${i}`, `s += i`)
+            let t = number_to_string(y);
+            return self.str_append(h, t.as_str());
+        }
         -1
     }
 

@@ -226,10 +226,11 @@ impl Vm {
             }
             NF_AP_UNSHIFT => {
                 let o = self.this_array(&this);
-                let mut i: usize = 0;
-                for a in args.iter() {
-                    self.insert_elem(o, i as int, *a);
-                    i += 1;
+                // the last first, each at 0 (the vector's front room)
+                let mut i = args.len();
+                while i > 0 {
+                    i -= 1;
+                    self.insert_elem(o, 0, args[i]);
                 }
                 Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double)
             }
