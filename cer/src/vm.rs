@@ -7647,6 +7647,18 @@ impl Vm {
             }
             OP_ARRAY_SPREAD => {
                 let src = self.pop();
+                let a = obj_of(self.top());
+                if let Val::Obj(so) = &src {
+                    if a >= 0 && self.array_iter_plain(*so) {
+                        // a plain array: its elements in one copy, as
+                        // iterable_to_vec would give them
+                        self.inc_elems(*so);
+                        let de = self.elems_id(a);
+                        let se = self.objs[*so as usize].elems as usize;
+                        evecs_append(&mut self.evecs, de, se);
+                        return false;
+                    }
+                }
                 let items = self.iterable_to_vec(&src);
                 if self.throwing {
                     return false;
@@ -8183,6 +8195,13 @@ impl Vm {
         grow_evecs(&mut self.evecs);
         self.evecs.push(elems_of(Vec::new()));
         self.evecs.len() - 1
+    }
+
+    #[inline(always)]
+    /// A reference more to each of `o`'s elements.
+    pub fn inc_elems(&mut self, o: int) {
+        let e = self.objs[o as usize].elems as usize;
+        inc_refs(&mut self.objs, &mut self.strs, &self.evecs[e]);
     }
 
     #[inline(always)]
@@ -9527,6 +9546,27 @@ pub struct SEnt {
 impl SEnt {
     pub fn new(s: Rc<String>, flag: i32) -> SEnt {
         SEnt { s: s, up: -1, len: 0, off: 0, ulen: -1, flag: flag, rc: 0, atom: -1, mark: false, inz: false }
+    }
+}
+
+/// A counted reference more to each object and string in `e` (Vm.inc
+/// over a whole vector, the tables borrowed once).
+pub fn inc_refs(objs: &mut Vec<JsObj>, strs: &mut Vec<SEnt>, e: &Elems) {
+    let n = e.v.len();
+    let mut i: usize = 0;
+    while i < n {
+        match e.v[i] {
+            Val::Obj(o) => {
+                objs[o as usize].rc += 1;
+            }
+            Val::Str(h) => {
+                if h > 0 {
+                    strs[h as usize].rc += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
     }
 }
 
