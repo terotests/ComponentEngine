@@ -39,10 +39,10 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "quickjs", "hermes", "cer-js"];
+const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "quickjs", "hermes", "spidermonkey", "cer-js"];
 // the WebAssembly file each engine loads, for its size; the CErXes variants
 // stand on the step that builds their file
-const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm", hermes: "hermes.wasm" };
+const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm", hermes: "hermes.wasm", spidermonkey: "spidermonkey.wasm" };
 const STEP = { "cerxes-stack": "cerxes-wasm" };
 const status = {}; // id -> { available, reason, size }
 
@@ -182,6 +182,22 @@ if (skip.has("hermes")) {
 } else {
   step("hermes", () => {
     for (const f of ["hermes.mjs", "hermes.wasm"]) fs.copyFileSync(path.join(HERMES_DIST, f), path.join(DIST, "wasm", f));
+  });
+}
+
+// ---- SpiderMonkey as WebAssembly -------------------------------------------
+// playground/spidermonkey/build.sh makes it (the Bytecode Alliance's WASI
+// library and wasi-sdk, downloaded; CI caches it).
+
+const SM_DIST = path.join(HERE, "spidermonkey/dist");
+if (skip.has("spidermonkey")) {
+  status.spidermonkey = { available: false, reason: "skipped in this build" };
+} else if (!fs.existsSync(path.join(SM_DIST, "spidermonkey.wasm"))) {
+  status.spidermonkey = { available: false, reason: "not built (playground/spidermonkey/build.sh)" };
+  log("-- spidermonkey: not built (playground/spidermonkey/build.sh)");
+} else {
+  step("spidermonkey", () => {
+    fs.copyFileSync(path.join(SM_DIST, "spidermonkey.wasm"), path.join(DIST, "wasm", "spidermonkey.wasm"));
   });
 }
 

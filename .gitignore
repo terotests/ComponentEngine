@@ -14,3 +14,7 @@ cerxes/target/
 cerxes/bin/
 playground/src/evg/vendor/
 cerxes/bench/pdfkit/out/
+playground/hermes/work/
+playground/hermes/dist/
+playground/spidermonkey/work/
+playground/spidermonkey/dist/
