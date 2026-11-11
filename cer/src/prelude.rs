@@ -623,6 +623,8 @@ var PP = Promise.prototype;
 var nativeThen = PP.then;
 var isPromiseObj = globalThis.__isPromise;
 delete globalThis.__isPromise;
+var promiseOf = globalThis.__promiseOf, PromiseI = Promise;
+delete globalThis.__promiseOf;
 function isPromise(x) { return isPromiseObj(x); }
 var SymSpecies = Symbol.species;
 function speciesOf(o, d) {
@@ -664,11 +666,20 @@ hide(PP, 'finally', function (f) {
     function (v) { return C.resolve(f()).then(function () { return v; }); },
     function (e) { return C.resolve(f()).then(function () { throw e; }); });
 });
-hide(Promise, 'resolve', function resolve(x) {
+var promiseResolveFn = function resolve(x) {
   if (!isObject(this)) throw new TypeError('PromiseResolve called on non-object');
   if (isPromise(x) && x.constructor === this) return x;
+  // the intrinsic Promise: the same steps natively (no capability)
+  if (this === PromiseI) return promiseOf(x);
   var cap = capability(this); cap.resolve(x); return cap.promise;
-});
+};
+hide(Promise, 'resolve', promiseResolveFn);
+// resolveFn.call(C, v) of the combinators, without the call when both
+// are the intrinsic ones
+function resolveVia(C, resolveFn, v) {
+  if (resolveFn === promiseResolveFn && C === PromiseI) return isPromise(v) && v.constructor === PromiseI ? v : promiseOf(v);
+  return resolveFn.call(C, v);
+}
 hide(Promise, 'reject', function reject(e) {
   var cap = capability(this); cap.reject(e); return cap.promise;
 });
@@ -680,7 +691,7 @@ hide(Promise, 'all', function all(items) {
     for (var v of items) {
       (function (k) {
         left++; out[k] = undefined; var called = false;
-        resolveFn.call(C, v).then(function (x) { if (called) return; called = true; out[k] = x; if (--left === 0) cap.resolve(out); }, cap.reject);
+        resolveVia(C, resolveFn, v).then(function (x) { if (called) return; called = true; out[k] = x; if (--left === 0) cap.resolve(out); }, cap.reject);
       })(i++);
     }
     if (--left === 0) cap.resolve(out);
@@ -691,7 +702,7 @@ hide(Promise, 'race', function race(items) {
   var C = this; var cap = capability(C);
   try {
     var resolveFn = C.resolve;
-    for (var v of items) resolveFn.call(C, v).then(cap.resolve, cap.reject);
+    for (var v of items) resolveVia(C, resolveFn, v).then(cap.resolve, cap.reject);
   } catch (e) { cap.reject(e); }
   return cap.promise;
 });
