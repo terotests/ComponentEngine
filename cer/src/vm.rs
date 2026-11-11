@@ -1726,12 +1726,8 @@ impl Vm {
             self.smark_root(v, list);
             i += 1;
         }
-        i = 0;
-        while i < self.kvals.len() {
-            let v = self.kvals[i];
-            self.smark_root(v, list);
-            i += 1;
-        }
+        // kvals are not scanned either: translate() copies a function's
+        // constants, whose strings link_strs pinned (flag 1)
         i = 0;
         while i < self.regex_shown.len() {
             let v = self.regex_shown[i];
