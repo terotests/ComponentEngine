@@ -946,3 +946,19 @@ function eq(x, y) { return x === y; } var w = "x".repeat(40), w0 = w, w1 = w + "
 r.join("|")
 ----
 99|0|100|-1,-2,-3,99|103|52|49|40|999|960|960|999|38|[999,998,997,994,993]|200|299|1|200|0123456701|34567|40|70|pp012345|true|q5|q0|q1.5|33|3000|41
+
+==== js string prepend into front room (s = x + s O(1) amortised): views, UTF-8, keys, Map, JSON, split/replace, JIT equality
+var r = [];
+var s = ""; for (var i = 0; i < 300; i++) s = (i & 7) + "ab" + s; r.push(s.length, s.slice(0, 9), s.slice(-6), s.indexOf("7ab6"), s.charCodeAt(5));
+var base = "x".repeat(40), a1 = "A" + base, a2 = "B" + base, a3 = "C" + a1, a4 = "D" + a1;
+r.push(a1.slice(0, 3), a2.slice(0, 3), a3.slice(0, 3), a4.slice(0, 3), a1 === "A" + "x".repeat(40), a3.length, a4 === "DA" + base);
+var u = "é".repeat(20); for (var i = 0; i < 50; i++) u = "ö" + u; r.push(u.length, u[0], u[49], u[50], u.slice(48, 52), encodeURIComponent(u.slice(49, 51)));
+var w = "y".repeat(40); for (var i = 0; i < 100; i++) w = "z" + w; var w2 = w + "END"; r.push(w.length, w2.length, w2.slice(-5), w.endsWith("yy"), w.startsWith("zz"));
+var o = {}; o[w] = 1; r.push(o["z".repeat(100) + "y".repeat(40)], JSON.stringify(w.slice(95, 105)), w.split("zy").length, w.replace(/z+/, "Z").length);
+var m = new Map(); m.set(a3, 7); r.push(m.get("CA" + base), [a1, a2].sort().join("").length, a1 < a2, a1.localeCompare(a2));
+var keep = []; for (var j = 0; j < 200; j++) { var t = "q".repeat(33); for (var k = 0; k < 20; k++) t = k + t; keep.push(t); } r.push(keep.length, keep[199].slice(0, 6), keep[0].length);
+function eq(x, y) { return x === y; } var h = 0, p1 = "!" + "k".repeat(40), p2 = "!" + "k".repeat(40); for (var i = 0; i < 3000; i++) h += eq(p1, p2) ? 1 : 0; r.push(h);
+var big = "-".repeat(1000); for (var i = 0; i < 2000; i++) big = String.fromCharCode(97 + i % 26) + big; r.push(big.length, big.slice(0, 5), big.charAt(1999), big.lastIndexOf("a"));
+r.join("|")
+----
+900|3ab2ab1ab|1ab0ab|12|98|Axx|Bxx|CAx|DAx|true|42|true|70|ö|ö|é|ööéé|%C3%B6%C3%A9|140|143|yyEND|true|true|1|"zzzzzyyyyy"|2|41|7|82|true|-1|200|191817|63|3000|3000|xwvut|a|1999
