@@ -275,6 +275,33 @@ pub fn mid(s: &str, _a: int, _n: int) -> &str {
     s
 }
 
+/// Chars [a, b) of `s` (a function's own text, sort_kind). Rust: when
+/// the text before b is ASCII, chars are bytes and no decoding is needed.
+#[ranger::target(rust)]
+pub fn char_range(s: &str, a: int, b: int) -> String {
+    let (ua, ub) = (a as usize, b as usize);
+    if ub <= s.len() && s.as_bytes()[..ub].is_ascii() {
+        return String::from(&s[ua..ub]);
+    }
+    s.chars().skip(ua).take(ub - ua).collect()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn char_range(s: &str, a: int, b: int) -> String {
+    let mut text = String::new();
+    let mut i: int = 0;
+    for c in s.chars() {
+        if i >= b {
+            break;
+        }
+        if i >= a {
+            text.push(c);
+        }
+        i += 1;
+    }
+    text
+}
+
 /// Byte `i` of an ASCII string, i in range.
 pub fn byte_at(s: &str, i: int) -> int {
     let r: int = ranger::native!(rust: { s.as_bytes()[i as usize] as int }, es6: "{s}.charCodeAt({i})");

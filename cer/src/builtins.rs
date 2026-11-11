@@ -2250,9 +2250,51 @@ impl Vm {
     }
 
     /// A stable merge sort; the comparator may throw.
+    /// 2 when `cmp` is a function whose whole text is `(a, b) => a - b`
+    /// (or `function (a, b) { return a - b; }`), 3 for `b - a`, else 1:
+    /// on numbers merge_sort then needs no calls (kept per function).
+    pub fn sort_kind(&mut self, cmp: &Val) -> i32 {
+        let o = obj_of(cmp);
+        if o < 0 || self.objs[o as usize].class != C_FUNCTION {
+            return 1;
+        }
+        let pi = self.objs[o as usize].func as usize;
+        while self.cmp_kinds.len() <= pi {
+            self.cmp_kinds.push(0);
+        }
+        if self.cmp_kinds[pi] != 0 {
+            return self.cmp_kinds[pi];
+        }
+        let mut k: i32 = 1;
+        if !self.protos[pi].generator && !self.protos[pi].is_async {
+            let (a, b) = (self.protos[pi].src_start, self.protos[pi].src_end);
+            // the forms are short: a longer text is not one of them
+            if b - a > 64 {
+                self.cmp_kinds[pi] = 1;
+                return 1;
+            }
+            if let Val::Str(h) = &self.protos[pi].src {
+                let src = self.sget(*h);
+                let text = jsstr::char_range(src.as_str(), a, b);
+                k = sub_cmp_kind(squeeze_ws(text.as_str()).as_str());
+            }
+        }
+        self.cmp_kinds[pi] = k;
+        k
+    }
+
     pub fn merge_sort(&mut self, v: &mut Vec<Val>, cmp: &Val) {
         let n = v.len();
         if n < 2 {
+            return;
+        }
+        let kind = self.sort_kind(cmp);
+        if kind >= 2 && all_nums(v) {
+            num_merge_sort(v, kind == 3);
+            return;
+        }
+        if matches!(cmp, Val::Undef) && all_nums(v) {
+            num_str_merge_sort(v);
             return;
         }
         let mut src: Vec<Val> = v.clone();
@@ -4858,4 +4900,267 @@ pub fn replace_plain(s: &str, pat: &str, rep: &str, all: bool) -> String {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn replace_plain(_s: &str, _pat: &str, _rep: &str, _all: bool) -> String {
     String::new()
+}
+
+/// Whether every value is a number.
+pub fn all_nums(v: &Vec<Val>) -> bool {
+    let n = v.len();
+    let mut i: usize = 0;
+    while i < n {
+        if !matches!(v[i], Val::Num(_)) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// merge_sort over numbers with `(a, b) => a - b` (desc: `b - a`) as the
+/// comparator: the same merges and so the same order as calling it.
+pub fn num_merge_sort(v: &mut Vec<Val>, desc: bool) {
+    let n = v.len();
+    let mut src: Vec<double> = Vec::with_capacity(n);
+    let mut i0: usize = 0;
+    while i0 < n {
+        if let Val::Num(x) = v[i0] {
+            src.push(x);
+        }
+        i0 += 1;
+    }
+    let mut dst: Vec<double> = src.clone();
+    let mut width: usize = 1;
+    while width < n {
+        let mut lo: usize = 0;
+        while lo < n {
+            let mid = if lo + width < n { lo + width } else { n };
+            let hi = if lo + 2 * width < n { lo + 2 * width } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            while i < mid && j < hi {
+                // cmp(src[j], src[i]) < 0; NaN compares as 0
+                let c = if desc { src[i] - src[j] } else { src[j] - src[i] };
+                if c < 0.0 {
+                    dst[k] = src[j];
+                    j += 1;
+                } else {
+                    dst[k] = src[i];
+                    i += 1;
+                }
+                k += 1;
+            }
+            while i < mid {
+                dst[k] = src[i];
+                i += 1;
+                k += 1;
+            }
+            while j < hi {
+                dst[k] = src[j];
+                j += 1;
+                k += 1;
+            }
+            lo += 2 * width;
+        }
+        let t = src;
+        src = dst;
+        dst = t;
+        width *= 2;
+    }
+    let mut i1: usize = 0;
+    while i1 < n {
+        v[i1] = Val::Num(src[i1]);
+        i1 += 1;
+    }
+}
+
+/// An identifier's length at the start of `s` (ASCII names only), 0 if none.
+#[ranger::target(rust)]
+fn ident_len(s: &[u8]) -> usize {
+    let mut i: usize = 0;
+    while i < s.len() {
+        let c = s[i];
+        let ok = c == b'_' || c == b'$' || (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (i > 0 && c >= b'0' && c <= b'9');
+        if !ok {
+            break;
+        }
+        i += 1;
+    }
+    i
+}
+
+#[ranger::target(rust)]
+fn word_byte(c: u8) -> bool {
+    c == b'_' || c == b'$' || (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (c >= b'0' && c <= b'9') || c >= 128
+}
+
+/// `t` with white space dropped, except one space between two word
+/// characters (`return a` stays apart from `returna`). Rust only, like
+/// sub_cmp_kind: elsewhere comparators are always called.
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn squeeze_ws(_t: &str) -> String {
+    String::new()
+}
+
+#[ranger::target(rust)]
+pub fn squeeze_ws(t: &str) -> String {
+    let s = t.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+            let mut j = i;
+            while j < s.len() && (s[j] == b' ' || s[j] == b'\t' || s[j] == b'\n' || s[j] == b'\r') {
+                j += 1;
+            }
+            if !out.is_empty() && j < s.len() && word_byte(out[out.len() - 1]) && word_byte(s[j]) {
+                out.push(b' ');
+            }
+            i = j;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or(String::new())
+}
+
+/// sort_kind of a function's text after squeeze_ws:
+/// `(a,b)=>a-b`, `(a,b)=>{return a-b;}`, `function f?(a,b){return a-b;}`
+/// give 2, the same with `b-a` 3, anything else 1.
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn sub_cmp_kind(_t: &str) -> i32 {
+    1
+}
+
+#[ranger::target(rust)]
+pub fn sub_cmp_kind(t: &str) -> i32 {
+    let s = t.as_bytes();
+    let mut p: usize = 0;
+    let arrow = !t.starts_with("function");
+    if !arrow {
+        p = 8;
+        if p < s.len() && s[p] == b' ' {
+            p += 1;
+            let ln = ident_len(&s[p..]);
+            if ln == 0 {
+                return 1;
+            }
+            p += ln;
+        }
+    }
+    if p >= s.len() || s[p] != b'(' {
+        return 1;
+    }
+    p += 1;
+    let la = ident_len(&s[p..]);
+    if la == 0 {
+        return 1;
+    }
+    let a = &t[p..p + la];
+    p += la;
+    if p >= s.len() || s[p] != b',' {
+        return 1;
+    }
+    p += 1;
+    let lb = ident_len(&s[p..]);
+    if lb == 0 {
+        return 1;
+    }
+    let b = &t[p..p + lb];
+    p += lb;
+    if p >= s.len() || s[p] != b')' || a == b || a == "arguments" || b == "arguments" || a == "eval" || b == "eval" {
+        return 1;
+    }
+    p += 1;
+    let rest = &t[p..];
+    let ab = format!("{}-{}", a, b);
+    let ba = format!("{}-{}", b, a);
+    let mut forms: Vec<String> = Vec::new();
+    if arrow {
+        forms.push(format!("=>{}", ab));
+        forms.push(format!("=>{{return {};}}", ab));
+        forms.push(format!("=>{{return {}}}", ab));
+        forms.push(format!("=>{}", ba));
+        forms.push(format!("=>{{return {};}}", ba));
+        forms.push(format!("=>{{return {}}}", ba));
+    } else {
+        forms.push(format!("{{return {};}}", ab));
+        forms.push(format!("{{return {}}}", ab));
+        forms.push(format!("{{return {};}}", ba));
+        forms.push(format!("{{return {}}}", ba));
+    }
+    let half = forms.len() / 2;
+    let mut i: usize = 0;
+    while i < forms.len() {
+        if rest == forms[i].as_str() {
+            return if i < half { 2 } else { 3 };
+        }
+        i += 1;
+    }
+    1
+}
+
+/// merge_sort of numbers with no comparator: each number's string made
+/// once, not at every comparison (the same merges, the same order).
+pub fn num_str_merge_sort(v: &mut Vec<Val>) {
+    let n = v.len();
+    let mut keys: Vec<String> = Vec::with_capacity(n);
+    let mut i0: usize = 0;
+    while i0 < n {
+        if let Val::Num(x) = v[i0] {
+            keys.push(number_to_string(x));
+        }
+        i0 += 1;
+    }
+    let mut src: Vec<usize> = Vec::with_capacity(n);
+    let mut i1: usize = 0;
+    while i1 < n {
+        src.push(i1);
+        i1 += 1;
+    }
+    let mut dst: Vec<usize> = src.clone();
+    let mut width: usize = 1;
+    while width < n {
+        let mut lo: usize = 0;
+        while lo < n {
+            let mid = if lo + width < n { lo + width } else { n };
+            let hi = if lo + 2 * width < n { lo + 2 * width } else { n };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            while i < mid && j < hi {
+                let c = jsstr::compare(keys[src[j]].as_str(), keys[src[i]].as_str());
+                if c < 0 {
+                    dst[k] = src[j];
+                    j += 1;
+                } else {
+                    dst[k] = src[i];
+                    i += 1;
+                }
+                k += 1;
+            }
+            while i < mid {
+                dst[k] = src[i];
+                i += 1;
+                k += 1;
+            }
+            while j < hi {
+                dst[k] = src[j];
+                j += 1;
+                k += 1;
+            }
+            lo += 2 * width;
+        }
+        let t = src;
+        src = dst;
+        dst = t;
+        width *= 2;
+    }
+    let old: Vec<Val> = v.clone();
+    let mut i2: usize = 0;
+    while i2 < n {
+        v[i2] = old[src[i2]];
+        i2 += 1;
+    }
 }
