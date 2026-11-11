@@ -56,7 +56,9 @@ jobs:
         # without it the page lists Hermes as not built
         continue-on-error: true
         run: |
-          sudo apt-get install -y ninja-build
+          # apt's mirrors sometimes do not resolve on a runner: pip has ninja too
+          sudo apt-get install -y ninja-build || pip install ninja
+          ninja --version
           HERMES_WORK="$RUNNER_TEMP/hermes" playground/hermes/build.sh
       - if: steps.hermes-build.outcome == 'success'
         uses: actions/cache/save@v4
