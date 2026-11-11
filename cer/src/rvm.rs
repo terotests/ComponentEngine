@@ -1557,20 +1557,26 @@ impl Vm {
     #[inline(always)]
     fn pic_probe(&mut self, site: int, o: int) -> int {
         let e0 = self.rpic[site as usize];
+        if e0 < 0 {
+            return -1;
+        }
+        let epoch = self.shape_epoch as i32;
+        let osh = self.ob(o).shape;
         let mut w: int = 0;
-        while e0 >= 0 && w < PIC_WAYS {
+        while w < PIC_WAYS {
             let b = ((e0 + w as i32) * PIC_W as i32) as usize;
             w += 1;
-            if self.pic[b + 1] != self.shape_epoch as i32 || self.objs[o as usize].shape != self.pic[b] as i32 {
+            if i32_at(&self.pic, b) != osh || i32_at(&self.pic, b + 1) != epoch {
                 continue;
             }
-            let depth = self.pic[b + 2] as usize;
+            let depth = i32_at(&self.pic, b + 2) as usize;
             let mut cur = o;
             let mut k: usize = 0;
             let mut ok = true;
             while k < depth {
-                let pk = self.pic[b + 5 + 2 * k];
-                if self.objs[cur as usize].proto != pk as i32 || self.objs[pk as usize].shape != self.pic[b + 6 + 2 * k] as i32 {
+                let pk = i32_at(&self.pic, b + 5 + 2 * k);
+                // pk is alive when cur's prototype is pk
+                if self.ob(cur).proto != pk || self.ob(pk as int).shape != i32_at(&self.pic, b + 6 + 2 * k) {
                     ok = false;
                     break;
                 }
@@ -1580,11 +1586,11 @@ impl Vm {
             if !ok {
                 continue;
             }
-            if self.pic[b + 3] >= 0 {
+            if i32_at(&self.pic, b + 3) >= 0 {
                 self.pic_way = b as int;
                 return cur;
             }
-            if self.objs[cur as usize].proto < 0 {
+            if self.ob(cur).proto < 0 {
                 return -2;
             }
         }
@@ -1806,10 +1812,14 @@ impl Vm {
             if let Val::Obj(o) = v {
                 // a method one prototype up: the site's entry in mcache
                 let k = ((MC_BASE - w3) * 5) as usize;
-                if k + 4 < self.mcache.len() && self.mcache[k] == self.ob(o).shape && self.mcache[k + 1] == (self.shape_epoch as i32) && self.ob(o).proto == self.mcache[k + 2] {
-                    let p = self.mcache[k + 2] as int;
-                    if self.ob(p).shape == self.mcache[k + 3] {
-                        let f = slot_at(self.ob(p), self.mcache[k + 4] as usize);
+                let (osh, p) = {
+                    let ob = self.ob(o);
+                    (ob.shape, ob.proto)
+                };
+                if k + 4 < self.mcache.len() && i32_at(&self.mcache, k) == osh && i32_at(&self.mcache, k + 1) == (self.shape_epoch as i32) && p == i32_at(&self.mcache, k + 2) {
+                    let po = self.ob(p as int);
+                    if po.shape == i32_at(&self.mcache, k + 3) {
+                        let f = slot_at(po, i32_at(&self.mcache, k + 4) as usize);
                         if let Val::Obj(fo) = f {
                             let fc = self.ob(fo).class;
                             if fc == C_FUNCTION || fc == C_NATIVE {
@@ -1821,7 +1831,15 @@ impl Vm {
                     }
                 }
             }
-        } else if w3 <= -16 {
+        }
+        self.r_get_method_more(bp, rb, fi, pc, w0, w1, v, w3);
+    }
+
+    /// r_get_method past the site's mcache entry: a primitive's method,
+    /// the receiver's own property, the site's ways (pic).
+    #[inline(never)]
+    fn r_get_method_more(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, v: Val, w3: int) {
+        if w3 > MC_BASE && w3 <= -16 {
             if matches!(v, Val::Str(_)) || matches!(v, Val::Num(_)) {
                 // a string's (number's) method: String.prototype's
                 // (Number.prototype's) slot -16 - w3, its key checked as an
@@ -1848,28 +1866,14 @@ impl Vm {
                 }
             }
             let site = rb + pc;
-            if (site as usize) < self.rpic.len() && self.rpic[site as usize] >= 0 {
-                // the site's first way, a data property one prototype up
-                // (a method on its class's prototype): checked here first
-                let b = (self.rpic[site as usize] * (PIC_W as i32)) as usize;
-                if b + 6 < self.pic.len() && self.pic[b] == self.ob(o).shape && self.pic[b + 1] == (self.shape_epoch as i32) && self.pic[b + 2] == 1 && self.pic[b + 3] >= 0 && self.pic[b + 4] == 0 {
-                    let p = self.pic[b + 5];
-                    if self.ob(o).proto == p && self.ob(p as int).shape == self.pic[b + 6] {
-                        let f = slot_at(self.ob(p as int), self.pic[b + 3] as usize);
-                        let fun = if let Val::Obj(fo) = f { self.ob(fo).class == C_FUNCTION } else { false };
-                        if fun || ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
-                            self.rset((bp + w1) as usize, f);
-                            self.rset((bp + w1 + 1) as usize, v);
-                            return;
-                        }
-                    }
-                }
+            if (site as usize) < self.rpic.len() {
                 // a way that fits o's shape was learnt on that shape
                 // without the property of its own
                 let h = self.pic_probe(site, o);
-                if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
-                    let f = if h >= 0 { self.objs[h as usize].get_slot(self.pic[(self.pic_way + 3) as usize] as usize) } else { Val::Undef };
-                    if ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
+                if h != -1 && (h < 0 || i32_at(&self.pic, (self.pic_way + 4) as usize) == 0) {
+                    let f = if h >= 0 { slot_at(self.ob(h), i32_at(&self.pic, (self.pic_way + 3) as usize) as usize) } else { Val::Undef };
+                    let fun = if let Val::Obj(fo) = f { self.ob(fo).class == C_FUNCTION } else { false };
+                    if fun || ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
                         self.rset((bp + w1) as usize, f);
                         self.rset((bp + w1 + 1) as usize, v);
                         return;
@@ -2657,6 +2661,22 @@ pub fn int_at(v: &Vec<int>, i: usize) -> &int {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn int_at(v: &Vec<int>, i: usize) -> &int {
     &v[i]
+}
+
+/// `v[i]` of a cache table (pic, rpic, mcache).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn i32_at(v: &Vec<i32>, i: usize) -> i32 {
+    debug_assert!(i < v.len(), "index past a cache table");
+    // SAFETY: a site names whole entries only: pic_learn and mc_learn
+    // push every int of an entry before the site (rpic, the op's c) gets
+    // its index, and the tables never shrink while register code lives
+    unsafe { *v.get_unchecked(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn i32_at(v: &Vec<i32>, i: usize) -> i32 {
+    v[i]
 }
 
 /// `v[i]` of the objects.
