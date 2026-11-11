@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // An object's elements (value.rs Elems.v) as a Vec<Val> that can drop its
 // first element in O(1): Array.prototype.shift moves the vector's start
-// instead of every element, and unshift puts a value back into the room
-// shifts left. Rust only (lib.rs includes it for the rust target); the
-// other targets keep their arrays.
+// instead of every element, and unshift puts a value into the room shifts
+// left, or into room it makes before the values. Rust only (lib.rs
+// includes it for the rust target); the other targets keep their arrays.
 //
 // `inner` is a Vec whose pointer may lie `head` values past the start of
 // its allocation (and whose capacity is the allocation's less `head`).
@@ -136,16 +136,23 @@ impl EVec {
             self.inner = Vec::from_raw_parts(p.add(1), len - 1, cap - 1);
         }
         self.head += 1;
-        // the dropped room back once it outgrows what is left: each value
-        // moves at most once per value shifted out
-        if self.head >= 64 && self.head > self.inner.len() {
+        // the dropped room back once it is twice what is left: each value
+        // moves at most once per value shifted out, and shifts after an
+        // unshift (front_room leaves head = len) do not move them at once
+        if self.head >= 64 && self.head > 2 * self.inner.len() {
             self.flat_slow();
         }
         x
     }
 
-    /// Puts `x` at `i`; at 0 into the room shifts left when there is.
+    /// Puts `x` at `i`; at 0 into the room shifts left when there is, and
+    /// with none (a vector of 16 or more) first into a new buffer with as
+    /// much room before the values as there are values: unshift in O(1)
+    /// amortised, as shift is.
     pub fn insert(&mut self, i: usize, x: Val) {
+        if i == 0 && self.head == 0 && self.inner.len() >= 16 {
+            self.front_room();
+        }
         if i == 0 && self.head > 0 {
             let len = self.inner.len();
             let cap = self.inner.capacity();
@@ -166,6 +173,29 @@ impl EVec {
             self.flat();
         }
         self.inner.insert(i, x);
+    }
+
+    /// Moves the values into a new buffer `len` values past its start
+    /// (and with len / 2 slots after them): `head` = len.
+    #[inline(never)]
+    fn front_room(&mut self) {
+        let len = self.inner.len();
+        let room = len;
+        let mut nv: Vec<Val> = Vec::with_capacity(room + len + len / 2);
+        let cap = nv.capacity();
+        let p = nv.as_mut_ptr();
+        std::mem::forget(nv);
+        let old = std::mem::replace(&mut self.inner, Vec::new());
+        // SAFETY: the new buffer holds cap >= room + len values; the len
+        // values go to p + room; `inner` then starts there with the cap -
+        // room slots from it, as remove leaves it. The old buffer is an
+        // ordinary Vec (head 0) and frees as one; Val owns nothing.
+        unsafe {
+            std::ptr::copy_nonoverlapping(old.as_ptr(), p.add(room), len);
+            self.inner = Vec::from_raw_parts(p.add(room), len, cap - room);
+        }
+        drop(old);
+        self.head = room;
     }
 
     /// The values as an ordinary Vec, taken out (this one left empty).
