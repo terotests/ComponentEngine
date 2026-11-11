@@ -57,6 +57,10 @@ fn put_val(out: &mut String, st: &mut Strings, vm: &Vm, v: &Val) {
             put_num(out, 6);
             put_num(out, *o);
         }
+        Val::Big(n) => {
+            put_num(out, 8);
+            put_num(out, *n as int);
+        }
     }
 }
 
@@ -94,6 +98,8 @@ fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
         Val::Obj(r.num())
     } else if t == 7 {
         Val::Num(r.num() as double)
+    } else if t == 8 {
+        Val::Big((r.num() as double) + 0.0)
     } else {
         r.bad = true;
         Val::Undef
@@ -319,20 +325,11 @@ pub fn snapshot(vm: &Vm) -> String {
         vm.priv_seq,
     ];
     put_ints(&mut b, &ints);
-    // both BigInt tables as text; restore sorts them again by size
-    put_num(&mut b, (vm.bigints.len() as int) + vm.bs_count);
+    // the table of large BigInts (objects) by their text
+    put_num(&mut b, vm.bigints.len() as int);
     for (k, v) in vm.bigints.iter() {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
-    }
-    let mut j: usize = 0;
-    while j < vm.bs_vals.len() {
-        if vm.bs_vals[j] >= 0 {
-            let kt = crate::bigint::int_text(vm.bs_keys[j]);
-            put_num(&mut b, st.id(kt.as_str()));
-            put_num(&mut b, vm.bs_vals[j]);
-        }
-        j += 1;
     }
     put_ints(&mut b, &vm.roots);
     put_num(&mut b, vm.out.len() as int);
@@ -637,23 +634,12 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.pcomp = ints[43] == 1;
     vm.priv_seq = ints[44];
     vm.bigints = HashMap::new();
-    vm.bs_keys = Vec::new();
-    vm.bs_vals = Vec::new();
-    vm.bs_count = 0;
     let nb = r.num();
     i = 0;
     while i < nb && !r.bad {
         let k = get_str(&mut r, &texts);
         let v = r.num();
-        if k == "0" {
-            vm.big_zero = v;
-        }
-        let kn = crate::bigint::small_big_of(k.as_str());
-        if kn < crate::bigint::small_big_limit() {
-            vm.bs_put(kn as int, v);
-        } else {
-            vm.bigints.insert(k, v);
-        }
+        vm.bigints.insert(k, v);
         i += 1;
     }
     vm.roots = get_ints(&mut r);

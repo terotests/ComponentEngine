@@ -665,10 +665,11 @@ pub fn int_text(v: int) -> String {
     format!("{}", v)
 }
 
-// ---- the VM's side: a BigInt is an interned C_BIGINT object whose `prim`
-// is its decimal text, or its value as a Num when that is below
-// small_big_limit (exact; those are interned in Vm.bs_keys/bs_vals by value), so
-// === and SameValue compare them by identity
+// ---- the VM's side: a BigInt below small_big_limit in magnitude is a
+// Val::Big holding its value (exact in a double); a larger one is an
+// interned C_BIGINT object whose `prim` is its decimal text. Each value has
+// one form, so === and SameValue compare Bigs by value and objects by
+// identity. class_of gives C_BIGINT for both.
 
 use crate::ops::*;
 use crate::value::*;
@@ -712,159 +713,38 @@ impl Vm {
         self.put_prim(o, sv0);
         self.bigints.insert(String::from(s), o);
         // the table is weak: a BigInt nothing holds is freed like any object
-        // and leaves the table then (release); 0n stays, the JIT reads it
-        if s == "0" {
-            self.big_zero = o;
-            self.roots.push(o);
-        }
+        // and leaves the table then (release)
         Val::Obj(o)
     }
 
     /// The BigInt with a small value `n` (an integer below
-    /// small_big_limit in magnitude), made once.
+    /// small_big_limit in magnitude): a Val::Big, no object.
+    #[inline]
     pub fn bigint_small(&mut self, n: double) -> Val {
-        let k = n as int;
-        let f = self.bs_find(k);
-        if f >= 0 {
-            return Val::Obj(f);
-        }
-        let bp = self.bigint_proto;
-        let o = self.alloc(C_BIGINT, bp);
-        self.put_prim(o, Val::Num((k as double) + 0.0));
-        self.bs_put(k, o);
-        if k == 0 {
-            self.big_zero = o;
-            self.roots.push(o);
-        }
-        Val::Obj(o)
+        Val::Big(n + 0.0)
     }
 
-    fn bs_slot(&self, k: int) -> int {
-        let a = (k ^ (k >> 31)) & 2147483647;
-        (a * 40503) & ((self.bs_keys.len() as int) - 1)
-    }
-
-    /// The small BigInt with value `k`, or -1.
-    pub fn bs_find(&self, k: int) -> int {
-        if self.bs_count == 0 {
-            return -1;
+    /// The small BigInt `n` plus `d` (a small integer).
+    pub fn big_step(&mut self, n: double, d: double) -> Val {
+        let r = n + d;
+        let lim = small_big_limit();
+        if r < lim && r > -lim {
+            return Val::Big(r + 0.0);
         }
-        let mask = (self.bs_keys.len() as int) - 1;
-        let mut h = self.bs_slot(k);
-        loop {
-            let v = self.bs_vals[h as usize];
-            if v < 0 {
-                return -1;
-            }
-            if self.bs_keys[h as usize] == k {
-                return v;
-            }
-            h = (h + 1) & mask;
-        }
-    }
-
-    pub fn bs_put(&mut self, k: int, o: int) {
-        let n = self.bs_keys.len() as int;
-        if (self.bs_count + 1) * 2 > n {
-            let nn: int = if n == 0 { 64 } else { n * 2 };
-            let ok = self.bs_keys.clone();
-            let ov = self.bs_vals.clone();
-            let mut nk: Vec<int> = Vec::new();
-            let mut nv: Vec<int> = Vec::new();
-            let mut j: int = 0;
-            while j < nn {
-                nk.push(0);
-                nv.push(-1);
-                j += 1;
-            }
-            self.bs_keys = nk;
-            self.bs_vals = nv;
-            self.bs_count = 0;
-            let mut j: usize = 0;
-            while j < ok.len() {
-                if ov[j] >= 0 {
-                    self.bs_put(ok[j], ov[j]);
-                }
-                j += 1;
-            }
-        }
-        let mask = (self.bs_keys.len() as int) - 1;
-        let mut h = self.bs_slot(k);
-        loop {
-            let v = self.bs_vals[h as usize];
-            if v < 0 {
-                self.bs_keys[h as usize] = k;
-                self.bs_vals[h as usize] = o;
-                self.bs_count += 1;
-                return;
-            }
-            if self.bs_keys[h as usize] == k {
-                self.bs_vals[h as usize] = o;
-                return;
-            }
-            h = (h + 1) & mask;
-        }
-    }
-
-    /// Removes `k`, moving later entries of its run back (no tombstones).
-    pub fn bs_remove(&mut self, k: int) {
-        if self.bs_count == 0 {
-            return;
-        }
-        let mask = (self.bs_keys.len() as int) - 1;
-        let mut h = self.bs_slot(k);
-        loop {
-            if self.bs_vals[h as usize] < 0 {
-                return;
-            }
-            if self.bs_keys[h as usize] == k {
-                break;
-            }
-            h = (h + 1) & mask;
-        }
-        self.bs_vals[h as usize] = -1;
-        self.bs_count -= 1;
-        let mut hole = h;
-        let mut j = (h + 1) & mask;
-        loop {
-            if self.bs_vals[j as usize] < 0 {
-                return;
-            }
-            let home = self.bs_slot(self.bs_keys[j as usize]);
-            // the entry at j may fill the hole when its home is not in
-            // (hole, j] going round
-            let stays = if hole <= j { home > hole && home <= j } else { home > hole || home <= j };
-            if !stays {
-                self.bs_keys[hole as usize] = self.bs_keys[j as usize];
-                self.bs_vals[hole as usize] = self.bs_vals[j as usize];
-                self.bs_vals[j as usize] = -1;
-                hole = j;
-            }
-            j = (j + 1) & mask;
-        }
+        self.bigint_val(crate::bigint::add(int_text(n as int).as_str(), int_text(d as int).as_str()).as_str())
     }
 
     /// The small value of a BigInt, when it has one.
+    #[inline]
     pub fn big_small_val(&self, v: &Val) -> Option<double> {
-        if let Val::Obj(o) = v {
-            if self.objs[*o as usize].class == C_BIGINT {
-                if let Val::Num(n) = self.colds[self.objs[*o as usize].cold as usize].prim {
-                    return Some(n);
-                }
-            }
+        if let Val::Big(n) = v {
+            return Some(*n);
         }
         None
     }
 
     /// A BigInt being freed leaves the table (when it is the one there).
     pub fn forget_bigint(&mut self, o: int) {
-        if let Val::Num(n) = self.colds[self.objs[o as usize].cold as usize].prim {
-            let k = n as int;
-            if self.bs_find(k) == o {
-                self.bs_remove(k);
-            }
-            return;
-        }
         let t = self.big_text(&Val::Obj(o));
         let mine = match self.bigints.get(t.as_str()) {
             Some(x) => *x == o,
@@ -876,20 +756,20 @@ impl Vm {
     }
 
     pub fn is_bigint(&self, v: &Val) -> bool {
-        self.class_of(v) == C_BIGINT
+        matches!(v, Val::Big(_)) || self.class_of(v) == C_BIGINT
     }
 
     /// The decimal text of a BigInt value.
     pub fn big_text(&self, v: &Val) -> String {
+        if let Val::Big(n) = v {
+            return int_text(*n as int);
+        }
         let o = obj_of(v);
         if o >= 0 {
             let pv = self.colds[self.objs[o as usize].cold as usize].prim;
             if let Val::Str(s) = pv {
                 let s = self.sget(s);
                 return s.as_ref().clone();
-            }
-            if let Val::Num(n) = pv {
-                return int_text(n as int);
             }
         }
         String::from("0")
@@ -954,11 +834,10 @@ impl Vm {
                 } else if code == OP_MUL {
                     p * q
                 } else if code == OP_DIV && q != 0.0 {
-                    // the remainder is exact, then the division is
-                    let r = p % q;
-                    (p - r) / q
+                    // both below small_big_limit: exact in int
+                    ((p as int) / (q as int)) as double
                 } else if code == OP_MOD && q != 0.0 {
-                    p % q
+                    ((p as int) % (q as int)) as double
                 } else {
                     ok = false;
                     0.0

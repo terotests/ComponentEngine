@@ -27,6 +27,9 @@ pub enum Val {
     /// linked (compiler, unit), an index into Proto.cstrs
     Str(int),
     Obj(int),
+    /// a BigInt whose value is an integer below small_big_limit in
+    /// magnitude (bigint.rs); larger ones are C_BIGINT objects
+    Big(double),
 }
 
 // object classes

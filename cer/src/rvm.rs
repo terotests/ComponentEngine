@@ -2454,6 +2454,7 @@ impl Vm {
             match (a, b) {
                 (Val::Num(x), Val::Num(y)) => if *x == *y { 1 } else { 0 },
                 (Val::Obj(x), Val::Obj(y)) => if *x == *y { 1 } else { 0 },
+                (Val::Big(x), Val::Big(y)) => if *x == *y { 1 } else { 0 },
                 (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => 1,
                 (Val::Bool(x), Val::Bool(y)) => if *x == *y { 1 } else { 0 },
                 (Val::Str(x), Val::Str(y)) => if *x == *y || self.sref(*x) == self.sref(*y) { 1 } else { 0 },
