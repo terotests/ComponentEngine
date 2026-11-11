@@ -2404,11 +2404,78 @@ impl Vm {
         out.push('"');
     }
 
+    /// The JSON.stringify plan of ordinary object `o` (index of its triple
+    /// in js_plan), -1 when it has none: a shared (never changing) shape
+    /// of data properties only, Object.prototype its prototype and neither
+    /// with toJSON (kept while shape_epoch and Object.prototype's shape stay).
+    /// Its values are read straight from their slots while
+    /// `o` keeps that shape.
+    pub fn json_plan(&mut self, o: int) -> int {
+        let op = self.object_proto;
+        if self.objs[o as usize].class != C_OBJECT || self.objs[o as usize].elems != 0 || (self.objs[o as usize].proto as int) != op {
+            return -1;
+        }
+        let sh = self.objs[o as usize].shape as int;
+        if self.shapes[sh as usize].owned {
+            return -1;
+        }
+        // Object.prototype's own keys: its shape, or shape_epoch when it
+        // changes an owned one in place
+        let ps = self.objs[op as usize].shape as int;
+        if self.js_epoch != self.shape_epoch || self.js_pshape != ps {
+            self.js_plan.clear();
+            self.js_epoch = self.shape_epoch;
+            self.js_pshape = ps;
+        }
+        let mut i: usize = 0;
+        while i < self.js_plan.len() {
+            if self.js_plan[i] as int == sh {
+                return if self.js_plan[i + 1] < 0 { -1 } else { i as int };
+            }
+            i += 3;
+        }
+        if self.js_plan.len() >= 24 || self.js_slots.len() > 4096 {
+            return -1;
+        }
+        let at = self.js_plan.len();
+        self.js_plan.push(sh as i32);
+        self.js_plan.push(-1);
+        self.js_plan.push(0);
+        if (self.objs[op as usize].proto as int) >= 0 || self.find(op, A_TOJSON) >= 0 || self.find(o, A_TOJSON) >= 0 {
+            return -1;
+        }
+        let atoms = self.own_string_atoms(o);
+        for a in atoms.iter() {
+            let slot = self.find(o, *a);
+            if slot < 0 || (self.attr_at(o, slot) & (P_ACCESSOR | P_MAPPED)) != 0 {
+                return -1;
+            }
+        }
+        let start = self.js_slots.len();
+        for a in atoms.iter() {
+            let slot = self.find(o, *a);
+            self.js_slots.push(slot as i32);
+            self.js_atoms.push(*a as i32);
+            let mut q = String::new();
+            self.json_quote(self.atom_names[*a as usize].as_str(), &mut q);
+            self.js_kq.push(q);
+        }
+        self.js_plan[at + 1] = start as i32;
+        self.js_plan[at + 2] = atoms.len() as i32;
+        at as int
+    }
+
     /// SerializeJSONProperty steps 1-4: toJSON, the replacer and unwrapping of
     /// Number/String/Boolean objects. `kidx` >= 0 is an array index whose key
     /// string is made only when toJSON or the replacer needs it.
     pub fn json_val(&mut self, holder: &Val, key0: &Val, kidx: int, v0: Val, replacer: &Val) -> Val {
         let mut v = v0;
+        // an object with a plan has no toJSON
+        if let Val::Obj(o) = &v {
+            if !self.is_callable(replacer) && self.json_plan(*o) >= 0 {
+                return v;
+            }
+        }
         // an array index key is made only when toJSON or a replacer needs it
         let tj = if is_obj(&v) || matches!(v, Val::Big(_)) { self.get(&v, A_TOJSON) } else { Val::Undef };
         let has_tj = self.is_callable(&tj);
@@ -2482,6 +2549,9 @@ impl Vm {
                 return true;
             }
             Val::Num(n) => {
+                if push_small_int(out, *n) >= 0 {
+                    return true;
+                }
                 if is_finite(*n) {
                     out.push_str(number_to_string(*n).as_str());
                 } else {
@@ -2512,7 +2582,62 @@ impl Vm {
                 stack.push(o);
                 let inner = if gap.is_empty() { String::new() } else { format!("{}{}", indent, gap) };
                 let class = self.objs[o as usize].class;
-                if class == C_ARRAY || (class == C_PROXY && self.is_array_val(&v)) {
+                let plan = if class == C_OBJECT && allow.is_empty() && !self.is_callable(replacer) { self.json_plan(o) } else { -1 };
+                if plan >= 0 {
+                    // the plan's keys, values from their slots while o keeps
+                    // its shape (a toJSON below may change it)
+                    let sh = self.js_plan[plan as usize] as int;
+                    let start = self.js_plan[plan as usize + 1] as usize;
+                    let len = self.js_plan[plan as usize + 2] as usize;
+                    out.push('{');
+                    let mut first = true;
+                    let mut j: usize = start;
+                    while j < start + len {
+                        let a = self.js_atoms[j] as int;
+                        let item = if (self.objs[o as usize].shape as int) == sh {
+                            self.objs[o as usize].get_slot(self.js_slots[j] as usize).clone()
+                        } else {
+                            self.get(&v, a)
+                        };
+                        if self.throwing {
+                            return false;
+                        }
+                        let iv = if is_obj(&item) || matches!(item, Val::Big(_)) {
+                            let kv = self.atom_val(a);
+                            self.json_val(&v, &kv, -1, item, replacer)
+                        } else {
+                            item
+                        };
+                        if self.throwing {
+                            return false;
+                        }
+                        j += 1;
+                        if self.json_skip(&iv) {
+                            continue;
+                        }
+                        if !first {
+                            out.push(',');
+                        }
+                        first = false;
+                        if !gap.is_empty() {
+                            out.push('\n');
+                            out.push_str(inner.as_str());
+                        }
+                        out.push_str(self.js_kq[j - 1].as_str());
+                        out.push(':');
+                        if !gap.is_empty() {
+                            out.push(' ');
+                        }
+                        if !self.json_write(iv, replacer, allow, gap, inner.as_str(), stack, out) {
+                            return false;
+                        }
+                    }
+                    if !first && !gap.is_empty() {
+                        out.push('\n');
+                        out.push_str(indent);
+                    }
+                    out.push('}');
+                } else if class == C_ARRAY || (class == C_PROXY && self.is_array_val(&v)) {
                     let n = self.len_of(&v);
                     out.push('[');
                     let mut i: int = 0;

@@ -1297,7 +1297,17 @@ impl Vm {
                 let mut out = String::new();
                 let mut stack: Vec<int> = Vec::new();
                 let sv1 = self.str_val("");
+                // plans are dropped only outside every stringify (a toJSON
+                // may call it again while an object's plan is in use)
+                if self.js_depth == 0 && self.js_slots.len() > 2048 {
+                    self.js_plan.clear();
+                    self.js_slots.clear();
+                    self.js_atoms.clear();
+                    self.js_kq.clear();
+                }
+                self.js_depth += 1;
                 let ok = self.json_str(&Val::Obj(holder), &sv1, -1, a0, &a1, &allow, gap.as_str(), "", &mut stack, &mut out);
+                self.js_depth -= 1;
                 if self.throwing || !ok {
                     return Val::Undef;
                 }
