@@ -349,11 +349,9 @@ impl Vm {
                 self.stack[self.frames[fi].mv_to as usize] = v;
                 self.frames[fi].mv_to = -1;
             }
+            let mut cp = code_at(&self.rcode, rb);
             loop {
-                let ins = {
-                    // pc stays inside the function's translated code
-                    op_at(&self.rcode, (rb + pc) as usize)
-                };
+                let ins = code_op(&self.rcode, cp, pc);
                 let w0 = ins.code;
                 // the operands widened once here: the arms index with them
                 let w1 = ins.a as int;
@@ -514,6 +512,7 @@ impl Vm {
                         }
                         if back && self.jit_on {
                             pc = self.jit_run(pi, rb, bp, fi, pc);
+                            cp = code_at(&self.rcode, rb);
                             if pc < 0 {
                                 if pc == -1 || (pc == -2 && !self.unwind(base)) {
                                     return;
@@ -535,6 +534,7 @@ impl Vm {
                         }
                         if back && self.jit_on {
                             pc = self.jit_run(pi, rb, bp, fi, pc);
+                            cp = code_at(&self.rcode, rb);
                             if pc < 0 {
                                 if pc == -1 || (pc == -2 && !self.unwind(base)) {
                                     return;
@@ -930,6 +930,7 @@ impl Vm {
                                 pc = frame_at(&self.frames, fi).pc;
                                 want = (bp + proto_at(&self.protos, pi).fsize) as usize;
                                 rb = proto_at(&self.protos, pi).rbase;
+                                cp = code_at(&self.rcode, rb);
                                 if self.slicing && self.frame_brk() {
                                     return;
                                 }
@@ -945,6 +946,7 @@ impl Vm {
                             }
                             continue 'frames;
                         }
+                        cp = code_at(&self.rcode, rb);
                         pc = (pc + 1 + ((w0 >> 16) as int));
                         continue;
                     }
@@ -993,6 +995,7 @@ impl Vm {
                             pc = self.frames[fi].pc;
                             want = (bp + self.protos[pi].fsize) as usize;
                             rb = self.protos[pi].rbase;
+                            cp = code_at(&self.rcode, rb);
                             if self.slicing && self.frame_brk() {
                                 return;
                             }
@@ -1037,6 +1040,7 @@ impl Vm {
                             pc = fc.pc;
                             want = (bp + proto_at(&self.protos, pi).fsize) as usize;
                             rb = proto_at(&self.protos, pi).rbase;
+                            cp = code_at(&self.rcode, rb);
                             let to = if fr.ret >= 0 { fr.ret as usize } else { fpos };
                             // the caller's slot of f or a register of its frame
                             val_put(&mut self.stack, to, v);
@@ -1047,6 +1051,7 @@ impl Vm {
                             if self.jit_on && ((rb + pc) as usize) < self.jit_res.len() && self.jit_res[(rb + pc) as usize] {
                                 // after a call out of compiled code: back in
                                 pc = self.jit_go(pi, bp, fi, pc, false);
+                                cp = code_at(&self.rcode, rb);
                                 if pc < 0 {
                                     if pc == -1 || (pc == -2 && !self.unwind(base)) {
                                         return;
@@ -1307,7 +1312,9 @@ impl Vm {
                     }
                     continue 'frames;
                 }
-                pc = if npc >= 0 { npc } else { pc + 1 + ((op_at(&self.rcode, (rb + pc) as usize).code >> 16) as int) };
+                // the arm may have called out: rcode may have moved
+                cp = code_at(&self.rcode, rb);
+                pc = if npc >= 0 { npc } else { pc + 1 + ((code_op(&self.rcode, cp, pc).code >> 16) as int) };
             }
         }
     }
@@ -2588,6 +2595,52 @@ pub fn op_at(v: &Vec<Op>, i: usize) -> Op {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn op_at(v: &Vec<Op>, i: usize) -> Op {
     v[i]
+}
+
+/// Where a function's register code starts (rrun's `cp`): Rust keeps the
+/// address, so an op is one indexed load without rcode's pointer or the
+/// function's base; the other targets keep the base.
+#[ranger::target(rust)]
+#[derive(Clone, Copy)]
+pub struct CodeP {
+    pub p: *const Op,
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+#[derive(Clone, Copy)]
+pub struct CodeP {
+    pub p: int,
+}
+
+/// The code of the function whose base is `rb`. rrun takes it again after
+/// anything that may translate a function (a call, compiled code), since
+/// that can move rcode.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn code_at(v: &Vec<Op>, rb: int) -> CodeP {
+    debug_assert!((rb as usize) <= v.len(), "code base past the register code");
+    // SAFETY: rb is a translated function's base in v
+    CodeP { p: unsafe { v.as_ptr().add(rb as usize) } }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn code_at(_v: &Vec<Op>, rb: int) -> CodeP {
+    CodeP { p: rb }
+}
+
+/// Op `pc` of the function at `cp`.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn code_op(_v: &Vec<Op>, cp: CodeP, pc: int) -> Op {
+    debug_assert!(_v.as_ptr() <= cp.p && (cp.p as usize) + (pc as usize) * 16 < (_v.as_ptr() as usize) + _v.len() * 16, "stale code pointer");
+    // SAFETY: pc stays inside the function's translated code, and cp was
+    // taken (code_at) after the last thing that could move rcode
+    unsafe { *cp.p.add(pc as usize) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn code_op(v: &Vec<Op>, cp: CodeP, pc: int) -> Op {
+    v[(cp.p + pc) as usize]
 }
 
 /// `v[i]` of the frames.
