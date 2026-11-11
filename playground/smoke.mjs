@@ -137,6 +137,12 @@ async function runZoo() {
   for (const r of rows) console.log(r.slice(1).map((c, i) => (i === 0 ? c.padEnd(40) : c.padStart(12))).join(""));
   const details = await page.evaluate(() => [...document.querySelectorAll("#zoo-details summary")].map((s) => s.textContent));
   for (const d of details) console.log(d);
+  // the first failing cases of each engine with their last output line: what
+  // a broken engine says is in the log, not only how many cases it failed
+  const firstFails = await page.evaluate(() =>
+    [...document.querySelectorAll("#zoo-details details")].map((d) => [d.querySelector("summary").textContent.split(":")[0], [...d.querySelectorAll(".failing li")].slice(0, 6).map((li) => li.textContent)]),
+  );
+  for (const [name, lines] of firstFails) for (const l of lines) console.log("  " + name + " · " + l);
   if (process.env.ZOO_DUMP) {
     const fails = await page.evaluate(() => [...document.querySelectorAll("#zoo-details details")].map((d) => d.querySelector("summary").textContent.split(":")[0] + "\n  " + [...d.querySelectorAll(".failing li")].map((li) => li.textContent).join("\n  ")));
     fs.writeFileSync(process.env.ZOO_DUMP, fails.join("\n"));
