@@ -1071,3 +1071,16 @@ var o = { length: 3, 0: "x", 1: "y", 2: "z" }; r.push(Array.prototype.indexOf.ca
 r.join("|")
 ----
 true|49|false|-1|true|51|false|52|false|1|10|true|-1|true|1|true|true|-1|2|false|2|true
+
+==== js An alternation of only characters compiles to a trie: alternatives that end early keep their place (ab|a|abc, a|ab|abc), empty alternatives, \b words, unicode, ignore-case left as is, lookbehind, split
+var r = [];
+function m(re, s) { var x = s.match(re); return x === null ? "null" : x.join(","); }
+r.push(m(/ab|a|abc/g, "abc abx a"), m(/a|ab|abc/g, "abc"), m(/abc|ab|a/g, "abcab"), m(/(?:ab|a|abc)c/, "abc"), m(/(?:a|ab|abc)c/, "abcc"));
+r.push(m(/^(?:cat|car|cart|ca|c)$/, "cart"), m(/^(?:cat|car|cart|ca|c)$/, "ca"), m(/x(?:|a|ab|b)y/g, "xy xay xaby xby xbay"));
+r.push(m(/\b(?:one|two|three|thr|t)\b/g, "one two three thr t tw"), m(/(?:aa|a|aaa|b)+$/, "aaaab"), m(/(?:foo|bar|baz|ba|f)/g, "fobazbarbafoo"));
+r.push(m(/(?:é|e|ée|ü)+/g, "éeéeü x"), m(/(?:\u{1F600}|a|b|c)/gu, "\u{1F600}cb"), "AbC".replace(/(?:ab|AB|Ab|aB)/, "_"));
+var w = []; for (var i = 0; i < 30; i++) w.push("w" + i); var big = new RegExp("^(?:" + w.join("|") + ")$"); r.push(big.test("w3"), big.test("w29"), big.test("w30"), big.test("w"));
+r.push(m(/(?:ab|cd|ef|gh)/i, "xEFx"), m(/(?<=(?:ab|a|abc|b))x/g, "abx ax bx cx"), "a1b2".split(/(?:1|2|3|4)/).join("-"));
+r.join("|")
+----
+ab,ab,a|a|abc,ab|abc|abc|cart|ca|xy,xay,xaby,xby|one,two,three,thr,t|aaaab|f,baz,bar,ba,foo|éeéeü|😀,c,b|_C|true|true|false|false|EF|x,x,x|a-b-
