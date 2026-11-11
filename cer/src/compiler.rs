@@ -981,6 +981,29 @@ impl Compiler {
         }
     }
 
+    /// A BigInt literal (its decimal digits): a small one is a constant
+    /// Val::Big, a larger one its text and OP_BIGINT.
+    fn push_bigint(&mut self, digits: &str) {
+        let n = crate::bigint::small_big_of(digits);
+        if n >= crate::bigint::small_big_limit() {
+            self.push_str(digits);
+            self.op(OP_BIGINT);
+            return;
+        }
+        let key = format!("big:{}", digits);
+        let mut c = match self.f().num_consts.get(&key) {
+            Some(i) => *i,
+            None => -1,
+        };
+        if c < 0 {
+            let f = self.f();
+            c = f.proto.consts.len() as int;
+            f.proto.consts.push(Val::Big(n + 0.0));
+            f.num_consts.insert(key, c);
+        }
+        self.emit(OP_CONST, c, 0);
+    }
+
     fn push_str(&mut self, s: &str) {
         let c = self.str_const(s);
         self.emit(OP_CONST, c, 0);
@@ -2386,8 +2409,7 @@ impl Compiler {
         }
         if k == N_BIGINT {
             let s = self.ast.nodes[n as usize].s.clone();
-            self.push_str(s.as_str());
-            self.op(OP_BIGINT);
+            self.push_bigint(s.as_str());
             return;
         }
         if k == N_NUM {

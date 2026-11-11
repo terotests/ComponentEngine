@@ -951,6 +951,7 @@ impl Vm {
                 }
                 s
             }
+            Val::Big(_) => format!("{}n", self.big_text(v)),
             _ => self.to_string(v),
         }
     }
@@ -1684,6 +1685,7 @@ impl Vm {
             }
             Val::Str(_) => String::new(),
             Val::Obj(o) => format!("o{}", o),
+            Val::Big(n) => format!("g{}", crate::bigint::int_text(*n as int)),
         };
         2 * self.intern(s.as_str()) + 1
     }
@@ -2343,14 +2345,14 @@ impl Vm {
     pub fn json_val(&mut self, holder: &Val, key0: &Val, kidx: int, v0: Val, replacer: &Val) -> Val {
         let mut v = v0;
         // an array index key is made only when toJSON or a replacer needs it
-        let tj = if is_obj(&v) { self.get(&v, A_TOJSON) } else { Val::Undef };
+        let tj = if is_obj(&v) || matches!(v, Val::Big(_)) { self.get(&v, A_TOJSON) } else { Val::Undef };
         let has_tj = self.is_callable(&tj);
         let mut key = key0.clone();
         if kidx >= 0 && (has_tj || self.is_callable(replacer)) {
             key = self.string_val(format!("{}", kidx));
         }
         let key = &key;
-        if is_obj(&v) || matches!(v, Val::Num(_)) {
+        if is_obj(&v) || matches!(v, Val::Num(_) | Val::Big(_)) {
             if has_tj {
                 v = self.call_fixed(tj, v.clone(), 1, key.clone(), Val::Undef, Val::Undef);
                 if self.throwing {
@@ -2423,6 +2425,10 @@ impl Vm {
                 return true;
             }
             Val::Undef => return false,
+            Val::Big(_) => {
+                self.throw_type("Do not know how to serialize a BigInt");
+                return false;
+            }
             Val::Obj(o) => {
                 let o = *o;
                 if self.is_callable(&v) || self.objs[o as usize].class == C_SYMBOL {

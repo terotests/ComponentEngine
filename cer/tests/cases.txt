@@ -899,3 +899,34 @@ var f = []; for (var i5 = 0; i5 < 300; i5++) f.push(i5); while (f.length > 1) { 
 r.join("|")
 ----
 11175|50|150|199||52|-1|-2|150|53|7|999|1000|500|999.5|99|40|40|40/41/42|59|x|5|true|[98,99]|1|69|31|29|0|69|186|0|1,2,3|44850
+
+==== js BigInt small values as plain values (Val::Big): equality, typeof, truthiness, keys, Map/Set, JSON, mixing errors, ~, ++ past 2^53, JIT-hot functions
+var r = [];
+var a = 5n, b = 5n, z = 0n, big = 123456789012345678901234567890n;
+r.push(typeof a, a === b, a == b, a == 5, 5 == a, a == "5", a < 6, a > 4.5, !!z, !!a, z ? 1 : 2, a !== 6n, a != 6n);
+r.push(String(a), a + "", `${a}`, a.toString(16), (255n).toString(2), BigInt(7) === 7n, String(BigInt("9007199254740993")), String(BigInt.asIntN(8, 255n)));
+r.push(String([a * b, a - 7n, -a, a ** 3n, 7n / 2n, -7n / 2n, -7n % 2n, 1n << 60n, (1n << 60n) >> 58n, 5n & 3n, 5n | 3n, 5n ^ 3n, ~5n, ~-1n, ~big]));
+var x = 9007199254740991n; x++; r.push(String(x), x === 9007199254740992n, x - 1n === 9007199254740991n, String(9007199254740991n + 2n));
+var y = 3n; y--; y += 10n; r.push(String(y));
+r.push(Object(a) == a, typeof Object(a), Object(a).valueOf() === a, Object.prototype.toString.call(a), Object(a) === a);
+var m = new Map(); m.set(5n, "five"); m.set(big, "big"); r.push(m.get(5n), m.get(123456789012345678901234567890n), m.has(5), new Set([1n, 1n, 2n, BigInt(2)]).size);
+r.push([1n, 2n, 3n].includes(2n), [1n, 2n].indexOf(2n), Object.is(0n, -0n), Object.is(1n, 1n), [0n].includes(0));
+try { JSON.stringify({ a: 1n }); } catch (e) { r.push("json " + e.constructor.name); }
+BigInt.prototype.toJSON = function () { return this.toString() + "!"; }; r.push(JSON.stringify({ a: 1n, b: [2n] })); delete BigInt.prototype.toJSON;
+try { 1n + 1; } catch (e) { r.push("mix " + e.constructor.name); }
+try { 1n * "2"; } catch (e) { r.push("mix2 " + e.constructor.name); }
+r.push(1n.constructor === BigInt, (5n).valueOf() === 5n, Number(5n), Math.max(1, Number(3n)), 5n.toLocaleString === BigInt.prototype.toString);
+var s = 0n; for (var i = 0n; i < 1000n; i++) s += i; r.push(String(s));
+switch (2n) { case 2: r.push("sw num"); break; case 2n: r.push("sw ok"); break; default: r.push("sw bad"); }
+var o = {}; o[5n] = 1; o[big] = 2; r.push(Object.keys(o).join("/"), o["5"]);
+r.push(a > big, big > a, big == big, big + 1n - 1n === big, -big < 0n, big % 7n === big - (big / 7n) * 7n);
+function f(v) { return v === 3n ? "three" : typeof v; } var t = ""; for (var k = 0; k < 2000; k++) t = f(k % 2 ? 3n : 4n); r.push(t, f(3n), f(4n));
+function g(v) { if (v) return 1; return 0; } var c = 0; for (var k = 0; k < 3000; k++) c += g(k % 3 ? 1n : 0n); r.push(c);
+function h(v) { return typeof v; } var tt; for (var k = 0; k < 3000; k++) tt = h(2n); r.push(tt, h(big));
+function q(a, b) { return a === b; } var qq = 0; for (var k = 0; k < 3000; k++) qq += q(BigInt(k), BigInt(k)) + q(1n, 3n) + q(4294967297n, 1n); r.push(qq);
+function w(v) { return v == 1n; } var ww = 0; for (var k = 0; k < 3000; k++) ww += w(k % 2 ? 1n : 4294967297n); r.push(ww);
+var arr = [3n, 1n, 2n]; arr.sort(function (p, q2) { return p < q2 ? -1 : p > q2 ? 1 : 0; }); r.push(arr.join(","));
+r.push(BigInt.asUintN(64, -1n) === 18446744073709551615n, String(-(2n ** 63n)), typeof (2n ** 100n), [10n, 20n].map(function (e) { return e / 3n; }).join(","));
+r.join("|")
+----
+bigint|true|true|true|true|true|true|true|false|true|2|true|true|5|5|5|5|11111111|true|9007199254740993|-1|25,-2,-5,125,3,-3,-1,1152921504606846976,4,1,7,6,-6,0,-123456789012345678901234567891|9007199254740992|true|true|9007199254740993|12|true|object|true|[object BigInt]|false|five|big|false|2|true|1|true|true|false|json TypeError|{"a":"1!","b":["2!"]}|mix TypeError|mix2 TypeError|true|true|5|3|false|499500|sw ok|5/123456789012345678901234567890|1|false|true|true|true|true|true|three|three|bigint|2000|bigint|bigint|3000|1500|1,2,3|true|-9223372036854775808|bigint|3,6

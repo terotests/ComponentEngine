@@ -380,6 +380,7 @@ impl Engine {
             }
             Val::Str(s) => format!("s:{}", self.vm.sref(*s)),
             Val::Obj(o) => format!("o:{}", self.vm.objs[*o as usize].class),
+            Val::Big(_) => format!("o:{}", C_BIGINT),
         }
     }
 

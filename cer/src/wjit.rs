@@ -46,6 +46,8 @@ pub struct Layout {
     pub t_num: u8,
     pub t_str: u8,
     pub t_obj: u8,
+    /// Val::Big (a small BigInt): its value is a double at off_num
+    pub t_big: u8,
     /// offsets of the payloads
     pub off_bool: u32,
     pub off_num: u32,
@@ -74,8 +76,6 @@ pub struct Layout {
     pub vm_frames_len: u32,
     pub vm_handlers_len: u32,
     pub vm_gc_flag: u32,
-    /// Vm.big_zero (0n, the one falsy object), from the Vm's address
-    pub vm_big_zero: u32,
     pub frame_size: u32,
     pub frame_this: u32,
     /// a Frame's env (low word), a JsObj's elems, Vm.evecs' buffer word
@@ -191,6 +191,7 @@ pub fn probe() -> Layout {
         t_num: 0,
         t_str: 0,
         t_obj: 0,
+        t_big: 0,
         off_bool: 0,
         off_num: 0,
         off_int: 0,
@@ -211,7 +212,6 @@ pub fn probe() -> Layout {
         vm_frames_len: 0,
         vm_handlers_len: 0,
         vm_gc_flag: 0,
-        vm_big_zero: 0,
         frame_size: 0,
         frame_this: 0,
         frame_env: 0,
@@ -290,13 +290,15 @@ pub fn probe() -> Layout {
     let nm = bytes_of(Val::Num(x));
     let s = bytes_of(Val::Str(0x5a3c_1e2d));
     let o = bytes_of(Val::Obj(0x1b2c_3d4e));
+    let bg = bytes_of(Val::Big(x));
     l.t_undef = u[0];
     l.t_null = n[0];
     l.t_bool = bt[0];
     l.t_num = nm[0];
     l.t_str = s[0];
     l.t_obj = o[0];
-    let tags = [l.t_undef, l.t_null, l.t_bool, l.t_num, l.t_str, l.t_obj];
+    l.t_big = bg[0];
+    let tags = [l.t_undef, l.t_null, l.t_bool, l.t_num, l.t_str, l.t_obj, l.t_big];
     for i in 0..tags.len() {
         for j in (i + 1)..tags.len() {
             if tags[i] == tags[j] {
@@ -334,7 +336,7 @@ pub fn probe() -> Layout {
             break;
         }
     }
-    if ob < 0 || on < 0 || oi < 0 {
+    if ob < 0 || on < 0 || oi < 0 || bg[on as usize..on as usize + 8] != xb {
         return l;
     }
     l.off_bool = ob as u32;
@@ -389,7 +391,6 @@ pub fn probe() -> Layout {
         l.vm_frames_len = std::mem::offset_of!(crate::vm::Vm, frames) as u32 + vl;
         l.vm_handlers_len = std::mem::offset_of!(crate::vm::Vm, handlers) as u32 + vl;
         l.vm_gc_flag = std::mem::offset_of!(crate::vm::Vm, gc_flag) as u32;
-        l.vm_big_zero = std::mem::offset_of!(crate::vm::Vm, big_zero) as u32;
         l.frame_size = std::mem::size_of::<Frame>() as u32;
         l.frame_this = std::mem::offset_of!(Frame, this_val) as u32;
         l.frame_env = std::mem::offset_of!(Frame, env) as u32;
@@ -1292,23 +1293,19 @@ impl<'a> Cg<'a> {
     fn truthy(&mut self, x: i32, pc: i64) {
         if x < 0 {
             let k = (-1 - x) as usize;
-            // an object constant may be 0n: tested at run time
-            let obj = matches!(self.kvals.get(k), Some(Val::Obj(_)));
-            if !obj {
-                let t = match self.kvals.get(k) {
-                    Some(v) => crate::vm::truthy(v),
-                    None => false,
-                };
-                self.i32c(if t { 1 } else { 0 });
-                return;
-            }
+            let t = match self.kvals.get(k) {
+                Some(v) => crate::vm::truthy(v),
+                None => false,
+            };
+            self.i32c(if t { 1 } else { 0 });
+            return;
         }
         let o = self.raw(x);
         let (b, off) = self.place(o);
         self.tag(o);
         self.set(L_TAG);
         let l = self.lay;
-        // number: n != 0 && n == n
+        // number or small BigInt: n != 0 && n == n
         self.get(b);
         self.mem(F64_LOAD, 3, off + l.off_num);
         self.set(L_A);
@@ -1328,16 +1325,10 @@ impl<'a> Cg<'a> {
         self.mem(I32_LOAD, 2, off + l.off_int);
         self.i32c(0);
         self.op(I32_NE);
+        // an object (0n is a Val::Big)
         self.get(L_TAG);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
-        // an object other than 0n
-        self.get(b);
-        self.mem(I32_LOAD, 2, off + l.off_int);
-        self.get(L_VM);
-        self.mem(I32_LOAD, 2, l.vm_big_zero);
-        self.op(I32_NE);
-        self.op(I32_AND);
         self.get(L_TAG);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
@@ -1349,6 +1340,10 @@ impl<'a> Cg<'a> {
         self.get(L_TAG);
         self.i32c(l.t_num as i64);
         self.op(I32_EQ);
+        self.get(L_TAG);
+        self.i32c(l.t_big as i64);
+        self.op(I32_EQ);
+        self.op(I32_OR);
         self.op(SELECT);
     }
     /// x <cmp> y for two numbers as an i32, or return pc
@@ -3342,6 +3337,22 @@ impl<'a> Cg<'a> {
         let (bb, bo) = self.place(b);
         let num_k = matches!(a, Opnd::Num(_)) || matches!(b, Opnd::Num(_));
         if !num_k {
+            // two small BigInts: their values
+            self.get(L_TAG);
+            self.i32c(l.t_big as i64);
+            self.op(I32_EQ);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.get(ab);
+            self.mem(F64_LOAD, 3, ao + l.off_num);
+            self.get(bb);
+            self.mem(F64_LOAD, 3, bo + l.off_num);
+            self.op(F64_EQ);
+            self.op(BR);
+            self.w.u(1);
+            self.extra -= 1;
+            self.op(END);
             // bool: its byte
             self.get(L_TAG);
             self.i32c(l.t_bool as i64);
@@ -5442,6 +5453,14 @@ impl<'a> Cg<'a> {
                 self.set(L_T2);
                 self.extra -= 1;
                 self.op(END);
+                // a small BigInt: 7 (its tag is not its type_index)
+                self.i32c(7);
+                self.get(L_T2);
+                self.get(L_T2);
+                self.i32c(l.t_big as i64);
+                self.op(I32_EQ);
+                self.op(SELECT);
+                self.set(L_T2);
                 self.get(L_VM);
                 self.mem(I32_LOAD, 2, l.vm_type_vals_ptr);
                 self.get(L_T2);
