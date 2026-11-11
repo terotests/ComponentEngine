@@ -26,6 +26,7 @@
 #include <js/CompilationAndEvaluation.h>
 #include <js/Conversions.h>
 #include <js/Exception.h>
+#include <js/GCAPI.h>
 #include <js/Initialization.h>
 #include <js/RealmOptions.h>
 #include <js/SourceText.h>
@@ -131,11 +132,17 @@ __attribute__((export_name("sm_reset"))) int sm_reset() {
   if (!cx) {
     if (!JS_Init())
       return 1;
-    cx = JS_NewContext(JS::DefaultHeapMaxBytes);
+    // the default limit is 32 MB, which Octane's Splay alone passes
+    cx = JS_NewContext(1024u * 1024 * 1024);
     if (!cx || !js::UseInternalJobQueues(cx) || !JS::InitSelfHostedCode(cx))
       return 1;
   }
-  return install() ? 0 : 1;
+  if (!install())
+    return 1;
+  // Every global is its own zone, too small to start a collection by
+  // itself: without this the old realms pile up until the heap limit.
+  JS_GC(cx);
+  return 0;
 }
 
 __attribute__((export_name("sm_eval"))) int sm_eval(

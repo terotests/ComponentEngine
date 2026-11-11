@@ -34,7 +34,7 @@ export default {
     };
     return {
       reset() {
-        if (x) x.sm_reset();
+        if (x && x.sm_reset() !== 0) x = null;
       },
       async run(src) {
         if (!x) x = await make();
@@ -52,7 +52,12 @@ export default {
           out.push("Uncaught " + String(e && e.message ? e.message : e));
           return { out, error: true };
         }
-        if (code !== 0) out.push("Uncaught " + cstr(x.sm_error()));
+        if (code !== 0) {
+          const text = cstr(x.sm_error());
+          out.push("Uncaught " + text);
+          // a heap that ran full stays full: the next run gets a new instance
+          if (text === "out of memory") x = null;
+        }
         return { out, error: code !== 0 };
       },
     };
