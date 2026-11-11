@@ -963,6 +963,22 @@ r.join("|")
 ----
 900|3ab2ab1ab|1ab0ab|12|98|Axx|Bxx|CAx|DAx|true|42|true|70|ö|ö|é|ööéé|%C3%B6%C3%A9|140|143|yyEND|true|true|1|"zzzzzyyyyy"|2|41|7|82|true|-1|200|191817|63|3000|3000|xwvut|a|1999
 
+==== js concat and spread accumulation copy each source once (a = a.concat(x), [...a, x]): holes, strings, sets, arguments, isConcatSpreadable, aliasing
+var r = [];
+var a = []; for (var i = 0; i < 300; i++) a = a.concat([i, "s" + i], i * 2, { k: i }); r.push(a.length, a[4], a[5], a[7].k, a[a.length - 2]);
+var b = []; for (var i = 0; i < 300; i++) b = [...b, i, "t" + i]; r.push(b.length, b[0], b[599], b.join("").length);
+var o = { x: 1 }; var c = [o]; for (var i = 0; i < 50; i++) c = [...c, ...c.slice(0, 1)]; r.push(c.length, c[50] === o);
+var h = [1, , 3]; var d = [...h]; var e = [].concat(h); r.push(d.length, 1 in d, d[1], e.length, 1 in e);
+var s = [..."héllo"], m = [...new Set([3, 3, 4])]; r.push(s.join("|"), m.join());
+function args() { return [...arguments, 9]; } r.push(args(1, 2).join());
+var q = [1, 2]; q[Symbol.isConcatSpreadable] = false; r.push([0].concat(q).length);
+var u = [5, 6]; var w = [...u, ...u, ...u]; u.push(7); r.push(w.join(), [].concat(u, u).join());
+var arr2 = [1, 2, 3]; arr2.foo = 1; r.push([...arr2].length, [].concat(arr2, [4]).join());
+var keep = []; for (var j = 0; j < 100; j++) keep.push([..."ab" + j]); r.push(keep[99].join(""));
+r.join("|")
+----
+1200|1|s1|1|598|600|0|t299|1880|51|true|3|true||3|false|h|é|l|l|o|3,4|1,2,9|2|5,6,5,6,5,6|5,6,7,5,6,7|3|1,2,3,4|ab99
+
 ==== js sort of numbers: (a, b) => a - b / b - a comparators recognised from their text (no calls), sort() with each number's string made once; NaN, -0, undefined, mixed values, look-alike texts
 var r = [];
 function mk(n) { var a = []; for (var i = 0; i < n; i++) a.push((i * 7919) % n - n / 2); return a; }
