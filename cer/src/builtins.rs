@@ -3752,6 +3752,14 @@ impl Vm {
         if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_DV_METHOD) {
             return self.call_native_ta(id, &this, args);
         }
+        if id == crate::proxy::NF_PROMISE_OF {
+            let p = self.new_promise();
+            self.temp_roots.push(Val::Obj(p));
+            let x = if args.is_empty() { Val::Undef } else { args[0].clone() };
+            self.settle(p, 1, x);
+            self.temp_roots.pop();
+            return Val::Obj(p);
+        }
         if id >= 920 && id < 930 {
             return self.call_native_typed(id, args);
         }

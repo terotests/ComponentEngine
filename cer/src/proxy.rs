@@ -36,6 +36,9 @@ pub const NF_AS_METHOD: int = 936;
 pub const NF_IS_CTOR: int = 937;
 pub const NF_ARRAY_GENERIC: int = 938;
 pub const NF_IS_ERROR: int = 939;
+/// __promiseOf(x): a new Promise resolved with x (Promise.resolve's
+/// steps for the intrinsic Promise, without a capability's closures)
+pub const NF_PROMISE_OF: int = 919;
 
 impl Vm {
     pub fn is_proxy(&self, o: int) -> bool {
@@ -51,6 +54,7 @@ impl Vm {
         self.method(g, "__isProxy", NF_IS_PROXY, 1);
         self.method(g, "__isRegExp", NF_IS_REGEXP, 1);
         self.method(g, "__isPromise", NF_IS_PROMISE, 1);
+        self.method(g, "__promiseOf", NF_PROMISE_OF, 1);
         self.method(g, "__asMethod", NF_AS_METHOD, 1);
         self.method(g, "__isConstructor", NF_IS_CTOR, 1);
         self.method(g, "__setArrayGeneric", NF_ARRAY_GENERIC, 1);
