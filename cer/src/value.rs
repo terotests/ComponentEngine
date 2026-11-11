@@ -154,6 +154,52 @@ pub fn elems_of(v: Vec<Val>) -> Elems {
     Elems { v: v }
 }
 
+/// `e`'s elements pushed onto `out` (Rust: one copy of the slice).
+#[ranger::target(rust)]
+pub fn elems_append(out: &mut Vec<Val>, e: &Elems) {
+    out.extend_from_slice(&e.v[..]);
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn elems_append(out: &mut Vec<Val>, e: &Elems) {
+    let n = e.v.len();
+    let mut i: usize = 0;
+    while i < n {
+        out.push(e.v[i]);
+        i += 1;
+    }
+}
+
+/// `es[src]`'s elements pushed onto `es[dst]` (Rust: one slice copy).
+#[ranger::target(rust)]
+pub fn evecs_append(es: &mut Vec<Elems>, dst: usize, src: usize) {
+    // room for a few more pushes too ([...a, x]): an exact fit would be
+    // copied again by the next push
+    let n = es[src].v.len();
+    es[dst].v.reserve(n + 8);
+    if dst == src {
+        let c: Vec<Val> = es[src].v[..].to_vec();
+        es[dst].v.extend_from_slice(&c);
+    } else if dst < src {
+        let (a, b) = es.split_at_mut(src);
+        a[dst].v.extend_from_slice(&b[0].v[..]);
+    } else {
+        let (a, b) = es.split_at_mut(dst);
+        b[0].v.extend_from_slice(&a[src].v[..]);
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn evecs_append(es: &mut Vec<Elems>, dst: usize, src: usize) {
+    let n = es[src].v.len();
+    let mut i: usize = 0;
+    while i < n {
+        let x = es[src].v[i];
+        es[dst].v.push(x);
+        i += 1;
+    }
+}
+
 /// `e.v[i] = x` (Rust: in place, the start kept).
 #[ranger::target(rust)]
 #[inline(always)]
