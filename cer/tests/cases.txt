@@ -1034,6 +1034,19 @@ r.join("|")
 ----
 [{"i":1,"s":"x"},{"i":2,"s":"y\"q"},{"i":-3.5},{"i":1e+21,"s":null}]|[/ {/  "i": 1,/  "s": "x"/ },/ {/  "i": 2,/  "s": "y\"q"/ },/ {/  "i": -3.5/ },/ {/  "i": 1e+21,/  "s": null/ }/]|[{"i":1},{"i":2},{"i":-3.5},{"i":1e+21}]|[{"i":2,"s":"x"},{"i":4,"s":"y\"q"},{"i":-7},{"i":2e+21,"s":null}]|[{"a":1},{"a":2,"b":"T"},"P"]|{"x":1,"y":2,"q":4}|{"x":1,"y":2,"z":"G"}|[{"a":1,"b":7},{"a":1,"b":7},{"a":1}]|{"1":"a","2":"b","k":"c"}|["hid",{"a":1}]|[{"a":1,"b":"[{\"a\":9,\"b\":8}]"},{"a":2,"b":3}]|[{"a":1},{"a":2}]|"np"|[{"a":1}]|[{"a":1,"b":"x"},{"a":2,"b":"y"},{"b":3,"a":4},{"a":6},{"1":1,"a":2},{"a":1,"b":{"a":[{"a":1}]}},{"":1,"a":2,"a\n":3}]|a6|b,a
 
+==== js Map and Set string keys by a table of their text hashes: delete and set again, long keys, an empty key, non-ASCII, a slice view as key, churn, clear
+var r = [];
+var m = new Map(); for (var i = 0; i < 300; i++) m.set("k" + i, i); for (var i = 0; i < 300; i += 3) m.delete("k" + i);
+var s = 0; for (var i = 0; i < 300; i++) s += m.has("k" + i) ? m.get("k" + i) : 0; r.push(s, m.size);
+for (var i = 0; i < 300; i += 3) m.set("k" + i, -i); r.push([...m.keys()].slice(195, 202).join(), m.get("k3"));
+var big = "x".repeat(40); var m2 = new Map([[big + "a", 1], [big + "b", 2], ["", 3], ["é", 4]]); r.push(m2.get("x".repeat(40) + "b"), m2.get(""), m2.get("é"), m2.has(big));
+var st = new Set(); for (var i = 0; i < 1000; i++) { st.add("s" + (i % 100)); if (i % 7 == 0) st.delete("s" + (i % 50)); } r.push(st.size, [...st].slice(0, 5).join());
+var pre = "abc"; var v1 = (pre + "defghijklmnopqrstuvwxyz0123456789").slice(3, 10); var m3 = new Map([[v1, "view"]]); r.push(m3.get("defghij"), new Map([[1, 1], ["1", 2]]).get("1"));
+var m4 = new Map([["a", 1]]); m4.clear(); m4.set("a", 5); r.push(m4.get("a"), m4.size);
+r.join("|")
+----
+30000|200|k293,k295,k296,k298,k299,k0,k3|-3|2|3|4|false|86|s50,s51,s52,s53,s54|view|2|5|1
+
 ==== js Array includes / indexOf of a string in a plain array: handles, lengths, then text; views, holes, wrappers, array-likes
 var r = [];
 var a = []; for (var i = 0; i < 50; i++) a.push("k" + i); var big = "x".repeat(30); a.push(big + "!", "é", 3, NaN, undefined);
