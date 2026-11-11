@@ -4997,6 +4997,7 @@ pub fn num_merge_sort(v: &mut Vec<Val>, desc: bool) {
 }
 
 /// An identifier's length at the start of `s` (ASCII names only), 0 if none.
+#[ranger::target(rust)]
 fn ident_len(s: &[u8]) -> usize {
     let mut i: usize = 0;
     while i < s.len() {
@@ -5010,12 +5011,20 @@ fn ident_len(s: &[u8]) -> usize {
     i
 }
 
+#[ranger::target(rust)]
 fn word_byte(c: u8) -> bool {
     c == b'_' || c == b'$' || (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (c >= b'0' && c <= b'9') || c >= 128
 }
 
 /// `t` with white space dropped, except one space between two word
-/// characters (`return a` stays apart from `returna`).
+/// characters (`return a` stays apart from `returna`). Rust only, like
+/// sub_cmp_kind: elsewhere comparators are always called.
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn squeeze_ws(_t: &str) -> String {
+    String::new()
+}
+
+#[ranger::target(rust)]
 pub fn squeeze_ws(t: &str) -> String {
     let s = t.as_bytes();
     let mut out: Vec<u8> = Vec::new();
@@ -5042,6 +5051,12 @@ pub fn squeeze_ws(t: &str) -> String {
 /// sort_kind of a function's text after squeeze_ws:
 /// `(a,b)=>a-b`, `(a,b)=>{return a-b;}`, `function f?(a,b){return a-b;}`
 /// give 2, the same with `b-a` 3, anything else 1.
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn sub_cmp_kind(_t: &str) -> i32 {
+    1
+}
+
+#[ranger::target(rust)]
 pub fn sub_cmp_kind(t: &str) -> i32 {
     let s = t.as_bytes();
     let mut p: usize = 0;
