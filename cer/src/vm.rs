@@ -8650,22 +8650,16 @@ impl Vm {
     /// The references `x` (being freed) holds are let go; what only it
     /// held joins `work`.
     fn drop_refs(&mut self, x: int, work: &mut Vec<int>) {
-        let (proto, env, home) = {
+        let (proto, env, cold, nv, xe) = {
             let ob = crate::rvm::obj_at(&self.objs, x as usize);
-            (ob.proto, ob.env, if ob.class == C_ARRAYBUFFER { -1 } else { crate::rvm::cold_at(&self.colds, ob.cold as usize).home })
+            (ob.proto, ob.env, ob.cold, ob.nv as usize, ob.elems as usize)
         };
-        let primv = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).prim;
-        let prim = obj_of(&primv);
-        if crate::rvm::obj_at(&self.objs, x as usize).class == C_BIGINT {
-            // out of the weak table before its text goes
-            self.forget_bigint(x);
+        if cold != 0 {
+            // few objects have a Cold
+            self.drop_refs_cold(x, work);
         }
-        self.sdec(str_of(&primv));
         self.drop_ref(proto as int, work);
         self.drop_ref(env as int, work);
-        self.drop_ref(home, work);
-        self.drop_ref(prim, work);
-        let nv = crate::rvm::obj_at(&self.objs, x as usize).nv as usize;
         let mut j: usize = 0;
         while j < nv {
             match crate::rvm::obj_at(&self.objs, x as usize).get_slot(j) {
@@ -8679,7 +8673,9 @@ impl Vm {
             }
             j += 1;
         }
-        let xe = crate::rvm::obj_at(&self.objs, x as usize).elems as usize;
+        if xe == 0 {
+            return;
+        }
         let ne = crate::rvm::evec_at(&self.evecs, xe).v.len();
         j = 0;
         while j < ne {
@@ -8694,8 +8690,27 @@ impl Vm {
             }
             j += 1;
         }
+    }
+
+    /// drop_refs for what x's Cold holds: a home object, a primitive, the
+    /// second elements.
+    #[inline(never)]
+    fn drop_refs_cold(&mut self, x: int, work: &mut Vec<int>) {
+        let home = {
+            let ob = crate::rvm::obj_at(&self.objs, x as usize);
+            if ob.class == C_ARRAYBUFFER { -1 } else { crate::rvm::cold_at(&self.colds, ob.cold as usize).home }
+        };
+        let primv = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).prim;
+        let prim = obj_of(&primv);
+        if crate::rvm::obj_at(&self.objs, x as usize).class == C_BIGINT {
+            // out of the weak table before its text goes
+            self.forget_bigint(x);
+        }
+        self.sdec(str_of(&primv));
+        self.drop_ref(home, work);
+        self.drop_ref(prim, work);
         let ne2 = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2.len();
-        j = 0;
+        let mut j: usize = 0;
         while j < ne2 {
             match crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2[j] {
                 Val::Obj(c) => {
