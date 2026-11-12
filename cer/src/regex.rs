@@ -99,6 +99,128 @@ pub struct Regex {
     fhi: bool,
     /// cmap[class * 256 + ic * 128 + u]: class_has for an ASCII unit u
     cmap: Vec<bool>,
+    /// units every match holds, starting lit_min..=lit_max units after
+    /// the match's start (lit_max -1: no bound); empty when none is known.
+    /// exec skips ahead to where the next one could start a match
+    lit: Vec<int>,
+    lit_min: int,
+    lit_max: int,
+}
+
+/// What req_lit knows of a node: its width in units (max -1: no bound)
+/// and the longest literal every match of it holds, at lmin..=lmax units
+/// from its start.
+struct LitInfo {
+    min: int,
+    max: int,
+    lit: Vec<int>,
+    lmin: int,
+    lmax: int,
+}
+
+fn add_w(a: int, b: int) -> int {
+    if a < 0 || b < 0 {
+        -1
+    } else {
+        a + b
+    }
+}
+
+/// LitInfo of node n (ic: case-insensitive here; uni: units of a code
+/// point may be two).
+fn req_lit(p: &RParser, n: int, ic: bool, uni: bool) -> LitInfo {
+    let nd = &p.nodes[n as usize];
+    let k = nd.kind;
+    let cw = if uni { 2 } else { 1 };
+    if k == R_CHAR {
+        let w = if nd.c > 0xffff { 2 } else { 1 };
+        let mut lit: Vec<int> = Vec::new();
+        if !ic && nd.c < 0xd800 {
+            lit.push(nd.c);
+        }
+        return LitInfo { min: w, max: w, lit: lit, lmin: 0, lmax: 0 };
+    }
+    if k == R_ANY || k == R_CLASS {
+        return LitInfo { min: 1, max: cw, lit: Vec::new(), lmin: 0, lmax: 0 };
+    }
+    if k == R_EMPTY || k == R_BOL || k == R_EOL || k == R_WORDB || k == R_NWORDB || k == R_LOOK {
+        return LitInfo { min: 0, max: 0, lit: Vec::new(), lmin: 0, lmax: 0 };
+    }
+    if k == R_GROUP {
+        return req_lit(p, nd.list[0], ic, uni);
+    }
+    if k == R_MODS {
+        let add = nd.c & 7;
+        let remove = (nd.c >> 3) & 7;
+        let ic2 = if (add & 1) != 0 { true } else if (remove & 1) != 0 { false } else { ic };
+        return req_lit(p, nd.list[0], ic2, uni);
+    }
+    if k == R_SEQ {
+        let mut out = LitInfo { min: 0, max: 0, lit: Vec::new(), lmin: 0, lmax: 0 };
+        // the run of characters being read, and where it started
+        let mut run: Vec<int> = Vec::new();
+        let mut rmin: int = 0;
+        let mut rmax: int = 0;
+        for x in nd.list.iter() {
+            let c = req_lit(p, *x, ic, uni);
+            let one = c.min == 1 && c.max == 1 && c.lit.len() == 1;
+            if one {
+                if run.is_empty() {
+                    rmin = out.min;
+                    rmax = out.max;
+                }
+                run.push(c.lit[0]);
+            } else {
+                if run.len() > out.lit.len() {
+                    out.lit = run.clone();
+                    out.lmin = rmin;
+                    out.lmax = rmax;
+                }
+                run.clear();
+                if c.lit.len() > out.lit.len() {
+                    out.lit = c.lit.clone();
+                    out.lmin = out.min + c.lmin;
+                    out.lmax = add_w(out.max, c.lmax);
+                }
+            }
+            out.min += c.min;
+            out.max = add_w(out.max, c.max);
+        }
+        if run.len() > out.lit.len() {
+            out.lit = run;
+            out.lmin = rmin;
+            out.lmax = rmax;
+        }
+        return out;
+    }
+    if k == R_ALT {
+        let mut out = LitInfo { min: -1, max: 0, lit: Vec::new(), lmin: 0, lmax: 0 };
+        for x in nd.list.iter() {
+            let c = req_lit(p, *x, ic, uni);
+            if out.min < 0 || c.min < out.min {
+                out.min = c.min;
+            }
+            if out.max >= 0 && (c.max < 0 || c.max > out.max) {
+                out.max = c.max;
+            }
+        }
+        if out.min < 0 {
+            out.min = 0;
+        }
+        return out;
+    }
+    if k == R_REPEAT {
+        let c = req_lit(p, nd.list[0], ic, uni);
+        let min = nd.min * c.min;
+        let max = if nd.max < 0 || c.max < 0 { -1 } else { nd.max * c.max };
+        if nd.min >= 1 {
+            // the first iteration's literal
+            return LitInfo { min: min, max: max, lit: c.lit, lmin: c.lmin, lmax: c.lmax };
+        }
+        return LitInfo { min: min, max: max, lit: Vec::new(), lmin: 0, lmax: 0 };
+    }
+    // back references: any width
+    LitInfo { min: 0, max: -1, lit: Vec::new(), lmin: 0, lmax: 0 }
 }
 
 struct RParser {
@@ -1716,6 +1838,9 @@ fn new_regex() -> Regex {
         fset: Vec::new(),
         fhi: false,
         cmap: Vec::new(),
+        lit: Vec::new(),
+        lit_min: 0,
+        lit_max: 0,
     }
 }
 
@@ -2046,6 +2171,15 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
     }
     re.code = g.code;
     re.nregs = g.nregs;
+    if !re.sticky && !re.unicode_sets {
+        let li = req_lit(&p, root, re.ignore_case, re.unicode);
+        // one unit right at the start is `first` already
+        if li.lit.len() >= 2 || (li.lit.len() == 1 && !(li.lmin == 0 && li.lmax == 0)) {
+            re.lit = li.lit;
+            re.lit_min = li.lmin;
+            re.lit_max = li.lmax;
+        }
+    }
     re.classes = p.classes;
     re.ngroups = p.ngroups;
     re.names = p.names;
@@ -2523,6 +2657,27 @@ impl Regex {
 
     /// Searches from `start`: the capture positions (start, end pairs; -1
     /// for unset), or an empty vector when there is no match.
+    /// Where `lit` occurs first at or after `from`, -1 when it does not.
+    fn find_lit(&self, input: &Vec<int>, from: int) -> int {
+        let n = input.len() as int;
+        let m = self.lit.len() as int;
+        let c0 = self.lit[0];
+        let mut i = if from < 0 { 0 } else { from };
+        while i + m <= n {
+            if input[i as usize] == c0 {
+                let mut j: int = 1;
+                while j < m && input[(i + j) as usize] == self.lit[j as usize] {
+                    j += 1;
+                }
+                if j == m {
+                    return i;
+                }
+            }
+            i += 1;
+        }
+        -1
+    }
+
     pub fn exec(&self, input: &Vec<int>, start: int) -> Vec<int> {
         let n = input.len() as int;
         let mut s = start;
@@ -2537,7 +2692,20 @@ impl Regex {
         // cleared, not dropped
         let mut caps: Vec<int> = Vec::with_capacity(ncap);
         let mut stack: Vec<(int, int, int)> = Vec::new();
+        // where lit was found last (-1: not looked for yet)
+        let mut lp: int = -1;
         while s <= n {
+            if !self.lit.is_empty() {
+                if lp < s + self.lit_min {
+                    lp = self.find_lit(input, s + self.lit_min);
+                    if lp < 0 {
+                        return Vec::new();
+                    }
+                }
+                if self.lit_max >= 0 && lp - self.lit_max > s {
+                    s = lp - self.lit_max;
+                }
+            }
             if self.first >= 0 && !self.sticky {
                 while s < n && input[s as usize] != self.first {
                     s += 1;
