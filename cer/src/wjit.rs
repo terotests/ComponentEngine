@@ -9138,6 +9138,10 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
     if fo < 0 || vm.objs[fo as usize].class != C_FUNCTION || vm.slicing || NEST.with(|n| n.get()) >= NEST_MAX {
         return new_win(vm, bp, fi, pc, w0, w3, want);
     }
+    // the constructor to enter: a class with the default derived
+    // constructor gives its parent (Vm::ctor_target)
+    let f0 = fo;
+    let fo = vm.ctor_target(fo);
     let tp = vm.objs[fo as usize].func as usize;
     // a base class's constructor too: its fields are set as enter_function
     // sets them
@@ -9168,6 +9172,9 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
         vm.stack[fpos as usize] = Val::Obj(m);
         vm.objs[m as usize].func as usize
     } else {
+        if fo != f0 {
+            vm.stack[fpos as usize] = Val::Obj(fo);
+        }
         tp
     };
     if !vm.renter(if m >= 0 { m } else { fo }, fpos, argc, fpos) {

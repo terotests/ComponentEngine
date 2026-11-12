@@ -1098,3 +1098,49 @@ var re = /k=(\d+);/g; re.lastIndex = 5; r.push(re.exec("k=1; k=22; k=3;")[1], re
 r.join("|")
 ----
 {"a":new Date(12),"b":"x\/Qngr(-3)\/","c":"\\\/Qngr(5)\/"}|"\/Qngr(7)\/",,7|bob@example.com,al@example.com|12-abc,2345-abc|null|cd,abcd,cd|xfooyz,xbaryz|ade,abcbde|aaxy,bbxy| "key",x"key"|a-bc,A_BC|abc|x😀ok,😀😀ok|a-b-c|aa|bb||true|abctail|abctail|22|10
+
+==== js new of classes: default derived constructors, fields, super getters
+var log = [];
+class A { constructor(a, b) { this.a = a; this.b = b; this.nt = new.target.name; } get g() { return this.a + 1; } static s() { return "As"; } }
+class B extends A {}
+class C extends B { x = 5; }
+class D extends C {}
+var d = new D(1, 2);
+log.push(d.a, d.b, d.nt, d.x, d instanceof D, Object.getPrototypeOf(d) === D.prototype);
+var b = new B(7); log.push(b.a, b.b, b.nt, b.g);
+function Old(v) { this.v = v; this.nt = new.target === E; }
+class E extends Old {}
+var e = new E(3); log.push(e.v, e.nt, e instanceof E);
+class F extends A { constructor() { super(1, 2); } get g() { return super.g * 10; } m() { return super.g; } static s() { return super.s() + "F"; } get z() { return super.zz; } }
+var f = new F(); log.push(f.g, f.m(), F.s(), f.z);
+class R { constructor() { return { r: 1 }; } }
+class S extends R {}
+log.push(new S().r, new S() instanceof S);
+class T extends Array {}
+var t = new T(3); log.push(t.length, t instanceof T, Array.isArray(t));
+class U extends A {}
+Object.setPrototypeOf(U, function (q) { this.q = q; });
+var u = new U(9); log.push(u.q, u.a);
+class V { f = log.push("field"); constructor() { log.push("ctor"); } }
+class W extends V {}
+new W();
+class X { constructor() { throw new Error("boom"); } }
+class Y extends X {}
+try { new Y(); } catch (err) { log.push(err.message); }
+class Z { y = (() => { throw new Error("fld"); })(); }
+for (var i = 0; i < 3; i++) { try { new Z(); } catch (err) { log.push(err.message); } }
+try { B(); } catch (err) { log.push(err instanceof TypeError); }
+class N0 extends null {}
+try { new N0(); } catch (err) { log.push(err instanceof TypeError); }
+class P1 { #p = 4; gp() { return this.#p; } }
+class P2 extends P1 {}
+log.push(new P2().gp());
+class G1 { get v() { return 1; } }
+class G2 extends G1 { get v() { return super.v + 1; } }
+class G3 extends G2 { get v() { return super.v + 1; } }
+var s = 0; for (var i = 0; i < 100; i++) s += new G3().v; log.push(s);
+var o = { __proto__: { get k() { return this.j; }, d: 4 }, j: 8, r() { return super.k + super.d; } }; log.push(o.r());
+log.push(Reflect.construct(B, [5, 6], D).nt, Reflect.construct(B, [5, 6], D) instanceof D);
+log.join(",")
+----
+1,2,D,5,true,true,7,,B,8,3,true,true,20,2,AsF,,1,false,3,true,true,9,,field,ctor,boom,fld,fld,fld,true,true,4,300,12,D,true
