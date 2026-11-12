@@ -3,7 +3,7 @@
 //! (../engine) written again as a strict Rust module (Ranger's
 //! docs/plans/PLAN_RUST_SYNTAX.md), beside it.
 //!
-//! An experiment in the manner of lib/evgr: one source, built by cargo into
+//! Built in the manner of lib/evgr: one source, compiled by cargo into
 //! native code and by `rgrc` into every Ranger target, measured against the
 //! Ranger engine on the same scripts (bench/).
 //!
