@@ -1085,6 +1085,20 @@ r.join("|")
 ----
 ab,ab,a|a|abc,ab|abc|abc|cart|ca|xy,xay,xaby,xby|one,two,three,thr,t|aaaab|f,baz,bar,ba,foo|éeéeü|😀,c,b|_C|true|true|false|false|EF|x,x,x|a-b-
 
+==== js A literal every match holds lets exec skip ahead: at a fixed or bounded offset, behind optional parts, repeats and back references, ignore-case and unicode left as they are, lastIndex
+var r = [];
+function m(re, s) { var x = s.match(re); return x === null ? "null" : x.join(","); }
+var js = '{"a":"\\/Qngr(12)\\/","b":"x\\/Qngr(-3)\\/","c":"\\\\\\/Qngr(5)\\/"}';
+r.push(js.replace(/(^|[^\\])\"\\\/Qngr\((-?[0-9]+)\)\\\/\"/g, "$1new Date($2)"), m(/(^|[^\\])\"\\\/Qngr\((-?[0-9]+)\)\\\/\"/, '"\\/Qngr(7)\\/"'));
+r.push(m(/[a-z]+@example\.com/g, "x bob@example.com, eve@example.co, al@example.com"), m(/\d{2,4}-abc/g, "1-abc 12-abc 12345-abc"), m(/.*end/, "no en d"));
+r.push(m(/(?:ab)?cd/g, "cd abcd acd"), m(/x(?:foo|bar)yz/g, "xfooyz xbaryz xyz"), m(/a(b|c)*de/g, "ade abcbde abd"), m(/(\w)\1xy/g, "aaxy abxy bbxy"));
+r.push(m(/[^"]"key"/g, ' "key" x"key"'), m(/A.BC/gi, "a-bc A_BC"), m(/(?<=q)abc/g, "qabc abc"), m(/.\u{1F600}ok/gu, "x\u{1F600}ok \u{1F600}\u{1F600}ok"));
+r.push("aXbXc".split(/X/).join("-"), "aa--bb--".split(/-{2}/).join("|"), /\s*;\s*/.test("a ; b"), m(/^.{3}tail$/, "abctail"), m(/^.{3}tail$/m, "x\nabctail"));
+var re = /k=(\d+);/g; re.lastIndex = 5; r.push(re.exec("k=1; k=22; k=3;")[1], re.lastIndex);
+r.join("|")
+----
+{"a":new Date(12),"b":"x\/Qngr(-3)\/","c":"\\\/Qngr(5)\/"}|"\/Qngr(7)\/",,7|bob@example.com,al@example.com|12-abc,2345-abc|null|cd,abcd,cd|xfooyz,xbaryz|ade,abcbde|aaxy,bbxy| "key",x"key"|a-bc,A_BC|abc|x😀ok,😀😀ok|a-b-c|aa|bb||true|abctail|abctail|22|10
+
 ==== js new of classes: default derived constructors, fields, super getters
 var log = [];
 class A { constructor(a, b) { this.a = a; this.b = b; this.nt = new.target.name; } get g() { return this.a + 1; } static s() { return "As"; } }
