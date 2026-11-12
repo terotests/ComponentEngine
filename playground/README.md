@@ -44,8 +44,10 @@ engines zoo.js.org publishes (amd64):
   several minutes per suite.
 
 zoo.js.org measures native builds on a server; here the engines are
-WebAssembly in a tab. With **Calibrate** on, each suite's score is scaled by
-zoo's V8 score over this browser's own, so the browser stands in for zoo's V8.
+WebAssembly in a tab. With **Calibrate** on, every score is scaled by one
+factor for the machine: the median over the suites of zoo's V8 score over this
+browser's own (one factor, not one per suite: a suite's ratio also holds how
+this browser's engine differs from zoo's V8 in that suite).
 Results are kept in `localStorage` until the engines' build changes. The
 material and its licences are in `zoo/`.
 
