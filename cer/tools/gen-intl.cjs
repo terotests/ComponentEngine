@@ -107,7 +107,16 @@ function supplement() {
     // empty where the time comes first (Vietnamese): the engine keeps its own order there
     const atTime = firstTime < 0 || lastDate < 0 ? "" : lp.slice(lastDate + 1, firstTime).map((p) => p.value).join("");
     if (/[|\n]/.test(atTime + days.join(""))) throw new Error("a bar in the weekdays or the at-time glue of " + tag);
-    out.push(nan, hour.length === 2 ? "HH" : "H", period(3) + "|" + period(15), datePattern(tag, "short"), datePattern(tag, "medium"), months.join("|"), days.join("|"), atTime);
+    // the literal between the day period and the time next to it, with
+    // minutes and with the hour alone (ICU: U+202F in "3:04 PM", nl "3 p.m.")
+    const nextTo = (o) => {
+      const p = new Intl.DateTimeFormat(tag, utc(Object.assign({ hour: "numeric", hour12: true }, o))).formatToParts(t);
+      const i = p.findIndex((x) => x.type === "dayPeriod");
+      const q = i < 0 ? null : i > 0 && p[i - 1].type === "literal" ? p[i - 1] : p[i + 1] && p[i + 1].type === "literal" ? p[i + 1] : null;
+      if (q && /[|\n]/.test(q.value)) throw new Error("a bar in the day period's literal of " + tag);
+      return q ? q.value : "";
+    };
+    out.push(nan, hour.length === 2 ? "HH" : "H", period(3) + "|" + period(15), datePattern(tag, "short"), datePattern(tag, "medium"), months.join("|"), days.join("|"), atTime, nextTo({ minute: "2-digit" }) + "|" + nextTo({}));
   }
   return out;
 }
@@ -168,7 +177,7 @@ function tailorings() {
 const tailor = tailorings();
 
 const tables = [
-  ["supplement", "s", supplement(), "8 per locale, from the host's ICU: the NaN symbol, H or HH (the default time's hour), AM|PM, the short and medium date patterns, the stand-alone month names joined by bars, the stand-alone weekday names (Sunday first) joined by bars, the glue between a long date and a time"],
+  ["supplement", "s", supplement(), "9 per locale, from the host's ICU: the NaN symbol, H or HH (the default time's hour), AM|PM, the short and medium date patterns, the stand-alone month names joined by bars, the stand-alone weekday names (Sunday first) joined by bars, the glue between a long date and a time, the literal next to the day period with minutes|with the hour alone"],
   ["tags", "s", tags, "one lowercased BCP 47 tag per locale; every other locale table is in this order"],
   ["num_strings", "s", strings("LocaleData.rgr", "numStrings"), "22 per locale: decimal, group, minus, percent; affixes (decimal, percent, currency letters, currency symbol; positive then negative, prefix then suffix, U+00A4 for the symbol); AM, PM"],
   ["num_ints", "i", ints("LocaleData.rgr", "numInts"), "5 per locale: primary and secondary grouping size, minimum grouping digits, hour12, year offset"],
