@@ -1144,3 +1144,30 @@ log.push(Reflect.construct(B, [5, 6], D).nt, Reflect.construct(B, [5, 6], D) ins
 log.join(",")
 ----
 1,2,D,5,true,true,7,,B,8,3,true,true,20,2,AsF,,1,false,3,true,true,9,,field,ctor,boom,fld,fld,fld,true,true,4,300,12,D,true
+
+==== js Typed array length without its getter call (own length, a prototype's getter, the getter put back), charCodeAt answered with its call (out of range, fractions, surrogates, an overridden method), Uint8Array stores, >>> of int32s
+var log = [];
+function L(x) { return x.length; }
+var a = new Uint8Array(5), b = new Int32Array(3), c = new Float64Array(2), d = new Uint8Array(new ArrayBuffer(8), 2, 4);
+for (var i = 0; i < 3; i++) log.push(L(a) + L(b) + L(c) + L(d));
+Object.defineProperty(b, 'length', { value: 42 }); log.push(L(b), L(a));
+Object.defineProperty(Uint8Array.prototype, 'length', { get() { return 7; }, configurable: true }); log.push(L(a), L(c), L(d));
+delete Uint8Array.prototype.length; log.push(L(a));
+var TA = Object.getPrototypeOf(Int8Array.prototype), g = Object.getOwnPropertyDescriptor(TA, 'length').get;
+Object.defineProperty(TA, 'length', { get() { return -g.call(this); }, configurable: true }); log.push(L(c), L(new Int16Array(9)));
+Object.defineProperty(TA, 'length', { get: g, configurable: true }); log.push(L(c));
+var s = 'aé€😀', u = [];
+for (var i = -1; i <= s.length; i++) u.push(s.charCodeAt(i), s.charCodeAt(i + 0.5));
+log.push(u.join(' '));
+var old = String.prototype.charCodeAt; String.prototype.charCodeAt = function (i) { return 'x' + i; };
+var w = []; for (var i = 0; i < 2; i++) w.push('ab'.charCodeAt(i)); String.prototype.charCodeAt = old; for (var i = 0; i < 2; i++) w.push('ab'.charCodeAt(i));
+log.push(w.join(' '));
+var o8 = new Uint8Array(4), v = [-1, 256.7, -0, 300];
+for (var i = 0; i < 4; i++) o8[i] = v[i];
+log.push(o8.join(' '), 1 / o8[2]);
+var x = -1, r = [];
+for (var i = 0; i < 4; i++) { r.push(x >>> (i * 8), x >>> 0 ^ 5, (x ^ 0xEDB88320) >>> 1); x = x * 3 + 7; }
+log.push(r.join(' '));
+log.join(',')
+----
+14,14,14,42,5,7,2,7,5,-2,-9,2,NaN 97 97 97 233 233 8364 8364 55357 55357 56832 56832 NaN NaN,x0 x1 97 98,255 0 0 44,Infinity,4294967295 -6 153337455 0 1 1994146194 0 22 1994146201 0 69 1994146224

@@ -329,6 +329,8 @@ pub struct Vm {
     /// groups give it
     pub rx_shapes: Vec<i32>,
     pub gn_memo: Vec<i32>,
+    /// Vm::ta_len_plain's lookups (typed.rs)
+    pub ta_memo: Vec<i32>,
     /// array_iter_plain's memo: an array's shape, the shape epoch, its
     /// prototype, the prototype's shape and its Symbol.iterator slot
     pub ai_memo: Vec<i32>,
@@ -671,6 +673,7 @@ impl Vm {
             mcache: Vec::new(),
             rx_shapes: Vec::new(),
             gn_memo: Vec::new(),
+            ta_memo: Vec::new(),
             ai_memo: Vec::new(),
             js_plan: Vec::new(),
             js_slots: Vec::new(),
@@ -6596,6 +6599,33 @@ impl Vm {
 
     /// `t.charCodeAt(a)` for a string `t` and a whole number `a`, as
     /// NF_SP_CHARCODEAT answers it; undefined when it is not that case.
+    /// `"s".charCodeAt(x)` for handle h's text without a copy of it: the
+    /// unit (NaN out of range) when x is an int and the text is ASCII or
+    /// the one str_cache holds; -1 otherwise (char_code_fast then).
+    #[inline]
+    pub fn char_unit(&mut self, h: int, x: double) -> double {
+        let i = x as int;
+        if (i as double) != x {
+            return -1.0;
+        }
+        let n = self.hlen(h);
+        if i < 0 || i >= n {
+            return nan();
+        }
+        let e = &self.strs[h as usize];
+        if e.up >= 0 {
+            return -1.0;
+        }
+        let nb = e.s.as_bytes().len();
+        if (n as usize) == nb {
+            return jsstr::byte_at(e.s.as_str(), i) as double;
+        }
+        if !self.sc_ascii && nb == self.sc_s.as_bytes().len() && (i as usize) < self.sc_units.len() && same_str(&self.sc_s, &e.s) {
+            return self.sc_units[i as usize] as double;
+        }
+        -1.0
+    }
+
     pub fn char_code_fast(&mut self, t: &Val, a: &Val) -> Val {
         if let (Val::Str(h), Val::Num(x)) = (t, a) {
             let i = *x as int;

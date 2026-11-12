@@ -399,39 +399,36 @@ impl Vm {
                         } else {
                             (((w0 >> 8) & 255) as int)
                         };
-                        let mut r = Val::Undef;
-                        let mut done = false;
                         if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
                             let (a, b) = (*x, *y);
-                            if code == OP_SUB {
-                                r = Val::Num(a - b);
+                            let r = if code == OP_SUB {
+                                a - b
                             } else if code == OP_MUL {
-                                r = Val::Num(a * b);
-                            } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
-                                // whole non-negative int32s: an int remainder
-                                let p = a as int;
-                                let q = b as int;
-                                r = Val::Num((p % q) as double);
+                                a * b
                             // bit operations on numbers in int32 range: ToInt32 is
                             // the truncation
-                            } else if code >= OP_BAND && code <= OP_SHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
+                            } else if code >= OP_BAND && code <= OP_USHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
                                 let (p, q) = (trunc_i32(a), trunc_i32(b));
-                                r = Val::Num(match code {
+                                match code {
                                     OP_BAND => (p & q) as double,
                                     OP_BOR => (p | q) as double,
                                     OP_BXOR => (p ^ q) as double,
                                     OP_SHL => wrap32(p << (q & 31)) as double,
-                                    _ => (p >> (q & 31)) as double,
-                                });
+                                    OP_SHR => (p >> (q & 31)) as double,
+                                    // >>>: the int32's bits as a uint32
+                                    _ => ((p & 4294967295) >> (q & 31)) as double,
+                                }
+                            } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
+                                // whole non-negative int32s: an int remainder
+                                let p = a as int;
+                                let q = b as int;
+                                (p % q) as double
                             } else if code >= OP_BAND && code <= OP_USHR {
-                                r = Val::Num(bit_num(code, a, b));
+                                bit_num(code, a, b)
                             } else {
-                                r = Val::Num(arith_num(code, a, b));
-                            }
-                            done = true;
-                        }
-                        if done {
-                            self.rset((bp + (w1 as int)) as usize, r);
+                                arith_num(code, a, b)
+                            };
+                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -893,6 +890,15 @@ impl Vm {
                         }
                     }
                     R_GET_METHOD => {
+                        if matches!(self.rget(bp, (w2 as int)), Val::Str(_)) {
+                            // a string's method, from String.prototype's slot
+                            // the site learnt (r_str_method)
+                            let to = self.r_str_method(bp, rb, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
+                            if to >= 0 {
+                                pc = to;
+                                continue;
+                            }
+                        }
                         self.r_get_method(bp, rb, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
                     }
                     R_CALL => {
@@ -1380,6 +1386,28 @@ impl Vm {
     /// R_GET_PROP / R_GET_THIS_PROP past its inline cache.
     #[inline(never)]
     pub fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
+        if o >= 0 && obj_at(&self.objs, o as usize).class == C_TYPED {
+            // a typed array's length: its getter's answer without the call
+            // (ta_len_plain), at once at a site that read one before (-5)
+            let n = if self.rcode[(rb + pc) as usize].c == -5 {
+                // -2 (no way fits) as -1: the lookup below
+                let k = self.ta_len_hit(o);
+                if k < 0 {
+                    -1
+                } else {
+                    k
+                }
+            } else if self.ratom(pi, pc) == A_LENGTH {
+                self.ta_len_plain(o)
+            } else {
+                -1
+            };
+            if n >= 0 {
+                self.stack[(bp + w1) as usize] = Val::Num(n as double);
+                self.rcode[(rb + pc) as usize].c = -5;
+                return false;
+            }
+        }
         let atom = self.ratom(pi, pc);
         if o < 0 && atom == A_LENGTH && (w0 & 255) == R_GET_PROP {
             if let Val::Str(h) = *self.rget(bp, w2) {
@@ -1847,6 +1875,75 @@ impl Vm {
             }
         }
         self.r_get_method_more(bp, rb, fi, pc, w0, w1, v, w3);
+    }
+
+    /// R_GET_METHOD on a string, at a site that learnt String.prototype's
+    /// slot -16 - w3 (r_get_method_more's first case, its key checked as an
+    /// inline cache's): the method and receiver put in place, the next pc
+    /// returned; for the native charCodeAt, r_char_code_call's pc after the
+    /// call when it answers the call too; -1 when the site has no such slot
+    /// (nothing done: r_get_method's way then).
+    #[inline(never)]
+    pub fn r_str_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) -> int {
+        if w3 <= MC_BASE || w3 > -16 {
+            return -1;
+        }
+        let sp = self.string_proto;
+        let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
+        let slot = self.ic_slot(sp, atom, -16 - w3, false);
+        if slot < 0 {
+            return -1;
+        }
+        let v = *self.rget(bp, w2);
+        let f = slot_at(self.ob(sp), slot as usize);
+        let fo = obj_of(&f);
+        if fo >= 0 && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_SP_CHARCODEAT {
+            let to = self.r_char_code_call(bp, rb, pc, w0, w1, v);
+            if to >= 0 {
+                return to;
+            }
+        }
+        self.rset((bp + w1) as usize, f);
+        self.rset((bp + w1 + 1) as usize, v);
+        pc + 1 + (w0 >> 16)
+    }
+
+    /// R_GET_METHOD of String.prototype's native charCodeAt on string `t`
+    /// (r_get_method_more found it) followed by its one argument's R_MOVE
+    /// and the R_CALL (a method call of one argument): when char_code_fast
+    /// answers, the answer goes where the call puts it and the pc after the
+    /// call is returned (the method, receiver and argument are not written
+    /// to the call's slots: nothing reads them after it); -1 otherwise,
+    /// nothing done.
+    #[inline(always)]
+    pub fn r_char_code_call(&mut self, bp: int, rb: int, pc: int, w0: int, w1: int, t: Val) -> int {
+        let p1 = pc + 1 + (w0 >> 16);
+        let m = self.rcode[(rb + p1) as usize];
+        if ((m.code & 255) as int) != R_MOVE || (m.a as int) != w1 + 2 {
+            return -1;
+        }
+        let p2 = p1 + 1 + ((m.code >> 16) as int);
+        let c = self.rcode[(rb + p2) as usize];
+        if ((c.code & 255) as int) != R_CALL || (c.a as int) != w1 || (c.b as int) != 1 || ((c.code >> 8) & 255) != 0 {
+            return -1;
+        }
+        let a = *self.rget(bp, m.b as int);
+        let mut r = Val::Undef;
+        if let (Val::Str(h), Val::Num(x)) = (t, a) {
+            let u = self.char_unit(h, x);
+            if u != -1.0 {
+                r = Val::Num(u);
+            }
+        }
+        if matches!(r, Val::Undef) {
+            r = self.char_code_fast(&t, &a);
+            if matches!(r, Val::Undef) {
+                return -1;
+            }
+        }
+        let dst = if c.c > 0 { bp + (c.c as int) - 1 } else { bp + w1 };
+        self.stack[dst as usize] = r;
+        p2 + 1 + ((c.code >> 16) as int)
     }
 
     /// r_get_method past the site's mcache entry: a primitive's method,
@@ -2919,6 +3016,20 @@ pub fn cold_at(v: &Vec<Cold>, i: usize) -> &Cold {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn cold_at(v: &Vec<Cold>, i: usize) -> &Cold {
     &v[i]
+}
+
+/// `v[i]` of the Colds, to write.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn cold_mut(v: &mut Vec<Cold>, i: usize) -> &mut Cold {
+    debug_assert!(i < v.len(), "cold past colds");
+    // SAFETY: as cold_at
+    unsafe { v.get_unchecked_mut(i) }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn cold_mut(v: &mut Vec<Cold>, i: usize) -> &mut Cold {
+    &mut v[i]
 }
 
 /// `v[i]` of the element vectors.

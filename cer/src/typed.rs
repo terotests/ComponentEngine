@@ -187,18 +187,8 @@ pub fn copy_nums(colds: &mut Vec<Cold>, sc: usize, s0: usize, tc: usize, d0: usi
 
 /// log2 of kind_size.
 pub fn kind_shift(kind: int) -> int {
-    if kind == TK_FLOAT16 {
-        return 1;
-    }
-    if kind <= TK_UINT8C {
-        0
-    } else if kind <= TK_UINT16 {
-        1
-    } else if kind <= TK_UINT32 || kind == TK_FLOAT32 {
-        2
-    } else {
-        3
-    }
+    // two bits a kind, TK_INT8 (0) to TK_FLOAT16 (11): 0 0 0 1 1 2 2 2 3 3 3 1
+    (8366400 >> (2 * kind)) & 3
 }
 
 pub fn kind_size(kind: int) -> int {
@@ -550,6 +540,114 @@ impl Vm {
         }
     }
 
+    /// ta_len_plain's answer out of a ta_memo way that fits o: its length,
+    /// -1 when the getter is not the native one, -2 when no way fits.
+    #[inline]
+    pub fn ta_len_hit(&self, o: int) -> int {
+        let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        let m = &self.ta_memo;
+        let ep = self.shape_epoch as i32;
+        // the way for o's shape and prototype (two ways, 7 ints each)
+        let w: usize = if m.len() >= 7 && crate::rvm::i32_at(m, 0) == ob.shape && crate::rvm::i32_at(m, 2) == ob.proto && crate::rvm::i32_at(m, 1) == ep {
+            0
+        } else if m.len() >= 14 && crate::rvm::i32_at(m, 7) == ob.shape && crate::rvm::i32_at(m, 9) == ob.proto && crate::rvm::i32_at(m, 8) == ep {
+            7
+        } else {
+            return -2;
+        };
+        // ob.proto is m[w + 2], an object while o lives
+        let po1 = crate::rvm::obj_at(&self.objs, ob.proto as usize);
+        if po1.shape != crate::rvm::i32_at(m, w + 3) || po1.proto != crate::rvm::i32_at(m, w + 4) {
+            return -2;
+        }
+        let po2 = crate::rvm::obj_at(&self.objs, po1.proto as usize);
+        if po2.shape != crate::rvm::i32_at(m, w + 5) {
+            return -2;
+        }
+        // the slot exists while p2's shape is the one that had it
+        let pair = obj_of(&crate::rvm::slot_at(po2, crate::rvm::i32_at(m, w + 6) as usize));
+        if pair < 0 {
+            return -1;
+        }
+        let pob = crate::rvm::obj_at(&self.objs, pair as usize);
+        if pob.class != C_ACCESSOR {
+            return -1;
+        }
+        let g = obj_of(crate::rvm::val_at(&crate::rvm::evec_at(&self.evecs, pob.elems as usize).v, 0));
+        if g < 0 {
+            return -1;
+        }
+        let gob = crate::rvm::obj_at(&self.objs, g as usize);
+        if gob.class != C_NATIVE || (gob.func as int) != NF_TA_LEN {
+            return -1;
+        }
+        // a fixed-length view over a buffer neither detached nor resizable:
+        // its length as made (ta_length does the rest)
+        let b = ob.env as int;
+        if b >= 0 {
+            let bo = crate::rvm::obj_at(&self.objs, b as usize);
+            if (bo.pos & 1) == 0 && bo.cold > 0 && !matches!(crate::rvm::cold_at(&self.colds, bo.cold as usize).prim, Val::Num(_)) {
+                if let Val::Num(n) = crate::rvm::cold_at(&self.colds, ob.cold as usize).prim {
+                    return n as int;
+                }
+            }
+        }
+        self.ta_length(o)
+    }
+
+    /// `o.length` for typed array `o` when %TypedArray%.prototype's own
+    /// getter answers it: no `length` of o's own or on its prototype, the
+    /// getter the native one. The lookup is kept (ta_memo, two ways of 7
+    /// ints: o's shape, shape_epoch, both prototypes and their shapes, the
+    /// slot) while those stay; -1 when it does not hold.
+    pub fn ta_len_plain(&mut self, o: int) -> int {
+        let n = self.ta_len_hit(o);
+        if n != -2 {
+            return n;
+        }
+        let p1 = self.objs[o as usize].proto;
+        if p1 < 0 {
+            return -1;
+        }
+        let p2 = self.objs[p1 as usize].proto;
+        if p2 < 0 {
+            return -1;
+        }
+        let osh = self.objs[o as usize].shape;
+        let ep = self.shape_epoch as i32;
+        if self.find(o, A_LENGTH) >= 0 || self.find(p1 as int, A_LENGTH) >= 0 {
+            return -1;
+        }
+        let slot = self.find(p2 as int, A_LENGTH);
+        if slot < 0 || (self.attr_at(p2 as int, slot) & P_ACCESSOR) == 0 {
+            return -1;
+        }
+        // a new way: the first two fill, then each replaces the older one
+        if self.ta_memo.len() < 14 {
+            let mut k = 0;
+            while k < 7 {
+                self.ta_memo.push(-1);
+                k += 1;
+            }
+        } else {
+            let mut k = 0;
+            while k < 7 {
+                self.ta_memo[k] = self.ta_memo[k + 7];
+                k += 1;
+            }
+        }
+        let b = self.ta_memo.len() - 7;
+        self.ta_memo[b] = osh;
+        self.ta_memo[b + 1] = ep;
+        self.ta_memo[b + 2] = p1;
+        self.ta_memo[b + 3] = self.objs[p1 as usize].shape;
+        self.ta_memo[b + 4] = p2;
+        self.ta_memo[b + 5] = self.objs[p2 as usize].shape;
+        self.ta_memo[b + 6] = slot as i32;
+        // the getter is checked as on a hit
+        self.ta_len_plain(o)
+    }
+
     /// Whether typed array `o` is out of bounds (or its buffer detached).
     pub fn ta_out_of_bounds(&self, o: int) -> bool {
         let b = self.objs[o as usize].env as int;
@@ -775,24 +873,48 @@ impl Vm {
     /// element_value converts it. false: nothing written, ta_set does it.
     #[inline]
     pub fn ta_put_num(&mut self, o: int, i: int, x: double) -> bool {
-        let s = self.ta_slot(o, i);
-        if s < 0 {
+        // ta_slot's checks, the buffer's Cold kept for the write
+        if i < 0 {
             return false;
         }
         let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        let b = ob.env as int;
+        if b < 0 {
+            return false;
+        }
+        let bo = crate::rvm::obj_at(&self.objs, b as usize);
+        if (bo.pos & 1) != 0 || bo.cold <= 0 {
+            return false;
+        }
+        let inside = match crate::rvm::cold_at(&self.colds, ob.cold as usize).prim {
+            Val::Num(n) => (i as double) < n,
+            _ => false,
+        };
+        if !inside {
+            return false;
+        }
+        let bci = bo.cold as usize;
+        let bc = crate::rvm::cold_at(&self.colds, bci);
+        if matches!(bc.prim, Val::Num(_)) {
+            return false;
+        }
         let kind = ob.pos as int;
+        let s = if bc.home == kind {
+            // a view's byte offset is a multiple of its element size
+            ((ob.func as int) >> kind_shift(kind)) + i
+        } else if bc.home < 0 && kind == TK_UINT8 {
+            (ob.func as int) + i
+        } else {
+            return false;
+        };
         if is_big(kind) {
             return false;
         }
-        let bc = crate::rvm::obj_at(&self.objs, ob.env as usize).cold as usize;
-        // a Uint8Array over bytes: the buffer holds Uint8 elements from now
-        self.colds[bc].home = kind;
-        if kind == TK_FLOAT64 {
-            self.colds[bc].nums[s as usize] = x;
-            return true;
-        }
+        // an integer the kind holds is stored as it is (as +0 for -0)
         let iv = x as int;
-        let fits = (iv as double) == x
+        let v = if kind == TK_FLOAT64 {
+            x
+        } else if (iv as double) == x
             && (if kind == TK_UINT8 || kind == TK_UINT8C {
                 iv >= 0 && iv <= 255
             } else if kind == TK_INT32 {
@@ -805,8 +927,18 @@ impl Vm {
                 iv >= 0 && iv <= 4294967295
             } else {
                 kind == TK_INT8 && iv >= -128 && iv <= 127
-            });
-        self.colds[bc].nums[s as usize] = if fits { iv as double } else { element_value(kind, x) };
+            })
+        {
+            // + 0.0: an int is never -0, but a JavaScript build's x as int
+            // keeps x's sign
+            (iv as double) + 0.0
+        } else {
+            element_value(kind, x)
+        };
+        let c = crate::rvm::cold_mut(&mut self.colds, bci);
+        // a Uint8Array over bytes: the buffer holds Uint8 elements from now
+        c.home = kind;
+        c.nums[s as usize] = v;
         true
     }
 
