@@ -1514,6 +1514,9 @@ impl Vm {
             return -1;
         }
         let n = self.strs[i].s.as_bytes().len() as int;
+        if jsstr::joins(self.strs[i].s.as_str(), b) {
+            return -1;
+        }
         if !rc_push(&mut self.strs[i].s, b) {
             return -1;
         }
@@ -1553,6 +1556,9 @@ impl Vm {
     #[inline(never)]
     pub fn str_prepend(&mut self, b: &str, y: int) -> int {
         if !prepend_ok() || y <= 0 {
+            return -1;
+        }
+        if jsstr::joins(b, self.sref(y)) {
             return -1;
         }
         let yi = y as usize;
@@ -4305,7 +4311,7 @@ impl Vm {
                 let h = self.take_handle(n as int, 0);
                 let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
                 s.push_str(self.sref(*x));
-                s.push_str(self.sref(*y));
+                jsstr::push_js(&mut s, self.sref(*y));
                 rc_refill(&mut self.strs[h as usize].s, s);
                 return Val::Str(h);
             }
@@ -4364,7 +4370,7 @@ impl Vm {
             }
             let mut s = String::new();
             s.push_str(x.as_str());
-            s.push_str(y.as_str());
+            jsstr::push_js(&mut s, y.as_str());
             return self.string_val(s);
         }
         if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
@@ -5290,10 +5296,9 @@ impl Vm {
             self.put_env(o, -1);
             return None;
         }
-        self.objs[o as usize].func = (i + jsstr::cp_width(cp)) as i32;
-        let mut t = String::new();
-        jsstr::push_cp(&mut t, cp);
-        Some(self.string_val(t))
+        let w = jsstr::iter_width(s.as_str(), i);
+        self.objs[o as usize].func = (i + w) as i32;
+        Some(self.string_val(jsstr::byte_slice(s.as_str(), i, i + w)))
     }
 
     /// The next value of an iterator made by `iter_values` / ITER_KEYS;
@@ -9919,7 +9924,7 @@ fn jf_string(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String) 
                         v = 0x10000 + ((v - 0xd800) << 10) + (lo - 0xdc00);
                     }
                 }
-                jsstr::push_cp(buf, v);
+                jsstr::push_code(buf, v);
             }
             _ => {
                 vm.throw_syntax("Bad escaped character in JSON");
