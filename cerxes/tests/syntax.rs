@@ -57,6 +57,11 @@ fn check_in(all: &[(String, String, String, String)], force: Option<&str>, throu
 /// … with `rc`, a reclaim at every safe point, each checked against a full
 /// mark (Vm::rc_stress).
 fn check_rc(all: &[(String, String, String, String)], force: Option<&str>, through_text: bool, snap: Option<&str>, rc: bool) -> Vec<String> {
+    check_vm(all, force, through_text, snap, rc, false)
+}
+
+/// … on the register machine (rvm.rs) when `regs`.
+fn check_vm(all: &[(String, String, String, String)], force: Option<&str>, through_text: bool, snap: Option<&str>, rc: bool, regs: bool) -> Vec<String> {
     let mut failed = Vec::new();
     for (mode, title, src, want) in all.iter() {
         let m = force.unwrap_or(mode.as_str());
@@ -69,6 +74,7 @@ fn check_rc(all: &[(String, String, String, String)], force: Option<&str>, throu
         if rc {
             e.vm.rc_stress();
         }
+        e.vm.regs = regs;
         e.set_syntax(m == "tsx" || m == "ts", m == "tsx" || m == "jsx");
         let got = e.eval(src);
         if &got != want || e.vm.rc_errors > 0 {
@@ -98,6 +104,16 @@ fn cer_cases_as_javascript() {
 fn cer_cases_as_tsx() {
     let all = cases("../cer/tests/cases.txt");
     let failed = check(&all, Some("tsx"));
+    assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
+}
+
+/// Every case on the register machine, which the library suite and the
+/// hosts run (bench/libs.mjs, CER_REGS=1).
+#[test]
+fn cases_on_the_register_machine() {
+    let mut all = cases("tests/cases.txt");
+    all.extend(cases("../cer/tests/cases.txt"));
+    let failed = check_vm(&all, None, false, None, false, true);
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), all.len(), failed.join("\n"));
 }
 

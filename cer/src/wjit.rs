@@ -9076,7 +9076,7 @@ fn site_pics(vm: &crate::vm::Vm, rb: usize, n: usize) -> Vec<i32> {
         while way < crate::rvm::PIC_WAYS as usize {
             let b = (vm.rpic[site] as usize + way) * w;
             way += 1;
-            if b + 7 > vm.pic.len() || vm.pic[b + 1] != vm.shape_epoch as i32 || vm.pic[b + 2] != 1 || vm.pic[b + 3] < 0 || vm.pic[b + 4] != 0 {
+            if b + 7 > vm.pic.len() || vm.pic[b + 1] != vm.chain_epoch as i32 || vm.pic[b + 2] != 1 || vm.pic[b + 3] < 0 || vm.pic[b + 4] != 0 {
                 continue;
             }
             let (sh, p, ps) = (vm.pic[b], vm.pic[b + 5], vm.pic[b + 6]);
