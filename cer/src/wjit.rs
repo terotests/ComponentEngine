@@ -640,6 +640,8 @@ const L_DB: u32 = 30;
 /// callx: the caller's proto and frame size (CARGS 7, 8)
 const L_CPI: u32 = 31;
 const L_CFS: u32 = 32;
+// callx: f's object (callx_body)
+const L_FO: u32 = 33;
 /// the compiled function's own extra locals (inline_call): the caller's
 /// sp and bp while an inlined callee's body runs, and the callee's scope
 const L_SSP: u32 = 22;
@@ -2830,9 +2832,12 @@ impl<'a> Cg<'a> {
     /// read through the cache at `a` (flags 0 a property, 1 a method that
     /// must be a function, 2 a method)
     fn pget(&mut self, dst: u32, b: u32, off: u32, a: u32, flags: i64, pc: i64) -> bool {
-        if flags == 0 && MASK.with(|m| m.get()) & (1u64 << 53) != 0 {
-            // experiment (mask 53): the cache's first way, an own data property of a shared
-            // shape, here; any other case through pget
+        let global = self.cur_kind == R_GET_GLOBAL as u32;
+        if flags == 0 && (global || MASK.with(|m| m.get()) & (1u64 << 53) != 0) {
+            // the cache's first way, an own data property, here: of the
+            // global object also under its shape epoch (the global's shape
+            // is its own), else of a shared shape (experiment, mask 53);
+            // any other case through pget
             let l = self.lay;
             let ai = a as i64;
             self.op(BLOCK);
@@ -2863,6 +2868,14 @@ impl<'a> Cg<'a> {
             self.mem(I32_LOAD, 2, 12);
             self.i32c(-1);
             self.op(I32_NE);
+            if global {
+                self.i32c(ai);
+                self.mem(I32_LOAD, 2, 12);
+                self.get(L_VM);
+                self.mem(I32_LOAD, 2, l.off_epoch);
+                self.op(I32_NE);
+                self.op(I32_AND);
+            }
             self.op(I32_OR);
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_class);
@@ -3951,7 +3964,7 @@ impl<'a> Cg<'a> {
         self.w.byte(T_I64);
         self.w.u(7);
         self.w.byte(T_I32);
-        self.w.u(11);
+        self.w.u(12);
         self.w.byte(T_I32);
         // the site's cache from CARGS[6], the operands from its record
         self.i32c(ca);
@@ -3984,30 +3997,43 @@ impl<'a> Cg<'a> {
             cg.i32c(2);
             cg.op(I32_ADD);
         };
+        // block $done / block $slow
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.slow_at = Some(self.extra);
+        // f not an object: the slow call; f's object at L_FO, a native
+        // one into block $nat (its fast paths), else on past it
+        let f_obj = |cg: &mut Cg<'a>, out: u64| {
+            cg.need_obj(L_FB, 0, 0);
+            cg.get(L_FB);
+            cg.mem(I32_LOAD, 2, l.off_int);
+            cg.obj_addr();
+            cg.w.byte(LOCAL_TEE);
+            cg.w.u(L_FO as u64);
+            cg.mem(I32_LOAD, 2, l.off_class);
+            cg.i32c(C_NATIVE as i64);
+            cg.op(I32_NE);
+            cg.op(BR_IF);
+            cg.w.u(out);
+        };
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        f_obj(self, 0);
         // f.call(this, a...): [call, f, this, a...] is f's call one slot
         // on (r_call_slow); H_CALL still reads the op as it is
         {
             self.op(BLOCK);
             self.op(T_VOID);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 0);
-            self.i32c(l.t_obj as i64);
-            self.op(I32_NE);
+            self.extra += 1;
             self.get(L_ARGC);
             self.i32c(1);
             self.op(I32_LT_S);
-            self.op(I32_OR);
-            self.op(BR_IF);
-            self.w.u(0);
-            self.get(L_FB);
-            self.mem(I32_LOAD, 2, l.off_int);
-            self.obj_addr();
-            self.w.byte(LOCAL_TEE);
-            self.w.u(L_T2 as u64);
-            self.mem(I32_LOAD, 2, l.off_class);
-            self.i32c(C_NATIVE as i64);
-            self.op(I32_NE);
-            self.get(L_T2);
+            self.get(L_FO);
             self.mem(I32_LOAD, 2, l.off_func);
             self.i32c(crate::builtins::NF_CALL as i64);
             self.op(I32_NE);
@@ -4026,6 +4052,9 @@ impl<'a> Cg<'a> {
             self.i32c(16);
             self.op(I32_ADD);
             self.set(L_FB);
+            // the function it calls, as f above
+            f_obj(self, 1);
+            self.extra -= 1;
             self.op(END);
         }
         // Math.abs, floor, ceil, round, sqrt of a number, min and max of
@@ -4037,24 +4066,7 @@ impl<'a> Cg<'a> {
             let on = l.off_num;
             self.op(BLOCK);
             self.op(T_VOID);
-            // a native function
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 0);
-            self.i32c(l.t_obj as i64);
-            self.op(I32_NE);
-            self.op(BR_IF);
-            self.w.u(0);
-            self.get(L_FB);
-            self.mem(I32_LOAD, 2, l.off_int);
-            self.obj_addr();
-            self.w.byte(LOCAL_TEE);
-            self.w.u(L_T2 as u64);
-            self.mem(I32_LOAD, 2, l.off_class);
-            self.i32c(C_NATIVE as i64);
-            self.op(I32_NE);
-            self.op(BR_IF);
-            self.w.u(0);
-            self.get(L_T2);
+            self.get(L_FO);
             self.mem(I32_LOAD, 2, l.off_func);
             self.i32c(m);
             self.op(I32_SUB);
@@ -4208,25 +4220,13 @@ impl<'a> Cg<'a> {
             };
             self.op(BLOCK);
             self.op(T_VOID);
-            // a native function, one argument or more: its id in L_T3
-            not_obj(self, 0);
+            // one argument or more: the function's id in L_T3
             self.get(L_ARGC);
             self.i32c(1);
             self.op(I32_LT_S);
-            self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
-            self.get(L_FB);
-            self.mem(I32_LOAD, 2, l.off_int);
-            self.obj_addr();
-            self.w.byte(LOCAL_TEE);
-            self.w.u(L_T2 as u64);
-            self.mem(I32_LOAD, 2, l.off_class);
-            self.i32c(C_NATIVE as i64);
-            self.op(I32_NE);
-            self.op(BR_IF);
-            self.w.u(0);
-            self.get(L_T2);
+            self.get(L_FO);
             self.mem(I32_LOAD, 2, l.off_func);
             self.set(L_T3);
             for (id, class) in [(crate::proxy::NF_IS_REGEXP, C_REGEXP), (crate::builtins::NF_A_ISARRAY, C_ARRAY)] {
@@ -4500,21 +4500,12 @@ impl<'a> Cg<'a> {
             self.op(END);
             self.op(END);
         }
-        // block $done / block $slow
-        self.op(BLOCK);
-        self.op(T_VOID);
-        self.extra += 1;
-        self.op(BLOCK);
-        self.op(T_VOID);
-        self.extra += 1;
-        self.slow_at = Some(self.extra);
+        self.extra -= 1;
+        self.op(END); // $nat
         {
             // f: a script function whose proto has compiled code it can be
             // called with (Vm.jit_calls; L_CA its words)
-            self.need_obj(L_FB, 0, 0);
-            self.get(L_FB);
-            self.mem(I32_LOAD, 2, l.off_int);
-            self.obj_addr();
+            self.get(L_FO);
             self.w.byte(LOCAL_TEE);
             self.w.u(L_T2 as u64);
             self.mem(I32_LOAD, 2, l.off_class);
@@ -4548,10 +4539,11 @@ impl<'a> Cg<'a> {
                 self.op(I32_EQZ);
                 self.get(L_FB);
                 self.mem(I32_LOAD8_U, 0, 16);
+                self.w.byte(LOCAL_TEE);
+                self.w.u(L_T3 as u64);
                 self.i32c(l.t_undef as i64);
                 self.op(I32_EQ);
-                self.get(L_FB);
-                self.mem(I32_LOAD8_U, 0, 16);
+                self.get(L_T3);
                 self.i32c(l.t_null as i64);
                 self.op(I32_EQ);
                 self.op(I32_OR);
@@ -4610,8 +4602,12 @@ impl<'a> Cg<'a> {
             self.op(I32_NE);
             self.op(I32_AND);
             self.op(I32_OR);
+            self.fail_if(0);
             // an arrow with a new.target (renter: cold elems2[0])
             ld(self, 7);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
             self.get(L_VM);
             self.mem(I32_LOAD, 2, l.vm_colds_ptr);
             self.get(L_T2);
@@ -4620,9 +4616,9 @@ impl<'a> Cg<'a> {
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.mem(I32_LOAD, 2, l.cold_e2_len);
-            self.op(I32_AND);
-            self.op(I32_OR);
             self.fail_if(0);
+            self.extra -= 1;
+            self.op(END);
             // a stack shorter than the callee's frame: undefined up to
             // its end (L_T3 from, L_T4 to), as grow_stack
             self.get(L_BP);
@@ -4689,7 +4685,7 @@ impl<'a> Cg<'a> {
                 self.mem(I32_STORE, 2, l.vm_stack_len);
             }
             self.op(END);
-            // the caller goes on after the call
+            // the caller goes on after the call (L_T5 its frame)
             self.get(L_VM);
             self.mem(I32_LOAD, 2, l.vm_frames_ptr);
             self.get(L_VM);
@@ -4699,6 +4695,8 @@ impl<'a> Cg<'a> {
             self.i32c(l.frame_size as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
+            self.w.byte(LOCAL_TEE);
+            self.w.u(L_T5 as u64);
             self.get(L_NEXT);
             self.op(I64_EXTEND_I32_S);
             self.mem(I64_STORE, 3, l.fr_pc);
@@ -4752,13 +4750,9 @@ impl<'a> Cg<'a> {
             self.w.u(0);
             self.op(END);
             self.op(END);
-            // the frame (L_T3)
-            self.get(L_VM);
-            self.mem(I32_LOAD, 2, l.vm_frames_ptr);
-            self.get(L_VM);
-            self.mem(I32_LOAD, 2, l.vm_frames_len);
+            // the frame (L_T3), after the caller's
+            self.get(L_T5);
             self.i32c(l.frame_size as i64);
-            self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T3);
             let st_i32 = |cg: &mut Cg<'a>, off: u32, v: &dyn Fn(&mut Cg<'a>)| {
@@ -4790,9 +4784,9 @@ impl<'a> Cg<'a> {
             });
             // this: the call's, an arrow's from its cold part (renter;
             // L_T4 where from)
-            self.get(L_FB);
-            self.i32c(16);
-            self.op(I32_ADD);
+            ld(self, 7);
+            self.op(IF);
+            self.w.byte(T_I32);
             self.get(L_VM);
             self.mem(I32_LOAD, 2, l.vm_colds_ptr);
             self.get(L_T2);
@@ -4802,9 +4796,11 @@ impl<'a> Cg<'a> {
             self.op(I32_ADD);
             self.i32c(l.cold_prim as i64);
             self.op(I32_ADD);
-            ld(self, 7);
-            self.op(I32_EQZ);
-            self.op(SELECT);
+            self.op(ELSE);
+            self.get(L_FB);
+            self.i32c(16);
+            self.op(I32_ADD);
+            self.op(END);
             self.set(L_T4);
             self.get(L_T3);
             self.get(L_T4);
@@ -4938,11 +4934,14 @@ impl<'a> Cg<'a> {
         self.op(I32_AND);
         self.op(IF);
         self.op(T_VOID);
+        // frames.len -= 1 (L_T4 the new length)
         self.get(L_VM);
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_frames_len);
         self.i32c(1);
         self.op(I32_SUB);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T4 as u64);
         self.mem(I32_STORE, 2, l.vm_frames_len);
         self.i32c(cell);
         self.i32c(cell);
@@ -4963,8 +4962,7 @@ impl<'a> Cg<'a> {
         self.i32c(cell);
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_frames_ptr);
-        self.get(L_VM);
-        self.mem(I32_LOAD, 2, l.vm_frames_len);
+        self.get(L_T4);
         self.i32c(1);
         self.op(I32_SUB);
         self.i32c(l.frame_size as i64);
