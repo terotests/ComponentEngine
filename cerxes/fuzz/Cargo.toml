@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# cerxes-fuzz: a fuzzer for CErXes on stable Rust with no dependencies but
+# the engine. It writes random JavaScript (and mutates the test cases), runs
+# each program in a worker process and checks it against oracles (see
+# README.md). Not part of the engine crate, so the engine stays
+# Ranger-translatable; libfuzzer/ holds the cargo-fuzz targets.
+
+[package]
+name = "cerxes-fuzz"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+cerxes = { path = ".." }
+
+[profile.release]
+overflow-checks = false
+debug = 1
+panic = "unwind"
+
+[workspace]

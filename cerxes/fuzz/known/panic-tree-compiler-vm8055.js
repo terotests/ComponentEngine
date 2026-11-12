@@ -1,0 +1,2 @@
+function s(){}function __p(){try{}catch(e){(e)}(s)}r=Math[0]
+class C0{r(){}g(){}g(){}m(){((3))}static{C0.t}}try{__p('',(()=>{try{((l())??'')}finally{(new C0().m(((([x,...z])=>[])(new Map([[]]).keys())?(2==1):0()))??((((''))??'')((1!='')())))}})())}catch(e){(e)}
