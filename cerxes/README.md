@@ -41,7 +41,7 @@ slow, but the shares hold.
 as WebAssembly with the JIT off and on, and Hermes when `HERMES` names a
 `hermes` binary; every engine has to make the same bytes.
 
-`node cerxes/bench/libs.mjs` runs 48 open-source libraries (lodash, d3,
+`node cerxes/bench/libs.mjs` runs 45 open-source libraries (lodash, d3,
 zod, rxjs, three, typescript, babel, prettier, pdf-lib, yjs, …; versions in
 `bench/libs/package.json`, `npm ci` there first) on CErXes and on V8 (Node,
 a fresh vm realm; `--engines=node,jitless,cerxes`): each case
