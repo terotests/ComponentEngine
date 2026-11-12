@@ -15,10 +15,11 @@ use crate::regs::*;
 use crate::value::*;
 use crate::vm::*;
 
-/// prototypes a chain cache entry follows, at most
-pub const PIC_DEPTH: int = 4;
+/// prototypes a chain cache entry follows, at most (a parser's class
+/// hierarchy, such as Babel's, is about ten deep)
+pub const PIC_DEPTH: int = 12;
 /// ints per prototype-chain cache entry (Vm.pic): the receiver's shape, the
-/// shape epoch, the depth, the slot (-1: absent, the chain ends there), 1
+/// chain epoch (Vm.chain_epoch), the depth, the slot (-1: absent, the chain ends there), 1
 /// for an accessor, then each prototype and its shape; a site's first
 /// entry's last int is whose turn it is to be refilled
 pub const PIC_W: int = 5 + 2 * PIC_DEPTH + 1;
@@ -1576,7 +1577,7 @@ impl Vm {
         if e0 < 0 {
             return -1;
         }
-        let epoch = self.shape_epoch as i32;
+        let epoch = self.chain_epoch as i32;
         let osh = self.ob(o).shape;
         let mut w: int = 0;
         while w < PIC_WAYS {
@@ -1668,7 +1669,7 @@ impl Vm {
         self.pic[ti] = (turn + 1) % PIC_WAYS as i32;
         let b = ((base + turn) * PIC_W as i32) as usize;
         self.pic[b] = self.objs[o as usize].shape as i32;
-        self.pic[b + 1] = self.shape_epoch as i32;
+        self.pic[b + 1] = self.chain_epoch as i32;
         self.pic[b + 2] = chain.len() as i32;
         self.pic[b + 3] = slot as i32;
         self.pic[b + 4] = if acc { 1 } else { 0 };
@@ -1893,7 +1894,7 @@ impl Vm {
                     let ob = self.ob(o);
                     (ob.shape, ob.proto)
                 };
-                if k + 4 < self.mcache.len() && i32_at(&self.mcache, k) == osh && i32_at(&self.mcache, k + 1) == (self.shape_epoch as i32) && p == i32_at(&self.mcache, k + 2) {
+                if k + 4 < self.mcache.len() && i32_at(&self.mcache, k) == osh && i32_at(&self.mcache, k + 1) == (self.chain_epoch as i32) && p == i32_at(&self.mcache, k + 2) {
                     let po = self.ob(p as int);
                     if po.shape == i32_at(&self.mcache, k + 3) {
                         let f = slot_at(po, i32_at(&self.mcache, k + 4) as usize);
@@ -1976,7 +1977,7 @@ impl Vm {
             self.mcache.push(-1);
         }
         self.mcache[k * 5] = self.ob(o).shape;
-        self.mcache[k * 5 + 1] = self.shape_epoch as i32;
+        self.mcache[k * 5 + 1] = self.chain_epoch as i32;
         self.mcache[k * 5 + 2] = h as i32;
         self.mcache[k * 5 + 3] = self.ob(h).shape;
         self.mcache[k * 5 + 4] = slot;

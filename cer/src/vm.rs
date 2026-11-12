@@ -315,8 +315,8 @@ pub struct Vm {
     pub sempty: Rc<String>,
     /// prototype-chain caches of the register code's reads (rvm.rs
     /// pic_get): rpic[i] is rcode[i]'s entry in pic (PIC_W ints), -1 none;
-    /// an entry holds while shape_epoch, which every change of an owned
-    /// shape moves, stays
+    /// an entry holds while chain_epoch, which every change of a
+    /// prototype's owned shape moves, stays
     pub rpic: Vec<i32>,
     /// per register site (rbase + pc): a second own-slot inline cache
     /// (shape * 65536 + slot) for a property read or write that sees two
@@ -345,6 +345,15 @@ pub struct Vm {
     pub js_pshape: int,
     pub pic: Vec<i32>,
     pub shape_epoch: int,
+    /// the epoch of the register VM's prototype-chain caches (rpic/pic,
+    /// mcache; wjit site_pics): moves with shape_epoch only when the
+    /// object whose owned shape changes or goes has been a prototype
+    /// (is_proto). Those caches never learn a dictionary receiver and
+    /// check every other shape on the way, so a dictionary that is no
+    /// one's prototype losing a key, changing an attribute or being freed
+    /// cannot stale them (a parser deleting its nodes' keys kept emptying
+    /// every chain cache)
+    pub chain_epoch: int,
     /// instanceof: Function.prototype's and Object.prototype's shapes and
     /// shape_epoch when neither had @@hasInstance (-1 none yet)
     pub hi_fp: int,
@@ -455,6 +464,11 @@ pub struct Vm {
     /// string converts it once
     pub rx_s: Rc<String>,
     pub rx_units: Vec<int>,
+    /// the one before (rx_cache swaps the two): a tokenizer that runs a
+    /// sticky regexp over its whole input and others over short words in
+    /// turn converted the input again after each word
+    pub rx_s2: Rc<String>,
+    pub rx_units2: Vec<int>,
     /// String.prototype.normalize's tables, decoded on first use
     pub norm: crate::normalize::Norm,
     /// Intl's collation tables, decoded on first use
@@ -681,6 +695,7 @@ impl Vm {
             js_pshape: -1,
             pic: Vec::new(),
             shape_epoch: 0,
+            chain_epoch: 0,
             hi_fp: -1,
             hi_op: -1,
             hi_epoch: -1,
@@ -738,6 +753,8 @@ impl Vm {
             sc_units: Vec::new(),
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
+            rx_s2: Rc::new(String::new()),
+            rx_units2: Vec::new(),
             norm: crate::normalize::Norm::new(),
             intl: crate::intl::Intl::new(),
             host_sync: Box::new(NoHostSync {}),
@@ -777,6 +794,23 @@ impl Vm {
         if self.rx_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s, s) {
             self.rx_s = s.clone();
             return;
+        }
+        let mut spare: Vec<int> = Vec::new();
+        if self.rx_s2.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s2, s) {
+            // the one kept back comes forward, the current one steps back
+            let cur = take_ints(&mut self.rx_units, &mut spare);
+            let back = self.rx_s.clone();
+            self.rx_units = take_ints(&mut self.rx_units2, &mut spare);
+            self.rx_s = s.clone();
+            self.rx_s2 = back;
+            self.rx_units2 = cur;
+            return;
+        }
+        // the current one is kept back unless a longer one is (the short
+        // words between two reads of the input do not push it out)
+        if self.rx_s.as_bytes().len() >= self.rx_s2.as_bytes().len() {
+            self.rx_s2 = self.rx_s.clone();
+            self.rx_units2 = take_ints(&mut self.rx_units, &mut spare);
         }
         self.rx_s = s.clone();
         self.rx_units = jsstr::units(s.as_str());
@@ -1087,7 +1121,7 @@ impl Vm {
             // the chain caches learn no dictionary receiver (pic_learn,
             // wjit cache_fill): only a prototype's new key stales them
             if self.objs[o as usize].is_proto {
-                self.shape_epoch += 1;
+                self.epoch_bump(o);
             }
             self.push_val(o, v);
             self.shapes[sh as usize].nkeys += 1;
@@ -1116,7 +1150,7 @@ impl Vm {
             if slot >= SHAPE_MAX {
                 // a dictionary
                 self.own_shape(o);
-                self.shape_epoch += 1;
+                self.epoch_bump(o);
                 let sh2 = self.objs[o as usize].shape as int;
                 self.push_val(o, v);
                 self.shapes[sh2 as usize].nkeys += 1;
@@ -1175,7 +1209,7 @@ impl Vm {
             let mut ns = ns;
             ns.kref = i;
             self.shapes[i as usize] = ns;
-            self.shape_epoch += 1;
+            self.epoch_bump(o);
             i
         };
         self.objs[o as usize].shape = id as i32;
@@ -1186,7 +1220,7 @@ impl Vm {
             return;
         }
         self.own_shape(o);
-        self.shape_epoch += 1;
+        self.epoch_bump(o);
         let sh = self.objs[o as usize].shape as int;
         self.shapes[sh as usize].attrs[slot as usize] = attr;
     }
@@ -1194,7 +1228,7 @@ impl Vm {
     pub fn remove_own(&mut self, o: int, slot: int) {
         self.del_count += 1;
         self.own_shape(o);
-        self.shape_epoch += 1;
+        self.epoch_bump(o);
         let sh = self.objs[o as usize].shape as int;
         if self.shapes[sh as usize].nkeys > TOMB_AT {
             // a big dictionary: a tombstone, not every later key and
@@ -1225,7 +1259,7 @@ impl Vm {
         }
         self.shapes[sh as usize].compact(&keep);
         self.objs[o as usize].retain_slots(&keep);
-        self.shape_epoch += 1;
+        self.epoch_bump(o);
     }
 
     /// Puts `o` back on the empty shape, freeing an owned one.
@@ -1235,9 +1269,19 @@ impl Vm {
         if self.shapes[sh as usize].owned {
             self.shapes[sh as usize] = Shape::new();
             self.free_shapes.push(sh);
-            self.shape_epoch += 1;
+            self.epoch_bump(o);
         }
         self.objs[o as usize].shape = 0;
+    }
+
+    /// Owned shape of `o` changed or went: shape_epoch moves, chain_epoch
+    /// too when `o` has been a prototype.
+    #[inline]
+    pub fn epoch_bump(&mut self, o: int) {
+        self.shape_epoch += 1;
+        if self.objs[o as usize].is_proto {
+            self.chain_epoch += 1;
+        }
     }
 
     pub fn add_prop(&mut self, o: int, atom: int, v: Val, attr: int) -> int {

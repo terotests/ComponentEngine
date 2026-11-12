@@ -451,6 +451,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
     vm.mcache = Vec::new();
     vm.pic = Vec::new();
     vm.shape_epoch += 1;
+    vm.chain_epoch += 1;
     let np = r.num();
     i = 0;
     while i < np && !r.bad {
