@@ -41,6 +41,14 @@ slow, but the shares hold.
 as WebAssembly with the JIT off and on, and Hermes when `HERMES` names a
 `hermes` binary; every engine has to make the same bytes.
 
+`node cerxes/bench/libs.mjs` runs 45 open-source libraries (lodash, d3,
+zod, rxjs, three, typescript, babel, prettier, pdf-lib, yjs, …; versions in
+`bench/libs/package.json`, `npm ci` there first) on CErXes and on V8 (Node,
+a fresh vm realm; `--engines=node,jitless,cerxes`): each case
+(`bench/libs/cases/*.js`) prints check values that must match V8's and
+timed benches, and each run's peak RSS is read with wait4. Results go to
+`bench/libs/out/` (JSON and a Markdown table).
+
 `tests/cases.txt` holds the syntax cases (a script and the value it
 answers). `tests/syntax.rs` runs them on the cargo build, and CEr's own
 cases (`../cer/tests/cases.txt`, plain JavaScript, values from Node) both
