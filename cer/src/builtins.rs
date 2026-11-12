@@ -155,6 +155,8 @@ pub const NF_SP_LOCALECOMPARE: int = 160;
 pub const NF_SP_TOSTRING: int = 161;
 pub const NF_SP_NORMALIZE: int = 162;
 pub const NF_SP_ITERATOR: int = 163;
+pub const NF_SP_ISWELLFORMED: int = 164;
+pub const NF_SP_TOWELLFORMED: int = 165;
 // Number / Boolean / Symbol / Error
 pub const NF_N_ISINTEGER: int = 170;
 pub const NF_N_ISSAFEINTEGER: int = 171;
@@ -598,6 +600,8 @@ impl Vm {
             ("toString", NF_SP_TOSTRING, 0),
             ("valueOf", NF_SP_TOSTRING, 0),
             ("normalize", NF_SP_NORMALIZE, 0),
+            ("isWellFormed", NF_SP_ISWELLFORMED, 0),
+            ("toWellFormed", NF_SP_TOWELLFORMED, 0),
         ];
         for (n, id, l) in snames {
             self.method(sp, n, id, l);
@@ -1226,14 +1230,14 @@ impl Vm {
                 out.push('$');
                 i += 2;
             } else if d == '&' {
-                out.push_str(matched);
+                jsstr::push_js(&mut out, matched);
                 i += 2;
             } else if d == '`' {
-                out.push_str(jsstr::from_units(units, 0, pos).as_str());
+                jsstr::push_js(&mut out, jsstr::from_units(units, 0, pos).as_str());
                 i += 2;
             } else if d == '\'' {
                 let end = pos + jsstr::len(matched);
-                out.push_str(jsstr::from_units(units, end, units.len() as int).as_str());
+                jsstr::push_js(&mut out, jsstr::from_units(units, end, units.len() as int).as_str());
                 i += 2;
             } else if d >= '0' && d <= '9' {
                 let mut num = (d as int) - 48;
@@ -1248,7 +1252,7 @@ impl Vm {
                 if num >= 1 && num < caps.len() as int {
                     if let Val::Str(s) = &caps[num as usize] {
                         let s = self.sget(s.clone());
-                        out.push_str(s.as_str());
+                        jsstr::push_js(&mut out, s.as_str());
                     }
                     i += used;
                 } else {
@@ -1271,7 +1275,7 @@ impl Vm {
                     let gv = g.1;
                     if g.0.as_str() == name.as_str() {
                         if let Val::Str(s) = gv {
-                            out.push_str(self.sref(s));
+                            jsstr::push_js(&mut out, self.sref(s));
                         }
                     }
                 }
@@ -1369,10 +1373,10 @@ impl Vm {
                     break;
                 }
                 let (ms, me) = (caps[0], caps[1]);
-                out.push_str(jsstr::sub_units(s.as_str(), units, last, ms).as_str());
+                jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, ms).as_str());
                 if plain_repl {
                     // a text without `$`: itself, no captures made
-                    out.push_str(repl_str.as_str());
+                    jsstr::push_js(&mut out, repl_str.as_str());
                     last = me;
                     if !global {
                         break;
@@ -1408,10 +1412,10 @@ impl Vm {
                         return Val::Undef;
                     }
                     let rs = self.to_string(&r);
-                    out.push_str(rs.as_str());
+                    jsstr::push_js(&mut out, rs.as_str());
                 } else {
                     let e = self.expand_replacement(repl_str.as_str(), matched.as_str(), ms, units, &capv, &groups);
-                    out.push_str(e.as_str());
+                    jsstr::push_js(&mut out, e.as_str());
                 }
                 last = me;
                 if !global {
@@ -1422,7 +1426,7 @@ impl Vm {
             if global {
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
             }
-            out.push_str(jsstr::sub_units(s.as_str(), units, last, units.len() as int).as_str());
+            jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, units.len() as int).as_str());
             return self.string_val(out);
         }
         let pat = self.to_string(pattern);
@@ -1433,7 +1437,7 @@ impl Vm {
             if p < 0 {
                 break;
             }
-            out.push_str(jsstr::sub_units(s.as_str(), units, last, p).as_str());
+            jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, p).as_str());
             if fn_repl {
                 let sv7 = self.string_val(pat.clone());
                 let sv8 = self.rc_val(s.clone());
@@ -1442,11 +1446,11 @@ impl Vm {
                     return Val::Undef;
                 }
                 let rs = self.to_string(&r);
-                out.push_str(rs.as_str());
+                jsstr::push_js(&mut out, rs.as_str());
             } else {
                 let sv6 = self.string_val(pat.clone());
                 let e = self.expand_replacement(repl_str.as_str(), pat.as_str(), p, units, &vec![sv6], &Vec::new());
-                out.push_str(e.as_str());
+                jsstr::push_js(&mut out, e.as_str());
             }
             last = p + plen;
             if !all {
@@ -1457,7 +1461,7 @@ impl Vm {
                 break;
             }
         }
-        out.push_str(jsstr::sub_units(s.as_str(), units, last, units.len() as int).as_str());
+        jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, units.len() as int).as_str());
         self.string_val(out)
     }
 
@@ -2453,7 +2457,7 @@ impl Vm {
         out.push('"');
         let mut plain = true;
         for c in s.chars() {
-            if c == '"' || c == '\\' || (c as int) < 32 {
+            if c == '"' || c == '\\' || (c as int) < 32 || (c as int) >= jsstr::LONE {
                 plain = false;
                 break;
             }
@@ -2463,7 +2467,32 @@ impl Vm {
             out.push('"');
             return;
         }
+        // a lone surrogate as an escape (well-formed JSON.stringify); a
+        // 0xdbfe/0xdbff pair kept as two stand-ins stays so
+        let mut hold: int = -1;
         for c in s.chars() {
+            let lu = jsstr::lone_unit(c as int);
+            if hold >= 0 {
+                if lu >= 0xdc00 {
+                    // a pair: as it is (the engine keeps U+10F800.. so)
+                    jsstr::push_cp(out, hold - 0xd800 + jsstr::LONE);
+                    out.push(c);
+                    hold = -1;
+                    continue;
+                }
+                out.push_str("\\u");
+                out.push_str(hex_digits(hold, 4, false).as_str());
+                hold = -1;
+            }
+            if lu >= 0 {
+                if lu >= 0xdbfe && lu <= 0xdbff {
+                    hold = lu;
+                } else {
+                    out.push_str("\\u");
+                    out.push_str(hex_digits(lu, 4, false).as_str());
+                }
+                continue;
+            }
             match c {
                 '"' => out.push_str("\\\""),
                 '\\' => out.push_str("\\\\"),
@@ -2482,6 +2511,10 @@ impl Vm {
                     }
                 }
             }
+        }
+        if hold >= 0 {
+            out.push_str("\\u");
+            out.push_str(hex_digits(hold, 4, false).as_str());
         }
         out.push('"');
     }
@@ -3097,7 +3130,7 @@ impl Vm {
                                 v = 0x10000 + ((v - 0xd800) << 10) + (lo - 0xdc00);
                             }
                         }
-                        jsstr::push_cp(&mut s, v);
+                        jsstr::push_code(&mut s, v);
                     }
                     _ => {
                         self.throw_syntax("Bad escaped character in JSON");
@@ -3473,14 +3506,31 @@ impl Vm {
 
     pub fn uri_encode(&mut self, s: &str, keep: &str) -> Val {
         let mut out = String::new();
-        for c in s.chars() {
-            let plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || "-_.!~*'()".contains(c) || keep.contains(c);
-            if plain {
-                out.push(c);
-                continue;
-            }
+        let cs = s.chars().collect::<Vec<char>>();
+        let mut i: usize = 0;
+        while i < cs.len() {
+            let c = cs[i];
+            i += 1;
             let mut buf = String::new();
-            buf.push(c);
+            // a lone surrogate cannot be encoded; a 0xdbfe/0xdbff pair kept
+            // as two stand-ins is its character
+            let lu = jsstr::lone_unit(c as int);
+            if lu >= 0 {
+                let lo = if lu >= 0xdbfe && lu <= 0xdbff && i < cs.len() { jsstr::lone_unit(cs[i] as int) } else { -1 };
+                if lo < 0xdc00 {
+                    self.throw_uri();
+                    return Val::Undef;
+                }
+                jsstr::push_cp(&mut buf, 0x10000 + ((lu - 0xd800) << 10) + (lo - 0xdc00));
+                i += 1;
+            } else {
+                let plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || "-_.!~*'()".contains(c) || keep.contains(c);
+                if plain {
+                    out.push(c);
+                    continue;
+                }
+                buf.push(c);
+            }
             for b in buf.bytes() {
                 let v = b as int;
                 out.push('%');
@@ -3953,6 +4003,8 @@ impl Vm {
                     line.push_str(s.as_str());
                     i += 1;
                 }
+                // a lone surrogate leaves as U+FFFD, as V8 writes it
+                let line = jsstr::to_well_formed(line.as_str(), true);
                 if self.echo {
                     println!("{}", line);
                 }
@@ -5124,14 +5176,14 @@ pub fn replace_plain(s: &str, pat: &str, rep: &str, all: bool) -> String {
     let mut last = 0usize;
     while let Some(p) = s[last..].find(pat) {
         let at = last + p;
-        out.push_str(&s[last..at]);
-        out.push_str(rep);
+        jsstr::push_js(&mut out, &s[last..at]);
+        jsstr::push_js(&mut out, rep);
         last = at + pat.len();
         if !all {
             break;
         }
     }
-    out.push_str(&s[last..]);
+    jsstr::push_js(&mut out, &s[last..]);
     out
 }
 
