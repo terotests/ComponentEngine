@@ -169,11 +169,9 @@ fn regex_after_word(w: &str) -> bool {
         || w == "await"
 }
 
+/// A lone surrogate escape (\uD83D) keeps its unit (jsstr::push_cp).
 pub fn push_code_point(out: &mut String, cp: int) {
-    match char::from_u32(cp as u32) {
-        Some(c) => out.push(c),
-        None => out.push('\u{fffd}'),
-    }
+    crate::jsstr::push_code(out, cp);
 }
 
 impl Lexer {
@@ -697,7 +695,12 @@ impl Lexer {
                 self.read_escape(&mut s, false, octal);
                 continue;
             }
-            s.push(c);
+            // a character among the lone-surrogate stand-ins as its two units
+            if (c as int) >= crate::jsstr::LONE {
+                push_code_point(&mut s, c as int);
+            } else {
+                s.push(c);
+            }
             self.pos += 1;
         }
         s
