@@ -1171,3 +1171,45 @@ log.push(r.join(' '));
 log.join(',')
 ----
 14,14,14,42,5,7,2,7,5,-2,-9,2,NaN 97 97 97 233 233 8364 8364 55357 55357 56832 56832 NaN NaN,x0 x1 97 98,255 0 0 44,Infinity,4294967295 -6 153337455 0 1 1994146194 0 22 1994146201 0 69 1994146224
+
+==== js Prototype-chain caches: a method twelve classes up, shadowed and unshadowed on the way; a dictionary prototype losing, regaining and redefining a key; dictionaries that are no one's prototype changing beside cached reads; a sticky regexp over a long input between tests of short words
+var log = [];
+class L0 { m() { return "a"; } get g() { return "g"; } }
+var C = L0;
+for (var d = 1; d < 12; d++) C = class extends C {};
+var o = new C(), Mid = Object.getPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf(o)))));
+function call() { return o.m() + o.g; }
+for (var i = 0; i < 3; i++) log.push(call());
+Mid.m = function () { return "b"; };
+for (i = 0; i < 3; i++) log.push(call());
+delete Mid.m;
+log.push(call());
+var base = { f() { return 1; } }, mid = Object.create(base);
+for (i = 0; i < 100; i++) mid["k" + i] = i;
+mid.f = function () { return 2; };
+var c = Object.create(mid), s = "";
+for (i = 0; i < 3; i++) s += c.f();
+delete mid.f;
+for (i = 0; i < 3; i++) s += c.f();
+mid.f = function () { return 3; };
+for (i = 0; i < 3; i++) s += c.f();
+Object.defineProperty(mid, "f", { get() { return function () { return 4; }; }, configurable: true });
+for (i = 0; i < 3; i++) s += c.f();
+log.push(s);
+var p = {};
+for (i = 0; i < 100; i++) p["k" + i] = i;
+p.v = 1;
+var q = Object.create(p), t = [];
+function rd() { return q.v; }
+for (i = 0; i < 3; i++) t.push(rd());
+Object.defineProperty(p, "v", { get() { return 9; } });
+t.push(rd());
+var junk = [];
+for (i = 0; i < 50; i++) { var x = { a: 1, b: 2 }; for (var k = 0; k < 80; k++) x["z" + k] = k; delete x.a; Object.defineProperty(x, "b", { enumerable: false }); junk.push(rd() + x.b); }
+log.push(t.join(""), junk.length, junk[49]);
+var big = "ab cd ".repeat(3000), ws = /\s+/y, word = /^[a-z]+$/, n = 0, pos = 0, m;
+while (pos < big.length) { ws.lastIndex = pos; if ((m = ws.exec(big))) { pos = ws.lastIndex; continue; } var e = big.indexOf(" ", pos); if (e < 0) e = big.length; if (word.test(big.slice(pos, e)) && /^.$/.test(big[pos])) n++; pos = e; }
+log.push(n);
+log.join(",")
+----
+ag,ag,ag,bg,bg,bg,ag,222111333444,1119,50,11,6000
