@@ -12,10 +12,12 @@
 //                (print provided, Measure timed with performance.now).
 //
 // zoo.js.org measures native builds on an amd64 server; this page measures
-// WebAssembly builds in a tab. "Calibrated" multiplies each suite's score by
-// zoo's V8 score over this browser's own score for that suite, so the
-// browser's JIT stands in for zoo's V8 and the other engines are placed as if
-// they had run on zoo's machine.
+// WebAssembly builds in a tab. "Calibrated" multiplies every score by one
+// factor, how much slower zoo's machine is than this one: the median over
+// the suites of zoo's V8 score ÷ this browser's own score. One factor and
+// not one per suite, because a suite's ratio is also how this browser's
+// engine differs from zoo's V8 there (its regex engine, its garbage
+// collector in Splay), which says nothing about an engine in WebAssembly.
 
 const $ = (id) => document.getElementById(id);
 
@@ -100,14 +102,18 @@ export function setupZoo(ctx) {
     return (reference && reference.engines.find((e) => e.id === "v8")) || null;
   }
 
-  /** Per-suite factor zoo V8 / this browser, when the browser has run. */
+  /** zoo V8 ÷ this browser per suite, when the browser has run, and their
+   * median: the machine's factor. */
   function factors() {
     const b = measured.engines.native;
     const v8 = v8Ref();
     if (!b || !v8) return null;
-    const f = {};
-    for (const k of SCORES) if (b.octane && b.octane[k] > 0 && v8.octane[k] > 0) f[k] = v8.octane[k] / b.octane[k];
-    return Object.keys(f).length ? f : null;
+    const suite = {};
+    for (const k of SCORES) if (b.octane && b.octane[k] > 0 && v8.octane[k] > 0) suite[k] = v8.octane[k] / b.octane[k];
+    const xs = Object.values(suite).sort((x, y) => x - y);
+    if (!xs.length) return null;
+    const mid = xs.length >> 1;
+    return { suite, machine: xs.length % 2 ? xs[mid] : Math.sqrt(xs[mid - 1] * xs[mid]) };
   }
 
   function rows() {
@@ -124,7 +130,7 @@ export function setupZoo(ctx) {
         const v = m.octane && m.octane[k];
         if (!(v > 0)) continue;
         if (!calibrate || id === "native") oct[k] = v;
-        else if (f && f[k]) oct[k] = v * f[k];
+        else if (f) oct[k] = v * f.machine;
       }
       const vals = Object.values(oct);
       out.push({
@@ -193,7 +199,8 @@ export function setupZoo(ctx) {
     renderDetails();
     const f = factors();
     $("zoo-calibration").textContent = f
-      ? "Calibration factors (zoo V8 ÷ this browser): " + SCORES.filter((k) => f[k]).map((k) => `${k} ${f[k].toFixed(2)}`).join(", ")
+      ? `Calibration factor ${f.machine.toFixed(2)}: the median of zoo V8 ÷ this browser over the suites (` +
+        SCORES.filter((k) => f.suite[k]).map((k) => `${k} ${f.suite[k].toFixed(2)}`).join(", ") + ")."
       : "No calibration yet: the browser's own Octane run supplies it.";
   }
 

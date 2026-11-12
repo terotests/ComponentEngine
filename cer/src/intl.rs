@@ -708,7 +708,7 @@ function str22(loc, k) { return ld().num_strings[loc * 22 + k]; }
 function int5(loc, k) { return ld().num_ints[loc * 5 + k]; }
 // the host-ICU supplement: 0 NaN, 1 H or HH, 2 AM|PM, 3 and 4 the short and
 // medium date patterns, 5 the stand-alone month names
-function sup(loc, k) { return ld().supplement[loc * 6 + k]; }
+function sup(loc, k) { return ld().supplement[loc * 9 + k]; }
 
 // ---- numbers: the digits as a decimal string, rounded half away from zero
 // as ICU rounds them -- on the shortest representation of the double, so
@@ -1137,9 +1137,18 @@ function DateTimeFormat(locales, options) {
     var hasPeriod = false;
     for (var z = 0; z < tp.length; z++) if (tp[z].f === 'dayPeriod') hasPeriod = true;
     if (f.hour && h12 && !hasPeriod) tp.push({ lit: ' ' }, { f: 'dayPeriod', w: 0 });
+    // the space next to the day period is ICU's U+202F where ICU has it
+    // (formatToParts keeps it, format() writes a plain space as V8 does)
+    for (var z = 0; z < tp.length; z++) if (tp[z].f === 'dayPeriod') {
+      var nb = sup(li, 8).split('|')[f.minute ? 0 : 1], at = z > 0 && tp[z - 1].lit !== undefined ? z - 1 : tp[z + 1] && tp[z + 1].lit !== undefined ? z + 1 : -1;
+      if (nb && at >= 0 && nb !== tp[at].lit && nb.replace(/\u202f/g, ' ') === tp[at].lit) tp[at] = { lit: nb };
+    }
     if (plan.length) {
       var dt = pattern(li, 5), glue = ', ';
       for (var g = 1; g < dt.length; g++) if (dt[g].lit !== undefined && dt[g - 1].f && /year|month|day/.test(dt[g - 1].f) && dt[g + 1] && /hour|minute|second|dayPeriod/.test(dt[g + 1].f)) glue = dt[g].lit;
+      // a written-out month joins its time as ICU's atTime pattern does
+      // (English "May 5, 2024 at 3:04 PM", German "um")
+      if (f.month === 'long' && sup(li, 7)) glue = sup(li, 7);
       // the date-and-time pattern's glue may repeat the date's closing
       // literal (Hungarian "05. 15:04", Bulgarian "г., 15:04")
       var last = plan[plan.length - 1];
@@ -1176,7 +1185,8 @@ function dateParts(dtf, date) {
         else v = padTo(M + 1, mo === '2-digit' ? 2 : it.w || 1);
         break;
       case 'day': v = padTo(D, (it.opt || o.day) === '2-digit' ? 2 : it.w || 1); break;
-      case 'weekday': v = o.weekday === 'long' ? names[base + 24 + W] : o.weekday === 'short' ? names[base + 31 + W] : names[base + 24 + W].charAt(0).toUpperCase(); break;
+      // a long weekday with no date stands alone (Finnish tiistai, not tiistaina)
+      case 'weekday': v = o.weekday === 'long' ? (o.day || o.month || o.year ? names[base + 24 + W] : sup(li, 6).split('|')[W]) : o.weekday === 'short' ? names[base + 31 + W] : names[base + 24 + W].charAt(0).toUpperCase(); break;
       case 'hour':
         var hh = h;
         if (o.hourCycle === 'h12') hh = (h + 11) % 12 + 1;
