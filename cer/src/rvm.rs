@@ -1280,7 +1280,13 @@ impl Vm {
                         self.step(op, pi, bp, fi, &mut p2);
                     }
                     R_STEP_PUSH => {
-                        self.r_step_push(pi, bp, fi, pc, (w1 as int));
+                        let way = self.r_get_super(pi, bp, fi, pc, (w0 as int), (w1 as int));
+                        if way == 2 {
+                            continue 'frames;
+                        }
+                        if way == 0 {
+                            self.r_step_push(pi, bp, fi, pc, (w1 as int));
+                        }
                     }
                     R_STEP_K => {
                         self.r_step_k(pi, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
@@ -2201,6 +2207,114 @@ impl Vm {
         self.rset(from as usize, Val::Obj(a));
     }
 
+    /// R_NEW of a class: its constructor (or the one Vm::ctor_target gives)
+    /// entered as a frame of this loop, `this` made from the class and a
+    /// base class's fields set as enter_function sets them. true when the
+    /// frames changed or it threw (r_win's caller goes on through 'frames);
+    /// false for a constructor with a rest parameter, which Vm::new_op
+    /// enters.
+    pub fn r_new_class(&mut self, fo: int, fpos: int, argc: int, fi: usize, next: int, want: usize) -> bool {
+        let tfo = if self.protos[self.ob(fo).func as usize].fwd_atom == -2 { self.ctor_target(fo) } else { fo };
+        let (ok, base_cls) = {
+            let q = &self.protos[self.ob(tfo).func as usize];
+            (q.rest < 0 && (q.class_ctor || q.constructible()), q.class_ctor && !q.derived)
+        };
+        if !ok {
+            return false;
+        }
+        self.frames[fi].pc = next;
+        if self.gc_due() {
+            self.rgc(want);
+        }
+        let top = (fpos + argc + 2) as usize;
+        if self.stack.len() < top {
+            grow_stack(&mut self.stack, top);
+        }
+        let mut k = argc;
+        while k > 0 {
+            self.stack[(fpos + 1 + k) as usize] = self.stack[(fpos + k) as usize];
+            k -= 1;
+        }
+        let f = self.stack[fpos as usize];
+        let this = self.make_this(&f);
+        self.stack[(fpos + 1) as usize] = this;
+        if tfo != fo {
+            self.stack[fpos as usize] = Val::Obj(tfo);
+        }
+        if !self.renter(tfo, fpos, argc, fpos) {
+            return true;
+        }
+        let nf = self.frames.len() - 1;
+        self.frames[nf].construct = true;
+        self.frames[nf].new_target = f;
+        if base_cls {
+            self.run_fields(tfo, &this);
+        }
+        true
+    }
+
+    /// `super.name` (OP_GET_SUPER under R_STEP_PUSH) read here when the
+    /// home object's prototypes are plain objects: 1 with a data property's
+    /// value in slot w1, 2 when a getter that is a plain function was
+    /// entered as a frame of this loop (as r_get_prop_slow enters one), 0
+    /// for anything else, which Vm::step does.
+    #[inline(never)]
+    pub fn r_get_super(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int) -> int {
+        let op = self.protos[pi].code[pc as usize];
+        if (op.code as int) != OP_GET_SUPER {
+            return 0;
+        }
+        let atom = op.a as int;
+        if self.atom_kind(atom) == 3 {
+            return 0;
+        }
+        let fobj = self.frames[fi].fobj;
+        let home = self.colds[self.objs[fobj as usize].cold as usize].home;
+        if home < 0 {
+            return 0;
+        }
+        let mut cur = self.objs[home as usize].proto as int;
+        while cur >= 0 {
+            if self.objs[cur as usize].class != C_OBJECT {
+                return 0;
+            }
+            let slot = self.find(cur, atom);
+            if slot >= 0 {
+                let attr = self.attr_at(cur, slot);
+                let v = self.objs[cur as usize].get_slot(slot as usize);
+                if (attr & (P_ACCESSOR | P_MAPPED)) == 0 {
+                    self.stack[(bp + w1) as usize] = v;
+                    return 1;
+                }
+                if (attr & P_MAPPED) != 0 {
+                    return 0;
+                }
+                let g = self.evecs[self.objs[obj_of(&v) as usize].elems as usize].v[0];
+                let go = obj_of(&g);
+                if go < 0 || self.objs[go as usize].class != C_FUNCTION {
+                    return 0;
+                }
+                {
+                    let p = &self.protos[self.objs[go as usize].func as usize];
+                    if p.rest >= 0 || p.class_ctor || p.generator || p.is_async {
+                        return 0;
+                    }
+                }
+                let recv = self.frames[fi].this_val;
+                self.frames[fi].pc = pc + 1 + (w0 >> 16);
+                let fpos = bp + self.protos[pi].fsize;
+                while (self.stack.len() as int) < fpos + 2 {
+                    self.stack.push(Val::Undef);
+                }
+                self.stack[fpos as usize] = g;
+                self.stack[(fpos + 1) as usize] = recv;
+                return if self.renter(go, fpos, 0, bp + w1) { 2 } else { 1 };
+            }
+            cur = self.objs[cur as usize].proto as int;
+        }
+        0
+    }
+
     #[inline(never)]
     pub fn r_step_push(&mut self, pi: usize, bp: int, fi: usize, pc: int, w1: int) {
         let op = self.protos[pi].code[pc as usize];
@@ -2323,6 +2437,15 @@ impl Vm {
             }
             self.frames[fi].pc = pc + 1;
             return pc + 1;
+        }
+        if code == OP_NEW {
+            // a class's constructor as a frame of rrun's loop
+            let argc = op.a as int;
+            let fpos = bp + w1 - argc - 1;
+            let fo = obj_of(&self.stack[fpos as usize]);
+            if fo >= 0 && self.ob(fo).class == C_FUNCTION && self.protos[self.ob(fo).func as usize].class_ctor && self.r_new_class(fo, fpos, argc, fi, pc + 1, want) {
+                return -1;
+            }
         }
         self.stack.truncate((bp + w1) as usize);
         let mut p2 = pc + 1;

@@ -1,0 +1,5 @@
+class: mismatch-snapshot
+signature: line/line x: y:undefined
+seed: 9581950708391485120
+generated: yes
+register VM vs slices + snapshot/restore: line 23: "s24 RegExp:(a|b)*c/" vs "s24 RegExp:undefined/"
