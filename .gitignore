@@ -18,3 +18,5 @@ playground/hermes/work/
 playground/hermes/dist/
 playground/spidermonkey/work/
 playground/spidermonkey/dist/
+cerxes/bench/libs/node_modules/
+cerxes/bench/libs/out/

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# cargo-fuzz targets (libFuzzer, coverage-guided, AddressSanitizer). Needs
+# nightly Rust and `cargo install cargo-fuzz`:
+#
+#   cd cerxes/fuzz/libfuzzer
+#   cargo +nightly fuzz run --fuzz-dir . compile -- -max_total_time=600
+#   cargo +nightly fuzz run --fuzz-dir . eval    -- -max_total_time=600 -timeout=10
+#   cargo +nightly fuzz run --fuzz-dir . snapshot -- -max_total_time=600
+[package]
+name = "cerxes-libfuzzer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cerxes = { path = "../.." }
+
+[[bin]]
+name = "compile"
+path = "fuzz_targets/compile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "eval"
+path = "fuzz_targets/eval.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot"
+path = "fuzz_targets/snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -105,6 +105,10 @@ pub struct Regex {
     lit: Vec<int>,
     lit_min: int,
     lit_max: int,
+    /// every match starts at a `^`: 1 one that matches only at the input's
+    /// start, 2 one that may also match after a line terminator (`m`);
+    /// 0 when a match can start anywhere. exec tries no other start
+    anchor: int,
 }
 
 /// What req_lit knows of a node: its width in units (max -1: no bound)
@@ -1841,6 +1845,7 @@ fn new_regex() -> Regex {
         lit: Vec::new(),
         lit_min: 0,
         lit_max: 0,
+        anchor: 0,
     }
 }
 
@@ -2187,6 +2192,9 @@ pub fn compile(pattern: &str, flags: &str) -> Regex {
     if re.first < 0 && !re.sticky {
         re.start_set();
     }
+    if !re.sticky {
+        re.anchor = re.start_anchor();
+    }
     re.class_maps();
     re
 }
@@ -2267,6 +2275,52 @@ impl Regex {
         }
         self.fset = set;
         self.fhi = hi;
+    }
+
+    /// anchor: whether every path from the start meets a `^` before it
+    /// consumes a unit or matches, and whether any of them is multiline.
+    fn start_anchor(&self) -> int {
+        let mut seen: Vec<bool> = Vec::new();
+        let mut j: usize = 0;
+        while j < self.code.len() {
+            seen.push(false);
+            j += 1;
+        }
+        let mut multi = false;
+        let mut work: Vec<int> = Vec::new();
+        work.push(1);
+        while !work.is_empty() {
+            let pc = work.pop().unwrap();
+            if pc < 0 || pc as usize >= self.code.len() {
+                return 0;
+            }
+            if seen[pc as usize] {
+                continue;
+            }
+            seen[pc as usize] = true;
+            let ins = self.code[pc as usize];
+            if ins.op == I_BOL {
+                if ins.a != 0 {
+                    multi = true;
+                }
+            } else if ins.op == I_SPLIT {
+                work.push(ins.a);
+                work.push(ins.b);
+            } else if ins.op == I_JMP {
+                work.push(ins.a);
+            } else if ins.op == I_SAVE || ins.op == I_CLEAR || ins.op == I_SETPOS || ins.op == I_CHKPOS {
+                work.push(pc + 1);
+            } else {
+                // a unit consumed, an assertion, a lookaround or the match
+                // before any `^`: a match may start anywhere
+                return 0;
+            }
+        }
+        if multi {
+            2
+        } else {
+            1
+        }
     }
 
     /// cmap from the classes
@@ -2694,7 +2748,21 @@ impl Regex {
         let mut stack: Vec<(int, int, int)> = Vec::new();
         // where lit was found last (-1: not looked for yet)
         let mut lp: int = -1;
+        if self.anchor == 1 && s > 0 {
+            // `^` matches only at 0
+            return Vec::new();
+        }
         while s <= n {
+            if self.anchor == 2 && s > 0 && !is_line_term(input[(s - 1) as usize]) {
+                // a multiline `^`: the next start after a line terminator
+                while s < n && !is_line_term(input[s as usize]) {
+                    s += 1;
+                }
+                s += 1;
+                if s > n {
+                    break;
+                }
+            }
             if !self.lit.is_empty() {
                 if lp < s + self.lit_min {
                     lp = self.find_lit(input, s + self.lit_min);
@@ -2736,7 +2804,7 @@ impl Regex {
             if e >= 0 {
                 return caps;
             }
-            if self.sticky {
+            if self.sticky || self.anchor == 1 {
                 break;
             }
             s += 1;
