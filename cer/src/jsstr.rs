@@ -2,6 +2,14 @@
 //! JavaScript strings are sequences of UTF-16 units; ours are Rust strings
 //! (UTF-8). Positions here are UTF-16 positions, as JavaScript counts them.
 //! An ASCII string (the common case) is indexed by its bytes directly.
+//!
+//! A lone surrogate (a unit 0xd800..0xdfff with no partner) cannot be in
+//! a Rust string, so Rust keeps unit u as the character U+10F800 + (u -
+//! 0xd800), the last 2048 code points of plane 16 (private use): one unit
+//! long here, and a high one joined to a low one becomes the pair's real
+//! character (join_fix). Real text in U+10F800..U+10FFFF reads as lone
+//! surrogates. Targets with UTF-16 strings keep them as they are; the
+//! others write U+FFFD.
 
 use ranger::prelude::*;
 
@@ -55,7 +63,9 @@ fn units_of(s: &str) -> Vec<int> {
     let mut out: Vec<int> = Vec::with_capacity(s.as_bytes().len());
     for c in s.chars() {
         let cp = c as int;
-        if cp >= 0x10000 {
+        if cp >= LONE {
+            out.push(cp - LONE + 0xd800);
+        } else if cp >= 0x10000 {
             let v = cp - 0x10000;
             out.push(0xd800 + (v >> 10));
             out.push(0xdc00 + (v & 0x3ff));
@@ -75,7 +85,7 @@ pub fn from_units(u: &Vec<int>, a: int, b: int) -> String {
             let d = u[(i + 1) as usize];
             if d >= 0xdc00 && d <= 0xdfff {
                 let cp = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
-                push_cp(&mut s, cp);
+                push_code(&mut s, cp);
                 i += 2;
                 continue;
             }
@@ -100,11 +110,196 @@ fn sub_units_of(s: &str, u: &Vec<int>, a: int, b: int) -> String {
     from_units(u, a, b)
 }
 
+/// The first code point that stands for a lone surrogate (Rust).
+pub const LONE: int = 0x10f800;
+
+/// A character of a Rust string (a stand-in stays itself), or a unit
+/// 0xd800..0xdfff on its own.
 pub fn push_cp(s: &mut String, cp: int) {
     match char::from_u32(cp as u32) {
         Some(c) => s.push(c),
-        None => s.push('\u{fffd}'),
+        None => push_lone(s, cp),
     }
+}
+
+/// A JavaScript code point (from units, an escape, fromCodePoint): one in
+/// U+10F800..U+10FFFF is kept as its two units' stand-ins (Rust), since as
+/// itself it would read as a lone surrogate.
+pub fn push_code(s: &mut String, cp: int) {
+    if cp >= LONE && cp <= 0x10ffff && lone_unit(cp) >= 0 {
+        let v = cp - 0x10000;
+        push_lone(s, 0xd800 + (v >> 10));
+        push_lone(s, 0xdc00 + (v & 0x3ff));
+        return;
+    }
+    push_cp(s, cp);
+}
+
+/// The unit a stand-in character keeps (Rust), else -1.
+#[ranger::target(rust)]
+pub fn lone_unit(cp: int) -> int {
+    if cp >= LONE && cp <= 0x10ffff {
+        cp - LONE + 0xd800
+    } else {
+        -1
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn lone_unit(_cp: int) -> int {
+    -1
+}
+
+/// A unit 0xd800..0xdfff on its own (Rust: its plane-16 stand-in)
+#[ranger::target(rust)]
+fn push_lone(s: &mut String, cp: int) {
+    if cp >= 0xd800 && cp <= 0xdfff {
+        s.push(char::from_u32((LONE + cp - 0xd800) as u32).unwrap());
+    } else {
+        s.push('\u{fffd}');
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn push_lone(s: &mut String, _cp: int) {
+    s.push('\u{fffd}');
+}
+
+/// `t` onto `s` as JavaScript joins strings: a lone high surrogate at the
+/// end of `s` and a lone low one at the start of `t` become one character.
+pub fn push_js(s: &mut String, t: &str) {
+    let at = s.as_bytes().len();
+    s.push_str(t);
+    join_fix(s, at as int);
+}
+
+/// Whether the 4 bytes before x[at] are a lone high surrogate's stand-in
+/// and the 4 from y[0] a lone low one's that make a character outside the
+/// stand-ins (a pair of 0xdbfe/0xdbff stays two stand-ins, push_cp).
+#[ranger::target(rust)]
+fn pair_joins(x: &[u8], at: usize, y: &[u8], from: usize) -> bool {
+    if at < 4 || y.len() < from + 4 || x[at - 4] != 0xf4 || y[from] != 0xf4 {
+        return false;
+    }
+    x[at - 3] == 0x8f && y[from + 1] == 0x8f && x[at - 2] >= 0xa0 && (x[at - 2] < 0xaf || (x[at - 2] == 0xaf && x[at - 1] < 0xbe)) && y[from + 2] >= 0xb0
+}
+
+/// After `s` grew at byte `at`: the lone high surrogate just before `at`
+/// and the lone low one just after it as their pair's character (Rust;
+/// only Rust has the stand-ins).
+#[ranger::target(rust)]
+pub fn join_fix(s: &mut String, at: int) {
+    let at = at as usize;
+    let b = s.as_bytes();
+    if !pair_joins(b, at, b, at) {
+        return;
+    }
+    let hi = (((b[at - 2] & 0x0f) as u32) << 6) | ((b[at - 1] & 0x3f) as u32);
+    let lo = ((((b[at + 2] & 0x3f) as u32) << 6) | ((b[at + 3] & 0x3f) as u32)) - 0xc00;
+    let c = char::from_u32(0x10000 + (hi << 10) + lo).unwrap();
+    let mut buf = [0u8; 4];
+    s.replace_range((at - 4)..(at + 4), c.encode_utf8(&mut buf));
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn join_fix(_s: &mut String, _at: int) {}
+
+/// Whether `a` + `b` joins a lone high surrogate to a lone low one (so the
+/// result is not the two texts side by side).
+#[ranger::target(rust)]
+pub fn joins(a: &str, b: &str) -> bool {
+    pair_joins(a.as_bytes(), a.as_bytes().len(), b.as_bytes(), 0)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn joins(_a: &str, _b: &str) -> bool {
+    false
+}
+
+/// Whether `s` has no lone surrogate (isWellFormed).
+pub fn well_formed(s: &str) -> bool {
+    if is_ascii(s) || !has_lone(s) {
+        return true;
+    }
+    let u = units(s);
+    let n = u.len();
+    let mut i: usize = 0;
+    while i < n {
+        let c = u[i];
+        if c >= 0xd800 && c <= 0xdbff && i + 1 < n && u[i + 1] >= 0xdc00 && u[i + 1] <= 0xdfff {
+            i += 2;
+            continue;
+        }
+        if c >= 0xd800 && c <= 0xdfff {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// `s` with each lone surrogate as U+FFFD: toWellFormed, or (host) text
+/// for the host, where U+10F800..U+10FFFF are themselves.
+pub fn to_well_formed(s: &str, host: bool) -> String {
+    if is_ascii(s) || !has_lone(s) {
+        return String::from(s);
+    }
+    let mut u = units(s);
+    let n = u.len();
+    let mut i: usize = 0;
+    while i < n {
+        let c = u[i];
+        if c >= 0xd800 && c <= 0xdbff && i + 1 < n && u[i + 1] >= 0xdc00 && u[i + 1] <= 0xdfff {
+            i += 2;
+            continue;
+        }
+        if c >= 0xd800 && c <= 0xdfff {
+            u[i] = 0xfffd;
+        }
+        i += 1;
+    }
+    if !host {
+        return from_units(&u, 0, n as int);
+    }
+    let mut out = String::new();
+    i = 0;
+    while i < n {
+        let c = u[i];
+        if c >= 0xd800 && c <= 0xdbff {
+            // a pair: its character as itself, even among the stand-ins
+            push_cp(&mut out, 0x10000 + ((c - 0xd800) << 10) + (u[i + 1] - 0xdc00));
+            i += 2;
+            continue;
+        }
+        push_cp(&mut out, c);
+        i += 1;
+    }
+    out
+}
+
+/// Whether `s` may hold a lone surrogate (Rust: a stand-in's lead bytes;
+/// es6: a surrogate unit).
+pub fn has_lone(s: &str) -> bool {
+    let r: bool = ranger::native!(rust: { has_standin(s) }, es6: "/[\\ud800-\\udfff]/.test({s})");
+    r
+}
+
+#[ranger::target(rust)]
+fn has_standin(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i + 2 < b.len() {
+        if b[i] == 0xf4 && b[i + 1] == 0x8f && b[i + 2] >= 0xa0 {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn has_standin(_s: &str) -> bool {
+    false
 }
 
 pub fn from_unit(c: int) -> String {
@@ -127,8 +322,21 @@ fn len_units(s: &str) -> int {
         return s.as_bytes().len() as int;
     }
     let mut n: usize = 0;
+    let mut f4: usize = 0;
     for &b in s.as_bytes() {
         n += ((b & 0xc0) != 0x80) as usize + (b >= 0xf0) as usize;
+        f4 += (b == 0xf4) as usize;
+    }
+    if f4 > 0 {
+        // a lone surrogate's stand-in (F4 8F A0..BF xx) is one unit, not two
+        let b = s.as_bytes();
+        let mut i: usize = 0;
+        while i + 3 < b.len() {
+            if b[i] == 0xf4 && b[i + 1] == 0x8f && b[i + 2] >= 0xa0 {
+                n -= 1;
+            }
+            i += 1;
+        }
     }
     n as int
 }
@@ -227,6 +435,41 @@ fn cp_at_byte(s: &str, i: int) -> int {
         p += cp_width(c as int);
     }
     -1
+}
+
+/// How far the string iterator moves from `i` (cp_at): one code point,
+/// or (Rust) a pair of lone-surrogate stand-ins that make one (push_code).
+pub fn iter_width(s: &str, i: int) -> int {
+    let r: int = ranger::native!(rust: { iter_width_bytes(s, i) }, es6: "({s}.codePointAt({i}) > 0xffff ? 2 : 1)");
+    r
+}
+
+#[ranger::target(rust)]
+fn iter_width_bytes(s: &str, i: int) -> int {
+    let b = s.as_bytes();
+    let i = i as usize;
+    match s[i..].chars().next() {
+        Some(c) => {
+            let w = c.len_utf8();
+            if pair_joins_any(b, i + w) {
+                return (w + 4) as int;
+            }
+            w as int
+        }
+        None => 0,
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn iter_width_bytes(s: &str, i: int) -> int {
+    cp_width(cp_at(s, i))
+}
+
+/// Whether the stand-ins before and at byte `at` are a high and a low
+/// one (in any range: a pair push_code keeps as two).
+#[ranger::target(rust)]
+fn pair_joins_any(b: &[u8], at: usize) -> bool {
+    at >= 4 && b.len() >= at + 4 && b[at - 4] == 0xf4 && b[at - 3] == 0x8f && b[at - 2] >= 0xa0 && b[at - 2] <= 0xaf && b[at] == 0xf4 && b[at + 1] == 0x8f && b[at + 2] >= 0xb0
 }
 
 pub fn cp_width(cp: int) -> int {

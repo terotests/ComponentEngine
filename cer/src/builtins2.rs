@@ -95,25 +95,25 @@ impl Vm {
         let mut i: usize = 0;
         for it in items {
             if i > 0 {
-                out.push_str(sep);
+                jsstr::push_js(&mut out, sep);
             }
             match &it {
                 Val::Undef | Val::Null => {}
                 Val::Obj(x) => {
                     if self.objs[*x as usize].class == C_ARRAY {
                         let inner = self.array_join(*x, ",", seen);
-                        out.push_str(inner.as_str());
+                        jsstr::push_js(&mut out, inner.as_str());
                     } else {
                         let s = self.to_str(&it);
                         if self.throwing {
                             return String::new();
                         }
-                        out.push_str(s.as_str());
+                        jsstr::push_js(&mut out, s.as_str());
                     }
                 }
                 _ => {
                     let s = self.to_str(&it);
-                    out.push_str(s.as_str());
+                    jsstr::push_js(&mut out, s.as_str());
                 }
             }
             i += 1;
@@ -779,7 +779,9 @@ impl Vm {
                         self.throw_range(format!("Invalid code point {}", number_to_string(n)).as_str());
                         return Val::Undef;
                     }
-                    jsstr::push_cp(&mut s, n as int);
+                    let mut t = String::new();
+                    jsstr::push_code(&mut t, n as int);
+                    jsstr::push_js(&mut s, t.as_str());
                 }
                 self.string_val(s)
             }
@@ -790,10 +792,10 @@ impl Vm {
                 let mut i: usize = 0;
                 while i < parts.len() {
                     let p = self.to_string(&parts[i]);
-                    s.push_str(p.as_str());
+                    jsstr::push_js(&mut s, p.as_str());
                     if i + 1 < parts.len() && i + 1 < args.len() {
                         let v = self.to_string(&args[i + 1]);
-                        s.push_str(v.as_str());
+                        jsstr::push_js(&mut s, v.as_str());
                     }
                     i += 1;
                 }
@@ -1012,6 +1014,20 @@ impl Vm {
                 }
                 self.string_val(js_trim_end(s.as_str()))
             }
+            NF_SP_ISWELLFORMED | NF_SP_TOWELLFORMED => {
+                let s = self.this_str(&this);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                let ok = jsstr::well_formed(s.as_str());
+                if id == NF_SP_ISWELLFORMED {
+                    return Val::Bool(ok);
+                }
+                if ok {
+                    return self.same_str_val(&this, s);
+                }
+                self.string_val(jsstr::to_well_formed(s.as_str(), false))
+            }
             NF_SP_NORMALIZE => {
                 let s = self.this_str(&this);
                 if self.throwing {
@@ -1137,6 +1153,17 @@ impl Vm {
                     self.throw_range("Invalid string length");
                     return Val::Undef;
                 }
+                // a string that ends with a lone high surrogate and starts with
+                // a lone low one: each copy joins the next
+                if jsstr::joins(s.as_str(), s.as_str()) {
+                    let mut out = String::new();
+                    let mut k: int = 0;
+                    while k < (n as int) {
+                        jsstr::push_js(&mut out, s.as_str());
+                        k += 1;
+                    }
+                    return self.string_val(out);
+                }
                 self.string_val(s.repeat(n as usize))
             }
             NF_SP_PADSTART | NF_SP_PADEND => {
@@ -1176,11 +1203,16 @@ impl Vm {
                     i += 1;
                 }
                 let ps = jsstr::from_units(&pad, 0, need);
+                // the pad and the string may join a lone high surrogate to a lone low one
+                let mut out = String::new();
                 if id == NF_SP_PADSTART {
-                    self.string_val(format!("{}{}", ps, s))
+                    out.push_str(ps.as_str());
+                    jsstr::push_js(&mut out, s.as_str());
                 } else {
-                    self.string_val(format!("{}{}", s, ps))
+                    out.push_str(s.as_str());
+                    jsstr::push_js(&mut out, ps.as_str());
                 }
+                self.string_val(out)
             }
             NF_SP_CONCAT => {
                 let s = self.this_str(&this);
@@ -1190,7 +1222,7 @@ impl Vm {
                 let mut out = s.as_ref().clone();
                 for a in args.iter() {
                     let x = self.to_str(a);
-                    out.push_str(x.as_str());
+                    jsstr::push_js(&mut out, x.as_str());
                 }
                 self.string_val(out)
             }
