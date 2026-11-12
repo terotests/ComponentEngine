@@ -560,6 +560,10 @@ pub struct PComp {
     pub outer_desc: String,
     /// the scopes of direct eval calls
     eval_sites: Vec<int>,
+    /// per binding: some code stores to it after it is declared (a
+    /// mapped parameter that never changes needs no mapping until the
+    /// arguments object itself is written)
+    bind_stored: Vec<bool>,
     /// a direct eval site's private environment ("p|…" desc parts)
     eval_privs: HashMap<int, String>,
     /// `using` regions open, the ones of the list being read from
@@ -717,6 +721,7 @@ impl PComp {
             script_imports: false,
             outer_desc: String::new(),
             eval_sites: Vec::new(),
+            bind_stored: Vec::new(),
             eval_privs: HashMap::new(),
             usings: Vec::new(),
             using_mark: 0,
@@ -1916,6 +1921,7 @@ impl PComp {
             self.eval_captures();
         }
         let nf = self.fns.len() as int;
+        self.find_stored();
         let mut f: int = 0;
         while f < nf {
             self.place(f);
@@ -1926,6 +1932,53 @@ impl PComp {
             self.expand(f);
             f += 1;
         }
+    }
+
+    /// bind_stored: the bindings some name reference stores to (anything
+    /// but a read, typeof or delete; a declaration's own first store
+    /// aside), and those a hoisted function declaration sets.
+    fn find_stored(&mut self) {
+        let mut st: Vec<bool> = Vec::new();
+        let mut i: usize = 0;
+        while i < self.binds.len() {
+            st.push(false);
+            i += 1;
+        }
+        let nf = self.fns.len();
+        let mut f: usize = 0;
+        while f < nf {
+            let pi = self.fns[f].proto as usize;
+            let n = self.protos[pi].code.len();
+            let mut k: usize = 0;
+            while k < n {
+                let o = self.protos[pi].code[k];
+                if (o.code as int) == PH_REF {
+                    let m = o.b as int;
+                    let r = o.a as usize;
+                    let stores = m == M_STORE || m == M_UPD || m == M_ADDT_STORE || m == M_WSTORE || m == M_WREF || (m == M_INIT && !self.refs[r].decl);
+                    let b = self.refs[r].bind;
+                    if stores && b >= 0 {
+                        st[b as usize] = true;
+                    }
+                }
+                k += 1;
+            }
+            f += 1;
+        }
+        let ns = self.scopes.len();
+        let mut s: usize = 0;
+        while s < ns {
+            let hs = self.scopes[s].hoists.clone();
+            for h in hs.iter() {
+                let name = self.hoists[*h as usize].name.clone();
+                let b = self.lookup_here(s as int, name.as_str());
+                if b >= 0 {
+                    st[b as usize] = true;
+                }
+            }
+            s += 1;
+        }
+        self.bind_stored = st;
     }
 
     /// Direct evals: the bindings of the scopes around them go in the
@@ -2787,6 +2840,16 @@ impl PComp {
                 self.xstore_bind(*b, true, fscope);
                 self.xop(OP_POP);
                 if self.fns[f as usize].mapped {
+                    // parameters nothing assigns (and no direct eval could)
+                    // hold what the arguments object holds until it is
+                    // written itself: the mapping is made then (b's 1 << 30)
+                    let mut lazy = self.eval_sites.is_empty();
+                    for q in pb.iter() {
+                        if *q >= 0 && (*q as usize) < self.bind_stored.len() && self.bind_stored[*q as usize] {
+                            lazy = false;
+                        }
+                    }
+                    let lazy_bit: int = if lazy { 1 << 30 } else { 0 };
                     // the last parameter of a name is the mapped one
                     let mut j = (pb.len() as int) - 1;
                     while j >= 0 {
@@ -2802,7 +2865,7 @@ impl PComp {
                         if pbj >= 0 && !later && self.binds[pbj as usize].in_env {
                             let depth = self.env_depth(fscope, self.binds[pbj as usize].scope);
                             let slot = self.binds[pbj as usize].slot;
-                            self.xemit(OP_ARGUMENTS, 2 + j, slot * 256 + depth);
+                            self.xemit(OP_ARGUMENTS, 2 + j, slot * 256 + depth + lazy_bit);
                             self.xop(OP_POP);
                         }
                         j -= 1;

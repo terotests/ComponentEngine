@@ -4941,11 +4941,40 @@ impl Vm {
             self.dec(&v);
             k += 1;
         }
+        // the parameters map_arg left for now (lazy): mapped from here on
+        let m = self.colds[self.objs[o as usize].cold as usize].marks.clone();
+        let mut q: usize = 0;
+        while q + 1 < m.len() {
+            let slot = self.find(o, m[q]);
+            if slot >= 0 {
+                let at = self.attr_at(o, slot);
+                self.set_attr(o, slot, at | P_MAPPED);
+            }
+            q += 2;
+        }
     }
 
     /// Maps arguments element j to the parameter in env slot (b >> 8) of
     /// the env at depth (b & 255) (OP_ARGUMENTS a = 2 + j).
-    pub fn map_arg(&mut self, o: int, j: int, b: int) {
+    pub fn map_arg(&mut self, o: int, j: int, b0: int) {
+        let b = b0 & ((1 << 30) - 1);
+        if (b0 & (1 << 30)) != 0 && self.objs[o as usize].class == C_ARGUMENTS {
+            // a parameter nothing assigns: the element holds its value
+            // until the object itself is written, and slow_args (the only
+            // way a write gets in) maps it then from this mark
+            if j >= self.evecs[self.objs[o as usize].elems as usize].v.len() as int {
+                return;
+            }
+            let env = self.get_env(b & 255);
+            if self.colds[self.objs[o as usize].cold as usize].home != env {
+                self.put_home(o, env);
+            }
+            let a = self.index_atom(j);
+            let c = self.cold_id(o) as usize;
+            self.colds[c].marks.push(a);
+            self.colds[c].marks.push(b >> 8);
+            return;
+        }
         self.slow_args(o);
         let a = self.index_atom(j);
         let slot = self.find(o, a);
