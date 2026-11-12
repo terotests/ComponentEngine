@@ -64,12 +64,15 @@ const ptags = strings("LocalePlural.rgr", "tags");
 if (tags.join() !== ptags.join()) throw new Error("LocaleData and LocalePlural list different locales");
 
 // A few facts the engine's tables do not hold, read from the host's ICU
-// (Node's, which must be a full-ICU build), six per locale: the NaN symbol;
+// (Node's, which must be a full-ICU build), eight per locale: the NaN symbol;
 // whether the default time pads the hour (the engine's patterns were
 // recorded at 15:04, where H and HH look alike); the AM and PM words; the
 // short and medium date patterns (dateStyle), as literals and {field}s --
 // {y} {yy} {M} {MM} {MMM} {d} {dd}; the month names standing alone
-// (Finnish tammikuu, where a date says tammikuuta).
+// (Finnish tammikuu, where a date says tammikuuta); the weekday names
+// standing alone (Finnish tiistai, where a date says tiistaina), Sunday
+// first; what joins a date with a written-out month to a time (English
+// " at ", German " um ": ICU's atTime pattern, not the date-and-time one).
 function supplement() {
   if (new Intl.NumberFormat("fi").resolvedOptions().locale !== "fi") throw new Error("this Node has no full ICU");
   const out = [];
@@ -95,7 +98,16 @@ function supplement() {
     const period = (h) => find(new Intl.DateTimeFormat(tag, utc({ hour: "numeric", hour12: true })).formatToParts(new Date(Date.UTC(2024, 0, 5, h))), "dayPeriod");
     const months = [];
     for (let m = 0; m < 12; m++) months.push(new Intl.DateTimeFormat(tag, utc({ month: "long" })).format(new Date(Date.UTC(2024, m, 5))));
-    out.push(nan, hour.length === 2 ? "HH" : "H", period(3) + "|" + period(15), datePattern(tag, "short"), datePattern(tag, "medium"), months.join("|"));
+    const days = [];
+    for (let d = 0; d < 7; d++) days.push(new Intl.DateTimeFormat(tag, utc({ weekday: "long" })).format(new Date(Date.UTC(2024, 0, 7 + d))));
+    const lp = new Intl.DateTimeFormat(tag, utc({ year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })).formatToParts(t);
+    const firstTime = lp.findIndex((p) => p.type === "hour" || p.type === "dayPeriod" || p.type === "minute");
+    let lastDate = -1;
+    lp.forEach((p, i) => { if (i < firstTime && (p.type === "year" || p.type === "month" || p.type === "day")) lastDate = i; });
+    // empty where the time comes first (Vietnamese): the engine keeps its own order there
+    const atTime = firstTime < 0 || lastDate < 0 ? "" : lp.slice(lastDate + 1, firstTime).map((p) => p.value).join("");
+    if (/[|\n]/.test(atTime + days.join(""))) throw new Error("a bar in the weekdays or the at-time glue of " + tag);
+    out.push(nan, hour.length === 2 ? "HH" : "H", period(3) + "|" + period(15), datePattern(tag, "short"), datePattern(tag, "medium"), months.join("|"), days.join("|"), atTime);
   }
   return out;
 }
@@ -156,7 +168,7 @@ function tailorings() {
 const tailor = tailorings();
 
 const tables = [
-  ["supplement", "s", supplement(), "6 per locale, from the host's ICU: the NaN symbol, H or HH (the default time's hour), AM|PM, the short and medium date patterns, the stand-alone month names joined by bars"],
+  ["supplement", "s", supplement(), "8 per locale, from the host's ICU: the NaN symbol, H or HH (the default time's hour), AM|PM, the short and medium date patterns, the stand-alone month names joined by bars, the stand-alone weekday names (Sunday first) joined by bars, the glue between a long date and a time"],
   ["tags", "s", tags, "one lowercased BCP 47 tag per locale; every other locale table is in this order"],
   ["num_strings", "s", strings("LocaleData.rgr", "numStrings"), "22 per locale: decimal, group, minus, percent; affixes (decimal, percent, currency letters, currency symbol; positive then negative, prefix then suffix, U+00A4 for the symbol); AM, PM"],
   ["num_ints", "i", ints("LocaleData.rgr", "numInts"), "5 per locale: primary and secondary grouping size, minimum grouping digits, hour12, year offset"],

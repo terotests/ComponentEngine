@@ -780,7 +780,9 @@ impl Vm {
                                 continue;
                             }
                         }
-                        self.r_set_prop_slow(o, pi, rb, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
+                        if self.r_set_prop_slow(o, pi, rb, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int)) {
+                            continue 'frames;
+                        }
                     }
                     R_GET_ELEM => {
                         let mut r = Val::Undef;
@@ -1694,9 +1696,10 @@ impl Vm {
         c != C_PROXY && c != C_STRING && atom != A_LENGTH && atom != A_NAME && atom != A_PROTOTYPE
     }
 
-    /// R_SET_PROP past its inline cache, or one that keeps its value.
+    /// R_SET_PROP past its inline cache, or one that keeps its value; true
+    /// when it entered a setter's frame (the caller goes on in that frame).
     #[inline(never)]
-    pub fn r_set_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+    pub fn r_set_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) -> bool {
         let val = self.rget(bp, w2).clone();
         let mut done = false;
         if o >= 0 && w3 <= -2 {
@@ -1713,7 +1716,7 @@ impl Vm {
                 if ((w0 >> 8) & 255) == 1 {
                     self.stack[(bp + w1) as usize] = val;
                 }
-                return;
+                return false;
             }
         }
         if o >= 0 {
@@ -1741,6 +1744,9 @@ impl Vm {
                 done = true;
             }
         }
+        if !done && o >= 0 && self.any_setter && self.objs[o as usize].class == C_OBJECT && self.r_setter_call(o, pi, bp, fi, pc, w0, w1, &val) {
+            return true;
+        }
         if !done {
             let target = self.rget(bp, w1).clone();
             self.frames[fi].pc = pc + 1;
@@ -1765,6 +1771,63 @@ impl Vm {
         if ((w0 >> 8) & 255) == 1 && !self.throwing {
             self.stack[(bp + w1) as usize] = val;
         }
+        false
+    }
+
+    /// A setter of a plain function on o's chain runs as a call in this
+    /// loop, as a getter does (r_get_prop_slow), not in a nested run: true
+    /// when its frame was entered.
+    fn r_setter_call(&mut self, o: int, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, val: &Val) -> bool {
+        let atom = self.ratom(pi, pc);
+        if atom == A_PROTO || !self.setter_atom(atom) {
+            return false;
+        }
+        let mut cur = o;
+        let mut pair: int = -1;
+        while cur >= 0 {
+            let class = self.objs[cur as usize].class;
+            if class == C_PROXY || class == C_TYPED {
+                return false;
+            }
+            let slot = self.find(cur, atom);
+            if slot >= 0 {
+                if (self.attr_at(cur, slot) & P_ACCESSOR) == 0 {
+                    return false;
+                }
+                pair = obj_of(&self.objs[cur as usize].get_slot(slot as usize));
+                break;
+            }
+            cur = self.objs[cur as usize].proto as int;
+        }
+        if pair < 0 {
+            return false;
+        }
+        let f = self.evecs[self.objs[pair as usize].elems as usize].v[1];
+        let fo = obj_of(&f);
+        if fo < 0 || self.objs[fo as usize].class != C_FUNCTION {
+            return false;
+        }
+        let plain = {
+            let p = &self.protos[self.objs[fo as usize].func as usize];
+            p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
+        };
+        if !plain {
+            return false;
+        }
+        self.frames[fi].pc = pc + 1;
+        if ((w0 >> 8) & 255) == 1 {
+            // the assignment's value, where the object was
+            self.stack[(bp + w1) as usize] = val.clone();
+        }
+        let fpos = bp + self.protos[pi].fsize;
+        while (self.stack.len() as int) < fpos + 3 {
+            self.stack.push(Val::Undef);
+        }
+        self.stack[fpos as usize] = f;
+        self.stack[(fpos + 1) as usize] = Val::Obj(o);
+        self.stack[(fpos + 2) as usize] = val.clone();
+        // the setter's result is dropped: it goes to the slot the callee had
+        self.renter(fo, fpos, 1, fpos)
     }
 
     /// The second cache of register site `site` when it holds `o`'s shape
