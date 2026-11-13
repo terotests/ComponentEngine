@@ -6205,7 +6205,7 @@ impl Vm {
                             let ob = &self.objs[*o as usize];
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
+                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
                                     let r = self.evecs[ob.elems as usize].v[i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
@@ -6230,17 +6230,17 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.pos < 2 {
+                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n && ob.pos < 2 {
                                     old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     elem_put(&mut self.evecs[ob.elems as usize], i as usize, val.clone());
                                     let oc = ob.cold as usize;
-                                    if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
+                                    if oc > 0 && i < (self.colds[oc].elems2.len() as int) {
                                         // the element is no longer a hole
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == *n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n && ob.extensible && ob.pos != 3 {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
@@ -6428,7 +6428,7 @@ impl Vm {
     pub fn is_hole(&self, o: int, i: int) -> bool {
         let ob = &self.objs[o as usize];
         let e2 = &self.colds[ob.cold as usize].elems2;
-        if ob.class != C_ARRAY || i < 0 || (i as usize) >= e2.len() {
+        if ob.class != C_ARRAY || i < 0 || i >= (e2.len() as int) {
             return false;
         }
         // a binding, not matches!(.., Val::Bool(true)): rgrc's JS matches the
@@ -6444,7 +6444,7 @@ impl Vm {
         while self.colds[self.objs[o as usize].cold as usize].elems2.len() < n {
             self.push_elem2(o, Val::Bool(false));
         }
-        if (i as usize) < n {
+        if i < (n as int) {
             self.put_elem2(o, i, Val::Bool(true));
         }
     }
@@ -6499,7 +6499,7 @@ impl Vm {
     }
 
     fn clear_hole(&mut self, o: int, i: int) {
-        if (i as usize) < self.colds[self.objs[o as usize].cold as usize].elems2.len() {
+        if i < (self.colds[self.objs[o as usize].cold as usize].elems2.len() as int) {
             self.put_elem2(o, i, Val::Bool(false));
         }
     }
@@ -6507,7 +6507,7 @@ impl Vm {
     /// HasProperty(o, i) for an index, holes counted as missing.
     pub fn has_index(&mut self, o: int, i: int) -> bool {
         let class = self.objs[o as usize].class;
-        if class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
+        if class == C_ARRAY && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) && !self.is_hole(o, i) {
             return true;
         }
         let k = Val::Num(i as double);
@@ -7029,7 +7029,7 @@ impl Vm {
         if (n as usize) == nb {
             return jsstr::byte_at(e.s.as_str(), i) as double;
         }
-        if !self.sc_ascii && nb == self.sc_s.as_bytes().len() && (i as usize) < self.sc_units.len() && same_str(&self.sc_s, &e.s) {
+        if !self.sc_ascii && nb == self.sc_s.as_bytes().len() && i < (self.sc_units.len() as int) && same_str(&self.sc_s, &e.s) {
             return self.sc_units[i as usize] as double;
         }
         -1.0

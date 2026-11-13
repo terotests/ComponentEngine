@@ -265,6 +265,11 @@ pub fn snapshot(vm: &Vm) -> String {
         put_val(&mut b, &mut st, vm, &cold.prim);
         put_num(&mut b, cold.home);
         put_num(&mut b, o.pos as int);
+        if o.class == C_ITER && (o.pos & 3) == 3 {
+            // a for-in walking a shape (Vm::for_in_iter): shapes are made
+            // again on restore, so the keys it has left go in the text
+            put_ints(&mut b, &for_in_rest(vm, o.env as int, o.func as int, (o.pos >> 2) as int));
+        }
         put_num(&mut b, if o.extensible { 1 } else { 0 });
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
@@ -517,6 +522,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     vm.shapes.push(Shape::new());
     vm.free_shapes = Vec::new();
     let no = r.num();
+    let mut for_ins: Vec<(int, Vec<int>)> = Vec::new();
     i = 0;
     while i < no && !r.bad {
         let class = r.num();
@@ -559,6 +565,12 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
             has_cold = true;
         }
         o.pos = r.num() as i32;
+        if class == C_ITER as int && (o.pos & 3) == 3 {
+            // the keys a shape-walking for-in had left: made a key list
+            // below, once every object is back
+            let rest = get_ints(&mut r);
+            for_ins.push(((vm.objs.len() as int), rest));
+        }
         let bits = r.num();
         o.extensible = bits % 2 == 1;
         if class == C_MAP as int || class == C_SET as int {
@@ -596,6 +608,35 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
         i += 1;
     }
     vm.free_list = get_ints(&mut r);
+    // each shape-walking for-in iterator becomes one over a key list (as
+    // OP_ITER_KEYS makes for any object): env the list, home the object,
+    // every key checked against the object, since it may have changed
+    let na = vm.atom_names.len() as int;
+    for (it, rest) in for_ins.iter() {
+        if r.bad {
+            break;
+        }
+        let src = vm.objs[*it as usize].env as int;
+        let mut keys: Vec<Val> = Vec::new();
+        for a in rest.iter() {
+            if *a < 0 || *a >= na {
+                r.bad = true;
+                break;
+            }
+            keys.push(vm.atom_val(*a));
+        }
+        let arr = vm.new_array(keys);
+        let ob = &mut vm.objs[*it as usize];
+        ob.env = arr as i32;
+        ob.func = 0;
+        ob.pos = 0;
+        let c = vm.cold_id(*it) as usize;
+        vm.colds[c].home = if src >= 0 { src } else { -1 };
+        vm.colds[c].prim = Val::Undef;
+        if src < 0 {
+            vm.objs[*it as usize].env = -1;
+        }
+    }
     let ints = get_ints(&mut r);
     if ints.len() != 45 {
         return false;
@@ -772,6 +813,28 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     // the counts are not in the text: made again from the heap
     vm.recount();
     true
+}
+
+/// The keys a shape-walking for-in (Vm::for_in_next) has left from index
+/// `i` of shape `sh`: hidden keys, symbols and private names skipped.
+fn for_in_rest(vm: &Vm, src: int, i: int, sh: int) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    if src < 0 || sh <= 0 || sh >= vm.shapes.len() as int {
+        return out;
+    }
+    let nk = vm.shapes[sh as usize].nkeys;
+    let hk = vm.holder(sh);
+    let mut k = i;
+    while k < nk {
+        let a = vm.shapes[hk].keys[k as usize];
+        let attr = vm.shapes[hk].attrs[k as usize];
+        k += 1;
+        if (attr & P_HIDDEN) != 0 || vm.atom_names[a as usize].starts_with('\u{1}') || vm.symbol_atoms.contains_key(&a) {
+            continue;
+        }
+        out.push(a);
+    }
+    out
 }
 
 /// A suspended script's frames name protos, objects and stack places that

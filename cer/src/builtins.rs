@@ -2249,7 +2249,7 @@ impl Vm {
             return;
         }
         let slot = self.find(o, atom);
-        let in_elems = i >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len();
+        let in_elems = i >= 0 && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int);
         let plain_elem = slot < 0 && in_elems && self.objs[o as usize].class == C_ARRAY && !self.is_hole(o, i);
         let existing_attr = if slot >= 0 { self.attr_at(o, slot) } else if plain_elem { 0 } else { -1 };
         if slot < 0 && !in_elems && !self.objs[o as usize].extensible && !(self.objs[o as usize].class == C_ARRAY && atom == A_LENGTH) {
@@ -2390,7 +2390,7 @@ impl Vm {
                 };
                 if slot >= 0 {
                     self.remove_own(o, slot);
-                    if (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                    if i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) {
                         self.put_elem(o, i, v);
                         self.clear_elem_hole(o, i);
                         return;
@@ -2437,7 +2437,7 @@ impl Vm {
             self.mapped_sync(o, ma);
         }
         let d = self.new_object();
-        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
+        if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) && !self.is_hole(o, i) {
             let v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
             self.add_own(d, A_VALUE, v, 0);
             self.add_own(d, A_WRITABLE, Val::Bool(true), 0);
@@ -5087,7 +5087,7 @@ impl Vm {
                 let (i, a) = self.to_key(&a0);
                 let class = self.objs[o as usize].class;
                 if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) {
-                    return Val::Bool((i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len());
+                    return Val::Bool(i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int));
                 }
                 let atom = if i >= 0 { self.index_atom(i) } else { a };
                 let slot = self.find(o, atom);

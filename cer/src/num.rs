@@ -663,7 +663,14 @@ pub fn radix_string(x: double, radix: int) -> String {
     let r = radix as double;
     while ip > 0.0 {
         let q = floor(ip / r);
-        let d = (ip - q * r) as int;
+        let mut d = (ip - q * r) as int;
+        // the product rounds for big doubles: keep the digit in range
+        if d < 0 {
+            d = 0;
+        }
+        if d >= radix {
+            d = radix - 1;
+        }
         int_part.push(digits[d as usize]);
         ip = q;
     }
@@ -720,38 +727,81 @@ fn quick_radix(x: double, radix: int) -> String {
         }
         return String::from(std::str::from_utf8(&small[p..]).unwrap_or(""));
     }
+    // V8's DoubleToRadixCString: the fraction's digits only as far as
+    // they tell this double from its neighbours (delta, half the gap to the
+    // next double), rounded at the end; then the integer part, whose digits
+    // below the double's precision are '0' (exact fmod and division)
+    let r = radix as f64;
     let mut ip = v.floor();
     let mut fp = v - ip;
-    let r = radix as f64;
-    let mut buf = [0u8; 1100];
-    let mut p = buf.len();
-    if ip == 0.0 {
-        p -= 1;
-        buf[p] = b'0';
+    let next = f64::from_bits(v.to_bits() + 1);
+    let mut delta = 0.5 * (next - v);
+    let tiny = f64::from_bits(1);
+    if !(delta > tiny) {
+        delta = tiny;
     }
-    while ip > 0.0 {
-        let q = (ip / r).floor();
-        let d = (ip - q * r) as usize;
-        p -= 1;
-        buf[p] = DIG[d];
-        ip = q;
+    let mut frac: Vec<u8> = Vec::new();
+    if fp >= delta {
+        loop {
+            fp *= r;
+            delta *= r;
+            let d = fp.floor();
+            let di = d as usize;
+            frac.push(DIG[if di < 36 { di } else { 35 }]);
+            fp -= d;
+            if fp > 0.5 || (fp == 0.5 && (di & 1) == 1) {
+                if fp + delta > 1.0 {
+                    // round up, carrying into the digits before
+                    loop {
+                        match frac.pop() {
+                            None => {
+                                ip += 1.0;
+                                break;
+                            }
+                            Some(c) => {
+                                let cd = if c > b'9' { (c - b'a' + 10) as i64 } else { (c - b'0') as i64 };
+                                if cd + 1 < radix as i64 {
+                                    frac.push(DIG[(cd + 1) as usize]);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            if !(fp >= delta) {
+                break;
+            }
+        }
     }
-    let mut out = String::with_capacity(buf.len() - p + 56);
+    let mut digits: Vec<u8> = Vec::new();
+    while (ip / r) >= 9007199254740992.0 {
+        ip /= r;
+        digits.push(b'0');
+    }
+    loop {
+        let rem = ip % r;
+        let ri = rem as usize;
+        digits.push(DIG[if ri < 36 { ri } else { 35 }]);
+        ip = (ip - rem) / r;
+        if !(ip > 0.0) {
+            break;
+        }
+    }
+    let mut out = String::with_capacity(digits.len() + frac.len() + 2);
     if neg {
         out.push('-');
     }
-    for b in &buf[p..] {
-        out.push(*b as char);
+    let mut k = digits.len();
+    while k > 0 {
+        k -= 1;
+        out.push(digits[k] as char);
     }
-    if fp > 0.0 {
+    if !frac.is_empty() {
         out.push('.');
-        let mut count = 0;
-        while fp > 0.0 && count < 52 {
-            fp *= r;
-            let d = fp.floor();
-            out.push(DIG[d as usize] as char);
-            fp -= d;
-            count += 1;
+        for b in frac.iter() {
+            out.push(*b as char);
         }
     }
     out
