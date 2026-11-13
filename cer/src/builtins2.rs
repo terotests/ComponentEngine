@@ -414,6 +414,9 @@ impl Vm {
                         len - 1
                     };
                     while i >= 0 {
+                        if (i & 0xffff) == 0 && self.poll(0x10000) {
+                            return Val::Undef;
+                        }
                         let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
                             self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
                         } else {
@@ -446,6 +449,9 @@ impl Vm {
                             let end = if n < len { n } else { len };
                             let mut k = i;
                             while k < end {
+                                if (k & 0xffff) == 0 && self.poll(0x10000) {
+                                    return Val::Undef;
+                                }
                                 if let Val::Num(y) = self.evecs[e].v[k as usize] {
                                     if y == x {
                                         return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(k as double) };
@@ -465,6 +471,9 @@ impl Vm {
                         let nb = needle.as_bytes().len();
                         let mut k = i;
                         while k < end {
+                            if (k & 0xffff) == 0 && crate::builtins::time_up(0x10000) {
+                                break;
+                            }
                             if let Val::Str(h2) = self.evecs[e].v[k as usize] {
                                 let st = &self.strs[h2 as usize];
                                 let l2 = if st.up < 0 { st.s.as_bytes().len() } else { st.len as usize };
@@ -474,10 +483,16 @@ impl Vm {
                             }
                             k += 1;
                         }
+                        if self.check_expired() {
+                            return Val::Undef;
+                        }
                         i = if end > i { end } else { i };
                     }
                 }
                 while i < len {
+                    if (i & 0xffff) == 0 && self.poll(0x10000) {
+                        return Val::Undef;
+                    }
                     let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
                         self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
                     } else {
@@ -1154,6 +1169,7 @@ impl Vm {
                 if id == NF_SP_SEARCH {
                     let units = self.rx_take(&s);
                     let caps = self.regexes[idx as usize].exec(&units, 0);
+                    self.rx_after();
                     self.rx_put(&s, units);
                     return Val::Num(if caps.is_empty() { -1.0 } else { caps[0] as double });
                 }
@@ -1198,6 +1214,7 @@ impl Vm {
                 let mut start: int = 0;
                 while start <= units.len() as int {
                     let caps = self.regexes[idx as usize].exec(&units, start);
+                    self.rx_after();
                     if caps.is_empty() {
                         break;
                     }
@@ -1859,7 +1876,7 @@ impl Vm {
                 self.temp_roots.push(Val::Obj(p));
                 self.call_fixed(a0, Val::Undef, 2, Val::Obj(res), Val::Obj(rej), Val::Undef);
                 self.temp_roots.pop();
-                if self.throwing {
+                if self.throwing && !self.terminated {
                     self.throwing = false;
                     let e = self.exc.clone();
                     self.exc = Val::Undef;

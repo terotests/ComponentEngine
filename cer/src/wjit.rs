@@ -9441,7 +9441,7 @@ fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool
     }
     let bp = vm.frames[nf].bp;
     let pc = vm.frames[nf].pc;
-    let r = enter(vm, tp, bp, pc, 1 << 30, false);
+    let r = enter(vm, tp, bp, pc, if vm.checking { crate::vm::SLICE_TICKS as i32 } else { 1 << 30 }, false);
     if r == -2 {
         // threw: a handler in the callee goes on there
         if vm.unwind(nf as int) {

@@ -2495,6 +2495,7 @@ impl Regex {
         let mut pc = pc0;
         let mut pos = start;
         let mut steps: int = 0;
+        let limit = crate::builtins::regex_limit();
         loop {
             let ins = self.code[pc as usize];
             let mut ok = true;
@@ -2561,7 +2562,7 @@ impl Regex {
                 }
                 I_STAR => {
                     steps += 1;
-                    if steps > 50000000 {
+                    if crate::builtins::regex_out(steps, limit) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2588,7 +2589,7 @@ impl Regex {
                     // a run without splits ends (no loop goes back without
                     // one): the step budget is counted here
                     steps += 1;
-                    if steps > 50000000 {
+                    if crate::builtins::regex_out(steps, limit) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2626,7 +2627,7 @@ impl Regex {
                 }
                 I_CNTBR | I_CNTBR_LAZY => {
                     steps += 1;
-                    if steps > 50000000 {
+                    if crate::builtins::regex_out(steps, limit) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2841,6 +2842,11 @@ impl Regex {
     }
 
     pub fn exec(&self, input: &Vec<int>, start: int) -> Vec<int> {
+        if crate::builtins::regex_stopped() {
+            // an attempt ran out of steps or time: no more tries until
+            // Vm::rx_after has thrown
+            return Vec::new();
+        }
         let n = input.len() as int;
         let mut s = start;
         let ncap = ((self.ngroups + 1) * 2) as usize;

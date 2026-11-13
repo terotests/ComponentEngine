@@ -279,20 +279,25 @@ impl Engine {
             self.error = String::from("SyntaxError");
             return self.error.clone();
         }
-        self.vm.slice_t0 = builtins::now_ms();
-        self.vm.ticks = vm::SLICE_TICKS;
-        self.vm.slicing = self.vm.slice_ms > 0.0 || self.vm.prof_on;
+        let began = self.vm.begin_call(true);
         let r = self.run_val(u);
-        self.vm.slicing = self.vm.prof_on;
         if self.vm.suspended {
+            self.vm.end_call(began);
             return String::new();
         }
-        self.finish_run(r)
+        let out = self.finish_run(r);
+        self.vm.end_call(began);
+        out
     }
 
     /// What `run` does once the script has returned: its jobs, then its
     /// completion value or the uncaught exception.
     fn finish_run(&mut self, r: Val) -> String {
+        self.vm.slicing = self.vm.prof_on;
+        if self.vm.terminated && !self.vm.throwing {
+            // a native dropped the time limit's exception: it stands
+            self.vm.terminate();
+        }
         if self.vm.throwing {
             return self.uncaught();
         }
@@ -301,10 +306,32 @@ impl Engine {
         self.vm.temp_roots.push(r);
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        if self.vm.terminated && !self.vm.throwing {
+            self.vm.terminate();
+        }
         if self.vm.throwing {
             return self.uncaught();
         }
         self.vm.display(&r)
+    }
+
+    /// The longest one call into the engine (`run`, `eval`, `call`, one
+    /// `resume`, the host's Vm::call_top / run_jobs) may run, in ms,
+    /// compile time not counted; 0: no limit (the default). Past it the
+    /// script stops wherever it is, under native code too (a getter, a
+    /// sort's comparator, a promise job, a long regex or BigInt
+    /// operation): the call answers `Uncaught Error: script time limit
+    /// exceeded (… ms)`, no catch or finally runs, and `timed_out` is true
+    /// until the next call. Promise jobs the script queued stay queued.
+    /// With slices on (`set_slice`), it bounds how long a slice can
+    /// overrun where it cannot stop (under native code).
+    pub fn set_time_limit(&mut self, ms: double) {
+        self.vm.set_time_limit(ms);
+    }
+
+    /// The last call was stopped by the time limit (`set_time_limit`).
+    pub fn timed_out(&self) -> bool {
+        self.vm.terminated
     }
 
     /// Scripts run in slices of `ms` milliseconds: when one runs out at a
@@ -339,24 +366,25 @@ impl Engine {
         }
         self.vm.suspended = false;
         self.vm.stack_base = vm::native_sp();
-        self.vm.slice_t0 = builtins::now_ms();
-        self.vm.ticks = vm::SLICE_TICKS;
-        self.vm.slicing = self.vm.slice_ms > 0.0 || self.vm.prof_on;
+        let began = self.vm.begin_call(true);
         if !self.vm.regs || self.vm.translate_frames() {
             self.vm.run(0);
         }
-        self.vm.slicing = self.vm.prof_on;
         if self.vm.suspended {
+            self.vm.end_call(began);
             return String::new();
         }
         if self.vm.throwing {
+            self.vm.end_call(began);
             return self.uncaught();
         }
         let r = match self.vm.stack.pop() {
             Some(v) => v,
             None => Val::Undef,
         };
-        self.finish_run(r)
+        let out = self.finish_run(r);
+        self.vm.end_call(began);
+        out
     }
 
     fn run_val(&mut self, u: unit::Unit) -> Val {
@@ -378,14 +406,17 @@ impl Engine {
         if !self.error.is_empty() {
             return format!("t:{}", self.error);
         }
+        let began = self.vm.begin_call(false);
         let r = self.run_val(u);
         if self.vm.throwing {
+            self.vm.end_call(began);
             let u = self.uncaught();
             return format!("t:{}", u);
         }
         self.vm.temp_roots.push(r);
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        self.vm.end_call(began);
         match &r {
             Val::Undef => String::from("u"),
             Val::Null => String::from("l"),
@@ -404,6 +435,17 @@ impl Engine {
     }
 
     fn uncaught(&mut self) -> String {
+        if self.vm.terminated {
+            // no script runs past the time limit, a toString neither
+            self.vm.exc = Val::Undef;
+            self.vm.throwing = false;
+            self.vm.stack.clear();
+            self.vm.frames.clear();
+            self.vm.handlers.clear();
+            self.vm.native_depth = 0;
+            self.error = format!("Uncaught Error: script time limit exceeded ({} ms)", self.vm.time_limit);
+            return self.error.clone();
+        }
         let e = self.vm.exc.clone();
         self.vm.throwing = false;
         self.vm.exc = Val::Undef;
@@ -423,14 +465,23 @@ impl Engine {
         let a = self.vm.intern(name);
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));
+        let began = self.vm.begin_call(false);
         let r = self.vm.call_top(f, Val::Undef, Vec::new());
         if self.vm.throwing {
+            self.vm.end_call(began);
             return self.uncaught();
         }
         // the jobs' frames are safe points: the result is held through them
         self.vm.temp_roots.push(r.clone());
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        self.vm.end_call(began);
+        if self.vm.terminated {
+            if !self.vm.throwing {
+                self.vm.terminate();
+            }
+            return self.uncaught();
+        }
         self.vm.display(&r)
     }
 

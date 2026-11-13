@@ -625,6 +625,10 @@ impl Vm {
     pub fn async_step_s(&mut self, g: int, mode: int, v: Val, safe: bool) {
         let p = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
         let r = self.gen_resume_s(g, mode, v, safe);
+        if self.terminated {
+            // past the time limit: the exception leaves the call
+            return;
+        }
         if self.throwing {
             self.throwing = false;
             let e = self.exc.clone();
@@ -685,6 +689,9 @@ impl Vm {
             }
             let req = obj_of(&self.evecs[self.objs[q2 as usize].elems as usize].v[0].clone());
             let p = obj_of(&self.evecs[self.objs[req as usize].elems as usize].v[2].clone());
+            if self.terminated {
+                return;
+            }
             if self.throwing {
                 self.throwing = false;
                 let e = self.exc.clone();
