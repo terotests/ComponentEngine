@@ -186,6 +186,151 @@ pub fn net_effect(op: &Op) -> int {
     }
 }
 
+/// The stack depth flow of a function's code (Tr::flow, unit::code_ok).
+pub struct Fl {
+    pub n: int,
+    pub depth: Vec<int>,
+    pub label: Vec<bool>,
+    pub maxd: int,
+    pub err: String,
+}
+
+impl Fl {
+    pub fn new(n: int) -> Fl {
+        let mut f = Fl { n: n, depth: Vec::new(), label: Vec::new(), maxd: 0, err: String::new() };
+        let mut i: int = 0;
+        while i < n {
+            f.depth.push(-1);
+            f.label.push(false);
+            i += 1;
+        }
+        f
+    }
+
+    fn fail(&mut self, what: &str, at: int) {
+        if self.err.is_empty() {
+            self.err = format!("register code: {} at {}", what, at);
+        }
+    }
+
+    fn edge(&mut self, to: int, d: int, jump: bool, work: &mut Vec<int>, from: int) {
+        if to < 0 || to >= self.n || d < 0 || d > 1048576 {
+            self.fail("bad edge", from);
+            return;
+        }
+        if jump {
+            self.label[to as usize] = true;
+        }
+        if d > self.maxd {
+            self.maxd = d;
+        }
+        let cur = self.depth[to as usize];
+        if cur < 0 {
+            self.depth[to as usize] = d;
+            work.push(to);
+        } else if cur != d {
+            self.fail("stack depths differ", to);
+        }
+    }
+
+    /// The stack depth before every op, -1 where no path reaches (a
+    /// worklist over the edges); err when two paths disagree, a depth goes
+    /// below the frame or an op is unknown.
+    pub fn run(&mut self, code: &Vec<Op>) {
+        if self.n == 0 {
+            return;
+        }
+        let mut work: Vec<int> = Vec::new();
+        self.depth[0] = 0;
+        work.push(0);
+        while !work.is_empty() && self.err.is_empty() {
+            let i = work.pop().unwrap();
+            let d = self.depth[i as usize];
+            let op = code[i as usize];
+            let c = op.code;
+            if (c as int) == OP_JUMP {
+                self.edge((op.a as int), d, true, &mut work, i);
+            } else if (c as int) == OP_JF || (c as int) == OP_JT || (c as int) == OP_JNOT_UNDEF {
+                self.edge((op.a as int), d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if (c as int) == OP_JF_KEEP || (c as int) == OP_JT_KEEP || (c as int) == OP_JNN_KEEP {
+                self.edge((op.a as int), d, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if (c as int) == OP_JNULLISH {
+                if op.b == 1 {
+                    self.edge((op.a as int), d, true, &mut work, i);
+                    self.edge(i + 1, d, false, &mut work, i);
+                } else {
+                    let m = if op.b > 1 { op.b } else { 1 };
+                    self.edge((op.a as int), d - (m as int) + 1, true, &mut work, i);
+                    self.edge(i + 1, d - 1, false, &mut work, i);
+                }
+            } else if (c as int) == OP_CMP_JF {
+                self.edge((op.a as int), d - 2, true, &mut work, i);
+                self.edge(i + 1, d - 2, false, &mut work, i);
+            } else if (c as int) == OP_LOCAL_NULL_JF || (c as int) == OP_CASE_INT_JT {
+                self.edge((op.a as int), d, true, &mut work, i);
+                self.edge(i + 1, d, false, &mut work, i);
+            } else if (c as int) == OP_CASE_JT {
+                self.edge((op.a as int), d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if (c as int) == OP_ITER_NEXT {
+                self.edge((op.a as int), d, true, &mut work, i);
+                self.edge(i + 1, d + 1, false, &mut work, i);
+            } else if (c as int) == OP_TEMPLATE_OBJ {
+                if op.b >= 0 {
+                    self.edge((op.a as int), d + 1, true, &mut work, i);
+                    self.edge(i + 1, d, false, &mut work, i);
+                } else {
+                    self.edge(i + 1, d + 1 - (2 * op.a as int), false, &mut work, i);
+                }
+            } else if (c as int) == OP_GEN_RESUME {
+                self.edge((op.a as int), d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if (c as int) == OP_ASTAR_CALL {
+                self.edge((op.a as int), d - 2, true, &mut work, i);
+                self.edge((op.b as int), d - 1, true, &mut work, i);
+                self.edge(i + 1, d, false, &mut work, i);
+            } else if (c as int) == OP_YIELD_STAR || (c as int) == OP_ASTAR_DONE {
+                self.edge((op.a as int), d - 2, true, &mut work, i);
+                self.edge((op.b as int), d - 1, true, &mut work, i);
+                self.edge(i + 1, d - 1, false, &mut work, i);
+            } else if (c as int) == OP_TRY {
+                self.edge((op.a as int), d + 1, true, &mut work, i);
+                self.edge(i + 1, d, false, &mut work, i);
+            } else if (c as int) == OP_RETURN || (c as int) == OP_RETURN_UNDEF || (c as int) == OP_THROW {
+                // no successor
+            } else if (c as int) == OP_SET_LOCAL_POP {
+                self.edge(i + 2, d - 1, false, &mut work, i);
+            } else if (c as int) == OP_SET_PROP_POP {
+                self.edge(i + 2, d - 2, false, &mut work, i);
+            } else if (c as int) == OP_SET_ELEM_POP {
+                self.edge(i + 2, d - 3, false, &mut work, i);
+            } else {
+                let e = net_effect(&op);
+                if e == BAD {
+                    self.fail("unknown op", i);
+                    return;
+                }
+                if d + e + 1 > self.maxd {
+                    self.maxd = d + e + 1;
+                }
+                self.edge(i + 1, d + e, false, &mut work, i);
+            }
+        }
+        // a store that steps over its POP joins the POP's path after it
+        let mut i: int = 0;
+        while i + 2 < self.n {
+            let c = code[i as usize].code;
+            if ((c as int) == OP_SET_LOCAL_POP || (c as int) == OP_SET_PROP_POP || (c as int) == OP_SET_ELEM_POP) && self.depth[i as usize] >= 0 && self.depth[(i + 1) as usize] >= 0 {
+                self.label[(i + 2) as usize] = true;
+            }
+            i += 1;
+        }
+    }
+
+}
+
 /// The translation of one function.
 pub struct Tr {
     pub code: Vec<Op>,
@@ -262,121 +407,24 @@ impl Tr {
         }
     }
 
-    fn edge(&mut self, to: int, d: int, jump: bool, work: &mut Vec<int>, from: int) {
-        if to < 0 || to >= self.n || d < 0 {
-            self.fail("bad edge", from);
-            return;
-        }
-        if jump {
-            self.label[to as usize] = true;
-        }
-        if d > self.maxd {
-            self.maxd = d;
-        }
-        let cur = self.depth[to as usize];
-        if cur < 0 {
-            self.depth[to as usize] = d;
-            work.push(to);
-        } else if cur != d {
-            self.fail("stack depths differ", to);
-        }
-    }
-
-    /// The stack depth at every op (a worklist over the edges).
+    /// The stack depth at every op (Fl::run).
     pub fn flow(&mut self) {
-        if self.n == 0 {
-            return;
-        }
-        let mut work: Vec<int> = Vec::new();
-        self.depth[0] = 0;
-        work.push(0);
-        while !work.is_empty() && self.err.is_empty() {
-            let i = work.pop().unwrap();
-            let d = self.depth[i as usize];
-            let op = self.code[i as usize];
-            let c = op.code;
-            if (c as int) == OP_JUMP {
-                self.edge((op.a as int), d, true, &mut work, i);
-            } else if (c as int) == OP_JF || (c as int) == OP_JT || (c as int) == OP_JNOT_UNDEF {
-                self.edge((op.a as int), d - 1, true, &mut work, i);
-                self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if (c as int) == OP_JF_KEEP || (c as int) == OP_JT_KEEP || (c as int) == OP_JNN_KEEP {
-                self.edge((op.a as int), d, true, &mut work, i);
-                self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if (c as int) == OP_JNULLISH {
-                if op.b == 1 {
-                    self.edge((op.a as int), d, true, &mut work, i);
-                    self.edge(i + 1, d, false, &mut work, i);
-                } else {
-                    let m = if op.b > 1 { op.b } else { 1 };
-                    self.edge((op.a as int), d - (m as int) + 1, true, &mut work, i);
-                    self.edge(i + 1, d - 1, false, &mut work, i);
-                }
-            } else if (c as int) == OP_CMP_JF {
-                self.edge((op.a as int), d - 2, true, &mut work, i);
-                self.edge(i + 1, d - 2, false, &mut work, i);
-            } else if (c as int) == OP_LOCAL_NULL_JF || (c as int) == OP_CASE_INT_JT {
-                self.edge((op.a as int), d, true, &mut work, i);
-                self.edge(i + 1, d, false, &mut work, i);
-            } else if (c as int) == OP_CASE_JT {
-                self.edge((op.a as int), d - 1, true, &mut work, i);
-                self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if (c as int) == OP_ITER_NEXT {
-                self.edge((op.a as int), d, true, &mut work, i);
-                self.edge(i + 1, d + 1, false, &mut work, i);
-            } else if (c as int) == OP_TEMPLATE_OBJ {
-                if op.b >= 0 {
-                    self.edge((op.a as int), d + 1, true, &mut work, i);
-                    self.edge(i + 1, d, false, &mut work, i);
-                } else {
-                    self.edge(i + 1, d + 1 - (2 * op.a as int), false, &mut work, i);
-                }
-            } else if (c as int) == OP_GEN_RESUME {
-                self.edge((op.a as int), d - 1, true, &mut work, i);
-                self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if (c as int) == OP_ASTAR_CALL {
-                self.edge((op.a as int), d - 2, true, &mut work, i);
-                self.edge((op.b as int), d - 1, true, &mut work, i);
-                self.edge(i + 1, d, false, &mut work, i);
-            } else if (c as int) == OP_YIELD_STAR || (c as int) == OP_ASTAR_DONE {
-                self.edge((op.a as int), d - 2, true, &mut work, i);
-                self.edge((op.b as int), d - 1, true, &mut work, i);
-                self.edge(i + 1, d - 1, false, &mut work, i);
-            } else if (c as int) == OP_TRY {
-                self.edge((op.a as int), d + 1, true, &mut work, i);
-                self.edge(i + 1, d, false, &mut work, i);
-            } else if (c as int) == OP_RETURN || (c as int) == OP_RETURN_UNDEF || (c as int) == OP_THROW {
-                // no successor
-            } else if (c as int) == OP_SET_LOCAL_POP {
-                self.edge(i + 2, d - 1, false, &mut work, i);
-            } else if (c as int) == OP_SET_PROP_POP {
-                self.edge(i + 2, d - 2, false, &mut work, i);
-            } else if (c as int) == OP_SET_ELEM_POP {
-                self.edge(i + 2, d - 3, false, &mut work, i);
-            } else {
-                let e = net_effect(&op);
-                if e == BAD {
-                    self.fail("unknown op", i);
-                    return;
-                }
-                if d + e + 1 > self.maxd {
-                    self.maxd = d + e + 1;
-                }
-                self.edge(i + 1, d + e, false, &mut work, i);
-            }
-        }
-        // a store that steps over its POP joins the POP's path after it
-        let mut i: int = 0;
-        while i + 2 < self.n {
-            let c = self.code[i as usize].code;
-            if ((c as int) == OP_SET_LOCAL_POP || (c as int) == OP_SET_PROP_POP || (c as int) == OP_SET_ELEM_POP) && self.depth[i as usize] >= 0 && self.depth[(i + 1) as usize] >= 0 {
-                self.label[(i + 2) as usize] = true;
-            }
-            i += 1;
+        let mut f = Fl::new(self.n);
+        f.run(&self.code);
+        self.depth = f.depth;
+        self.label = f.label;
+        self.maxd = f.maxd;
+        if !f.err.is_empty() && self.err.is_empty() {
+            self.err = f.err;
         }
     }
 
     fn set(&mut self, i: int, rop: int, sub: int, a: int, b: int, c: int) {
+        if sub < 0 || sub > 255 {
+            // the sub-op shares the code word with the op and its length
+            self.fail("operand out of range", i);
+            return;
+        }
         self.rc[i as usize] = Op { code: (rop + 256 * sub) as i32, a: (a as i32), b: (b as i32), c: (c as i32) };
     }
 
@@ -444,7 +492,12 @@ impl Tr {
         }
     }
 
-    fn opnd(&self, k: int) -> int {
+    fn opnd(&mut self, k: int) -> int {
+        if k < 0 || k >= self.es.len() as int {
+            // code no compiler writes (a damaged code cache unit)
+            self.fail("operand below the stack", k);
+            return 0;
+        }
         self.es[k as usize]
     }
 
@@ -1035,6 +1088,9 @@ impl Tr {
     /// Skips over the instructions that do nothing, and jumps to the
     /// first that does.
     fn finish(&mut self) {
+        if !self.err.is_empty() {
+            return;
+        }
         let n = self.n;
         let mut run: Vec<int> = Vec::new();
         let mut i: int = 0;

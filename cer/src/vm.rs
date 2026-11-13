@@ -412,6 +412,27 @@ pub struct Vm {
     /// slices are on for this run: set by Engine::run / resume only, so a
     /// host call (call_top, jobs) never stops half way
     pub slicing: bool,
+    /// the time limit (Vm::set_time_limit): the longest one host call may
+    /// run, in ms, 0 for none; the clock time the running call ends at (0:
+    /// none is timed); set once the limit passed and the script was
+    /// stopped: no catch or finally runs then, and every later check stops
+    /// it again until the host call returns
+    pub time_limit: double,
+    pub deadline: double,
+    pub terminated: bool,
+    /// a host call is running (begin_call)
+    pub in_call: bool,
+    /// run_jobs may stop a job where its slice runs out (Engine::run /
+    /// resume set it), and the script's value it keeps then
+    pub job_slices: bool,
+    pub run_result: Val,
+    /// units of native work left before poll reads the clock
+    pub poll_left: int,
+    /// set_regex_step_limit (0: none)
+    pub regex_steps: double,
+    /// branches, calls and returns count ticks and read the clock now and
+    /// then: slices or a deadline are on
+    pub checking: bool,
     /// the sampling profiler (cerxes CERXES_PROF=1): with slicing on, every
     /// tick charges the time since the last one to the running function
     /// (prof_self) and once to each function on the stack (prof_incl), in
@@ -750,6 +771,15 @@ impl Vm {
             ticks: SLICE_TICKS,
             suspended: false,
             slicing: false,
+            time_limit: 0.0,
+            deadline: 0.0,
+            terminated: false,
+            in_call: false,
+            job_slices: false,
+            run_result: Val::Undef(),
+            poll_left: 1048576,
+            regex_steps: 10000000.0,
+            checking: false,
             prof_on: false,
             prof_t: 0.0,
             prof_self: Vec::new(),
@@ -4719,9 +4749,12 @@ impl Vm {
         if self.native_depth != 0 {
             return self.call_value(f, this, args);
         }
+        // a host call of its own: the time limit counts from here
+        let began = self.begin_call(false);
         self.native_depth -= 1;
         let r = self.call_value(f, this, args);
         self.native_depth += 1;
+        self.end_call(began);
         r
     }
 
@@ -5294,6 +5327,11 @@ impl Vm {
             if hf < base {
                 break;
             }
+            if self.terminated {
+                // past the time limit: no catch or finally runs
+                self.handlers.pop();
+                continue;
+            }
             let (catch_pc, sp, env) = (self.handlers[h].catch_pc, self.handlers[h].sp, self.handlers[h].env);
             self.handlers.pop();
             self.frames.truncate((hf + 1) as usize);
@@ -5717,6 +5755,15 @@ impl Vm {
             }
             return;
         }
+        self.srun(base);
+        if self.terminated && self.throwing {
+            // stopped at a branch past the deadline: the frames go
+            self.unwind(base);
+        }
+    }
+
+    /// The stack VM's loop (run).
+    fn srun(&mut self, base: int) {
         self.check_native_stack();
         'frames: loop {
             if self.throwing {
@@ -5727,7 +5774,7 @@ impl Vm {
             if (self.frames.len() as int) <= base {
                 return;
             }
-            if self.slicing && self.frame_brk() {
+            if self.checking && self.frame_brk() {
                 return;
             }
             let fi = self.frames.len() - 1;
@@ -5847,7 +5894,7 @@ impl Vm {
                                     self.gc();
                                 }
                             }
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5868,7 +5915,7 @@ impl Vm {
                     OP_CASE_INT_JT => {
                         if let Some(x) = (self.stack[self.stack.len() - 1]).as_num() {
                             if x == (op.b as double) {
-                                if self.slicing && self.brk(fi, (op.a as int)) {
+                                if self.checking && self.brk(fi, (op.a as int)) {
                                     return;
                                 }
                                 pc = (op.a as int);
@@ -5885,7 +5932,7 @@ impl Vm {
                                     self.gc();
                                 }
                             }
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5906,7 +5953,7 @@ impl Vm {
                             }
                         };
                         if hit {
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5919,7 +5966,7 @@ impl Vm {
                                 self.gc();
                             }
                         }
-                        if self.slicing && self.brk(fi, (op.a as int)) {
+                        if self.checking && self.brk(fi, (op.a as int)) {
                             return;
                         }
                         pc = (op.a as int);
@@ -5927,7 +5974,7 @@ impl Vm {
                     OP_JF => {
                         let v = self.pop();
                         if !self.truthy_v(&v) {
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5936,7 +5983,7 @@ impl Vm {
                     OP_JT => {
                         let v = self.pop();
                         if self.truthy_v(&v) {
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -6125,7 +6172,7 @@ impl Vm {
                             let ob = &self.objs[o as usize];
                             if ob.class == C_ARRAY {
                                 let i = n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == n && ob.pos != 3 && !self.idx_protos {
+                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.pos != 3 && !self.idx_protos {
                                     let r = self.evecs[ob.elems as usize].v[i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
@@ -6150,17 +6197,17 @@ impl Vm {
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
                                 let i = n as int;
-                                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == n && ob.pos < 2 {
+                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.pos < 2 {
                                     old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     elem_put(&mut self.evecs[ob.elems as usize], i as usize, val.clone());
                                     let oc = ob.cold as usize;
-                                    if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
+                                    if oc > 0 && i < (self.colds[oc].elems2.len() as int) {
                                         // the element is no longer a hole
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
@@ -6277,7 +6324,7 @@ impl Vm {
                             continue 'frames;
                         }
                         // a branch in step (JF_KEEP, JNULLISH, ITER_NEXT...)
-                        if pc != pc0 && self.slicing && self.brk(fi, pc) {
+                        if pc != pc0 && self.checking && self.brk(fi, pc) {
                             return;
                         }
                     }
@@ -6348,7 +6395,7 @@ impl Vm {
     pub fn is_hole(&self, o: int, i: int) -> bool {
         let ob = &self.objs[o as usize];
         let e2 = &self.colds[ob.cold as usize].elems2;
-        if ob.class != C_ARRAY || i < 0 || (i as usize) >= e2.len() {
+        if ob.class != C_ARRAY || i < 0 || i >= (e2.len() as int) {
             return false;
         }
         // a binding, not matches!(.., Val::Bool(true)): rgrc's JS matches the
@@ -6361,7 +6408,7 @@ impl Vm {
         while self.colds[self.objs[o as usize].cold as usize].elems2.len() < n {
             self.push_elem2(o, Val::Bool(false));
         }
-        if (i as usize) < n {
+        if i < (n as int) {
             self.put_elem2(o, i, Val::Bool(true));
         }
     }
@@ -6416,7 +6463,7 @@ impl Vm {
     }
 
     fn clear_hole(&mut self, o: int, i: int) {
-        if (i as usize) < self.colds[self.objs[o as usize].cold as usize].elems2.len() {
+        if i < (self.colds[self.objs[o as usize].cold as usize].elems2.len() as int) {
             self.put_elem2(o, i, Val::Bool(false));
         }
     }
@@ -6424,7 +6471,7 @@ impl Vm {
     /// HasProperty(o, i) for an index, holes counted as missing.
     pub fn has_index(&mut self, o: int, i: int) -> bool {
         let class = self.objs[o as usize].class;
-        if class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
+        if class == C_ARRAY && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) && !self.is_hole(o, i) {
             return true;
         }
         let k = Val::Num(i as double);
@@ -6438,18 +6485,162 @@ impl Vm {
     /// At a branch, call or return with slices on: whether this slice is
     /// over and the script can stop here, with no native code under it
     /// (native_depth 0). The clock is read once in SLICE_TICKS branches.
+    /// With a deadline the clock is read under native code too, and a call
+    /// past it is stopped (Vm::terminate) wherever it is.
     pub fn slice_over(&mut self) -> bool {
         if self.prof_on {
             self.prof_tick();
-            return false;
+            if self.deadline <= 0.0 {
+                return false;
+            }
         }
         self.ticks -= 1;
-        if self.ticks > 0 || self.native_depth != 0 {
+        if self.ticks > 0 {
             return false;
         }
         self.ticks = SLICE_TICKS;
         let now = crate::builtins::now_ms();
+        if self.deadline > 0.0 && now >= self.deadline {
+            self.terminate();
+            return true;
+        }
+        if !self.slicing || self.native_depth != 0 || self.slice_ms <= 0.0 {
+            return false;
+        }
         now - self.slice_t0 >= self.slice_ms
+    }
+
+    /// The longest one host call may run (Engine::set_time_limit), in ms;
+    /// 0: no limit (the default). Past it the script is stopped wherever it
+    /// is, under native code too: an Error no catch or finally sees leaves
+    /// the call, and `terminated` stays set until the next host call.
+    pub fn set_time_limit(&mut self, ms: double) {
+        self.time_limit = if ms > 0.0 { ms } else { 0.0 };
+    }
+
+    /// A host call begins (Engine::run / eval / call / resume, call_top or
+    /// run_jobs from the host): its time limit and slice start now. false
+    /// when one is already running (a nested call keeps the outer
+    /// deadline); end_call(false) is a no-op then.
+    pub fn begin_call(&mut self, slices: bool) -> bool {
+        if self.in_call {
+            return false;
+        }
+        self.in_call = true;
+        let now = crate::builtins::now_ms();
+        self.slice_t0 = now;
+        self.ticks = SLICE_TICKS;
+        self.terminated = false;
+        self.poll_left = crate::builtins::POLL_EVERY;
+        crate::builtins::set_deadline(0.0);
+        crate::builtins::set_regex_limit(self.regex_steps);
+        crate::builtins::take_regex_over();
+        if self.time_limit > 0.0 {
+            self.deadline = now + self.time_limit;
+            crate::builtins::set_deadline(self.deadline);
+        }
+        self.slicing = (slices && self.slice_ms > 0.0) || self.prof_on;
+        self.checking = self.slicing || self.deadline > 0.0;
+        true
+    }
+
+    /// The host call begun by begin_call (began true) returns.
+    pub fn end_call(&mut self, began: bool) {
+        if !began {
+            return;
+        }
+        self.in_call = false;
+        self.deadline = 0.0;
+        crate::builtins::set_deadline(0.0);
+        self.slicing = self.prof_on;
+        self.checking = self.prof_on;
+    }
+
+    /// The time limit passed: an Error leaves the running host call, past
+    /// every catch and finally (unwind), and each later check throws it
+    /// again, so a native that drops an exception does not keep the script
+    /// going.
+    #[inline(never)]
+    pub fn terminate(&mut self) {
+        self.terminated = true;
+        self.ticks = 1;
+        if self.throwing {
+            return;
+        }
+        let p = self.error_proto;
+        let msg = format!("script time limit exceeded ({} ms)", self.time_limit);
+        let e = self.new_error(p, msg.as_str());
+        self.throw_val(Val::Obj(e));
+    }
+
+    /// A native's long loop, `cost` more units of work (elements, steps)
+    /// done: true when the deadline passed (the script is stopped then,
+    /// Vm::terminate), so the loop ends. The clock is read once in
+    /// builtins::POLL_EVERY units; a slice that ran out meanwhile ends at
+    /// the next branch the script takes.
+    #[inline(always)]
+    pub fn poll(&mut self, cost: int) -> bool {
+        if !self.checking {
+            return false;
+        }
+        self.poll_slow(cost)
+    }
+
+    #[inline(never)]
+    fn poll_slow(&mut self, cost: int) -> bool {
+        if self.terminated {
+            if !self.throwing {
+                self.terminate();
+            }
+            return true;
+        }
+        self.poll_left -= cost;
+        if self.poll_left > 0 {
+            return false;
+        }
+        self.poll_left = crate::builtins::POLL_EVERY;
+        let now = crate::builtins::now_ms();
+        if self.deadline > 0.0 && now >= self.deadline {
+            self.terminate();
+            return true;
+        }
+        if self.slicing && self.slice_ms > 0.0 && now - self.slice_t0 >= self.slice_ms {
+            self.ticks = 1;
+        }
+        false
+    }
+
+    /// After a regex match attempt: one that ran out of the backtracking
+    /// budget (set_regex_step_limit) throws a RangeError, one stopped by
+    /// the deadline stops the script.
+    pub fn rx_after(&mut self) {
+        if crate::builtins::take_regex_over() {
+            if !self.throwing {
+                self.throw_range("regular expression backtracking limit exceeded");
+            }
+            return;
+        }
+        self.check_expired();
+    }
+
+    /// The most backtracking steps one regex match attempt may take before it throws
+    /// a RangeError (backtracking such as /^(a+)+$/ grows exponentially);
+    /// 0: no limit. The default, builtins::REGEX_STEPS (10 million), is about
+    /// a second of a pathological pattern.
+    pub fn set_regex_step_limit(&mut self, n: double) {
+        self.regex_steps = if n > 0.0 { n } else { 0.0 };
+        crate::builtins::set_regex_limit(self.regex_steps);
+    }
+
+    /// Code with no Vm at hand (the regex matcher, BigInt arithmetic, a
+    /// number sort) stopped early because the deadline passed
+    /// (builtins::time_up): the script stops here. true then.
+    pub fn check_expired(&mut self) -> bool {
+        if self.deadline > 0.0 && crate::builtins::expired() {
+            self.terminate();
+            return true;
+        }
+        false
     }
 
     /// The profiler's tick (prof_on): the time since the last tick to the
@@ -6491,7 +6682,9 @@ impl Vm {
             return false;
         }
         self.frames[fi].pc = to;
-        self.suspended = true;
+        // past the deadline the frame stopped with the exception thrown
+        // instead (run unwinds it)
+        self.suspended = !self.terminated;
         true
     }
 
@@ -6501,7 +6694,7 @@ impl Vm {
         if !self.slice_over() {
             return false;
         }
-        self.suspended = true;
+        self.suspended = !self.terminated;
         true
     }
 
@@ -6794,7 +6987,7 @@ impl Vm {
         if (n as usize) == nb {
             return jsstr::byte_at(e.s.as_str(), i) as double;
         }
-        if !self.sc_ascii && nb == self.sc_s.as_bytes().len() && (i as usize) < self.sc_units.len() && same_str(&self.sc_s, &e.s) {
+        if !self.sc_ascii && nb == self.sc_s.as_bytes().len() && i < (self.sc_units.len() as int) && same_str(&self.sc_s, &e.s) {
             return self.sc_units[i as usize] as double;
         }
         -1.0
@@ -10166,6 +10359,9 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
         return Val::Undef();
     }
     let c = b[*pos];
+    if (c == b'{' || c == b'[') && vm.poll(64) {
+        return Val::Undef();
+    }
     // nesting: the native stack is looked at every 32 levels
     if (depth & 31) == 31 && (c == b'{' || c == b'[') && vm.stack_exhausted() {
         vm.throw_range("Maximum call stack size exceeded");

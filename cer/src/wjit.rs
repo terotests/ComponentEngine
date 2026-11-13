@@ -4980,10 +4980,11 @@ impl<'a> Cg<'a> {
         self.set(L_A);
         self.num(b);
         self.set(L_B);
-        // !(a >= 0 && b > 0 && a <= 2^31-1 && b <= 2^31-1 && whole)
+        // !(a >= 1 && b > 0 && a <= 2^31-1 && b <= 2^31-1 && whole): a
+        // zero keeps its sign the slow way (-0 % 5 is -0)
         self.get(L_A);
         self.op(F64_CONST);
-        self.w.b.extend_from_slice(&0.0f64.to_le_bytes());
+        self.w.b.extend_from_slice(&1.0f64.to_le_bytes());
         self.op(F64_GE);
         self.get(L_B);
         self.op(F64_CONST);
@@ -5391,7 +5392,7 @@ impl<'a> Cg<'a> {
                 self.set(L_Q0);
                 self.store_val(w1 as u32, L_Q0);
                 if sub == 1 {
-                    // undefined in dst + 1: the bytes of Val::Undef
+                    // undefined in dst + 1: the bytes of Val::Undef()
                     let u = bytes_of(Val::Undef());
                     let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
                     self.get(L_SP);
@@ -7626,7 +7627,7 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         if ob.class == C_ARRAY {
             let i = n as int;
             let ev = &vm.evecs[ob.elems as usize].v;
-            if i >= 0 && (i as usize) < ev.len() && (i as double) == n {
+            if i >= 0 && i < (ev.len() as int) && (i as double) == n {
                 r = ev[i as usize];
                 done = true;
             }
@@ -7731,20 +7732,20 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
     }
     let e = vm.objs[o as usize].elems as usize;
     let len = vm.evecs[e].v.len();
-    if (i as usize) < len {
+    if i < (len as int) {
         vm.inc(&val);
         let old = crate::vm::obj_of(&vm.evecs[e].v[i as usize]);
         let old_s = crate::vm::str_of(&vm.evecs[e].v[i as usize]);
         elem_put(&mut vm.evecs[e], i as usize, val);
         let oc = vm.objs[o as usize].cold as usize;
-        if oc > 0 && (i as usize) < vm.colds[oc].elems2.len() {
+        if oc > 0 && i < (vm.colds[oc].elems2.len() as int) {
             vm.colds[oc].elems2[i as usize] = Val::Bool(false);
         }
         vm.dec_o(old);
         vm.sdec(old_s);
         return true;
     }
-    if (i as usize) == len && e != 0 && vm.objs[o as usize].extensible && vm.objs[o as usize].pos != 3 {
+    if i == (len as int) && e != 0 && vm.objs[o as usize].extensible && vm.objs[o as usize].pos != 3 {
         vm.inc(&val);
         vm.evecs[e].v.push(val);
         return true;
@@ -8045,7 +8046,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                     a - b
                 } else if code == OP_MUL {
                     a * b
-                } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
+                } else if code == OP_MOD && a >= 1.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
                     ((a as int) % (b as int)) as double
                 } else if code >= OP_BAND && code <= OP_SHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
                     let (p, q) = (a as int, b as int);
@@ -8282,8 +8283,13 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_GET_METHOD => {
             // a string's or number's method: its prototype's (prop_cache)
-            let o = if let Some(o) = (*vm.rget(bp, w2)).as_obj() { o } else if (*vm.rget(bp, w2)).is_str() { vm.string_proto } else if (*vm.rget(bp, w2)).is_num() { vm.number_proto } else { -1 };
-            vm.r_get_method(bp, rb, fi, pc, w0, w1, w2, w3);
+            let o = match (*vm.rget(bp, w2)).kind() {
+                VK::Obj(o) => o,
+                VK::Str(_) => vm.string_proto,
+                VK::Num(_) => vm.number_proto,
+                _ => -1,
+            };
+            vm.r_get_method(bp, w1, w2, w3, rb, fi, pc, w0);
             if !vm.throwing && vm.frames.len() == nf {
                 let atom = vm.protos[pi].code[pc as usize].a as int;
                 cache_fill(vm, ri as usize, o, atom);
@@ -9244,7 +9250,7 @@ fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool
     }
     let bp = vm.frames[nf].bp;
     let pc = vm.frames[nf].pc;
-    let r = enter(vm, tp, bp, pc, 1 << 30, false);
+    let r = enter(vm, tp, bp, pc, if vm.checking { crate::vm::SLICE_TICKS as i32 } else { 1 << 30 }, false);
     if r == -2 {
         // threw: a handler in the callee goes on there
         if vm.unwind(nf as int) {

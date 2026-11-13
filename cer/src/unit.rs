@@ -510,25 +510,68 @@ pub fn decode(text: &str, input: &str) -> Unit {
     u
 }
 
-/// Every atom and closure operand in range (a damaged text must not index
+/// Every function's code passes code_ok (a damaged text must not index
 /// past the tables).
 fn valid(u: &Unit) -> bool {
     let na = u.atom_names.len() as int;
     let np = u.protos.len() as int;
     for p in u.protos.iter() {
-        let nc = p.consts.len() as int;
-        for op in p.code.iter() {
-            let k = atom_operand((op.code as int));
-            if ((k == 1 || k == 3) && (op.a < 0 || (op.a as int) >= na)) || (k == 2 && (op.b < 0 || (op.b as int) >= na)) || (k == 3 && (op.b as int) >= na) {
-                return false;
-            }
-            if (op.code as int) == OP_CLOSURE && (op.a < 0 || (op.a as int) >= np) {
-                return false;
-            }
-            if ((op.code as int) == OP_CONST || (op.code as int) == OP_SET_NAME || (op.code as int) == OP_CHECK_TDZ) && (op.a < 0 || (op.a as int) >= nc) {
-                return false;
-            }
+        if !code_ok(p, na, np) {
+            return false;
         }
     }
     true
+}
+
+/// A function's code read from a text (a code cache unit, a snapshot) is
+/// one the interpreters can run without indexing past their tables: its
+/// counts are sane; every atom, closure, constant and local operand is in
+/// range; and the stack depth is the same on every path to an op, never
+/// below the frame, from known ops only (regs::Tr::flow, as the register
+/// translation checks it). `na` atoms, `np` functions.
+pub fn code_ok(p: &Proto, na: int, np: int) -> bool {
+    let n = p.code.len() as int;
+    let ns = p.nslots;
+    if ns < 0 || ns > 1000000 || p.nparams < 0 || p.nparams > ns || p.env_size < 0 || p.env_size > 1000000 || p.rest < -1 || p.rest > ns {
+        return false;
+    }
+    let nc = p.consts.len() as int;
+    for op in p.code.iter() {
+        let c = op.code as int;
+        let k = atom_operand(c);
+        if ((k == 1 || k == 3) && (op.a < 0 || (op.a as int) >= na)) || (k == 2 && (op.b < 0 || (op.b as int) >= na)) || (k == 3 && (op.b as int) >= na) {
+            return false;
+        }
+        if c == OP_CLOSURE && (op.a < 0 || (op.a as int) >= np) {
+            return false;
+        }
+        if (c == OP_CONST || c == OP_SET_NAME || c == OP_CHECK_TDZ) && (op.a < 0 || (op.a as int) >= nc) {
+            return false;
+        }
+        let local_a = c == OP_GET_LOCAL || c == OP_SET_LOCAL || c == OP_SET_LOCAL_POP || c == OP_INC_LOCAL || c == OP_POSTINC_LOCAL || c == OP_PREINC_LOCAL || c == OP_GET_LOCAL_PROP || c == OP_ADD_LOCAL_POP || c == OP_GET_LOCAL2;
+        if local_a && (op.a < 0 || (op.a as int) >= ns) {
+            return false;
+        }
+        if c == OP_GET_LOCAL2 && (op.b < 0 || (op.b as int) >= ns) {
+            return false;
+        }
+        if c == OP_LOCAL_NULL_JF && (op.b < 0 || ((op.b / 256) as int) >= ns) {
+            return false;
+        }
+        if (c == OP_CALL || c == OP_CALL_EVAL || c == OP_NEW || c == OP_SUPER_CALL || c == OP_NEW_ARRAY || c == OP_OBJ_REST) && (op.a < 0 || op.a > 1048576) {
+            return false;
+        }
+        if c == OP_OBJ_REST && (op.b < 0 || op.b > 1048576) {
+            return false;
+        }
+        if (c == OP_GET_ENV || c == OP_SET_ENV || c == OP_GET_ENV_UNDEF || c == OP_ADD_ENV_POP) && (op.a < 0 || op.b < 0) {
+            return false;
+        }
+    }
+    if n == 0 {
+        return true;
+    }
+    let mut f = crate::regs::Fl::new(n);
+    f.run(&p.code);
+    f.err.is_empty()
 }

@@ -21,7 +21,7 @@ impl Vm {
     /// HasProperty(o, k) for an index: an element in place, else the
     /// generic lookup (element properties, prototypes, proxies).
     pub fn has_elem_or_prop(&mut self, o: int, k: int) -> bool {
-        if self.objs[o as usize].class == C_ARRAY && (k as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, k) {
+        if self.objs[o as usize].class == C_ARRAY && k < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) && !self.is_hole(o, k) {
             return true;
         }
         let kv = Val::Num(k as double);
@@ -65,6 +65,84 @@ impl Vm {
         true
     }
 
+    /// The spec's copy of index `src` to `dst`: Get and Set when `src` is
+    /// there, otherwise DeletePropertyOrThrow of `dst`.
+    fn move_index(&mut self, o: int, src: int, dst: int) {
+        if self.has_index(o, src) {
+            let v = self.get_index(&Val::Obj(o), src);
+            if self.throwing {
+                return;
+            }
+            self.set_index(o, dst, v);
+        } else {
+            self.delete(o, &Val::Num(dst as double));
+        }
+    }
+
+    /// Array.prototype.splice by the spec's steps, for an array whose
+    /// length changed while the arguments were converted: `len`, `s` and
+    /// `del` are the values taken before.
+    fn splice_generic(&mut self, o: int, len: int, s: int, del: int, args: &Vec<Val>) -> Val {
+        let mut removed: Vec<Val> = Vec::new();
+        let mut holes: Vec<int> = Vec::new();
+        let mut k: int = 0;
+        while k < del {
+            if self.has_index(o, s + k) {
+                let v = self.get_index(&Val::Obj(o), s + k);
+                if self.throwing {
+                    return Val::Undef();
+                }
+                removed.push(v);
+            } else {
+                removed.push(Val::Undef());
+                holes.push(k);
+            }
+            k += 1;
+        }
+        let a = self.new_array(removed);
+        for h in holes.iter() {
+            self.delete(a, &Val::Num(*h as double));
+        }
+        let ic: int = if args.len() > 2 { (args.len() as int) - 2 } else { 0 };
+        if ic < del {
+            let mut k = s;
+            while k < len - del {
+                self.move_index(o, k + del, k + ic);
+                if self.throwing {
+                    return Val::Undef();
+                }
+                k += 1;
+            }
+            let mut k = len;
+            while k > len - del + ic {
+                self.delete(o, &Val::Num((k - 1) as double));
+                if self.throwing {
+                    return Val::Undef();
+                }
+                k -= 1;
+            }
+        } else if ic > del {
+            let mut k = len - del;
+            while k > s {
+                self.move_index(o, k + del - 1, k + ic - 1);
+                if self.throwing {
+                    return Val::Undef();
+                }
+                k -= 1;
+            }
+        }
+        let mut i: int = 0;
+        while i < ic {
+            self.set_index(o, s + i, args[(i + 2) as usize].clone());
+            if self.throwing {
+                return Val::Undef();
+            }
+            i += 1;
+        }
+        self.set_length(o, (len - del + ic) as double);
+        Val::Obj(a)
+    }
+
     fn flatten_into(&mut self, out: &mut Vec<Val>, items: Vec<Val>, depth: double) {
         if self.stack_exhausted() {
             self.throw_range("Maximum call stack size exceeded");
@@ -104,6 +182,9 @@ impl Vm {
         for it in items {
             if i > 0 {
                 jsstr::push_js(&mut out, sep);
+            }
+            if (i & 8191) == 8191 && self.poll(131072) {
+                return String::new();
             }
             if (out.as_bytes().len() as int) > MAX_STR_BYTES {
                 self.throw_range("Invalid string length");
@@ -285,10 +366,12 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef();
                 }
-                // a valueOf above may have shrunk the array
+                // a valueOf above changed the length: the spec's steps on
+                // the array as it is now (holes, growth and all)
                 let cur = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
-                let s = if s > cur { cur } else { s };
-                let del = if s + del > cur { cur - s } else { del };
+                if cur != len {
+                    return self.splice_generic(o, len, s, del, args);
+                }
                 let mut removed: Vec<Val> = Vec::new();
                 let mut k = 0;
                 while k < del {
@@ -411,7 +494,10 @@ impl Vm {
                         len - 1
                     };
                     while i >= 0 {
-                        let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                        if (i & 0xffff) == 0 && self.poll(0x10000) {
+                            return Val::Undef();
+                        }
+                        let v = if plain && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) {
                             self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
                         } else {
                             if !self.has_elem_or_prop(o, i) {
@@ -443,6 +529,9 @@ impl Vm {
                             let end = if n < len { n } else { len };
                             let mut k = i;
                             while k < end {
+                                if (k & 0xffff) == 0 && self.poll(0x10000) {
+                                    return Val::Undef();
+                                }
                                 if let Some(y) = (self.evecs[e].v[k as usize]).as_num() {
                                     if y == x {
                                         return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(k as double) };
@@ -462,6 +551,9 @@ impl Vm {
                         let nb = needle.as_bytes().len();
                         let mut k = i;
                         while k < end {
+                            if (k & 0xffff) == 0 && crate::builtins::time_up(0x10000) {
+                                break;
+                            }
                             if let Some(h2) = (self.evecs[e].v[k as usize]).as_str() {
                                 let st = &self.strs[h2 as usize];
                                 let l2 = if st.up < 0 { st.s.as_bytes().len() } else { st.len as usize };
@@ -471,11 +563,17 @@ impl Vm {
                             }
                             k += 1;
                         }
+                        if self.check_expired() {
+                            return Val::Undef();
+                        }
                         i = if end > i { end } else { i };
                     }
                 }
                 while i < len {
-                    let v = if plain && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() {
+                    if (i & 0xffff) == 0 && self.poll(0x10000) {
+                        return Val::Undef();
+                    }
+                    let v = if plain && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) {
                         self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
                     } else {
                         if id != NF_AP_INCLUDES && !self.has_elem_or_prop(o, i) {
@@ -513,7 +611,7 @@ impl Vm {
                     // holes are skipped by forEach / map / filter / some / every
                     let present = if id == NF_AP_FIND || id == NF_AP_FINDINDEX || back {
                         true
-                    } else if self.objs[o as usize].class == C_ARRAY && (i as usize) < self.evecs[self.objs[o as usize].elems as usize].v.len() && !self.is_hole(o, i) {
+                    } else if self.objs[o as usize].class == C_ARRAY && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) && !self.is_hole(o, i) {
                         true
                     } else {
                         let kv = Val::Num(i as double);
@@ -707,9 +805,12 @@ impl Vm {
                         }
                     } else {
                         self.put_elem(o, i, a0.clone());
-                        if (i as usize) < self.colds[self.objs[o as usize].cold as usize].elems2.len() {
+                        if i < (self.colds[self.objs[o as usize].cold as usize].elems2.len() as int) {
                             self.put_elem2(o, i, Val::Bool(false));
                         }
+                    }
+                    if (i & 8191) == 8191 && self.poll(131072) {
+                        return Val::Undef();
                     }
                     i += 1;
                 }
@@ -729,14 +830,14 @@ impl Vm {
                 if !generic && (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) < len {
                     // a valueOf above shrank the array: read it as it is now,
                     // as the spec's HasProperty / Get / Set / Delete do
+                    // the spec's count, and backwards when the ranges
+                    // overlap with the target after the source
+                    let count = if e - s < len - t { e - s } else { len - t };
+                    let back = s < t && t < s + count;
                     let mut j: int = 0;
-                    while s + j < e && t + j < len {
-                        if self.has_index(o, s + j) {
-                            let v = self.get_index(&Val::Obj(o), s + j);
-                            self.set_index(o, t + j, v);
-                        } else {
-                            self.delete(o, &Val::Num((t + j) as double));
-                        }
+                    while j < count {
+                        let k = if back { count - 1 - j } else { j };
+                        self.move_index(o, s + k, t + k);
                         if self.throwing {
                             return Val::Undef();
                         }
@@ -982,7 +1083,11 @@ impl Vm {
                     NF_SP_LASTINDEXOF => {
                         let n = self.to_number(&a1);
                         let from = if is_nan(n) { len } else { to_integer(n) as int };
-                        Val::Num(jsstr::last_index_of(s.as_str(), p.as_str(), from) as double)
+                        let r = jsstr::last_index_of(s.as_str(), p.as_str(), from);
+                        if self.check_expired() {
+                            return Val::Undef();
+                        }
+                        Val::Num(r as double)
                     }
                     NF_SP_INCLUDES => {
                         let from = self.rel_index_pos(&a1, len, 0);
@@ -1151,6 +1256,7 @@ impl Vm {
                 if id == NF_SP_SEARCH {
                     let units = self.rx_take(&s);
                     let caps = self.regexes[idx as usize].exec(&units, 0);
+                    self.rx_after();
                     self.rx_put(&s, units);
                     return Val::Num(if caps.is_empty() { -1.0 } else { caps[0] as double });
                 }
@@ -1195,6 +1301,7 @@ impl Vm {
                 let mut start: int = 0;
                 while start <= units.len() as int {
                     let caps = self.regexes[idx as usize].exec(&units, start);
+                    self.rx_after();
                     if caps.is_empty() {
                         break;
                     }
@@ -1846,7 +1953,7 @@ impl Vm {
                 self.temp_roots.push(Val::Obj(p));
                 self.call_fixed(a0, Val::Undef(), 2, Val::Obj(res), Val::Obj(rej), Val::Undef());
                 self.temp_roots.pop();
-                if self.throwing {
+                if self.throwing && !self.terminated {
                     self.throwing = false;
                     let e = self.exc.clone();
                     self.exc = Val::Undef();

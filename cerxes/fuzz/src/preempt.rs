@@ -111,6 +111,18 @@ fn longest_slice(src: &str, regs: bool, slice_ms: f64, total_ms: f64) -> f64 {
     max
 }
 
+/// How long the program runs under a host time limit of `limit_ms` and no
+/// slices, and whether the limit stopped it (Engine::set_time_limit).
+pub fn limited(src: &str, regs: bool, limit_ms: f64) -> (f64, bool) {
+    let mut e = Engine::new();
+    e.vm.regs = regs;
+    e.set_syntax(false, false);
+    e.set_time_limit(limit_ms);
+    let t0 = Instant::now();
+    e.eval(src);
+    (t0.elapsed().as_secs_f64() * 1000.0, e.timed_out())
+}
+
 /// Slack over the slice length before a slice is late.
 pub const LATE_MS: f64 = 20.0;
 
@@ -120,6 +132,18 @@ pub fn judge(src: &str, sig: &str, seed: u64) -> String {
     let regs = rng.chance(75);
     let slice = if rng.chance(70) { 50.0 } else { 5.0 };
     crate::stage::set(if regs { "preempt register VM" } else { "preempt stack VM" });
+    // the hard limit holds everywhere, also where a slice cannot stop (a
+    // loop under a native frame: getter, comparator, ...): `deadline`
+    let (ms, _) = limited(src, regs, slice);
+    if ms > slice + LATE_MS {
+        let (ms2, _) = limited(src, regs, slice);
+        if ms2 > slice + LATE_MS {
+            return format!(
+                "deadline\t{}\ta {} ms time limit on the {} VM: ran {:.0} ms, then {:.0} ms (allowed {:.0})",
+                sig, slice, if regs { "register" } else { "stack" }, ms, ms2, slice + LATE_MS
+            );
+        }
+    }
     let a = longest_slice(src, regs, slice, 400.0);
     if a <= slice + LATE_MS {
         return String::from("ok");

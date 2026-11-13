@@ -192,8 +192,10 @@ impl Engine {
             self.error = String::from("SyntaxError");
             return self.error.clone();
         }
+        let began = self.vm.begin_call(false);
         let r = self.run_val(u);
         if self.vm.throwing {
+            self.vm.end_call(began);
             return self.uncaught();
         }
         // the completion value lives through the jobs: a reclaim there
@@ -201,10 +203,27 @@ impl Engine {
         self.vm.temp_roots.push(r);
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        self.vm.end_call(began);
+        if self.vm.terminated && !self.vm.throwing {
+            self.vm.terminate();
+        }
         if self.vm.throwing {
             return self.uncaught();
         }
         self.vm.display(&r)
+    }
+
+    /// The longest one call into the engine (`run`, `eval`, `call`) may
+    /// run, in ms; 0: no limit (the default). Past it the script stops
+    /// wherever it is: `Uncaught Error: script time limit exceeded`, no
+    /// catch or finally runs (Vm::set_time_limit).
+    pub fn set_time_limit(&mut self, ms: double) {
+        self.vm.set_time_limit(ms);
+    }
+
+    /// The last call was stopped by the time limit.
+    pub fn timed_out(&self) -> bool {
+        self.vm.terminated
     }
 
     fn run_val(&mut self, u: unit::Unit) -> Val {
@@ -225,14 +244,17 @@ impl Engine {
         if !self.error.is_empty() {
             return format!("t:{}", self.error);
         }
+        let began = self.vm.begin_call(false);
         let r = self.run_val(u);
         if self.vm.throwing {
+            self.vm.end_call(began);
             let u = self.uncaught();
             return format!("t:{}", u);
         }
         self.vm.temp_roots.push(r);
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        self.vm.end_call(began);
         match (&r).kind() {
             VK::Undef => String::from("u"),
             VK::Null => String::from("l"),
@@ -269,14 +291,23 @@ impl Engine {
         let a = self.vm.intern(name);
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));
+        let began = self.vm.begin_call(false);
         let r = self.vm.call_top(f, Val::Undef(), Vec::new());
         if self.vm.throwing {
+            self.vm.end_call(began);
             return self.uncaught();
         }
         // the jobs' frames are safe points: the result is held through them
         self.vm.temp_roots.push(r.clone());
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        self.vm.end_call(began);
+        if self.vm.terminated {
+            if !self.vm.throwing {
+                self.vm.terminate();
+            }
+            return self.uncaught();
+        }
         self.vm.display(&r)
     }
 

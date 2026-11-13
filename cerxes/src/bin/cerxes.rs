@@ -71,6 +71,10 @@ fn main() {
     // it ends (what a host that detaches the engine pays for its checks)
     let slice = std::env::var("CERXES_SLICE_MS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
     e.set_slice(slice);
+    // CERXES_TIME_LIMIT_MS=n: each call into the engine stops after n ms
+    // (Engine::set_time_limit)
+    let limit = std::env::var("CERXES_TIME_LIMIT_MS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    e.set_time_limit(limit);
     // `--module m.js`: after the script, the module m.js runs (and the
     // modules it imports); `--base f.js`: the script's `import()` reads
     // relative to f.js. The files they name are handed to the loader first.
