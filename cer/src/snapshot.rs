@@ -26,11 +26,25 @@ use crate::vm::*;
 pub const SNAPSHOT_FORMAT: int = 3;
 
 struct Strings {
+    /// by handle: a text many values share (a program's source, which
+    /// every function of it holds) is hashed once
+    by_handle: HashMap<int, int>,
     index: HashMap<String, int>,
     list: Vec<String>,
 }
 
 impl Strings {
+    fn id_of(&mut self, vm: &Vm, h: int) -> int {
+        match self.by_handle.get(&h) {
+            Some(i) => *i,
+            None => {
+                let i = self.id(vm.sref(h));
+                self.by_handle.insert(h, i);
+                i
+            }
+        }
+    }
+
     fn id(&mut self, s: &str) -> int {
         match self.index.get(s) {
             Some(i) => *i,
@@ -52,7 +66,7 @@ fn put_val(out: &mut String, st: &mut Strings, vm: &Vm, v: &Val) {
         VK::Num(x) => put_number(out, x),
         VK::Str(s) => {
             put_num(out, 5);
-            put_num(out, st.id(vm.sref(s)));
+            put_num(out, st.id_of(vm, s));
         }
         VK::Obj(o) => {
             put_num(out, 6);
@@ -165,7 +179,7 @@ pub fn snapshot(vm: &Vm) -> String {
     if !(idle || vm.suspended) || vm.throwing || vm.native_depth != 0 || !vm.temp_roots.is_empty() {
         return String::new();
     }
-    let mut st = Strings { index: HashMap::new(), list: Vec::new() };
+    let mut st = Strings { by_handle: HashMap::new(), index: HashMap::new(), list: Vec::new() };
     let mut b = String::new();
     put_num(&mut b, vm.atom_names.len() as int);
     for a in vm.atom_names.iter() {

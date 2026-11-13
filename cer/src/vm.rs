@@ -161,6 +161,12 @@ pub struct Vm {
     /// link_strs' handles by text while one program is linked (emptied
     /// after it): its functions' equal constants share one
     pub lpool: StrPool,
+    /// link_strs' longer texts while one program is linked, by length
+    /// (index into lbig_rc / lbig_h): the program's source, which every
+    /// function of it holds, gets one handle instead of one per function
+    pub lbig: HashMap<int, int>,
+    pub lbig_rc: Vec<Rc<String>>,
+    pub lbig_h: Vec<int>,
     pub protos: Vec<Proto>,
     pub atoms: HashMap<String, int>,
     pub atom_names: Vec<String>,
@@ -644,6 +650,9 @@ impl Vm {
             free_shapes: Vec::new(),
             t_far: TFar::new(),
             lpool: StrPool::new(),
+            lbig: HashMap::new(),
+            lbig_rc: Vec::new(),
+            lbig_h: Vec::new(),
             protos: Vec::new(),
             atoms: HashMap::new(),
             atom_cache: Vec::new(),
@@ -1722,6 +1731,9 @@ impl Vm {
     /// After a program's protos are linked: link_strs' pool goes.
     pub fn link_done(&mut self) {
         self.lpool = StrPool::new();
+        self.lbig = HashMap::new();
+        self.lbig_rc = Vec::new();
+        self.lbig_h = Vec::new();
     }
 
     pub fn link_strs(&mut self, p: &mut Proto) {
@@ -1746,8 +1758,29 @@ impl Vm {
                     self.lpool.put(s.as_str(), v.strh());
                     map.push(v);
                 }
+            } else if s.is_empty() {
+                map.push(Val::Str(0));
             } else {
-                map.push(self.pin_rc(s));
+                // a longer text: the same one (most often the program's
+                // source) found by its length, then compared
+                let n = s.as_bytes().len() as int;
+                let mut h: int = -1;
+                let j: int = match self.lbig.get(&n) {
+                    Some(x) => *x,
+                    None => -1,
+                };
+                if j >= 0 && same_str(&s, &self.lbig_rc[j as usize]) {
+                    h = self.lbig_h[j as usize];
+                }
+                if h >= 0 {
+                    map.push(Val::Str(h));
+                } else {
+                    let v = self.pin_rc(s.clone());
+                    self.lbig.insert(n, self.lbig_rc.len() as int);
+                    self.lbig_rc.push(s);
+                    self.lbig_h.push(v.strh());
+                    map.push(v);
+                }
             }
             i += 1;
         }
