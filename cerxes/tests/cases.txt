@@ -891,6 +891,12 @@ function of(x) { return x; } let r = []; for (var e = of([1, 2]); e.length; e = 
 ----
 2,1,3
 
+# minified bundle: a local function named `of` in a for head with several declarations
+==== js
+(function () { function of(a) { return a.map(function (v) { return v * 2; }); } var s = 0; for (var e = of([1, 2, 3]), t = 0; t < e.length; t++) s += e[t]; return s; })()
+----
+12
+
 # one long + expression of strings
 ==== js
 let s = (0, eval)("'a'" + "+'aaaaaaaaaa'".repeat(2000)); s.length
