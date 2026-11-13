@@ -35,19 +35,23 @@ use crate::vm::{A_LENGTH, A_NAME, A_PROTOTYPE};
 
 // ---------------------------------------------------------------- layout
 
+/// a value's size in memory (value.rs Val: 8 bytes, NaN-boxed)
+pub const VS: u32 = 8;
+const VSU: usize = VS as usize;
+
 /// Where the parts of a Val lie in memory.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub ok: bool,
     pub size: u32,
-    pub t_undef: u8,
-    pub t_null: u8,
-    pub t_bool: u8,
-    pub t_num: u8,
-    pub t_str: u8,
-    pub t_obj: u8,
+    pub t_undef: u32,
+    pub t_null: u32,
+    pub t_bool: u32,
+    pub t_num: u32,
+    pub t_str: u32,
+    pub t_obj: u32,
     /// Val::Big (a small BigInt): its value is a double at off_num
-    pub t_big: u8,
+    pub t_big: u32,
     /// offsets of the payloads
     pub off_bool: u32,
     pub off_num: u32,
@@ -161,21 +165,9 @@ pub struct Layout {
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
-    let mut buf = [0u8; 16];
+    // a value's 8 bytes, then 8 zero bytes
     let mut out = [0u8; 16];
-    if std::mem::size_of::<Val>() != 16 {
-        return out;
-    }
-    // SAFETY: buf is 16 bytes, zeroed, and Val (Copy, 16 bytes) is written
-    // into it unaligned; the bytes are then read one at a time with volatile
-    // loads, so a padding byte the write left alone reads as its zero and
-    // the compiler cannot reason the reads away
-    unsafe {
-        std::ptr::write_unaligned(buf.as_mut_ptr() as *mut Val, v);
-        for i in 0..16 {
-            out[i] = std::ptr::read_volatile(buf.as_ptr().add(i));
-        }
-    }
+    out[..8].copy_from_slice(&v.b.to_le_bytes());
     out
 }
 
@@ -279,69 +271,24 @@ pub fn probe() -> Layout {
         cold_nums_p: 0,
         cold_nums_l: 0,
     };
-    if l.size != 16 || std::mem::align_of::<Val>() != 8 {
+    if l.size != VS || std::mem::align_of::<Val>() != 8 {
         return l;
     }
-    let u = bytes_of(Val::Undef());
-    let n = bytes_of(Val::Null());
-    let bt = bytes_of(Val::Bool(true));
-    let bf = bytes_of(Val::Bool(false));
-    let x = 1.2345678901234567e-300f64;
-    let nm = bytes_of(Val::Num(x));
-    let s = bytes_of(Val::Str(0x5a3c_1e2d));
-    let o = bytes_of(Val::Obj(0x1b2c_3d4e));
-    let bg = bytes_of(Val::Big(x));
-    l.t_undef = u[0];
-    l.t_null = n[0];
-    l.t_bool = bt[0];
-    l.t_num = nm[0];
-    l.t_str = s[0];
-    l.t_obj = o[0];
-    l.t_big = bg[0];
-    let tags = [l.t_undef, l.t_null, l.t_bool, l.t_num, l.t_str, l.t_obj, l.t_big];
-    for i in 0..tags.len() {
-        for j in (i + 1)..tags.len() {
-            if tags[i] == tags[j] {
-                return l;
-            }
-        }
-    }
-    if bf[0] != bt[0] {
+    // NaN-boxed (value.rs): the tag is a value's top 16 bits, a number's
+    // is taken as 0xFFF8 (tag_at); the payloads are the low bits
+    l.t_undef = (crate::value::V_UNDEF >> 48) as u32;
+    l.t_null = (crate::value::V_NULL >> 48) as u32;
+    l.t_bool = (crate::value::V_BOOL >> 48) as u32;
+    l.t_num = 0xFFF8;
+    l.t_str = (crate::value::V_STR >> 48) as u32;
+    l.t_obj = (crate::value::V_OBJ >> 48) as u32;
+    l.t_big = (crate::value::V_BIG >> 48) as u32;
+    if Val::Obj(0x1b2c_3d4e).b != crate::value::V_OBJ | 0x1b2c_3d4e || Val::Num(1.5).b != 1.5f64.to_bits() {
         return l;
     }
-    // the bool: the one byte true and false differ in
-    let mut ob: i32 = -1;
-    for i in 1..16 {
-        if bt[i] != bf[i] {
-            if ob >= 0 || bt[i] != 1 || bf[i] != 0 {
-                return l;
-            }
-            ob = i as i32;
-        }
-    }
-    let xb = x.to_le_bytes();
-    let mut on: i32 = -1;
-    for off in [8usize, 4, 1] {
-        if off + 8 <= 16 && nm[off..off + 8] == xb {
-            on = off as i32;
-            break;
-        }
-    }
-    let sb = 0x5a3c_1e2di32.to_le_bytes();
-    let obb = 0x1b2c_3d4ei32.to_le_bytes();
-    let mut oi: i32 = -1;
-    for off in [4usize, 8, 1] {
-        if s[off..off + 4] == sb && o[off..off + 4] == obb {
-            oi = off as i32;
-            break;
-        }
-    }
-    if ob < 0 || on < 0 || oi < 0 || bg[on as usize..on as usize + 8] != xb {
-        return l;
-    }
-    l.off_bool = ob as u32;
-    l.off_num = on as u32;
-    l.off_int = oi as u32;
+    l.off_bool = 0;
+    l.off_num = 0;
+    l.off_int = 0;
     l.ok = true;
     // the buffer pointer of a Vec<Val>: the word of the Vec that holds it
     let mut v: Vec<Val> = Vec::with_capacity(7);
@@ -380,7 +327,7 @@ pub fn probe() -> Layout {
         l.off_vals = std::mem::offset_of!(JsObj, vals) as u32;
         l.off_inl0 = std::mem::offset_of!(JsObj, inl0) as u32;
         l.off_nv = std::mem::offset_of!(JsObj, nv) as u32;
-        assert!(std::mem::offset_of!(JsObj, inl1) == std::mem::offset_of!(JsObj, inl0) + 16);
+        assert!(std::mem::offset_of!(JsObj, inl1) == std::mem::offset_of!(JsObj, inl0) + VS as usize);
         l.off_proto = std::mem::offset_of!(JsObj, proto) as u32;
         l.off_class = std::mem::offset_of!(JsObj, class) as u32;
         l.off_epoch = std::mem::offset_of!(crate::vm::Vm, shape_epoch) as u32;
@@ -565,6 +512,16 @@ const I32_LOAD: u8 = 0x28;
 const I64_LOAD: u8 = 0x29;
 const F64_LOAD: u8 = 0x2b;
 const I32_LOAD8_U: u8 = 0x2d;
+const I32_LOAD16_U: u8 = 0x2f;
+const I32_GT_U: u8 = 0x4b;
+const I64_EXTEND_I32_U: u8 = 0xad;
+const I64_OR: u8 = 0x84;
+const I64_SHL: u8 = 0x86;
+const I64_SHR_U: u8 = 0x88;
+const I64_NE: u8 = 0x52;
+const I64_EQ: u8 = 0x51;
+const I64_AND: u8 = 0x83;
+const I32_WRAP_I64: u8 = 0xa7;
 const I64_STORE: u8 = 0x37;
 const F64_STORE: u8 = 0x39;
 const I32_STORE8: u8 = 0x3a;
@@ -1063,8 +1020,8 @@ impl<'a> Cg<'a> {
     /// base local and byte offset of an operand's value in memory
     fn place(&self, o: Opnd) -> (u32, u32) {
         match o {
-            Opnd::Reg(r) => (L_SP, r * 16),
-            Opnd::K(k) => (L_KV, k * 16),
+            Opnd::Reg(r) => (L_SP, r * VS),
+            Opnd::K(k) => (L_KV, k * VS),
             Opnd::Num(_) => (L_SP, 0),
         }
     }
@@ -1122,8 +1079,7 @@ impl<'a> Cg<'a> {
             }
             _ => {
                 let (b, off) = self.place(o);
-                self.get(b);
-                self.mem(I32_LOAD8_U, 0, off);
+                self.tag_at(b, off);
             }
         }
     }
@@ -1226,53 +1182,53 @@ impl<'a> Cg<'a> {
     /// slot r = Num(local l)
     fn store_num(&mut self, r: u32, l: u32) {
         self.get(L_SP);
-        let t = self.lay.t_num as i64;
-        self.i32c(t);
-        self.mem(I32_STORE8, 0, r * 16);
-        self.get(L_SP);
         self.get(l);
-        let on = self.lay.off_num;
-        self.mem(F64_STORE, 3, r * 16 + on);
+        self.mem(F64_STORE, 3, r * VS);
     }
-    /// slot r = Bool(the i32 on the wasm stack); it goes through L_TAG
+    /// slot r = Bool(the i32 on the wasm stack)
     fn store_bool(&mut self, r: u32) {
         self.set(L_TAG);
         self.get(L_SP);
-        let t = self.lay.t_bool as i64;
-        self.i32c(t);
-        self.mem(I32_STORE8, 0, r * 16);
-        self.get(L_SP);
         self.get(L_TAG);
-        let ob = self.lay.off_bool;
-        self.mem(I32_STORE8, 0, r * 16 + ob);
+        self.op(I64_EXTEND_I32_U);
+        self.i64c(crate::value::V_BOOL as i64);
+        self.op(I64_OR);
+        self.mem(I64_STORE, 3, r * VS);
     }
-    /// the 16 bytes of an operand as two i64 into locals q, q + 1
+    /// an i64 constant on the wasm stack
+    fn i64c(&mut self, x: i64) {
+        self.w.byte(I64_CONST);
+        self.w.s(x);
+    }
+    /// the tag of the value at b + off on the wasm stack: its top 16 bits
+    /// for undefined .. a small BigInt (value.rs V_UNDEF ..), t_num
+    /// (0xFFF8) for a number
+    fn tag_at(&mut self, b: u32, off: u32) {
+        self.get(b);
+        self.mem(I32_LOAD16_U, 1, off + 6);
+        self.i32c(0xFFF8);
+        self.get(b);
+        self.mem(I32_LOAD16_U, 1, off + 6);
+        self.i32c(0xFFF8);
+        self.op(I32_GT_U);
+        self.op(SELECT);
+    }
+    /// the address on the wasm stack gets the bits of a value of tag t
+    /// with a payload of 0 (a payload store at the same address after it
+    /// makes the whole value)
+    fn st_tag(&mut self, off: u32, t: u32) {
+        self.i64c(((t as u64) << 48) as i64);
+        self.mem(I64_STORE, 3, off);
+    }
+    /// the 8 bytes of an operand as an i64 into local q
     fn load_val(&mut self, o: Opnd, q: u32) -> bool {
         match o {
-            Opnd::Num(_) | Opnd::K(_) => {
-                let (b, off) = match o {
-                    Opnd::Num(_) => {
-                        // a number constant: its kvals entry
-                        return false;
-                    }
-                    _ => self.place(o),
-                };
-                self.get(b);
-                self.mem(I64_LOAD, 3, off);
-                self.set(q);
-                self.get(b);
-                self.mem(I64_LOAD, 3, off + 8);
-                self.set(q + 1);
-                true
-            }
-            Opnd::Reg(_) => {
+            Opnd::Num(_) => false,
+            _ => {
                 let (b, off) = self.place(o);
                 self.get(b);
                 self.mem(I64_LOAD, 3, off);
                 self.set(q);
-                self.get(b);
-                self.mem(I64_LOAD, 3, off + 8);
-                self.set(q + 1);
                 true
             }
         }
@@ -1280,10 +1236,7 @@ impl<'a> Cg<'a> {
     fn store_val(&mut self, r: u32, q: u32) {
         self.get(L_SP);
         self.get(q);
-        self.mem(I64_STORE, 3, r * 16);
-        self.get(L_SP);
-        self.get(q + 1);
-        self.mem(I64_STORE, 3, r * 16 + 8);
+        self.mem(I64_STORE, 3, r * VS);
     }
     /// the raw operand (a kvals index for constants, numbers included)
     fn raw(&self, x: i32) -> Opnd {
@@ -1310,7 +1263,7 @@ impl<'a> Cg<'a> {
         self.tag(o);
         self.set(L_TAG);
         let l = self.lay;
-        // number or small BigInt: n != 0 && n == n
+        // number: n != 0 && n == n
         self.get(b);
         self.mem(F64_LOAD, 3, off + l.off_num);
         self.set(L_A);
@@ -1322,33 +1275,37 @@ impl<'a> Cg<'a> {
         self.get(L_A);
         self.op(F64_EQ);
         self.op(I32_AND);
-        // bool: its byte; a string: its handle is not 0 (the empty
-        // string); otherwise object
+        // small BigInt: its 48 payload bits are not all 0
         self.get(b);
-        self.mem(I32_LOAD8_U, 0, off + l.off_bool);
+        self.mem(I64_LOAD, 3, off);
+        self.i64c(16);
+        self.op(I64_SHL);
+        self.i64c(0);
+        self.op(I64_NE);
+        // bool or string: the low word (bool's bit, the string handle,
+        // 0 for the empty string) is not 0; otherwise object
         self.get(b);
-        self.mem(I32_LOAD, 2, off + l.off_int);
+        self.mem(I32_LOAD, 2, off);
         self.i32c(0);
         self.op(I32_NE);
-        // an object (0n is a Val::Big)
         self.get(L_TAG);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
         self.get(L_TAG);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
-        self.op(SELECT);
         self.get(L_TAG);
         self.i32c(l.t_bool as i64);
+        self.op(I32_EQ);
+        self.op(I32_OR);
+        self.op(SELECT);
+        self.get(L_TAG);
+        self.i32c(l.t_big as i64);
         self.op(I32_EQ);
         self.op(SELECT);
         self.get(L_TAG);
         self.i32c(l.t_num as i64);
         self.op(I32_EQ);
-        self.get(L_TAG);
-        self.i32c(l.t_big as i64);
-        self.op(I32_EQ);
-        self.op(I32_OR);
         self.op(SELECT);
     }
     /// x <cmp> y for two numbers as an i32, or return pc
@@ -1380,7 +1337,7 @@ impl<'a> Cg<'a> {
     /// * 65536 + slot, as the interpreter's R_GET_PROP) saw when this was
     /// compiled: the slot read from the object's vals
     fn get_prop_ic(&mut self, dst: u32, obj: u32, c: i32, pc: i64) -> bool {
-        self.get_prop_at(dst, L_SP, obj * 16, c, pc)
+        self.get_prop_at(dst, L_SP, obj * VS, c, pc)
     }
     /// &objs[id] for the object id on the wasm stack
     fn obj_addr(&mut self) {
@@ -1404,10 +1361,11 @@ impl<'a> Cg<'a> {
     /// Vm::inc and dec count it: fails (before writing) for a string, old
     /// or new, and for an old object the write would leave unreferenced
     /// (Vm::dec_o puts it in the zct).
-    /// tags 0..4 are typeof's indices (vm.rs type_index)
+    /// tags 0xFFF8 (number) .. 0xFFFC (string) map to typeof's indices
+    /// (vm.rs type_index) by TYPE_NIB
     fn typeof_ok(&self) -> bool {
         let l = self.lay;
-        l.t_undef == 0 && l.t_null == 1 && l.t_bool == 2 && l.t_num == 3 && l.t_str == 4
+        l.t_num == 0xFFF8 && l.t_undef == 0xFFF9 && l.t_null == 0xFFFA && l.t_bool == 0xFFFB && l.t_str == 0xFFFC
     }
     /// heap_store through the module's hstore(src, slot, .., vm, ..)
     fn heap_store(&mut self, b: u32, off: u32, pc: i64) {
@@ -1465,8 +1423,7 @@ impl<'a> Cg<'a> {
         let to = l.t_obj as i64;
         // an old string the write would leave unreferenced (Vm::sdec puts
         // it in szct): the helper
-        self.get(L_T2);
-        self.mem(I32_LOAD8_U, 0, 0);
+        self.tag_at(L_T2, 0);
         self.i32c(ts);
         self.op(I32_EQ);
         self.op(IF);
@@ -1489,8 +1446,7 @@ impl<'a> Cg<'a> {
         // an old object: rc > 1, then rc - 1 (L_T3 its &objs[id])
         self.i32c(0);
         self.set(L_T3);
-        self.get(L_T2);
-        self.mem(I32_LOAD8_U, 0, 0);
+        self.tag_at(L_T2, 0);
         self.i32c(to);
         self.op(I32_EQ);
         self.op(IF);
@@ -1525,8 +1481,7 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
         // a new object: rc + 1
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.tag_at(b, off);
         self.i32c(to);
         self.op(I32_EQ);
         self.op(IF);
@@ -1605,10 +1560,6 @@ impl<'a> Cg<'a> {
         self.get(b);
         self.mem(I64_LOAD, 3, off);
         self.mem(I64_STORE, 3, 0);
-        self.get(L_T2);
-        self.get(b);
-        self.mem(I64_LOAD, 3, off + 8);
-        self.mem(I64_STORE, 3, 8);
     }
     /// &Vm.strs[local h].rc on the wasm stack
     fn srcs_addr(&mut self, h: u32) {
@@ -1625,8 +1576,7 @@ impl<'a> Cg<'a> {
     /// the string at b + off, if one (handle > 0): srcs[h] op= 1
     fn str_count(&mut self, b: u32, off: u32, op: u8) {
         let l = self.lay;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.tag_at(b, off);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
         self.op(IF);
@@ -1676,7 +1626,7 @@ impl<'a> Cg<'a> {
         self.mem(I32_LOAD, 2, l.vm_evecs_ptr);
         self.op(I32_ADD);
         self.mem(I32_LOAD, 2, l.elems_vp);
-        self.i32c(slot as i64 * 16);
+        self.i32c(slot as i64 * VS as i64);
         self.op(I32_ADD);
         self.set(L_T2);
     }
@@ -1690,9 +1640,9 @@ impl<'a> Cg<'a> {
     /// fails to the helper.
     fn for_in_step(&mut self, it: u32, dst: u32, pc: i64) {
         let l = self.lay;
-        self.need_obj(L_SP, it * 16, pc);
+        self.need_obj(L_SP, it * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, it * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, it * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -1772,16 +1722,13 @@ impl<'a> Cg<'a> {
             self.get(L_T5);
             self.mem(I32_LOAD, 2, l.elems_vp);
             self.get(L_T6);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T4);
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.set(L_Q0);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.set(L_Q0 + 1);
             self.store_val(dst, L_Q0);
             self.op(BR);
             self.w.u((self.extra - ok) as u64);
@@ -1891,12 +1838,11 @@ impl<'a> Cg<'a> {
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_avals_ptr);
         self.get(L_T4);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T4 as u64);
-        self.mem(I32_LOAD8_U, 0, 0);
+        self.set(L_T4);
+        self.tag_at(L_T4, 0);
         self.i32c(l.t_str as i64);
         self.op(I32_NE);
         self.fail_if(pc);
@@ -1908,9 +1854,6 @@ impl<'a> Cg<'a> {
         self.get(L_T4);
         self.mem(I64_LOAD, 3, 0);
         self.set(L_Q0);
-        self.get(L_T4);
-        self.mem(I64_LOAD, 3, 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         self.extra -= 1;
         self.op(END);
@@ -1918,9 +1861,9 @@ impl<'a> Cg<'a> {
     /// dst = the array at register ob's length
     fn array_len(&mut self, dst: u32, ob: u32, pc: i64) -> bool {
         let l = self.lay;
-        self.need_obj(L_SP, ob * 16, pc);
+        self.need_obj(L_SP, ob * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, ob * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -1943,7 +1886,7 @@ impl<'a> Cg<'a> {
     }
     fn get_elem_fast(&mut self, dst: u32, ob: u32, key: Opnd, pc: i64) -> bool {
         let l = self.lay;
-        self.need_obj(L_SP, ob * 16, pc);
+        self.need_obj(L_SP, ob * VS, pc);
         let skey = match key {
             Opnd::Reg(r) if MASK.with(|m| m.get()) & (1u64 << 50) == 0 => Some(r),
             _ => None,
@@ -1955,8 +1898,7 @@ impl<'a> Cg<'a> {
             self.op(BLOCK);
             self.op(T_VOID);
             self.extra += 1;
-            self.get(L_SP);
-            self.mem(I32_LOAD8_U, 0, r * 16);
+            self.tag_at(L_SP, r * VS);
             self.i32c(l.t_str as i64);
             self.op(I32_EQ);
             self.op(IF);
@@ -1965,7 +1907,7 @@ impl<'a> Cg<'a> {
             let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
             let o_atom = std::mem::offset_of!(crate::vm::SEnt, atom) as u32;
             self.get(L_SP);
-            self.mem(I32_LOAD, 2, r * 16 + l.off_int);
+            self.mem(I32_LOAD, 2, r * VS + l.off_int);
             self.i32c(sz);
             self.op(I32_MUL);
             self.get(L_VM);
@@ -1978,7 +1920,7 @@ impl<'a> Cg<'a> {
             self.op(I32_LT_S);
             self.fail_if(pc);
             self.get(L_SP);
-            self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+            self.mem(I32_LOAD, 2, ob * VS + l.off_int);
             self.obj_addr();
             self.get(L_T3);
             self.get(L_VM);
@@ -1991,9 +1933,6 @@ impl<'a> Cg<'a> {
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.set(L_Q0);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.set(L_Q0 + 1);
             self.store_val(dst, L_Q0);
             self.op(BR);
             self.w.u((self.extra - done) as u64);
@@ -2002,7 +1941,7 @@ impl<'a> Cg<'a> {
         }
         self.need_num(key, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, ob * VS + l.off_int);
         self.obj_addr();
         self.set(L_T2);
         let typed = MASK.with(|m| m.get()) & (1u64 << 61) == 0;
@@ -2080,16 +2019,13 @@ impl<'a> Cg<'a> {
         self.get(L_T4);
         self.mem(I32_LOAD, 2, l.elems_vp);
         self.get(L_T3);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T4);
         self.get(L_T4);
         self.mem(I64_LOAD, 3, 0);
         self.set(L_Q0);
-        self.get(L_T4);
-        self.mem(I64_LOAD, 3, 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         if typed {
             self.extra -= 1;
@@ -2155,9 +2091,8 @@ impl<'a> Cg<'a> {
         self.i32c(l.cold_size as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T6 as u64);
-        self.mem(I32_LOAD8_U, 0, l.cold_prim);
+        self.set(L_T6);
+        self.tag_at(L_T6, l.cold_prim);
         self.i32c(l.t_num as i64);
         self.op(I32_NE);
         self.fail_if(pc);
@@ -2181,9 +2116,8 @@ impl<'a> Cg<'a> {
         self.i32c(l.cold_size as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T6 as u64);
-        self.mem(I32_LOAD8_U, 0, l.cold_prim);
+        self.set(L_T6);
+        self.tag_at(L_T6, l.cold_prim);
         self.i32c(l.t_num as i64);
         self.op(I32_EQ);
         self.fail_if(pc);
@@ -2242,11 +2176,11 @@ impl<'a> Cg<'a> {
         if keep && matches!(val, Opnd::Num(_)) {
             return false;
         }
-        self.need_obj(L_SP, ob * 16, pc);
+        self.need_obj(L_SP, ob * VS, pc);
         self.need_num(key, pc);
         self.need_num(val, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, ob * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -2336,8 +2270,7 @@ impl<'a> Cg<'a> {
     /// fail unless the value at b + off is an object
     fn need_obj(&mut self, b: u32, off: u32, pc: i64) {
         let t = self.lay.t_obj as i64;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.tag_at(b, off);
         self.i32c(t);
         self.op(I32_NE);
         self.fail_if(pc);
@@ -2358,19 +2291,16 @@ impl<'a> Cg<'a> {
         let slot = (c & 65535) as u32;
         // slots 0 and 1 in the object, the rest in vals
         let at = if slot < 2 {
-            l.off_inl0 + slot * 16
+            l.off_inl0 + slot * VS
         } else {
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_vals);
             self.set(L_T2);
-            (slot - 2) * 16
+            (slot - 2) * VS
         };
         self.get(L_T2);
         self.mem(I64_LOAD, 3, at);
         self.set(L_Q0);
-        self.get(L_T2);
-        self.mem(I64_LOAD, 3, at + 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         true
     }
@@ -2386,9 +2316,9 @@ impl<'a> Cg<'a> {
             }
         }
         let (vb, voff) = self.place(vo);
-        self.need_obj(L_SP, obj * 16, pc);
+        self.need_obj(L_SP, obj * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, obj * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -2400,10 +2330,10 @@ impl<'a> Cg<'a> {
         let slot = (c & 65535) as u32;
         self.get(L_T2);
         if slot < 2 {
-            self.i32c((l.off_inl0 + slot * 16) as i64);
+            self.i32c((l.off_inl0 + slot * VS) as i64);
         } else {
             self.mem(I32_LOAD, 2, l.off_vals);
-            self.i32c(((slot - 2) * 16) as i64);
+            self.i32c(((slot - 2) * VS) as i64);
         }
         self.op(I32_ADD);
         self.set(L_T2);
@@ -2416,13 +2346,13 @@ impl<'a> Cg<'a> {
     fn set_prop_cached(&mut self, obj: u32, v: i32, a: u32, t: i32, atom: i32, pc: i64) -> bool {
         let l = self.lay;
         let (vb, voff) = self.place(self.raw(v));
-        self.need_obj(L_SP, obj * 16, pc);
+        self.need_obj(L_SP, obj * VS, pc);
         // block $done
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, obj * VS + l.off_int);
         self.obj_addr();
         self.i32c(a as i64);
         self.get(L_VM);
@@ -2453,15 +2383,10 @@ impl<'a> Cg<'a> {
     fn store_undef(&mut self, r: u32) {
         let u = bytes_of(Val::Undef());
         let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-        let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
         self.get(L_SP);
         self.w.byte(I64_CONST);
         self.w.s(lo);
-        self.mem(I64_STORE, 3, r * 16);
-        self.get(L_SP);
-        self.w.byte(I64_CONST);
-        self.w.s(hi);
-        self.mem(I64_STORE, 3, r * 16 + 8);
+        self.mem(I64_STORE, 3, r * VS);
     }
     /// A plain call's frame pushed as renter pushes it, for the callee the
     /// site's call cache at `a` names (h_call fills it: proto, table
@@ -2474,7 +2399,7 @@ impl<'a> Cg<'a> {
             cg.i32c(a as i64);
             cg.mem(I32_LOAD, 2, k * 4);
         };
-        let fo = f as u32 * 16;
+        let fo = f as u32 * VS;
         // f: a script function of the cached proto
         self.need_obj(L_SP, fo, pc);
         self.get(L_SP);
@@ -2522,8 +2447,7 @@ impl<'a> Cg<'a> {
         // a sloppy function's this must be an object already
         ld(self, 6);
         self.op(I32_EQZ);
-        self.get(L_SP);
-        self.mem(I32_LOAD8_U, 0, fo + 16);
+        self.tag_at(L_SP, fo + VS);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(I32_AND);
@@ -2553,26 +2477,25 @@ impl<'a> Cg<'a> {
             cg.op(I32_LT_S);
             cg.op(SELECT);
         };
-        let cbp = (f as u32 + 2) * 16;
+        let cbp = (f as u32 + 2) * VS;
         self.get(L_SP);
         self.i32c(cbp as i64);
         self.op(I32_ADD);
         self.w.byte(LOCAL_TEE);
         self.w.u(L_C as u64);
         keep(self);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
         self.get(L_C);
         ld(self, 3);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T4);
         let u = bytes_of(Val::Undef());
         let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-        let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
         self.op(BLOCK);
         self.op(T_VOID);
         self.op(LOOP);
@@ -2587,11 +2510,7 @@ impl<'a> Cg<'a> {
         self.w.s(lo);
         self.mem(I64_STORE, 3, 0);
         self.get(L_T3);
-        self.w.byte(I64_CONST);
-        self.w.s(hi);
-        self.mem(I64_STORE, 3, 8);
-        self.get(L_T3);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_ADD);
         self.set(L_T3);
         self.op(BR);
@@ -2638,14 +2557,9 @@ impl<'a> Cg<'a> {
         // this_val = the slot after f
         self.get(L_T3);
         self.get(L_SP);
-        self.mem(I64_LOAD, 3, fo + 16);
+        self.mem(I64_LOAD, 3, fo + VS);
         self.mem(I64_STORE, 3, l.frame_this);
-        self.get(L_T3);
-        self.get(L_SP);
-        self.mem(I64_LOAD, 3, fo + 24);
-        self.mem(I64_STORE, 3, l.frame_this + 8);
         st_k(self, l.fr_new_target, lo);
-        st_k(self, l.fr_new_target + 8, hi);
         st_k(self, l.fr_args_obj, -1);
         self.get(L_T3);
         self.i32c(0);
@@ -2716,8 +2630,7 @@ impl<'a> Cg<'a> {
         }
         let (vb, voff) = self.place(vo);
         // the value: no string (Vm::inc's other case)
-        self.get(vb);
-        self.mem(I32_LOAD8_U, 0, voff);
+        self.tag_at(vb, voff);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
         self.fail_if(pc);
@@ -2740,9 +2653,9 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
         }
-        self.need_obj(L_SP, obj * 16, pc);
+        self.need_obj(L_SP, obj * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, obj * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -2777,8 +2690,7 @@ impl<'a> Cg<'a> {
         self.get(L_T2);
         self.i32c((t & 65535) as i64);
         self.mem(I32_STORE, 2, l.off_shape);
-        self.get(vb);
-        self.mem(I32_LOAD8_U, 0, voff);
+        self.tag_at(vb, voff);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
         self.op(IF);
@@ -2800,7 +2712,7 @@ impl<'a> Cg<'a> {
         self.op(I32_ADD);
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_nv);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
@@ -2815,7 +2727,7 @@ impl<'a> Cg<'a> {
         self.get(L_T2);
         self.vals_hdr();
         self.mem(I32_LOAD, 2, l.off_vals_len);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
@@ -2832,10 +2744,6 @@ impl<'a> Cg<'a> {
         self.get(vb);
         self.mem(I64_LOAD, 3, voff);
         self.mem(I64_STORE, 3, 0);
-        self.get(L_T3);
-        self.get(vb);
-        self.mem(I64_LOAD, 3, voff + 8);
-        self.mem(I64_STORE, 3, 8);
         self.get(L_T2);
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_nv);
@@ -2862,8 +2770,7 @@ impl<'a> Cg<'a> {
             self.op(BLOCK);
             self.op(T_VOID);
             self.extra += 1;
-            self.get(b);
-            self.mem(I32_LOAD8_U, 0, off);
+            self.tag_at(b, off);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(BR_IF);
@@ -2908,7 +2815,7 @@ impl<'a> Cg<'a> {
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
-            // slot * 16 < 32 in the object, else in vals
+            // slot * VS < 2 * VS in the object, else in vals
             self.get(L_T2);
             self.i32c(l.off_inl0 as i64);
             self.op(I32_ADD);
@@ -2918,19 +2825,16 @@ impl<'a> Cg<'a> {
             self.mem(I32_LOAD, 2, l.off_vals);
             self.get(L_T3);
             self.op(I32_ADD);
-            self.i32c(32);
+            self.i32c(2 * VS as i64);
             self.op(I32_SUB);
             self.get(L_T3);
-            self.i32c(32);
+            self.i32c(2 * VS as i64);
             self.op(I32_LT_U);
             self.op(SELECT);
             self.set(L_T4);
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.set(L_Q0);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.set(L_Q0 + 1);
             self.store_val(dst, L_Q0);
             self.op(BR);
             self.w.u(1);
@@ -2958,8 +2862,7 @@ impl<'a> Cg<'a> {
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.tag_at(b, off);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(BR_IF);
@@ -2976,19 +2879,16 @@ impl<'a> Cg<'a> {
         self.w.u(0);
         let slot = (ic & 65535) as u32;
         let at = if slot < 2 {
-            l.off_inl0 + slot * 16
+            l.off_inl0 + slot * VS
         } else {
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_vals);
             self.set(L_T2);
-            (slot - 2) * 16
+            (slot - 2) * VS
         };
         self.get(L_T2);
         self.mem(I64_LOAD, 3, at);
         self.set(L_Q0);
-        self.get(L_T2);
-        self.mem(I64_LOAD, 3, at + 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         self.op(BR);
         self.w.u(1);
@@ -3017,8 +2917,7 @@ impl<'a> Cg<'a> {
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.tag_at(b, off);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(BR_IF);
@@ -3048,23 +2947,19 @@ impl<'a> Cg<'a> {
         self.op(BR_IF);
         self.w.u(0);
         let vat = if slot < 2 {
-            l.off_inl0 + slot * 16
+            l.off_inl0 + slot * VS
         } else {
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_vals);
             self.set(L_T2);
-            (slot - 2) * 16
+            (slot - 2) * VS
         };
         self.get(L_T2);
         self.mem(I64_LOAD, 3, vat);
         self.set(L_Q0);
-        self.get(L_T2);
-        self.mem(I64_LOAD, 3, vat + 8);
-        self.set(L_Q0 + 1);
         if flags == 1 {
             // a script or native function (prop_cache's check)
-            self.get(L_T2);
-            self.mem(I32_LOAD8_U, 0, vat);
+            self.tag_at(L_T2, vat);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(BR_IF);
@@ -3088,9 +2983,6 @@ impl<'a> Cg<'a> {
             self.get(b);
             self.mem(I64_LOAD, 3, off);
             self.set(L_Q2);
-            self.get(b);
-            self.mem(I64_LOAD, 3, off + 8);
-            self.set(L_Q2 + 1);
         }
         self.store_val(dst, L_Q0);
         if flags != 0 {
@@ -3108,7 +3000,7 @@ impl<'a> Cg<'a> {
     fn pget_call(&mut self, dst: u32, b: u32, off: u32, a: u32, flags: i64, pc: i64) -> bool {
         self.get(L_SP);
         if dst != 0 {
-            self.i32c(dst as i64 * 16);
+            self.i32c(dst as i64 * VS as i64);
             self.op(I32_ADD);
         }
         self.i32c(a as i64);
@@ -3189,8 +3081,7 @@ impl<'a> Cg<'a> {
         let l = self.lay;
         if method {
             // L_T5 = the object, or a string's or number's prototype
-            self.get(b);
-            self.mem(I32_LOAD8_U, 0, off);
+            self.tag_at(b, off);
             self.set(L_T6);
             self.get(b);
             self.mem(I32_LOAD, 2, off + l.off_int);
@@ -3229,9 +3120,6 @@ impl<'a> Cg<'a> {
             self.get(b);
             self.mem(I64_LOAD, 3, off);
             self.set(L_Q2);
-            self.get(b);
-            self.mem(I64_LOAD, 3, off + 8);
-            self.set(L_Q2 + 1);
         }
         // look(&objs[id], cache, epoch): &value, or 0 (a miss)
         self.get(L_T5);
@@ -3270,9 +3158,6 @@ impl<'a> Cg<'a> {
         self.get(L_T4);
         self.mem(I64_LOAD, 3, 0);
         self.set(L_Q0);
-        self.get(L_T4);
-        self.mem(I64_LOAD, 3, 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         if method {
             self.store_val(dst + 1, L_Q2);
@@ -3366,7 +3251,7 @@ impl<'a> Cg<'a> {
         let (bb, bo) = self.place(b);
         let num_k = matches!(a, Opnd::Num(_)) || matches!(b, Opnd::Num(_));
         if !num_k {
-            // two small BigInts: their values
+            // two small BigInts: their bits
             self.get(L_TAG);
             self.i32c(l.t_big as i64);
             self.op(I32_EQ);
@@ -3374,10 +3259,10 @@ impl<'a> Cg<'a> {
             self.op(T_VOID);
             self.extra += 1;
             self.get(ab);
-            self.mem(F64_LOAD, 3, ao + l.off_num);
+            self.mem(I64_LOAD, 3, ao);
             self.get(bb);
-            self.mem(F64_LOAD, 3, bo + l.off_num);
-            self.op(F64_EQ);
+            self.mem(I64_LOAD, 3, bo);
+            self.op(I64_EQ);
             self.op(BR);
             self.w.u(1);
             self.extra -= 1;
@@ -3663,7 +3548,7 @@ impl<'a> Cg<'a> {
             self.store_undef(f as u32 + 1);
         }
         // f: c's function object; room on the stack for its frame
-        let fo = f as u32 * 16;
+        let fo = f as u32 * VS;
         self.need_obj(L_SP, fo, pc);
         self.get(L_SP);
         self.mem(I32_LOAD, 2, fo + l.off_int);
@@ -3691,7 +3576,7 @@ impl<'a> Cg<'a> {
         self.set(L_SENV);
         // the callee's frame: sp and bp at f + 2
         self.get(L_SP);
-        self.i32c((f as i64 + 2) * 16);
+        self.i32c((f as i64 + 2) * VS as i64);
         self.op(I32_ADD);
         self.set(L_SP);
         self.get(L_BP);
@@ -3709,7 +3594,7 @@ impl<'a> Cg<'a> {
         self.caches = c.caches.clone();
         self.atoms = c.atoms.clone();
         self.fsize = c.fsize;
-        self.inl_this = Some(((f as u32 + 1) * 16, c.strict));
+        self.inl_this = Some(((f as u32 + 1) * VS, c.strict));
         let mut cp = c.entry;
         let mut ret = false;
         while cp < c.code.len() && !self.inl_bad {
@@ -3726,9 +3611,6 @@ impl<'a> Cg<'a> {
                 self.w.byte(I64_CONST);
                 self.w.s(i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]));
                 self.set(L_Q0);
-                self.w.byte(I64_CONST);
-                self.w.s(i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]));
-                self.set(L_Q0 + 1);
                 ret = true;
                 break;
             }
@@ -3906,7 +3788,7 @@ impl<'a> Cg<'a> {
             self.get(L_VM);
             self.mem(I32_LOAD, 2, l.vm_stack_ptr);
             self.get(L_BP);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_SP);
@@ -3930,11 +3812,7 @@ impl<'a> Cg<'a> {
             self.get(L_SP);
             self.i32c(cell);
             self.mem(I64_LOAD, 3, 48);
-            self.mem(I64_STORE, 3, dst as u32 * 16);
-            self.get(L_SP);
-            self.i32c(cell);
-            self.mem(I64_LOAD, 3, 56);
-            self.mem(I64_STORE, 3, dst as u32 * 16 + 8);
+            self.mem(I64_STORE, 3, dst as u32 * VS);
             self.i32c(0);
             self.set(L_TAG);
             self.op(ELSE);
@@ -3998,7 +3876,7 @@ impl<'a> Cg<'a> {
         for (lb, lr) in [(L_FB, L_F), (L_DB, L_DST)] {
             self.get(L_SP);
             self.get(lr);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(lb);
@@ -4065,7 +3943,7 @@ impl<'a> Cg<'a> {
             self.op(I32_SUB);
             self.set(L_ARGC);
             self.get(L_FB);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_ADD);
             self.set(L_FB);
             // the function it calls, as f above
@@ -4091,15 +3969,14 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.i32c(1);
             self.op(I32_LT_S);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 32);
+            self.tag_at(L_FB, 2 * VS);
             self.i32c(tn);
             self.op(I32_NE);
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
             self.get(L_FB);
-            self.mem(F64_LOAD, 3, 32 + on);
+            self.mem(F64_LOAD, 3, 2 * VS + on);
             self.set(L_A);
             let done = |cg: &mut Cg<'a>| {
                 // L_A into dst; 0 (the caller reloads its registers' address
@@ -4108,9 +3985,6 @@ impl<'a> Cg<'a> {
                 cg.i32c(cell);
                 cg.get(L_SP);
                 cg.mem(I32_STORE, 2, 0);
-                cg.get(L_DB);
-                cg.i32c(tn);
-                cg.mem(I32_STORE8, 0, 0);
                 cg.get(L_DB);
                 cg.get(L_A);
                 cg.mem(F64_STORE, 3, on);
@@ -4189,8 +4063,7 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.i32c(2);
             self.op(I32_NE);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 48);
+            self.tag_at(L_FB, 3 * VS);
             self.i32c(tn);
             self.op(I32_NE);
             self.op(I32_OR);
@@ -4200,7 +4073,7 @@ impl<'a> Cg<'a> {
                 is(self, k);
                 self.get(L_A);
                 self.get(L_FB);
-                self.mem(F64_LOAD, 3, 48 + on);
+                self.mem(F64_LOAD, 3, 3 * VS + on);
                 self.op(op);
                 done(self);
                 self.op(END);
@@ -4218,19 +4091,18 @@ impl<'a> Cg<'a> {
                 cg.get(L_SP);
                 cg.mem(I32_STORE, 2, 0);
                 cg.get(L_DB);
-                cg.i32c(l.t_bool as i64);
-                cg.mem(I32_STORE8, 0, 0);
-                cg.get(L_DB);
                 cg.get(L_TAG);
-                cg.mem(I32_STORE8, 0, l.off_bool);
+                cg.op(I64_EXTEND_I32_U);
+                cg.i64c(crate::value::V_BOOL as i64);
+                cg.op(I64_OR);
+                cg.mem(I64_STORE, 3, 0);
                 cg.i32c(0);
                 cg.op(RETURN);
             };
             // slot k of the call (0 f, 1 this, 2 the first argument) not an
             // object: br_if out of the innermost block
             let not_obj = |cg: &mut Cg<'a>, k: u32| {
-                cg.get(L_FB);
-                cg.mem(I32_LOAD8_U, 0, k * 16);
+                cg.tag_at(L_FB, k * VS);
                 cg.i32c(to);
                 cg.op(I32_NE);
             };
@@ -4258,7 +4130,7 @@ impl<'a> Cg<'a> {
                 done(self);
                 self.op(END);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.obj_addr();
                 self.mem(I32_LOAD, 2, l.off_class);
                 self.i32c(class as i64);
@@ -4283,7 +4155,7 @@ impl<'a> Cg<'a> {
                 self.op(BR_IF);
                 self.w.u(0);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 16 + l.off_int);
+                self.mem(I32_LOAD, 2, VS + l.off_int);
                 self.obj_addr();
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T2 as u64);
@@ -4336,8 +4208,7 @@ impl<'a> Cg<'a> {
                 self.w.u(0);
                 // the value's reference (Vm::inc): an object's rc, a
                 // string handle's (> 0) rc
-                self.get(L_FB);
-                self.mem(I32_LOAD8_U, 0, 32);
+                self.tag_at(L_FB, 2 * VS);
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_TAG as u64);
                 self.i32c(to);
@@ -4345,7 +4216,7 @@ impl<'a> Cg<'a> {
                 self.op(IF);
                 self.op(T_VOID);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.obj_addr();
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T4 as u64);
@@ -4361,14 +4232,14 @@ impl<'a> Cg<'a> {
                 self.i32c(l.t_str as i64);
                 self.op(I32_EQ);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.i32c(0);
                 self.op(I32_GT_S);
                 self.op(I32_AND);
                 self.op(IF);
                 self.op(T_VOID);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.i32c(ssz);
                 self.op(I32_MUL);
                 self.get(L_VM);
@@ -4386,18 +4257,14 @@ impl<'a> Cg<'a> {
                 self.get(L_T5);
                 self.mem(I32_LOAD, 2, l.elems_vp);
                 self.get(L_T6);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T4 as u64);
                 self.get(L_FB);
-                self.mem(I64_LOAD, 3, 32);
+                self.mem(I64_LOAD, 3, 2 * VS);
                 self.mem(I64_STORE, 3, 0);
-                self.get(L_T4);
-                self.get(L_FB);
-                self.mem(I64_LOAD, 3, 40);
-                self.mem(I64_STORE, 3, 8);
                 self.get(L_T6);
                 self.i32c(1);
                 self.op(I32_ADD);
@@ -4409,9 +4276,6 @@ impl<'a> Cg<'a> {
                 self.i32c(cell);
                 self.get(L_SP);
                 self.mem(I32_STORE, 2, 0);
-                self.get(L_DB);
-                self.i32c(l.t_num as i64);
-                self.mem(I32_STORE8, 0, 0);
                 self.get(L_DB);
                 self.get(L_T6);
                 self.op(F64_CONVERT_I32_S);
@@ -4426,15 +4290,14 @@ impl<'a> Cg<'a> {
             self.op(I32_NE);
             not_obj(self, 1);
             self.op(I32_OR);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 32);
+            self.tag_at(L_FB, 2 * VS);
             self.i32c(l.t_str as i64);
             self.op(I32_NE);
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
             self.get(L_FB);
-            self.mem(I32_LOAD, 2, 16 + l.off_int);
+            self.mem(I32_LOAD, 2, VS + l.off_int);
             self.obj_addr();
             self.w.byte(LOCAL_TEE);
             self.w.u(L_T2 as u64);
@@ -4447,7 +4310,7 @@ impl<'a> Cg<'a> {
             let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
             let o_atom = std::mem::offset_of!(crate::vm::SEnt, atom) as u32;
             self.get(L_FB);
-            self.mem(I32_LOAD, 2, 32 + l.off_int);
+            self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
             self.i32c(sz);
             self.op(I32_MUL);
             self.get(L_VM);
@@ -4550,11 +4413,9 @@ impl<'a> Cg<'a> {
             {
                 let ob = bytes_of(Val::Obj(0));
                 let lo = i64::from_le_bytes([ob[0], ob[1], ob[2], ob[3], ob[4], ob[5], ob[6], ob[7]]);
-                let hi = i64::from_le_bytes([ob[8], ob[9], ob[10], ob[11], ob[12], ob[13], ob[14], ob[15]]);
                 ld(self, 6);
                 self.op(I32_EQZ);
-                self.get(L_FB);
-                self.mem(I32_LOAD8_U, 0, 16);
+                self.tag_at(L_FB, VS);
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T3 as u64);
                 self.i32c(l.t_undef as i64);
@@ -4569,15 +4430,11 @@ impl<'a> Cg<'a> {
                 self.get(L_FB);
                 self.w.byte(I64_CONST);
                 self.w.s(lo);
-                self.mem(I64_STORE, 3, 16);
-                self.get(L_FB);
-                self.w.byte(I64_CONST);
-                self.w.s(hi);
-                self.mem(I64_STORE, 3, 24);
+                self.mem(I64_STORE, 3, VS);
                 self.get(L_FB);
                 self.get(L_VM);
                 self.mem(I32_LOAD, 2, l.vm_global);
-                self.mem(I32_STORE, 2, 16 + l.off_int);
+                self.mem(I32_STORE, 2, VS + l.off_int);
                 self.op(END);
             }
             ld(self, 1);
@@ -4612,8 +4469,7 @@ impl<'a> Cg<'a> {
             self.op(I32_OR);
             ld(self, 6);
             self.op(I32_EQZ);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 16);
+            self.tag_at(L_FB, VS);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(I32_AND);
@@ -4654,20 +4510,19 @@ impl<'a> Cg<'a> {
             {
                 let u = bytes_of(Val::Undef());
                 let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-                let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
                 // L_T5 = &stack[len], L_T6 = &stack[need]
                 self.get(L_VM);
                 self.mem(I32_LOAD, 2, l.vm_stack_ptr);
                 self.set(L_T6);
                 self.get(L_T6);
                 self.get(L_T3);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.set(L_T5);
                 self.get(L_T6);
                 self.get(L_T4);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.set(L_T6);
@@ -4685,11 +4540,7 @@ impl<'a> Cg<'a> {
                 self.w.s(lo);
                 self.mem(I64_STORE, 3, 0);
                 self.get(L_T5);
-                self.w.byte(I64_CONST);
-                self.w.s(hi);
-                self.mem(I64_STORE, 3, 8);
-                self.get(L_T5);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_ADD);
                 self.set(L_T5);
                 self.op(BR);
@@ -4718,7 +4569,7 @@ impl<'a> Cg<'a> {
             self.mem(I64_STORE, 3, l.fr_pc);
             // locals past the arguments: undefined (L_C the callee's sp)
             self.get(L_FB);
-            self.i32c(32);
+            self.i32c(2 * VS as i64);
             self.op(I32_ADD);
             self.w.byte(LOCAL_TEE);
             self.w.u(L_C as u64);
@@ -4728,19 +4579,18 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.op(I32_LT_S);
             self.op(SELECT);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T3);
             self.get(L_C);
             ld(self, 3);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T4);
             let u = bytes_of(Val::Undef());
             let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-            let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
             self.op(BLOCK);
             self.op(T_VOID);
             self.op(LOOP);
@@ -4755,11 +4605,7 @@ impl<'a> Cg<'a> {
             self.w.s(lo);
             self.mem(I64_STORE, 3, 0);
             self.get(L_T3);
-            self.w.byte(I64_CONST);
-            self.w.s(hi);
-            self.mem(I64_STORE, 3, 8);
-            self.get(L_T3);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_ADD);
             self.set(L_T3);
             self.op(BR);
@@ -4814,7 +4660,7 @@ impl<'a> Cg<'a> {
             self.op(I32_ADD);
             self.op(ELSE);
             self.get(L_FB);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_ADD);
             self.op(END);
             self.set(L_T4);
@@ -4822,12 +4668,7 @@ impl<'a> Cg<'a> {
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.mem(I64_STORE, 3, l.frame_this);
-            self.get(L_T3);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.mem(I64_STORE, 3, l.frame_this + 8);
             st_k(self, l.fr_new_target, lo);
-            st_k(self, l.fr_new_target + 8, hi);
             st_k(self, l.fr_args_obj, -1);
             self.get(L_T3);
             self.i32c(0);
@@ -4968,7 +4809,7 @@ impl<'a> Cg<'a> {
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_stack_ptr);
         self.get(L_BP);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_SP);
@@ -4997,7 +4838,7 @@ impl<'a> Cg<'a> {
         // the value into dst (db is from the sp before the call)
         self.get(L_SP);
         self.get(L_DST);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_DB);
@@ -5005,10 +4846,6 @@ impl<'a> Cg<'a> {
         self.i32c(cell);
         self.mem(I64_LOAD, 3, 48);
         self.mem(I64_STORE, 3, 0);
-        self.get(L_DB);
-        self.i32c(cell);
-        self.mem(I64_LOAD, 3, 56);
-        self.mem(I64_STORE, 3, 8);
         self.i32c(0);
         self.set(L_TAG);
         self.op(ELSE);
@@ -5338,7 +5175,7 @@ impl<'a> Cg<'a> {
             self.get(L_SP);
             self.get(l);
             let on = self.lay.off_num;
-            self.mem(F64_STORE, 3, dst as u32 * 16 + on);
+            self.mem(F64_STORE, 3, dst as u32 * VS + on);
         } else {
             self.store_num(dst as u32, l);
         }
@@ -5378,8 +5215,7 @@ impl<'a> Cg<'a> {
                     self.op(I32_ADD);
                     self.set(L_T2);
                     if !strict {
-                        self.get(L_T2);
-                        self.mem(I32_LOAD8_U, 0, 0);
+                        self.tag_at(L_T2, 0);
                         self.i32c(self.lay.t_obj as i64);
                         self.op(I32_NE);
                         self.fail_if(p);
@@ -5394,9 +5230,6 @@ impl<'a> Cg<'a> {
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);
                 self.set(L_Q0);
-                self.get(L_T2);
-                self.mem(I64_LOAD, 3, 8);
-                self.set(L_Q0 + 1);
                 self.store_val(w1 as u32, L_Q0);
                 true
             }
@@ -5442,8 +5275,7 @@ impl<'a> Cg<'a> {
                 let l = self.lay;
                 let o = self.raw(w2);
                 let (b, off) = self.place(o);
-                self.get(b);
-                self.mem(I32_LOAD8_U, 0, off);
+                self.tag_at(b, off);
                 self.set(L_T2);
                 self.get(L_T2);
                 self.i32c(l.t_obj as i64);
@@ -5478,6 +5310,25 @@ impl<'a> Cg<'a> {
                 self.set(L_T2);
                 self.extra -= 1;
                 self.op(END);
+                // number .. string (0xFFF8 ..= 0xFFFC): its index from
+                // TYPE_NIB's nibbles
+                self.get(L_T2);
+                self.i32c(0xFFF8);
+                self.op(I32_SUB);
+                self.set(L_T3);
+                self.i32c(TYPE_NIB);
+                self.get(L_T3);
+                self.i32c(4);
+                self.op(I32_MUL);
+                self.op(I32_SHR_U);
+                self.i32c(15);
+                self.op(I32_AND);
+                self.get(L_T2);
+                self.get(L_T3);
+                self.i32c(5);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                self.set(L_T2);
                 // a small BigInt: 7 (its tag is not its type_index)
                 self.i32c(7);
                 self.get(L_T2);
@@ -5489,16 +5340,13 @@ impl<'a> Cg<'a> {
                 self.get(L_VM);
                 self.mem(I32_LOAD, 2, l.vm_type_vals_ptr);
                 self.get(L_T2);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.set(L_T2);
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);
                 self.set(L_Q0);
-                self.get(L_T2);
-                self.mem(I64_LOAD, 3, 8);
-                self.set(L_Q0 + 1);
                 self.store_val(w1 as u32, L_Q0);
                 true
             }
@@ -5509,8 +5357,7 @@ impl<'a> Cg<'a> {
                 let o = Opnd::Reg(w1 as u32);
                 let (b, off) = self.place(o);
                 if sub == 0 {
-                    self.get(b);
-                    self.mem(I32_LOAD8_U, 0, off);
+                    self.tag_at(b, off);
                     self.i32c(l.t_obj as i64);
                     self.op(I32_EQ);
                     self.get(b);
@@ -5520,12 +5367,10 @@ impl<'a> Cg<'a> {
                     self.op(I32_EQ);
                     self.op(I32_AND);
                 } else {
-                    self.get(b);
-                    self.mem(I32_LOAD8_U, 0, off);
+                    self.tag_at(b, off);
                     self.i32c(l.t_undef as i64);
                     self.op(I32_EQ);
-                    self.get(b);
-                    self.mem(I32_LOAD8_U, 0, off);
+                    self.tag_at(b, off);
                     self.i32c(l.t_null as i64);
                     self.op(I32_EQ);
                     self.op(I32_OR);
@@ -5538,23 +5383,15 @@ impl<'a> Cg<'a> {
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);
                 self.set(L_Q0);
-                self.get(L_T2);
-                self.mem(I64_LOAD, 3, 8);
-                self.set(L_Q0 + 1);
                 self.store_val(w1 as u32, L_Q0);
                 if sub == 1 {
                     // undefined in dst + 1: the bytes of Val::Undef
                     let u = bytes_of(Val::Undef());
                     let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-                    let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
                     self.get(L_SP);
                     self.w.byte(I64_CONST);
                     self.w.s(lo);
-                    self.mem(I64_STORE, 3, (w1 as u32 + 1) * 16);
-                    self.get(L_SP);
-                    self.w.byte(I64_CONST);
-                    self.w.s(hi);
-                    self.mem(I64_STORE, 3, (w1 as u32 + 1) * 16 + 8);
+                    self.mem(I64_STORE, 3, (w1 as u32 + 1) * VS);
                 }
                 true
             }
@@ -5583,8 +5420,7 @@ impl<'a> Cg<'a> {
                     cg.op(F64_ADD);
                     cg.set(L_A);
                     cg.env_slot_addr(sub as i32, w3);
-                    cg.get(L_T2);
-                    cg.mem(I32_LOAD8_U, 0, 0);
+                    cg.tag_at(L_T2, 0);
                     cg.set(L_TAG);
                     cg.get(L_TAG);
                     cg.i32c(l.t_num as i64);
@@ -5594,9 +5430,6 @@ impl<'a> Cg<'a> {
                     cg.op(I32_NE);
                     cg.op(I32_AND);
                     cg.fail_if(p);
-                    cg.get(L_T2);
-                    cg.i32c(l.t_num as i64);
-                    cg.mem(I32_STORE8, 0, 0);
                     cg.get(L_T2);
                     cg.get(L_A);
                     cg.mem(F64_STORE, 3, l.off_num);
@@ -5659,7 +5492,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_METHOD if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * 16, a, if sub == 0 { 1 } else { 2 }, -1, p))
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * VS, a, if sub == 0 { 1 } else { 2 }, -1, p))
             }
             R_GET_ELEM if self.lay.obj_ok && w1 >= 0 && w2 >= 0 => {
                 let key = self.opnd(w3);
@@ -5685,7 +5518,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * 16, a, 0, w3, p))
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * VS, a, 0, w3, p))
             }
             R_CMP_JF | R_CMP_JT | R_LOOP | R_CMP_JFK | R_CMP_JTK => {
                 let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w2, w3) } else { (w1, w2) };
@@ -5821,20 +5654,10 @@ impl<'a> Cg<'a> {
                     self.get(b);
                     self.mem(I64_LOAD, 3, off);
                     self.mem(I64_STORE, 3, 48);
-                    self.i32c(cell);
-                    self.get(b);
-                    self.mem(I64_LOAD, 3, off + 8);
-                    self.mem(I64_STORE, 3, 56);
                 } else {
-                    let t = self.lay.t_undef as i64;
                     self.i32c(cell);
-                    self.w.byte(I64_CONST);
-                    self.w.s(t);
+                    self.i64c(crate::value::V_UNDEF as i64);
                     self.mem(I64_STORE, 3, 48);
-                    self.i32c(cell);
-                    self.w.byte(I64_CONST);
-                    self.w.s(0);
-                    self.mem(I64_STORE, 3, 56);
                 }
                 self.i32c(cell);
                 self.i32c(p);
@@ -6775,21 +6598,21 @@ fn eget_body(l: Layout) -> Vec<u8> {
             k(&mut w, P_ACCESSOR as i64);
             w.byte(I32_AND);
             ret0(&mut w);
-            // slot i: i * 16 < 32 in the object, else in vals
+            // slot i: i * VS < 2 * VS in the object, else in vals
             get(&mut w, 0);
             k(&mut w, l.off_inl0 as i64);
             w.byte(I32_ADD);
             get(&mut w, 5);
-            k(&mut w, 16);
+            k(&mut w, VS as i64);
             w.byte(I32_MUL);
             w.byte(I32_ADD);
             get(&mut w, 0);
             ld(&mut w, l.off_vals);
             get(&mut w, 5);
-            k(&mut w, 16);
+            k(&mut w, VS as i64);
             w.byte(I32_MUL);
             w.byte(I32_ADD);
-            k(&mut w, 32);
+            k(&mut w, 2 * VS as i64);
             w.byte(I32_SUB);
             get(&mut w, 5);
             k(&mut w, 2);
@@ -7080,7 +6903,7 @@ fn look_body(l: Layout) -> Vec<u8> {
         k(&mut w, unsafe { std::ptr::addr_of!(UNDEF16) } as usize as i64);
         w.byte(RETURN);
         w.byte(END);
-        // the slot's address: slot * 16 < 32 in the object, else in vals
+        // the slot's address: slot * VS < 2 * VS in the object, else in vals
         get(&mut w, 6);
         k(&mut w, l.off_inl0 as i64);
         w.byte(I32_ADD);
@@ -7092,11 +6915,11 @@ fn look_body(l: Layout) -> Vec<u8> {
         get(&mut w, 5);
         ld(&mut w, 8);
         w.byte(I32_ADD);
-        k(&mut w, 32);
+        k(&mut w, 2 * VS as i64);
         w.byte(I32_SUB);
         get(&mut w, 5);
         ld(&mut w, 8);
-        k(&mut w, 32);
+        k(&mut w, 2 * VS as i64);
         w.byte(I32_LT_U);
         w.byte(SELECT);
         w.byte(RETURN);
@@ -7647,7 +7470,7 @@ fn run_at(vm: &mut crate::vm::Vm, f: i64, pi: usize, bp: i64, pc: i64, budget: i
     }
     ENTRIES.with(|e| e.set(e.get() + 1));
     fill_from(vm, bp as i32);
-    let sp = vm.stack.as_ptr() as usize + (bp as usize) * 16;
+    let sp = vm.stack.as_ptr() as usize + (bp as usize) * VSU;
     let kv = vm.kvals.as_ptr() as usize;
     let vp = vm as *mut crate::vm::Vm as usize;
     let r = host::call(f as i32, sp, kv, pc as i32, budget, vp, bp as i32);
@@ -8076,7 +7899,7 @@ fn fill_from(v: &crate::vm::Vm, bp: i32) {
     // SAFETY: CELL is only touched on this (the VM's) thread
     unsafe {
         let c = &mut *std::ptr::addr_of_mut!(CELL);
-        c[0] = (v.stack.as_ptr() as usize + (bp as usize) * 16) as i32;
+        c[0] = (v.stack.as_ptr() as usize + (bp as usize) * VSU) as i32;
         c[1] = v.kvals.as_ptr() as usize as i32;
         c[4] = v.objs.as_ptr() as usize as i32;
         c[5] = top_this(v);
@@ -8742,8 +8565,11 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
 // replace. In Vm.jit_caches, whose buffers do not move, by rcode index.
 
 const CACHE_WAYS: u32 = 4;
+/// typeof's index (vm.rs type_index) of tag 0xFFF8 + t in nibble t:
+/// number 3, undefined 0, null 1, bool 2, string 4
+const TYPE_NIB: i64 = 0x42103;
 /// a way's slot * 16 for a property absent from the whole chain
-const SLOT_ABSENT: i32 = -16;
+const SLOT_ABSENT: i32 = -(VS as i32);
 
 /// undefined as a value's 16 bytes, for an absent property (look);
 /// layout() writes it
@@ -8802,7 +8628,7 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
         if (vm.attr_at(o, own) & P_ACCESSOR) != 0 {
             return;
         }
-        way[2] = (own * 16) as i32;
+        way[2] = (own * VS as i64) as i32;
     } else {
         // a dictionary receiver gains keys without an epoch (add_own)
         if (!plain(cls) && !sp) || vm.shapes[ob.shape as usize].owned {
@@ -8836,7 +8662,7 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
                     return;
                 }
                 way[1] = d as i32;
-                way[2] = (k * 16) as i32;
+                way[2] = (k * VS as i64) as i32;
                 break;
             }
             if !plain(pc) {
@@ -9284,7 +9110,7 @@ fn direct(vm: &mut crate::vm::Vm, nf: usize, f: i64) -> i32 {
         c[2] = entry as i32;
         c[7] = f as i32;
         c[8] = cbp as i32;
-        c[10] = (vm.stack.as_ptr() as usize + (cbp as usize) * 16) as i32;
+        c[10] = (vm.stack.as_ptr() as usize + (cbp as usize) * VSU) as i32;
     }
     6
 }
