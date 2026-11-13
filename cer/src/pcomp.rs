@@ -3434,7 +3434,19 @@ impl PComp {
                 let fin = self.f().ctl[i as usize].fin;
                 if fin >= 0 {
                     let saved = self.split_ctl(i);
+                    // a return's value (and what lies above it) stays on
+                    // the stack through the finally block: a break or
+                    // continue there pops them on its way out
+                    let mut k: int = 0;
+                    while ret && k < above {
+                        self.f().ctl.push(new_ctl(CT_ITEM));
+                        k += 1;
+                    }
                     self.block_at(fin);
+                    while k > 0 {
+                        self.f().ctl.pop();
+                        k -= 1;
+                    }
                     self.join_ctl(saved);
                 } else if fin == -2 {
                     let un = self.f().ctl[i as usize].uname.clone();

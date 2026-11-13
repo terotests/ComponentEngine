@@ -5131,10 +5131,11 @@ impl<'a> Cg<'a> {
         self.set(L_A);
         self.num(b);
         self.set(L_B);
-        // !(a >= 0 && b > 0 && a <= 2^31-1 && b <= 2^31-1 && whole)
+        // !(a >= 1 && b > 0 && a <= 2^31-1 && b <= 2^31-1 && whole): a
+        // zero keeps its sign the slow way (-0 % 5 is -0)
         self.get(L_A);
         self.op(F64_CONST);
-        self.w.b.extend_from_slice(&0.0f64.to_le_bytes());
+        self.w.b.extend_from_slice(&1.0f64.to_le_bytes());
         self.op(F64_GE);
         self.get(L_B);
         self.op(F64_CONST);
@@ -8233,7 +8234,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                     a - b
                 } else if code == OP_MUL {
                     a * b
-                } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
+                } else if code == OP_MOD && a >= 1.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
                     ((a as int) % (b as int)) as double
                 } else if code >= OP_BAND && code <= OP_SHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
                     let (p, q) = (a as int, b as int);

@@ -838,3 +838,21 @@ RangeError,RangeError,RangeError,RangeError
 function f() { return f(); } let n; try { f(); } catch (e) { n = e.name; } n
 ----
 RangeError
+
+# break / continue in a finally block left by a return: the return's value
+# is popped on the way out (both machines; register code checks depths)
+==== js
+function g1(){ for(;;){ try{ return 1 } finally { break } } return 2 }
+function g2(){ var n=0; for(var i=0;i<3;i++){ try{ return 1 } finally { n++; continue } } return n }
+function g3(){ a:{ try{ return 1 } finally { break a } } return 2 }
+function g4(){ for (var x of [1,2,3]) { try { return x } finally { if (x < 3) continue } } return 'end' }
+function g7(){ out: for (var i=0;i<2;i++) { for (var j=0;j<2;j++) { try { return [i,j] } finally { if (j==0) continue out; } } } return 'done' }
+[g1(), g2(), g3(), g4(), g7()].join()
+----
+2,3,2,3,done
+
+# a zero keeps its sign in %: -0 % 5 is -0
+==== js
+function f(a){ return a % 5 } var z = -0; [Object.is(-0 % 5, -0), Object.is(z % 5, -0), Object.is(f(-0), -0), f(7), f(-7)].join()
+----
+true,true,true,2,-2

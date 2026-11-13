@@ -11,7 +11,8 @@
 // with the JIT off and on (min 0: every loop compiled at its first back
 // edge) and fails on a different answer. --bench times the loop workloads
 // below and cerxes/bench/cpu/*.js, off and on (the best of --runs). With
-// neither, both.
+// neither, both. --limits: endless loops in compiled code stop at the time
+// limit (Engine::set_time_limit) with the JIT on.
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -25,8 +26,9 @@ const TARGET = path.join(CRATE, "target-jit");
 const WASM = process.env.WJIT_WASM || path.join(TARGET, "wasm32-wasip1/release/cerxes_wasm.wasm");
 const args = process.argv.slice(2);
 const opt = (name, def) => args.find((a) => a.startsWith("--" + name + "="))?.slice(name.length + 3) ?? def;
-const doCases = args.includes("--cases") || !args.includes("--bench");
-const doBench = args.includes("--bench") || !args.includes("--cases");
+const doLimits = args.includes("--limits");
+const doCases = !doLimits && (args.includes("--cases") || !args.includes("--bench"));
+const doBench = !doLimits && (args.includes("--bench") || !args.includes("--cases"));
 const runs = Number(opt("runs", "3"));
 const min = Number(opt("min", "64"));
 
@@ -126,6 +128,9 @@ function engine() {
       const value = text(x.cx_result_ptr(), x.cx_result_len());
       const o = text(x.cx_output_ptr(), x.cx_output_len());
       return { failed, value, output: o };
+    },
+    limit(ms) {
+      x.cx_set_time_limit(e, ms);
     },
     stats() {
       x.cx_jit_stats();
@@ -315,4 +320,29 @@ if (doBench) {
   for (const r of rows) console.log(r.join("\t"));
 }
 
+if (doLimits) {
+  // endless loops the JIT compiles: each must stop at the time limit
+  const loops = [
+    "var s = 0; for (var i = 0; ; i++) s += i;",
+    "function f() { var s = 0; for (var i = 0; ; i++) s = (s + i) | 0; } f()",
+    "function inner(n) { var s = 0; for (var i = 0; i < n; i++) s += i; return s } function outer() { var t = 0; for (;;) t += inner(1000) } outer()",
+    "function k(o) { return o.a + 1 } var o = { a: 1 }; while (true) o.a = k(o) % 1000",
+    "[1, 2].sort(function () { for (;;) {} })",
+    "Promise.resolve().then(function () { var a = [1, 2, 3]; for (var i = 0; ; i++) a[i % 3] += i }); 1",
+  ];
+  let bad = 0;
+  for (const src of loops) {
+    const en = engine();
+    en.setJit(true, 0);
+    en.limit(100);
+    const t0 = performance.now();
+    const r = en.eval(src);
+    const ms = performance.now() - t0;
+    const ok = r.value.includes("script time limit exceeded") && ms < 1000;
+    if (!ok) bad++;
+    console.log(`${ok ? "ok  " : "FAIL"} ${ms.toFixed(0).padStart(5)} ms  ${src.slice(0, 60)}  => ${r.value.slice(0, 60)}`);
+  }
+  if (bad) process.exit(1);
+}
 process.exit(failures ? 1 : 0);
+

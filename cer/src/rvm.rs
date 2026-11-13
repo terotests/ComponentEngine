@@ -417,8 +417,9 @@ impl Vm {
                             let (a, b) = (*x, *y);
                             let r = if code >= OP_BAND && code <= OP_USHR {
                                 bit_fast(code, a, b)
-                            } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
-                                // whole non-negative int32s: an int remainder
+                            } else if code == OP_MOD && a >= 1.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
+                                // whole positive int32s: an int remainder (a 0
+                                // keeps its sign in arith_num: -0 % 5 is -0)
                                 let p = a as int;
                                 let q = b as int;
                                 (p % q) as double
