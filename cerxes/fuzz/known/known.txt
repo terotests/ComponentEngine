@@ -9,14 +9,12 @@
 # function it happened in (`… @ cerxes::vm::Vm::put_elem`), so an entry
 # survives edits elsewhere in the file.
 
-# --- first fuzz runs (2026-11-12, README.md here); being fixed in "Fix CErXes fuzzing findings"
-skip	lone-backslash	hang-lone-backslash.js: a backslash in code that is not \u… (`l\et`, a source ending in \) hangs the reader
-mismatch-snapshot	RegExp:undefined	mismatch-snapshot-regexp-source.js: RegExp source lost after restore
-# no native recursion limit and no heap limit yet: every deep recursion
-# through a builtin aborts, every huge allocation fails (V8 classes
-# native-recursion-depth, size-limits; README --heavy)
-stack-overflow	*	no native recursion depth limit (stack-overflow-map-proto.js, V8 class native-recursion-depth)
-oom	*	no heap limit (--heavy: repeat 2**31, Array(2**32-1).fill)
+# --- first fuzz runs (2026-11-12): all four fixed in #154 (lone backslash,
+# RegExp source after restore, tree compiler idx -1, Map proto stack
+# overflow), with frame / native stack / string / array limits. Their
+# cases stay in this directory as regression cases (`cerxes-fuzz known`).
+# There is still no total heap limit: --heavy may still report oom.
+oom	*	no total heap limit (many arrays just under the 2^25 element cap)
 
 # --- audit 2026-11-13 (/mnt/project-files/cerxes-audit), being fixed in "Audit CErXes code and fuzzing"
 panic	Vm::put_elem	F1 fill/copyWithin when valueOf shrinks the array
