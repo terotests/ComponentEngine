@@ -530,7 +530,7 @@ impl Engine {
 /// not restore, and the prelude is then compiled.
 #[ranger::target(rust)]
 pub fn prelude_snapshot(vm: &mut Vm) -> bool {
-    snapshot::restore(vm, include!("prelude_snap.rs"))
+    snapshot::restore_built_in(vm, include!("prelude_snap.rs"))
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]

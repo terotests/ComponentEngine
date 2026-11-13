@@ -390,6 +390,17 @@ pub fn snapshot(vm: &Vm) -> String {
 /// An engine's state from a snapshot's text, into `vm` (a new Vm); false
 /// when the text is not one, and `vm` is then not to be used.
 pub fn restore(vm: &mut Vm, text: &str) -> bool {
+    restore_as(vm, text, true)
+}
+
+/// restore of a text the engine itself carries (the prelude's): its code
+/// is not checked again (unit::code_ok).
+pub fn restore_built_in(vm: &mut Vm, text: &str) -> bool {
+    restore_as(vm, text, false)
+}
+
+/// restore; `check`: every function's code passes unit::code_ok.
+fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     let mut r = Reader::new(text);
     if r.num() != SNAPSHOT_FORMAT {
         return false;
@@ -485,6 +496,9 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             let b = r.num();
             p.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
             k += 1;
+        }
+        if check && !r.bad && !crate::unit::code_ok(&p, na, np) {
+            r.bad = true;
         }
         pack_code(&mut p);
         vm.protos.push(p);
@@ -766,13 +780,35 @@ fn valid_frames(vm: &Vm) -> bool {
     let np = vm.protos.len() as int;
     let no = vm.objs.len() as int;
     let ns = vm.stack.len() as int;
+    if !vm.frames.is_empty() && !vm.suspended {
+        return false;
+    }
+    let mut lens: Vec<int> = Vec::new();
     for f in vm.frames.iter() {
-        if f.proto < 0 || f.proto >= np || f.fobj >= no || f.env >= no || f.args_obj >= no || f.bp < 0 || f.bp > ns || f.pc < 0 {
+        if f.proto < 0 || f.proto >= np || f.fobj < -1 || f.fobj >= no || f.env < -1 || f.env >= no || f.args_obj < -1 || f.args_obj >= no || f.gen < -1 || f.gen >= no || f.bp < 2 || f.bp > ns || f.pc < 0 {
+            return false;
+        }
+        // the pc on an op of the function, its locals on the stack
+        let p = &vm.protos[f.proto as usize];
+        let n = proto_ops(p).len() as int;
+        if f.pc >= n || f.bp + p.nslots > ns || f.ret < -1 || f.ret >= ns || f.mv_from < -1 || f.mv_from >= ns || f.mv_to < -1 || f.mv_to >= ns {
+            return false;
+        }
+        if !in_objs(&f.this_val, no) || !in_objs(&f.new_target, no) {
+            return false;
+        }
+        lens.push(n);
+    }
+    for h in vm.handlers.iter() {
+        if h.frame < 0 || h.frame >= vm.frames.len() as int || h.sp < 0 || h.sp > ns || h.env < -1 || h.env >= no {
+            return false;
+        }
+        if h.catch_pc < 0 || h.catch_pc >= lens[h.frame as usize] || h.sp < vm.frames[h.frame as usize].bp - 2 {
             return false;
         }
     }
-    for h in vm.handlers.iter() {
-        if h.frame < 0 || h.frame >= vm.frames.len() as int || h.sp < 0 || h.sp > ns || h.env >= no {
+    for v in vm.stack.iter() {
+        if !in_objs(v, no) {
             return false;
         }
     }
@@ -823,5 +859,63 @@ fn valid_heap(vm: &Vm) -> bool {
             }
         }
     }
-    vm.global >= 0 && vm.global < no
+    // the free list names free objects; the roots, the built-in objects,
+    // the symbols and the pending jobs live ones
+    for f in vm.free_list.iter() {
+        if *f < 0 || *f >= no || !vm.objs[*f as usize].free {
+            return false;
+        }
+    }
+    let builtins = vec![
+        vm.object_proto, vm.function_proto, vm.array_proto, vm.string_proto, vm.number_proto, vm.boolean_proto, vm.symbol_proto,
+        vm.error_proto, vm.type_error_proto, vm.range_error_proto, vm.reference_error_proto, vm.syntax_error_proto, vm.regexp_proto,
+        vm.date_proto, vm.map_proto, vm.set_proto, vm.iter_proto, vm.promise_proto, vm.iterator_proto, vm.map_iter_proto,
+        vm.set_iter_proto, vm.string_iter_proto, vm.generator_proto, vm.generator_function_proto, vm.async_function_proto,
+        vm.async_generator_proto, vm.async_generator_function_proto, vm.async_from_sync, vm.proxy_hooks, vm.thrower, vm.tdz_obj,
+        vm.bigint_proto, vm.array_values_fn, vm.array_generic,
+    ];
+    for b in builtins.iter() {
+        if *b != -1 && !live_obj(vm, *b) {
+            return false;
+        }
+    }
+    if vm.prelude_protos < 0 || vm.prelude_protos > np {
+        return false;
+    }
+    for x in vm.roots.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for x in vm.symbols.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for (_, x) in vm.symbol_atoms.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for (_, x) in vm.symbol_registry.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for (_, x) in vm.bigints.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for v in vm.jobs.iter() {
+        if !in_objs(v, no) {
+            return false;
+        }
+    }
+    live_obj(vm, vm.global)
+}
+
+/// `o` names an object that is not free.
+fn live_obj(vm: &Vm, o: int) -> bool {
+    o >= 0 && o < vm.objs.len() as int && !vm.objs[o as usize].free
 }

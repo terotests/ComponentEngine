@@ -3754,9 +3754,11 @@ impl Vm {
             self.job_head = h as int;
             return;
         }
-        let mut rest = self.pending_jobs();
+        let rest = self.pending_jobs();
         let mut out: Vec<Val> = vec![a, b, c, d];
-        out.append(&mut rest);
+        for v in rest {
+            out.push(v);
+        }
         self.jobs = out;
         self.job_head = 0;
     }

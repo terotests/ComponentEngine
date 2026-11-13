@@ -60,7 +60,9 @@ impl Vm {
     pub fn env_of(&self, fi: usize, depth: int) -> int {
         let mut e = self.frames[fi].env;
         let mut d = depth;
-        while d > 0 {
+        // past the outermost scope: -1 (only code no compiler writes, a
+        // damaged code cache unit, gets there; env_slot answers undefined)
+        while d > 0 && e >= 0 {
             e = self.ob(e).proto as int;
             d -= 1;
         }
@@ -86,14 +88,22 @@ impl Vm {
         -1
     }
 
-    /// Slot `k` of scope `e`, unchecked: the compiler resolved it against
-    /// the scope the closure was made in.
+    /// Slot `k` of scope `e`: the compiler resolved it against the scope
+    /// the closure was made in; a scope or slot that is not there (code no
+    /// compiler writes) reads as undefined.
     #[inline(always)]
     pub fn env_slot(&self, e: int, k: int) -> Val {
+        if e < 0 {
+            return Val::Undef;
+        }
         let ev = self.ob(e).elems as usize;
         // a scope gets its slots when it is made (renter, PUSH_ENV) and
         // keeps them while a closure or frame refers to it
-        *val_at(&evec_at(&self.evecs, ev).v, k as usize)
+        let v = &evec_at(&self.evecs, ev).v;
+        if (k as usize) >= v.len() {
+            return Val::Undef;
+        }
+        *val_at(v, k as usize)
     }
 
     /// Slot `k` of scope `e` takes `v` (Vm::put_elem unchecked, as
@@ -101,7 +111,14 @@ impl Vm {
     /// the heap.
     #[inline(always)]
     pub fn env_put(&mut self, e: int, k: int, v: Val) {
+        if e < 0 {
+            return;
+        }
         let ev = self.ob(e).elems as usize;
+        if (k as usize) >= evec_at(&self.evecs, ev).v.len() {
+            // as env_slot: not a slot of the scope
+            return;
+        }
         let old = *val_at(&evec_at(&self.evecs, ev).v, k as usize);
         if is_heap(&v) || is_heap(&old) {
             self.put_elem(e, k, v);
