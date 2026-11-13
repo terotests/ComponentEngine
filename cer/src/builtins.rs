@@ -422,12 +422,9 @@ pub fn set_regex_limit(n: double) {
     limits(LIM_SET_REGEX, n);
 }
 
-pub fn regex_limit() -> int {
-    let l = limits(LIM_REGEX, 0.0);
-    if l >= 9.0e18 {
-        return 9000000000000000000;
-    }
-    l as int
+/// A double: the C++ target's int is 32 bits.
+pub fn regex_limit() -> double {
+    limits(LIM_REGEX, 0.0)
 }
 
 /// A match attempt has taken `steps`: true when it is to stop, past the

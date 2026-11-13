@@ -508,7 +508,7 @@ pub fn bitop(op: int, x: &str, y: &str) -> String {
 }
 
 /// 2^bits as a decimal string.
-/// 30 bits a step; stops (a wrong value) past the host's deadline, which
+/// 15 bits a step (limb * 2^15 fits the C++ target's 32-bit int); stops (a wrong value) past the host's deadline, which
 /// the caller's check_expired turns into the time limit's Error.
 pub fn pow2(bits: int) -> String {
     let mut acc: Vec<int> = vec![1];
@@ -517,7 +517,7 @@ pub fn pow2(bits: int) -> String {
         if crate::builtins::time_up(acc.len() as int) {
             return String::from("0");
         }
-        let k = if bits - i >= 30 { 30 } else { bits - i };
+        let k = if bits - i >= 15 { 15 } else { bits - i };
         acc = mul_small(&acc, 1 << k);
         i += k;
     }
@@ -526,6 +526,14 @@ pub fn pow2(bits: int) -> String {
 
 /// BigInt.asUintN: x modulo 2^bits, non-negative.
 pub fn as_uint_n(bits: int, x: &str) -> String {
+    if !x.starts_with("-") && (bits as double) > (digit_count(x) as double) * 3.33 + 8.0 {
+        // already below 2^bits
+        return String::from(x);
+    }
+    if (bits as double) > 1073741824.0 {
+        // a negative x would need 2^bits: past V8's BigInt size
+        return String::new();
+    }
     let m = pow2(bits);
     let r = rem(x, m.as_str());
     if r.starts_with("-") {
@@ -538,6 +546,10 @@ pub fn as_uint_n(bits: int, x: &str) -> String {
 pub fn as_int_n(bits: int, x: &str) -> String {
     if bits == 0 {
         return String::from("0");
+    }
+    if (bits as double) > (digit_count(x) as double) * 3.33 + 8.0 {
+        // already within [-2^(bits-1), 2^(bits-1))
+        return String::from(x);
     }
     let u = as_uint_n(bits, x);
     let half = pow2(bits - 1);
@@ -914,6 +926,18 @@ impl Vm {
                 return self.bigint_val(int_text(v).as_str());
             }
         }
+        if code == OP_EXP || code == OP_SHL || code == OP_SHR {
+            // a result past 2^30 bits (V8's limit) is an error, not a
+            // computation that runs for hours
+            let bits = (digit_count(x.as_str()) as double) * 3.33;
+            let n = to_double(y.as_str());
+            let big = x.as_str() != "0" && x.as_str() != "1" && x.as_str() != "-1";
+            let grows = if code == OP_EXP { big && n * bits > 1073741824.0 } else { x.as_str() != "0" && ((code == OP_SHL) == (n >= 0.0)) && (if n < 0.0 { -n } else { n }) + bits > 1073741824.0 };
+            if grows {
+                self.throw_range("Maximum BigInt size exceeded");
+                return Val::Undef;
+            }
+        }
         let r = match code {
             OP_ADD => add(x.as_str(), y.as_str()),
             OP_SUB => sub(x.as_str(), y.as_str()),
@@ -925,6 +949,13 @@ impl Vm {
                 let n = to_double(y.as_str());
                 let left = (code == OP_SHL) == (n >= 0.0);
                 let k = if n < 0.0 { -n } else { n };
+                if x.as_str() == "0" {
+                    return self.bigint_val("0");
+                }
+                if !left && k > (digit_count(x.as_str()) as double) * 3.33 + 8.0 {
+                    // shifted past every bit: the sign is what is left
+                    return self.bigint_val(if x.starts_with("-") { "-1" } else { "0" });
+                }
                 let p = pow2(k as int);
                 if left {
                     mul(x.as_str(), p.as_str())
@@ -1058,7 +1089,19 @@ impl Vm {
                 return Val::Undef;
             }
             let t = self.big_text(&x);
-            let r = if id == NF_BIGINT_ASINTN { as_int_n(bits as int, t.as_str()) } else { as_uint_n(bits as int, t.as_str()) };
+            // past 2^30 bits (before an int cast, 32 bits in C++): every
+            // BigInt is in range, but a negative one has no unsigned form
+            let r = if bits > 1073741824.0 {
+                if id == NF_BIGINT_ASINTN || !t.starts_with("-") { t.clone() } else { String::new() }
+            } else if id == NF_BIGINT_ASINTN {
+                as_int_n(bits as int, t.as_str())
+            } else {
+                as_uint_n(bits as int, t.as_str())
+            };
+            if r.is_empty() {
+                self.throw_range("Maximum BigInt size exceeded");
+                return Val::Undef;
+            }
             return self.bigint_val(r.as_str());
         }
         let v = self.this_bigint(&this);

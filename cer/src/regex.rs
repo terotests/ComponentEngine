@@ -2778,7 +2778,7 @@ impl Regex {
                 // backtrack: the budget counts these (a match that never
                 // goes back, however long, does not use it up)
                 backs += 1;
-                if backs > limit {
+                if (backs as double) > limit {
                     crate::builtins::regex_over();
                     stack.truncate(base);
                     return -1;

@@ -873,3 +873,12 @@ function b6() { x: { try { return 1; } catch (e) {} finally { break x; } } retur
 [c1(), c2(), c3(), b1(), b2(), b3(), b4(), b5(), b6()].join()
 ----
 100000,33,1-2-3,end,end,end,end,end,end
+
+# BigInt results past 2^30 bits throw (V8's limit) instead of computing for
+# hours; shifts past every bit and asUintN / asIntN of a value already in
+# range answer at once
+==== js
+var r = []; for (var f of [() => (2n**64n)**123456789012345678901234567890n, () => 1n<<(2n**40n), () => 5n>>(2n**40n), () => -5n>>(2n**40n), () => 0n<<(2n**40n), () => (-1n)**(10n**30n), () => BigInt.asUintN(2**53-1, 5n), () => BigInt.asIntN(2**53-1, -5n), () => BigInt.asUintN(2**53-1, -5n), () => BigInt.asIntN(3, 5n), () => (-(2n**100n))>>99n]) { try { r.push(String(f())) } catch (e) { r.push(e.name) } }
+r.join()
+----
+RangeError,RangeError,0,-1,0,1,5,-5,RangeError,-3,-2
