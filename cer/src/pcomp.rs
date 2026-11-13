@@ -983,6 +983,21 @@ impl PComp {
         self.toks[i as usize].kind as int
     }
 
+    /// `of` at `k` follows a punctuator other than ) ] }, so it is a name.
+    fn of_is_name(&self, k: int) -> bool {
+        if !self.tok_is(k, "of") {
+            return false;
+        }
+        let p = k - 1;
+        if (self.toks[p as usize].kind as int) != T_PUNCT {
+            return false;
+        }
+        if self.tok_is(p, ")") || self.tok_is(p, "]") {
+            return false;
+        }
+        !self.tok_is(p, "}")
+    }
+
     fn tok_is(&self, i: int, s: &str) -> bool {
         if i < 0 || i >= self.tok_count() {
             return false;
@@ -4231,7 +4246,7 @@ impl PComp {
         }
         // `of` after a punctuator other than ) ] } is a name, as in
         // `for (var e = of(x); …)` of minified code
-        while k < close && k > head && self.tok_is(k, "of") && self.toks[(k - 1) as usize].kind as int == T_PUNCT && !self.tok_is(k - 1, ")") && !self.tok_is(k - 1, "]") && !self.tok_is(k - 1, "}") {
+        while k < close && k > head && self.of_is_name(k) {
             k = self.scan_to(k + 1, ";", true);
         }
         if k < close && (self.tok_is(k, "in") || self.tok_is(k, "of")) && !self.in_cond_middle(head, k) {
