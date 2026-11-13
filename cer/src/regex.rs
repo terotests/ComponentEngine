@@ -10,6 +10,9 @@
 use ranger::prelude::*;
 
 const R_EMPTY: int = 0;
+/// The deepest group nesting a pattern may have: deeper, it is a
+/// SyntaxError rather than a stack overflow in the passes that recurse.
+const MAX_NESTING: int = 1000;
 const R_CHAR: int = 1;
 const R_ANY: int = 2;
 const R_CLASS: int = 3;
@@ -241,6 +244,8 @@ fn req_lit(p: &RParser, n: int, ic: bool, uni: bool) -> LitInfo {
 }
 
 struct RParser {
+    /// how deep `[` classes are nested (the v flag), MAX_NESTING at most
+    class_depth: int,
     src: Vec<int>,
     pos: int,
     nodes: Vec<RNode>,
@@ -404,6 +409,11 @@ impl RParser {
     }
 
     fn disjunction(&mut self) -> int {
+        if (self.alt_path.len() as int) > 2 * MAX_NESTING {
+            // the parser and every pass over the tree recurse on groups
+            self.fail("Invalid regular expression: too deeply nested");
+            return self.node(R_EMPTY);
+        }
         let id = self.ndisj;
         self.ndisj += 1;
         self.alt_path.push(id);
@@ -1209,6 +1219,17 @@ impl RParser {
     /// A v-mode class at its `[`: operands joined by union, `&&` or `--`,
     /// classes nested; the (normalized) ranges it matches.
     fn class_v(&mut self) -> Vec<int> {
+        if self.class_depth >= MAX_NESTING {
+            self.fail("Invalid regular expression: too deeply nested");
+            return Vec::new();
+        }
+        self.class_depth += 1;
+        let r = self.class_v_inner();
+        self.class_depth -= 1;
+        r
+    }
+
+    fn class_v_inner(&mut self) -> Vec<int> {
         self.pos += 1;
         let mut neg = false;
         if self.cur() == 94 {
@@ -1983,6 +2004,7 @@ fn empty_parser() -> RParser {
         name_index: Vec::new(),
         name_paths: Vec::new(),
         alt_path: Vec::new(),
+        class_depth: 0,
         ndisj: 0,
         has_names: false,
         refs: Vec::new(),

@@ -994,6 +994,44 @@ impl Vm {
         }
     }
 
+    /// The `source` a RegExp of compiled regex `idx` shows. A restored
+    /// snapshot keeps the regexes by their cache key ("source/flags") but
+    /// not the shown texts, so those are made again here when missing.
+    pub fn regex_shown_at(&mut self, idx: int) -> Val {
+        let ix = idx as usize;
+        if ix < self.regex_shown.len() && !matches!(self.regex_shown[ix], Val::Undef) {
+            return self.regex_shown[ix].clone();
+        }
+        let mut key = String::new();
+        for (k, v) in self.regex_cache.iter() {
+            if *v == idx {
+                key = k.clone();
+            }
+        }
+        // "source/flags": the flags are the letters after the last '/'
+        let cs: Vec<char> = key.chars().collect();
+        let mut cut = cs.len();
+        while cut > 0 && cs[cut - 1] != '/' {
+            cut -= 1;
+        }
+        if cut == 0 {
+            return Val::Undef;
+        }
+        let mut source = String::new();
+        let mut j: usize = 0;
+        while j + 1 < cut {
+            source.push(cs[j]);
+            j += 1;
+        }
+        let shown = shown_source(source.as_str());
+        while self.regex_shown.len() <= ix {
+            self.regex_shown.push(Val::Undef);
+        }
+        let v = self.string_val(shown);
+        self.regex_shown[ix] = v.clone();
+        v
+    }
+
     /// A RegExp object of compiled regex `idx`; `src` its source text.
     pub fn make_regexp(&mut self, idx: int, src: Val) -> Val {
         // the `source` shown, made once per regex
@@ -1002,7 +1040,7 @@ impl Vm {
         }
         if matches!(self.regex_shown[idx as usize], Val::Undef) {
             let s = self.to_string(&src);
-            let shown = if s.is_empty() { String::from("(?:)") } else { s.replace("/", "\\/").replace("\\\\/", "\\/").replace("\n", "\\n").replace("\r", "\\r").replace("\u{2028}", "\\u2028").replace("\u{2029}", "\\u2029") };
+            let shown = shown_source(s.as_str());
             self.regex_shown[idx as usize] = self.string_val(shown);
             // read-only properties (as add_prop marks them)
             self.mark_setter(A_LASTINDEX);
@@ -2684,6 +2722,12 @@ impl Vm {
                 if self.is_callable(&v) || self.objs[o as usize].class == C_SYMBOL {
                     return false;
                 }
+                // objects and arrays nest (stack holds them): the native
+                // stack is looked at every 32 levels
+                if (stack.len() & 31) == 31 && self.stack_exhausted() {
+                    self.throw_range("Maximum call stack size exceeded");
+                    return false;
+                }
                 if self.objs[o as usize].class == C_BIGINT {
                     self.throw_type("Do not know how to serialize a BigInt");
                     return false;
@@ -2884,6 +2928,10 @@ impl Vm {
             return Val::Undef;
         }
         let c = cs[*pos];
+        if (c == '{' || c == '[') && self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+            return Val::Undef;
+        }
         if c == '{' {
             *pos += 1;
             let o = self.new_object();
@@ -4195,7 +4243,10 @@ impl Vm {
                             self.throw_range("Invalid array length");
                             return Val::Undef;
                         }
-                        let len = if n > 100000000.0 { 100000000 } else { n as int };
+                        if self.elems_too_many(n) {
+                            return Val::Undef;
+                        }
+                        let len = n as int;
                         let mut v: Vec<Val> = Vec::new();
                         let mut i = 0;
                         while i < len {
@@ -5454,5 +5505,15 @@ pub fn num_str_merge_sort(v: &mut Vec<Val>) {
     while i2 < n {
         v[i2] = old[src[i2]];
         i2 += 1;
+    }
+}
+
+/// A regex's source as `RegExp.prototype.source` shows it: `/` and line
+/// terminators escaped, "(?:)" for an empty one.
+pub fn shown_source(s: &str) -> String {
+    if s.is_empty() {
+        String::from("(?:)")
+    } else {
+        s.replace("/", "\\/").replace("\\\\/", "\\/").replace("\n", "\\n").replace("\r", "\\r").replace("\u{2028}", "\\u2028").replace("\u{2029}", "\\u2029")
     }
 }
