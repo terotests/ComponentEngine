@@ -66,6 +66,7 @@ is one test, run as a script of its own with the rest of its file as setup.
 | 08-iter-gen-async-gc | generators re-entered, iterator close, Promise combinators re-entered, FinalizationRegistry, collection during callbacks | Promise.all resolve element re-entrancy, async generator queue |
 | 09-class-scope-intl | private fields and brand checks, super, TDZ, Function properties, Intl options | private brand on proxies and return-override objects, TDZ hole leaks |
 | 10-depth | native recursion depth: every case should end in a catchable RangeError | many: V8 has a stack limit everywhere |
+| 11-snapshot | CErXes only: state a snapshot taken in the middle must keep (for-in over a changing shape, suspended generators, iterators, lastIndex, sort in progress) | nearest: V8 snapshot/code-cache deserializer bugs |
 
 After a run, `out/own/` holds every test as a script of its own; the fuzzer
 can mutate them: `cerxes-fuzz run --corpus cerxes/tests/v8/out/own`.
