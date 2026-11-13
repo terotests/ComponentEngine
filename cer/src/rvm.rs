@@ -258,7 +258,7 @@ impl Vm {
             let ob = &self.objs[*o as usize];
             if ob.class == C_ARRAY {
                 let i = *n as int;
-                if i >= 0 && (i as usize) < self.evecs[ob.elems as usize].v.len() && (i as double) == *n {
+                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n {
                     f = self.evecs[ob.elems as usize].v[i as usize].clone();
                     done = true;
                 }
@@ -803,7 +803,7 @@ impl Vm {
                             if ob.class == C_ARRAY {
                                 let i = *n as int;
                                 let ev = ob.elems as usize;
-                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
+                                if i >= 0 && i < (evec_at(&self.evecs, ev).v.len() as int) && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
                                     r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
@@ -871,16 +871,16 @@ impl Vm {
                             if ob.class == C_ARRAY {
                                 let i = n as int;
                                 let ev = ob.elems as usize;
-                                if i >= 0 && (i as usize) < evec_at(&self.evecs, ev).v.len() && (i as double) == n && ob.pos < 2 {
+                                if i >= 0 && i < (evec_at(&self.evecs, ev).v.len() as int) && (i as double) == n && ob.pos < 2 {
                                     old = obj_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
                                     old_s = str_of(val_at(&evec_at(&self.evecs, ev).v, i as usize));
                                     elem_put_in(evec_mut(&mut self.evecs, ev), i as usize, val.clone());
                                     let oc = ob.cold as usize;
-                                    if oc > 0 && (i as usize) < self.colds[oc].elems2.len() {
+                                    if oc > 0 && i < (self.colds[oc].elems2.len() as int) {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && (i as usize) == self.evecs[ob.elems as usize].v.len() && (i as double) == n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();

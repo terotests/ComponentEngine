@@ -7801,7 +7801,7 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         if ob.class == C_ARRAY {
             let i = *n as int;
             let ev = &vm.evecs[ob.elems as usize].v;
-            if i >= 0 && (i as usize) < ev.len() && (i as double) == *n {
+            if i >= 0 && i < (ev.len() as int) && (i as double) == *n {
                 r = ev[i as usize];
                 done = true;
             }
@@ -7919,20 +7919,20 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
     }
     let e = vm.objs[o as usize].elems as usize;
     let len = vm.evecs[e].v.len();
-    if (i as usize) < len {
+    if i < (len as int) {
         vm.inc(&val);
         let old = crate::vm::obj_of(&vm.evecs[e].v[i as usize]);
         let old_s = crate::vm::str_of(&vm.evecs[e].v[i as usize]);
         elem_put(&mut vm.evecs[e], i as usize, val);
         let oc = vm.objs[o as usize].cold as usize;
-        if oc > 0 && (i as usize) < vm.colds[oc].elems2.len() {
+        if oc > 0 && i < (vm.colds[oc].elems2.len() as int) {
             vm.colds[oc].elems2[i as usize] = Val::Bool(false);
         }
         vm.dec_o(old);
         vm.sdec(old_s);
         return true;
     }
-    if (i as usize) == len && e != 0 && vm.objs[o as usize].extensible && vm.objs[o as usize].pos != 3 {
+    if i == (len as int) && e != 0 && vm.objs[o as usize].extensible && vm.objs[o as usize].pos != 3 {
         vm.inc(&val);
         vm.evecs[e].v.push(val);
         return true;

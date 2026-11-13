@@ -171,6 +171,33 @@ fn mul_small(a: &Vec<int>, m: int) -> Vec<int> {
     out
 }
 
+/// (quotient, remainder) of a magnitude by a small d (1 <= d <= 100000:
+/// a remainder times BASE plus a limb stays below 2^31).
+fn div_small(a: &Vec<int>, d: int) -> (Vec<int>, int) {
+    let mut q: Vec<int> = vec![0; a.len()];
+    let mut r: int = 0;
+    let mut i = (a.len() as int) - 1;
+    while i >= 0 {
+        let t = r * BASE + a[i as usize];
+        q[i as usize] = t / d;
+        r = t % d;
+        i -= 1;
+    }
+    trim(&mut q);
+    (q, r)
+}
+
+/// The largest power of radix up to 100000, and its exponent.
+fn radix_chunk(radix: int) -> (int, int) {
+    let mut m = radix;
+    let mut k = 1;
+    while m * radix <= 100000 {
+        m = m * radix;
+        k += 1;
+    }
+    (m, k)
+}
+
 /// (quotient, remainder) of magnitudes; b not zero.
 fn divmod_mag(a: &Vec<int>, b: &Vec<int>) -> (Vec<int>, Vec<int>) {
     if cmp_mag(a, b) < 0 {
@@ -398,11 +425,18 @@ pub fn to_radix(x: &str, radix: int) -> String {
     }
     let mut digits: Vec<char> = Vec::new();
     let chars = "0123456789abcdefghijklmnopqrstuvwxyz".chars().collect::<Vec<char>>();
+    // k digits a pass, by short division with radix^k
+    let (m, k) = radix_chunk(radix);
     while !a.is_empty() {
-        let (q, r) = divmod_mag(&a, &vec![radix]);
-        let d = if r.is_empty() { 0 } else { r[0] };
-        digits.push(chars[d as usize]);
+        let (q, r) = div_small(&a, m);
         a = q;
+        let mut v = r;
+        let mut j = 0;
+        while j < k && (v > 0 || !a.is_empty()) {
+            digits.push(chars[(v % radix) as usize]);
+            v = v / radix;
+            j += 1;
+        }
     }
     let mut s = String::new();
     if n {
@@ -421,9 +455,13 @@ fn mag_bytes(a: &Vec<int>) -> Vec<int> {
     let mut out: Vec<int> = Vec::new();
     let mut m = a.clone();
     while !m.is_empty() {
-        let (q, r) = divmod_mag(&m, &vec![256]);
-        out.push(if r.is_empty() { 0 } else { r[0] });
+        let (q, r) = div_small(&m, 65536);
+        out.push(r % 256);
+        out.push(r / 256);
         m = q;
+    }
+    while !out.is_empty() && out[out.len() - 1] == 0 {
+        out.pop();
     }
     out
 }
@@ -431,12 +469,20 @@ fn mag_bytes(a: &Vec<int>) -> Vec<int> {
 fn bytes_mag(b: &Vec<int>) -> Vec<int> {
     let mut acc: Vec<int> = Vec::new();
     let mut i = (b.len() as int) - 1;
-    while i >= 0 {
-        acc = mul_small(&acc, 256);
+    // two bytes a pass when there are two left
+    if (b.len() & 1) == 1 {
         if b[i as usize] != 0 {
-            acc = add_mag(&acc, &vec![b[i as usize]]);
+            acc = vec![b[i as usize]];
         }
         i -= 1;
+    }
+    while i >= 1 {
+        acc = mul_small(&acc, 65536);
+        let v = b[i as usize] * 256 + b[(i - 1) as usize];
+        if v != 0 {
+            acc = add_mag(&acc, &vec![v]);
+        }
+        i -= 2;
     }
     trim(&mut acc);
     acc
@@ -492,6 +538,11 @@ pub fn bitop(op: int, x: &str, y: &str) -> String {
 pub fn pow2(bits: int) -> String {
     let mut acc: Vec<int> = vec![1];
     let mut i = 0;
+    // 13 bits a pass: a limb times 8192 plus its carry stays below 2^31
+    while i + 13 <= bits {
+        acc = mul_small(&acc, 8192);
+        i += 13;
+    }
     while i < bits {
         acc = mul_small(&acc, 2);
         i += 1;
@@ -499,8 +550,33 @@ pub fn pow2(bits: int) -> String {
     result(false, acc)
 }
 
+/// V8's limit on a BigInt's size, 2^30 bits: a result past it throws
+/// "Maximum BigInt size exceeded" before any work is done.
+pub const MAX_BITS: double = 1073741824.0;
+
+/// An upper bound of the bits of a canonical decimal's magnitude: each
+/// digit is at most log2(10) = 3.3219... bits; "0" has none.
+pub fn bits_above(s: &str) -> double {
+    if s == "0" {
+        return 0.0;
+    }
+    (digit_count(s) as double) * 3.3219280949 + 1.0
+}
+
+/// A lower bound of the same: 10^(digits-1) <= |x|.
+pub fn bits_below(s: &str) -> double {
+    if s == "0" {
+        return 0.0;
+    }
+    ((digit_count(s) - 1) as double) * 3.3219280948
+}
+
 /// BigInt.asUintN: x modulo 2^bits, non-negative.
 pub fn as_uint_n(bits: int, x: &str) -> String {
+    // a non-negative x below 2^bits is its own result: 2^bits is never made
+    if !x.starts_with("-") && (bits as double) >= bits_above(x) {
+        return String::from(x);
+    }
     let m = pow2(bits);
     let r = rem(x, m.as_str());
     if r.starts_with("-") {
@@ -513,6 +589,10 @@ pub fn as_uint_n(bits: int, x: &str) -> String {
 pub fn as_int_n(bits: int, x: &str) -> String {
     if bits == 0 {
         return String::from("0");
+    }
+    // -2^(bits-1) <= x < 2^(bits-1): x itself
+    if ((bits - 1) as double) >= bits_above(x) {
+        return String::from(x);
     }
     let u = as_uint_n(bits, x);
     let half = pow2(bits - 1);
@@ -879,22 +959,42 @@ impl Vm {
                 return self.bigint_val(int_text(v).as_str());
             }
         }
+        if self.big_too_big(code, x.as_str(), y.as_str()) {
+            self.throw_range("Maximum BigInt size exceeded");
+            return Val::Undef;
+        }
         let r = match code {
             OP_ADD => add(x.as_str(), y.as_str()),
             OP_SUB => sub(x.as_str(), y.as_str()),
             OP_MUL => mul(x.as_str(), y.as_str()),
             OP_DIV => div(x.as_str(), y.as_str()),
             OP_MOD => rem(x.as_str(), y.as_str()),
-            OP_EXP => pow(x.as_str(), y.as_str()),
+            OP_EXP => {
+                if x == "0" || x == "1" || y == "0" {
+                    // 0 ** 0 is 1; a negative exponent is left to pow
+                    if y.starts_with("-") { String::new() } else if y == "0" { String::from("1") } else { x.clone() }
+                } else if x == "-1" && !y.starts_with("-") {
+                    let last = y.as_bytes()[y.as_bytes().len() - 1] as int;
+                    if (last & 1) == 1 { String::from("-1") } else { String::from("1") }
+                } else {
+                    pow(x.as_str(), y.as_str())
+                }
+            }
             OP_SHL | OP_SHR => {
                 let n = to_double(y.as_str());
                 let left = (code == OP_SHL) == (n >= 0.0);
                 let k = if n < 0.0 { -n } else { n };
-                let p = pow2(k as int);
-                if left {
+                if x == "0" {
+                    String::from("0")
+                } else if !left && k >= bits_above(x.as_str()) {
+                    // every bit shifted out: 0, or -1 for a negative x (floor)
+                    if x.starts_with("-") { String::from("-1") } else { String::from("0") }
+                } else if left {
+                    let p = pow2(k as int);
                     mul(x.as_str(), p.as_str())
                 } else {
                     // floor division
+                    let p = pow2(k as int);
                     let q = div(x.as_str(), p.as_str());
                     let r2 = rem(x.as_str(), p.as_str());
                     if r2.starts_with("-") {
@@ -921,6 +1021,34 @@ impl Vm {
             return Val::Undef;
         }
         self.bigint_val(r.as_str())
+    }
+
+    /// Whether a BigInt operation's result would pass MAX_BITS, from the
+    /// operands' sizes alone (lower bounds: a result that fits is never
+    /// refused).
+    fn big_too_big(&self, code: int, x: &str, y: &str) -> bool {
+        if x == "0" {
+            return false;
+        }
+        if code == OP_MUL {
+            return y != "0" && bits_below(x) + bits_below(y) > MAX_BITS;
+        }
+        if code == OP_SHL || code == OP_SHR {
+            let n = to_double(y);
+            let left = (code == OP_SHL) == (n >= 0.0);
+            let k = if n < 0.0 { -n } else { n };
+            return left && bits_below(x) + k > MAX_BITS;
+        }
+        if code == OP_EXP {
+            if x == "1" || x == "-1" || y.starts_with("-") {
+                return false;
+            }
+            // |x| >= 2: at least one bit per unit of the exponent
+            let lx = bits_below(x);
+            let per = if lx > 1.0 { lx } else { 1.0 };
+            return to_double(y) * per > MAX_BITS;
+        }
+        false
     }
 
     /// `<` with a BigInt on either side: 1, 0, or -1 (undefined).
@@ -1015,6 +1143,17 @@ impl Vm {
                 return Val::Undef;
             }
             let t = self.big_text(&x);
+            // x fits in the bits: x itself, decided on the double (an int
+            // may be 32 bits on some targets)
+            let fits = if id == NF_BIGINT_ASINTN { bits - 1.0 >= bits_above(t.as_str()) } else { !t.starts_with("-") && bits >= bits_above(t.as_str()) };
+            if fits {
+                return x;
+            }
+            // a negative x modulo 2^bits needs all of the bits
+            if id == NF_BIGINT_ASUINTN && t.starts_with("-") && bits > MAX_BITS {
+                self.throw_range("Maximum BigInt size exceeded");
+                return Val::Undef;
+            }
             let r = if id == NF_BIGINT_ASINTN { as_int_n(bits as int, t.as_str()) } else { as_uint_n(bits as int, t.as_str()) };
             return self.bigint_val(r.as_str());
         }
