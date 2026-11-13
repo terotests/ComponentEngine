@@ -806,3 +806,25 @@ i32[1] = 4294967295;
 [B.join(" "), L.join(), C.join(), u8.join(), i32.join(), i32[1] ^ i32[0]].join(" | ")
 ----
 3,-1,-4,-8,-1,536870911 0,-1294967263,-1294967263,1705032704,-647483648,1500000000 2,-1,-3,-4,-1,1073741823 -2147483648,-1,2147483647,0,-1,1 0,0,0,0,0,0 0,1,1,0,0,0 | 4,3,2,2,2,4 | 65,228,NaN,-3,66 | 250,253,0,3 | -2,-1 | 1
+
+# a base class's field initializer runs as a frame before the constructor's
+# body (rvm r_fields_frame), defines fields with DEFINE_FIELD (rvm win_op):
+# order, this, a throw from an initializer, frozen and non-extensible cases
+==== js
+const log = [];
+class A { x = (log.push("x"), 1); y = this.x + 1; static s = 5; constructor(a) { log.push("ctor" + this.y); this.a = a; } }
+class B extends A { z = this.y * 10; constructor() { super(7); log.push("B" + this.z); } }
+const a = new A(3), b = new B();
+class T { f = (() => { throw new Error("boom"); })(); }
+let caught = ""; try { new T(); } catch (e) { caught = e.message; }
+class P { #p = 4; q = this.#p + 1; get p() { return this.#p; } }
+const p = new P();
+class D { constructor() { Object.preventExtensions(this); } }
+class E extends D { e = 1; }
+let ne = ""; try { new E(); } catch (e) { ne = e.constructor.name; }
+class G { ["c" + 1] = 2; 3 = "n"; }
+const g = new G();
+let n = 0; for (let i = 0; i < 300; i++) n += new A(i).y + new B().z;
+[log.slice(0, 6).join(), a.x, a.y, a.a, b.z, b.a, caught, p.p, p.q, ne, g.c1, g[3], n, A.s].join()
+----
+x,ctor2,x,ctor2,B20,x,1,2,3,20,7,boom,4,5,TypeError,2,n,6600,5

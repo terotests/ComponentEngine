@@ -207,6 +207,21 @@ impl Vm {
             OP_ADD_PROP_POP => {
                 self.add_prop_pop(op);
             }
+            OP_DEFINE_FIELD => {
+                // a public field defined as Vm::step's case does it, its
+                // throws (a fixed property, a non-extensible object) and
+                // private fields left to step
+                let o = if op.b == 1 || self.stack.len() < 2 { -1 } else { obj_of(&self.stack[self.stack.len() - 2]) };
+                if o < 0 {
+                    return self.step(op, pi, bp, fi, pc);
+                }
+                let slot = self.find(o, op.a as int);
+                if (slot >= 0 && (self.attr_at(o, slot) & P_FIXED) != 0) || (slot < 0 && !self.objs[o as usize].extensible && self.objs[o as usize].class == C_OBJECT) {
+                    return self.step(op, pi, bp, fi, pc);
+                }
+                let v = self.pop();
+                self.define(o, (op.a as int), v, 0);
+            }
             _ => {
                 return self.step(op, pi, bp, fi, pc);
             }
@@ -2393,9 +2408,43 @@ impl Vm {
         let nf = self.frames.len() - 1;
         self.frames[nf].construct = true;
         self.frames[nf].new_target = f;
-        if base_cls {
+        if base_cls && !self.r_fields_frame(tfo, this) {
             self.run_fields(tfo, &this);
         }
+        true
+    }
+
+    /// A base class's field initializer entered as a frame of rrun's loop
+    /// above the constructor's just entered (frames' top), so that it runs
+    /// first, as run_fields would before the body; its result goes to the
+    /// initializer's own slot of f, past the constructor's frame. true when
+    /// done or there are no fields; false for an initializer that is not a
+    /// plain function (run_fields then).
+    #[inline(never)]
+    fn r_fields_frame(&mut self, ctor: int, this: Val) -> bool {
+        let c = self.objs[ctor as usize].cold as usize;
+        if self.colds[c].elems2.is_empty() {
+            return true;
+        }
+        let f = self.colds[c].elems2[0];
+        let fo = obj_of(&f);
+        if fo < 0 || self.objs[fo as usize].class != C_FUNCTION {
+            return false;
+        }
+        {
+            let p = &self.protos[self.objs[fo as usize].func as usize];
+            if p.rest >= 0 || p.class_ctor || p.generator || p.is_async {
+                return false;
+            }
+        }
+        let nf = self.frames.len() - 1;
+        let fpos = self.frames[nf].bp + self.protos[self.frames[nf].proto as usize].fsize;
+        while (self.stack.len() as int) < fpos + 2 {
+            self.stack.push(Val::Undef);
+        }
+        self.stack[fpos as usize] = f;
+        self.stack[(fpos + 1) as usize] = this;
+        self.renter(fo, fpos, 0, fpos);
         true
     }
 
