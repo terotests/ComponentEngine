@@ -240,6 +240,65 @@ pub fn elems_set(e: &mut Elems, v: Vec<Val>) {
     e.v = v;
 }
 
+/// An object's property values from slot 2 on (JsObj.vals): a struct, so
+/// each target writes them where they are. Rust: a thin vector, one
+/// pointer in the object (svec.rs).
+#[ranger::target(rust)]
+pub struct Slots {
+    pub v: crate::svec::SVec,
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub struct Slots {
+    pub v: Vec<Val>,
+}
+
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn slots_new() -> Slots {
+    Slots { v: crate::svec::SVec::new() }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn slots_new() -> Slots {
+    Slots { v: Vec::new() }
+}
+
+/// The values and their buffer go.
+#[ranger::target(rust)]
+pub fn slots_free(s: &mut Slots) {
+    s.v.free();
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn slots_free(s: &mut Slots) {
+    s.v = Vec::new();
+}
+
+/// Value `i` for an `i` the caller has checked (Rust: unchecked).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn slots_at(s: &Slots, i: usize) -> Val {
+    *s.v.get_unchecked(i)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn slots_at(s: &Slots, i: usize) -> Val {
+    s.v[i]
+}
+
+/// `s.v[i] = x` for an `i` the caller has checked (Rust: unchecked).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn slots_put(s: &mut Slots, i: usize, x: Val) {
+    *s.v.get_unchecked_mut(i) = x;
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn slots_put(s: &mut Slots, i: usize, x: Val) {
+    s.v[i] = x;
+}
+
 pub struct JsObj {
     pub class: i32,
     /// the prototype, -1 for none; for a scope, the enclosing scope
@@ -253,7 +312,7 @@ pub struct JsObj {
     pub inl0: Val,
     pub inl1: Val,
     /// the values of slots 2 on
-    pub vals: Vec<Val>,
+    pub vals: Slots,
     /// the property count
     pub nv: i32,
     /// the object's Cold (`Vm.colds`), 0 for none
@@ -290,7 +349,7 @@ impl JsObj {
             shape: 0,
             inl0: Val::Undef,
             inl1: Val::Undef,
-            vals: Vec::new(),
+            vals: slots_new(),
             nv: 0,
             cold: 0,
             elems: 0,
@@ -314,10 +373,10 @@ impl JsObj {
         self.inl0 = Val::Undef;
         self.inl1 = Val::Undef;
         self.nv = 0;
-        if self.vals.len() as int <= INDEX_AT {
-            self.vals.truncate(0);
+        if self.vals.v.len() as int <= INDEX_AT {
+            self.vals.v.truncate(0);
         } else {
-            self.vals = Vec::new();
+            slots_free(&mut self.vals);
         }
         self.env = -1;
         self.func = -1;
@@ -336,7 +395,9 @@ impl JsObj {
         } else if i == 1 {
             self.inl1
         } else {
-            self.vals[i - 2]
+            // nv is in the object: no read of the values' header
+            assert!(i < self.nv as usize, "slot past the object's values");
+            slots_at(&self.vals, i - 2)
         }
     }
 
@@ -348,7 +409,8 @@ impl JsObj {
         } else if i == 1 {
             self.inl1 = v;
         } else {
-            self.vals[i - 2] = v;
+            assert!(i < self.nv as usize, "slot past the object's values");
+            slots_put(&mut self.vals, i - 2, v);
         }
     }
 
@@ -360,7 +422,7 @@ impl JsObj {
         } else if n == 1 {
             self.inl1 = v;
         } else {
-            self.vals.push(v);
+            self.vals.v.push(v);
         }
         self.nv = n + 1;
     }
@@ -371,7 +433,7 @@ impl JsObj {
         let all = self.slots();
         self.inl0 = Val::Undef;
         self.inl1 = Val::Undef;
-        self.vals.truncate(0);
+        self.vals.v.truncate(0);
         self.nv = 0;
         let mut i: usize = 0;
         while i < all.len() {
@@ -388,13 +450,13 @@ impl JsObj {
         let n = self.nv as usize;
         // vals holds slots 2.. (one move of the rest, not a slot at a time)
         if i >= 2 {
-            self.vals.remove(i - 2);
+            self.vals.v.remove(i - 2);
         } else {
             if i == 0 {
                 self.inl0 = self.inl1;
             }
             if n > 2 {
-                self.inl1 = self.vals.remove(0);
+                self.inl1 = self.vals.v.remove(0);
             } else {
                 self.inl1 = Val::Undef;
                 if n == 1 {
