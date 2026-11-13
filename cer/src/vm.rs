@@ -2725,11 +2725,13 @@ impl Vm {
             }
             _ => {}
         }
-        if let Some(x) = a.as_bool() {
+        if a.is_bool() {
+            let x = a.boolv();
             let n = Val::Num(if x { 1.0 } else { 0.0 });
             return self.loose_equals(&n, b);
         }
-        if let Some(y) = b.as_bool() {
+        if b.is_bool() {
+            let y = b.boolv();
             let n = Val::Num(if y { 1.0 } else { 0.0 });
             return self.loose_equals(a, &n);
         }
@@ -6400,7 +6402,7 @@ impl Vm {
         }
         // a binding, not matches!(.., Val::Bool(true)): rgrc's JS matches the
         // variant only and would count every marker as a hole
-        if let Some(b) = (&e2[i as usize]).as_bool() { b } else { false }
+        let e = &e2[i as usize]; e.is_bool() && e.boolv()
     }
 
     pub fn mark_hole(&mut self, o: int, i: int) {

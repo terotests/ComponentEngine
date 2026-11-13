@@ -883,7 +883,7 @@ impl Vm {
         if self.throwing {
             return Val::Undef();
         }
-        if let Some(b) = (&p).as_bool() { return self.bigint_val(if b { "1" } else { "0" }) } else if let Some(s) = (&p).as_str() {
+        if p.is_bool() { return self.bigint_val(if p.boolv() { "1" } else { "0" }) } else if let Some(s) = (&p).as_str() {
                 let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 if t.is_empty() {
@@ -1121,7 +1121,7 @@ impl Vm {
                 let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 !t.is_empty() && t == x
-            } else if let Some(bv) = other.as_bool() { x.as_str() == (if bv { "1" } else { "0" }) } else {
+            } else if other.is_bool() { x.as_str() == (if other.boolv() { "1" } else { "0" }) } else {
                 if self.is_bigint(other) {
                     return self.big_text(other) == x;
                 }

@@ -122,10 +122,6 @@ impl Val {
         let d = self.b.wrapping_sub(V_STR);
         if d <= 0xFFFF_FFFF { Some(d as int) } else { None }
     }
-    #[inline(always)]
-    pub fn as_bool(&self) -> Option<bool> {
-        if (self.b >> 48) == 0xFFFB { Some((self.b & 1) != 0) } else { None }
-    }
     /// the number of a Val that is_num (the other getters likewise)
     #[inline(always)]
     pub fn num(&self) -> double {
@@ -139,6 +135,8 @@ impl Val {
     pub fn strh(&self) -> int {
         self.b.wrapping_sub(V_STR) as int
     }
+    // no as_bool() -> Option<bool>: rgrc's C++ keeps an Option<bool> as a plain
+    // bool (None and Some(false) alike); is_bool() and boolv() instead
     #[inline(always)]
     pub fn boolv(&self) -> bool {
         (self.b & 1) != 0
@@ -250,9 +248,6 @@ impl Val {
     }
     pub fn as_str(&self) -> Option<int> {
         if let VK::Str(x) = self.k { Some(x) } else { None }
-    }
-    pub fn as_bool(&self) -> Option<bool> {
-        if let VK::Bool(x) = self.k { Some(x) } else { None }
     }
     pub fn num(&self) -> double {
         if let VK::Num(x) = self.k { x } else { 0.0 }
