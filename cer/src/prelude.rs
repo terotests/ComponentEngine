@@ -787,10 +787,17 @@ hide(Promise, 'withResolvers', function withResolvers() {
 
 // ---- Array.prototype.toSpliced (ES2023)
 hide(Array.prototype, 'toSpliced', function toSpliced(start, skip) {
-  var o = Object(this); var len = o.length >>> 0;
+  'use strict';
+  if (this === null || this === undefined) throw new TypeError('Array.prototype.toSpliced called on null or undefined');
+  var o = Object(this); var len = toIntegerOrInfinity(o.length);
+  len = len <= 0 ? 0 : Math.min(len, 9007199254740991);
   var s = toIntegerOrInfinity(start);
   s = s < 0 ? Math.max(len + s, 0) : Math.min(s, len);
   var n = arguments.length === 0 ? 0 : arguments.length === 1 ? len - s : Math.min(Math.max(toIntegerOrInfinity(skip), 0), len - s);
+  // the spec's length checks, before any element is read
+  var newLen = len + Math.max(arguments.length - 2, 0) - n;
+  if (newLen > 9007199254740991) throw new TypeError('Invalid array length');
+  if (newLen > 4294967295) throw new RangeError('Invalid array length');
   var out = [];
   for (var i = 0; i < s; i++) out.push(o[i]);
   for (var j = 2; j < arguments.length; j++) out.push(arguments[j]);

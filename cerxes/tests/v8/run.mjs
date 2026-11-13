@@ -60,6 +60,16 @@ function build() {
   const need = new Set(configs);
   if (!fs.existsSync(BIN) || need.has("regs")) run1("cargo", ["build", "--release", "--bin", "cerxes"], CE);
   if (need.has("snap")) run1("cargo", ["build", "--release", "--bin", "snaprun"], path.join(CE, "fuzz"));
+  if (need.has("wjit")) {
+    // as bench/wjit.mjs --build does
+    const crate = path.resolve(CE, "../playground/cerxes-wasm");
+    const r = spawnSync("cargo", ["build", "--release", "--target", "wasm32-wasip1", "--features", "wjit"], {
+      cwd: crate,
+      stdio: ["ignore", "ignore", "inherit"],
+      env: { ...process.env, CARGO_TARGET_DIR: path.join(crate, "target-jit"), RUSTFLAGS: "-Awarnings -C link-arg=--export-table -C link-arg=--growable-table" },
+    });
+    if (r.status !== 0) process.exit(1);
+  }
 }
 function run1(cmd, a, cwd) {
   const r = spawnSync(cmd, a, { cwd, stdio: ["ignore", "ignore", "inherit"], env: { ...process.env, RUSTFLAGS: "-Awarnings" } });
@@ -192,7 +202,12 @@ async function own() {
   console.log(`report: ${path.join(OUT, "own-report.md")}`);
   console.log(`(cp ${path.join(OUT, "own-known.json")} ${path.join(HERE, "known.json")} to accept today's verdicts)`);
   // a crash class that known.json did not have fails the run
-  const worse = changes.filter((l) => / → .*(panic|stack-overflow|oom|wasm-trap|crash)/.test(l) && !/ → same$/.test(l));
+  const crashes = (v) => new Set((v ?? "same").split(" ").filter((x) => /:(panic|stack-overflow|oom|wasm-trap|crash)/.test(x)));
+  const worse = Object.keys(now).filter((id) => {
+    const before = crashes(known[id]);
+    return [...crashes(now[id])].some((x) => !before.has(x));
+  });
+  if (worse.length) console.log("new crash classes: " + worse.join(", "));
   process.exit(worse.length ? 1 : 0);
 }
 
