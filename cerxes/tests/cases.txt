@@ -806,3 +806,35 @@ i32[1] = 4294967295;
 [B.join(" "), L.join(), C.join(), u8.join(), i32.join(), i32[1] ^ i32[0]].join(" | ")
 ----
 3,-1,-4,-8,-1,536870911 0,-1294967263,-1294967263,1705032704,-647483648,1500000000 2,-1,-3,-4,-1,1073741823 -2147483648,-1,2147483647,0,-1,1 0,0,0,0,0,0 0,1,1,0,0,0 | 4,3,2,2,2,4 | 65,228,NaN,-3,66 | 250,253,0,3 | -2,-1 | 1
+
+# fuzzing finds (cerxes/fuzz/known): a lone backslash ends with an error,
+# it does not read the same empty name forever
+==== js
+let r = []; for (const s of ["\\", "a \\", "x\\y", "#\\"]) { try { eval(s); r.push("ran"); } catch (e) { r.push(e.name); } } r.join()
+----
+SyntaxError,SyntaxError,SyntaxError,SyntaxError
+
+# a function in a finally block is compiled once (the block is written
+# twice, for the normal path and for the exception's)
+==== js
+let out = ""; try { try { throw 1; } finally { (function () { var [x, ...z] = [1, 2, 3]; out = z.join("-"); })(); } } catch (e) { out += ":" + e; } out
+----
+2-3:1
+
+# early errors the parser reports like pcomp
+==== js
+let r = []; for (const s of ["typeof 2 ** 2", "let [a];", "const {b};", "a: a: ;", "/(?<a b)/"]) { try { eval(s); r.push("ran"); } catch (e) { r.push(e.name); } } r.join()
+----
+SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError
+
+# too long a string or array is a RangeError, not a failed allocation
+==== js
+let r = []; for (const f of [() => "x".padStart(2 ** 31), () => new Array(2 ** 32 - 1), () => { const a = []; a.length = 2 ** 32 - 1; }, () => { let s = "ab"; for (;;) s += s; }]) { try { f(); r.push("ran"); } catch (e) { r.push(e.name); } } r.join()
+----
+RangeError,RangeError,RangeError,RangeError
+
+# deep recursion is a RangeError
+==== js
+function f() { return f(); } let n; try { f(); } catch (e) { n = e.name; } n
+----
+RangeError

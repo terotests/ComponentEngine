@@ -515,6 +515,8 @@ pub const PT_NL: i32 = 1;
 pub const PT_ESCAPED: i32 = 2;
 
 pub struct PComp {
+    /// the native stack where compiling began (stack_deeper_than)
+    pub sp0: int,
     toks: Vec<PTok>,
     /// the tokens' texts, each once (`name_ids` finds one)
     names: Vec<String>,
@@ -695,6 +697,7 @@ impl PComp {
     pub fn new_syntax(src: &str, atoms: HashMap<String, int>, atom_names: Vec<String>, proto_base: int, jsx: bool, factory: &str, fragment: &str) -> PComp {
         let mut lx = lexer_for(src, jsx, factory, fragment);
         let mut c = PComp {
+            sp0: crate::vm::native_sp(),
             toks: Vec::new(),
             names: Vec::new(),
             name_ids: HashMap::new(),
@@ -3110,6 +3113,8 @@ impl PComp {
     /// them. Answers what pop_tokens needs back.
     fn push_tokens(&mut self, src: &str) -> Vec<int> {
         let mut lx = lexer_for(src, self.jsx, self.jsx_factory.as_str(), self.jsx_fragment.as_str());
+        // the stack budget counts from where compiling began
+        lx.sp0 = self.sp0;
         let base = self.toks.len() as int;
         let xbase = self.xs.len() as int;
         let mut saved: Vec<int> = Vec::new();
@@ -3464,7 +3469,19 @@ impl PComp {
         self.is("let") && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "[") || self.peek_is(1, "{"))
     }
 
+    /// Whether the nesting has used the native stack up: a SyntaxError.
+    fn too_nested(&mut self) -> bool {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+            return false;
+        }
+        self.fail("Maximum call stack size exceeded");
+        true
+    }
+
     fn statement(&mut self) {
+        if self.too_nested() {
+            return;
+        }
         let in_list = self.list_stmt;
         self.list_stmt = false;
         let using_ok = self.using_here;
@@ -3513,7 +3530,7 @@ impl PComp {
                     return;
                 }
             }
-            if ws == "var" || ws == "const" || (ws == "let" && self.is_let_decl() && (in_list || !self.tok_nl(self.pos + 1) || !(self.peek_kind(1) == T_IDENT))) {
+            if ws == "var" || ws == "const" || (ws == "let" && self.is_let_decl() && (in_list || !self.tok_nl(self.pos + 1) || !(self.peek_kind(1) == T_IDENT || self.peek_is(1, "{")))) {
                 self.var_decl();
                 self.semicolon();
                 return;
@@ -4026,6 +4043,9 @@ impl PComp {
                 self.goto(ts);
                 self.pattern_target(kind);
                 self.goto(after);
+            } else if !single {
+                self.fail("Missing initializer in destructuring declaration");
+                return;
             } else if kind == K_CONST {
                 self.fail("Missing initializer in const declaration");
                 return;
@@ -5282,7 +5302,7 @@ impl PComp {
     }
 
     fn assign(&mut self) -> Ex {
-        if !self.error.is_empty() {
+        if !self.error.is_empty() || self.too_nested() {
             return ex(E_OTHER);
         }
         if self.arrow_ahead() {

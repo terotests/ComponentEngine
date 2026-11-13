@@ -6,6 +6,7 @@
 //! optional chaining, `??`, exponentiation and shorthand object members.
 
 use ranger::prelude::*;
+use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::lexer::*;
@@ -27,6 +28,12 @@ pub struct Parser {
     /// `yield` and `await` are operators here
     in_generator: bool,
     in_async: bool,
+    /// the labels around the statement being read, in this function
+    labels: Vec<String>,
+    /// the native stack where parsing began (stack_deeper_than)
+    sp0: int,
+    /// the closing bracket of each opening one scanned for an arrow
+    mates: HashMap<int, int>,
     /// the expression last closed by `)`: `({a}) = …` is not a pattern
     last_paren: int,
     /// inside strict code (a "use strict" directive seen)
@@ -180,6 +187,9 @@ impl Parser {
             in_class: false,
             in_generator: false,
             in_async: false,
+            labels: Vec::new(),
+            sp0: crate::vm::native_sp(),
+            mates: HashMap::new(),
             last_paren: -1,
             strict: false,
             member_start: 0,
@@ -410,7 +420,19 @@ impl Parser {
 
     // ---- statements
 
+    /// Whether the nesting has used the native stack up: a SyntaxError.
+    fn too_nested(&mut self) -> bool {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+            return false;
+        }
+        self.fail("Maximum call stack size exceeded");
+        true
+    }
+
     fn statement(&mut self) -> int {
+        if self.too_nested() {
+            return self.node(N_EMPTY);
+        }
         if self.kind() == T_PUNCT {
             if self.is("{") {
                 return self.block();
@@ -425,11 +447,13 @@ impl Parser {
             let ws = w.as_str();
             if ws == "var" || ws == "const" {
                 let n = self.var_decl();
+                self.check_initializers(n);
                 self.semicolon();
                 return n;
             }
             if ws == "let" && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "[") || self.peek_is(1, "{")) {
                 let n = self.var_decl();
+                self.check_initializers(n);
                 self.semicolon();
                 return n;
             }
@@ -548,9 +572,20 @@ impl Parser {
             if self.peek_is(1, ":") && !is_reserved(ws) {
                 let n = self.node(N_LABELED);
                 self.ast.nodes[n as usize].s = w.clone();
+                let mut dup = false;
+                for l in self.labels.iter() {
+                    if l.as_str() == ws {
+                        dup = true;
+                    }
+                }
+                if dup {
+                    self.fail(format!("Label '{}' has already been declared", ws).as_str());
+                }
+                self.labels.push(w.clone());
                 self.next();
                 self.next();
                 let b = self.statement();
+                self.labels.pop();
                 self.ast.nodes[n as usize].a = b;
                 return n;
             }
@@ -611,6 +646,26 @@ impl Parser {
         self.ast.nodes[n as usize].op = kw;
         self.ast.nodes[n as usize].list = decls;
         n
+    }
+
+    /// Outside a for-in / for-of head a pattern, and a const, needs an
+    /// initializer (an early error).
+    fn check_initializers(&mut self, n: int) {
+        let decls = self.ast.nodes[n as usize].list.clone();
+        for d in decls {
+            if self.ast.nodes[d as usize].b >= 0 {
+                continue;
+            }
+            let t = self.ast.nodes[d as usize].a;
+            if self.ast.kind(t) != N_IDENT {
+                self.fail("Missing initializer in destructuring declaration");
+                return;
+            }
+            if self.ast.nodes[n as usize].op.as_str() == "const" {
+                self.fail("Missing initializer in const declaration");
+                return;
+            }
+        }
     }
 
     /// An identifier or a destructuring pattern.
@@ -764,6 +819,8 @@ impl Parser {
                 let e = self.ast.add(N_EXPR, line);
                 self.ast.nodes[e as usize].a = init;
                 init = e;
+            } else {
+                self.check_initializers(init);
             }
         }
         if is_await {
@@ -1013,6 +1070,8 @@ impl Parser {
         self.in_generator = (flags & F_GENERATOR) != 0;
         self.in_async = (flags & F_ASYNC) != 0;
         self.in_function = true;
+        let saved_labels = self.labels.clone();
+        self.labels.clear();
         let n = self.node(N_BLOCK);
         self.expect("{");
         self.directives(owner);
@@ -1023,6 +1082,7 @@ impl Parser {
         }
         self.expect("}");
         self.ast.nodes[n as usize].list = body;
+        self.labels = saved_labels;
         self.in_function = saved;
         self.in_generator = saved_gen;
         self.in_async = saved_async;
@@ -1031,7 +1091,7 @@ impl Parser {
     }
 
     /// True when the tokens from here are an arrow function's head.
-    fn arrow_ahead(&self) -> bool {
+    fn arrow_ahead(&mut self) -> bool {
         let mut k: int = 0;
         if self.peek_is(0, "async") && !self.toks[(self.pos + 1) as usize].nl && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "(")) {
             if self.peek_kind(1) == T_IDENT {
@@ -1045,31 +1105,47 @@ impl Parser {
         if !self.peek_is(k, "(") {
             return false;
         }
-        let mut depth = 0;
-        let mut i = self.pos + k;
+        let i = self.mate(self.pos + k);
+        let n = self.toks.len() as int;
+        if i < 0 || i + 1 >= n {
+            return false;
+        }
+        let u = &self.toks[(i + 1) as usize];
+        u.kind == T_PUNCT && u.text.as_str() == "=>" && !u.nl
+    }
+
+    /// The token that closes the bracket at token `open`, or -1. Every
+    /// bracket passed on the way is remembered (mates), so nested
+    /// parentheses are scanned once, not once for each level.
+    fn mate(&mut self, open: int) -> int {
+        if let Some(c) = self.mates.get(&open) {
+            return *c;
+        }
+        let mut stack: Vec<int> = Vec::new();
+        let mut i = open;
         let n = self.toks.len() as int;
         while i < n {
             let t = &self.toks[i as usize];
             if t.kind == T_PUNCT {
                 let s = t.text.as_str();
                 if s == "(" || s == "[" || s == "{" {
-                    depth += 1;
+                    stack.push(i);
                 } else if s == ")" || s == "]" || s == "}" {
-                    depth -= 1;
-                    if depth == 0 {
-                        if i + 1 < n {
-                            let u = &self.toks[(i + 1) as usize];
-                            return u.kind == T_PUNCT && u.text.as_str() == "=>" && !u.nl;
-                        }
-                        return false;
+                    if stack.is_empty() {
+                        return -1;
+                    }
+                    let o = stack.pop().unwrap();
+                    self.mates.insert(o, i);
+                    if stack.is_empty() {
+                        return i;
                     }
                 }
             } else if t.kind == T_EOF {
-                return false;
+                return -1;
             }
             i += 1;
         }
-        false
+        -1
     }
 
     fn arrow(&mut self) -> int {
@@ -1437,6 +1513,9 @@ impl Parser {
     }
 
     fn assign(&mut self) -> int {
+        if self.too_nested() {
+            return self.node(N_EMPTY);
+        }
         if self.arrow_ahead() {
             return self.arrow();
         }
@@ -1567,6 +1646,9 @@ impl Parser {
             if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_async) {
                 self.next();
                 let a = self.unary();
+                if self.is("**") && s != "await" {
+                    self.fail("unary operator before **");
+                }
                 if s == "delete" && self.strict && self.ast.kind(a) == N_IDENT {
                     self.fail("Delete of an unqualified identifier in strict mode.");
                 }
@@ -1831,6 +1913,8 @@ impl Parser {
         let mut es: Vec<int> = Vec::new();
         for src in exprs {
             let mut sp = Parser::new(src.as_str());
+            // the stack budget counts from the outermost parser's start
+            sp.sp0 = self.sp0;
             sp.in_function = self.in_function;
             sp.in_class = self.in_class;
             let e = sp.expression();
@@ -1887,6 +1971,11 @@ impl Parser {
             let s = self.text();
             let fx = self.toks[self.pos as usize].x;
             let f = if fx >= 0 { self.lx.xs[fx as usize].flags.clone() } else { String::new() };
+            // a literal that is not a regular expression is an early error
+            let rerr = crate::regex::check(s.as_str(), f.as_str());
+            if !rerr.is_empty() {
+                self.fail(format!("Invalid regular expression: /{}/{}: {}", s, f, rerr).as_str());
+            }
             self.ast.nodes[n as usize].s = s;
             self.ast.nodes[n as usize].op = f;
             self.next();
