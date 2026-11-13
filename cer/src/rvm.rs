@@ -234,7 +234,8 @@ impl Vm {
     #[inline(never)]
     pub fn r_add_env(&mut self, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let depth = (w0 >> 8) & 255;
-        if let (Some(x), Some(y)) = ((self.rget(bp, w1)).as_num(), (self.rget(bp, w2)).as_num()) {
+        let va_ = *self.rget(bp, w1); let vb_ = *self.rget(bp, w2);
+        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
             let r = x + y;
             let e = self.get_env(depth);
             self.put_elem(e, w3, Val::NumC(r));
@@ -254,7 +255,7 @@ impl Vm {
         let k = self.rget(bp, w3).clone();
         let mut f = Val::Undef();
         let mut done = false;
-        if let (Some(o), Some(n)) = ((&v).as_obj(), (&k).as_num()) {
+        if let Some(o) = (&v).as_obj() { if let Some(n) = (&k).as_num() {
             let ob = &self.objs[o as usize];
             if ob.class == C_ARRAY {
                 let i = n as int;
@@ -263,7 +264,7 @@ impl Vm {
                     done = true;
                 }
             }
-        }
+        }}
         if !done {
             f = self.get_elem(&v, &k);
         }
@@ -397,7 +398,8 @@ impl Vm {
                     R_ADD => {
                         let mut r = Val::Undef();
                         let mut done = false;
-                        if let (Some(x), Some(y)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
                             r = Val::NumC(x + y);
                             done = true;
                         }
@@ -409,7 +411,8 @@ impl Vm {
                         self.r_add_slow(bp, fi, pc, (w1 as int), (w2 as int), (w3 as int));
                     }
                     R_SUB | R_MUL => {
-                        if let (Some(x), Some(y)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
                             let r = if ((w0 & 255) as int) == R_SUB { x - y } else { x * y };
                             self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -420,7 +423,8 @@ impl Vm {
                     }
                     R_ARITH => {
                         let code = ((w0 >> 8) & 255) as int;
-                        if let (Some(x), Some(y)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
                             let (a, b) = (x, y);
                             let r = if code >= OP_BAND && code <= OP_USHR {
                                 bit_fast(code, a, b)
@@ -449,7 +453,8 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Some(a), Some(b)) = ((self.rget(bp, (w1 as int))).as_num(), (self.rget(bp, (w2 as int))).as_num()) {
+                        let va_ = *self.rget(bp, (w1 as int)); let vb_ = *self.rget(bp, (w2 as int));
+                        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
                             num = true;
                             r = match (code as int) {
                                 OP_LT => a < b,
@@ -480,7 +485,8 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Some(a), Some(b)) = ((self.rget(bp, (w1 as int))).as_num(), (self.rget(bp, (w2 as int))).as_num()) {
+                        let va_ = *self.rget(bp, (w1 as int)); let vb_ = *self.rget(bp, (w2 as int));
+                        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
                             num = true;
                             r = match (code as int) {
                                 OP_LT => a < b,
@@ -584,7 +590,8 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Some(a), Some(b)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
                             num = true;
                             r = match (code as int) {
                                 OP_LT => a < b,
@@ -794,7 +801,7 @@ impl Vm {
                     R_GET_ELEM => {
                         let mut r = Val::Undef();
                         let mut done = false;
-                        if let (Some(o), Some(n)) = ((self.rget(bp, (w2 as int))).as_obj(), (self.rget(bp, (w3 as int))).as_num()) {
+                        if let Some(o) = (self.rget(bp, (w2 as int))).as_obj() { if let Some(n) = (self.rget(bp, (w3 as int))).as_num() {
                             let ob = obj_at(&self.objs, o as usize);
                             if ob.class == C_ARRAY {
                                 let i = n as int;
@@ -814,7 +821,7 @@ impl Vm {
                                     }
                                 }
                             }
-                        }
+                        }}
                         if done {
                             self.rset((bp + (w1 as int)) as usize, r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -823,7 +830,7 @@ impl Vm {
                         let v = self.rget(bp, (w2 as int)).clone();
                         let kv = self.rget(bp, (w3 as int)).clone();
                         self.frames[fi].pc = pc + 1;
-                        if let (Some(po), Some(kh)) = (v.as_obj(), kv.as_str()) {
+                        if v.is_obj() && kv.is_str() { let po = v.obj(); let kh = kv.strh();
                             if self.objs[po as usize].class == C_PROXY && self.strs[kh as usize].atom >= 0 {
                                 let a = self.strs[kh as usize].atom as int;
                                 let fpos = bp + self.protos[pi].fsize;
@@ -1139,7 +1146,8 @@ impl Vm {
                         continue;
                     }
                     R_ADD_ENV => {
-                        if let (Some(x), Some(y)) = ((self.rget(bp, (w1 as int))).as_num(), (self.rget(bp, (w2 as int))).as_num()) {
+                        let va_ = *self.rget(bp, (w1 as int)); let vb_ = *self.rget(bp, (w2 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
                             let r = Val::NumC(x + y);
                             let e = self.env_of(fi, ((w0 >> 8) & 255) as int);
                             self.env_put(e, (w3 as int), r);
@@ -1267,7 +1275,7 @@ impl Vm {
                         let b = *self.rget(bp, (w2 as int));
                         let i = (bp + (w1 as int)) as usize;
                         // numbers first: the string append below is the rarer case
-                        if let (Some(x), Some(y)) = ((val_at(&self.stack, i)).as_num(), (&b).as_num()) {
+                        if (val_at(&self.stack, i)).is_num() && (&b).is_num() { let x = (val_at(&self.stack, i)).num(); let y = (&b).num();
                             let r = Val::NumC(x + y);
                             self.rset(i, r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -1280,7 +1288,7 @@ impl Vm {
                             let a = self.stack[i].clone();
                             let mut r = Val::Undef();
                             let mut quick = false;
-                            if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) {
+                            if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                                 r = Val::NumC(x + y);
                                 quick = true;
                             }
@@ -2047,12 +2055,12 @@ impl Vm {
         }
         let a = *self.rget(bp, m.b as int);
         let mut r = Val::Undef();
-        if let (Some(h), Some(x)) = (t.as_str(), a.as_num()) {
+        if let Some(h) = t.as_str() { if let Some(x) = a.as_num() {
             let u = self.char_unit(h, x);
             if u != -1.0 {
                 r = Val::NumC(u);
             }
-        }
+        }}
         if r.is_undef() {
             r = self.char_code_fast(&t, &a);
             if r.is_undef() {
@@ -2876,7 +2884,7 @@ impl Vm {
                 } else {
                     0
                 }
-            } else if let (Some(x), Some(y)) = (a.as_str(), b.as_str()) {
+            } else if a.is_str() && b.is_str() { let x = a.strh(); let y = b.strh();
                 if x == y || self.sref(x) == self.sref(y) { 1 } else { 0 }
             } else {
                 -1
@@ -2910,7 +2918,8 @@ impl Vm {
     pub fn rcompare(&mut self, code: int, _pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
         let mut num = false;
         let mut r = false;
-        if let (Some(a), Some(b)) = ((self.rget(bp, x)).as_num(), (self.rget(bp, y)).as_num()) {
+        let va_ = *self.rget(bp, x); let vb_ = *self.rget(bp, y);
+        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
             num = true;
             r = match code {
                 OP_LT => a < b,

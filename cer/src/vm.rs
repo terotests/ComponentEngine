@@ -4395,7 +4395,7 @@ impl Vm {
     // ---- arithmetic helpers
 
     pub fn add_vals(&mut self, a: &Val, b: &Val) -> Val {
-        if let (Some(x), Some(y)) = (a.as_num(), b.as_num()) {
+        if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
             return Val::Num(x + y);
         }
         match (a.kind(), b.kind()) {
@@ -4498,7 +4498,7 @@ impl Vm {
 
     /// `<`: 1 true, 0 false, -1 undefined (NaN)
     pub fn less_than(&mut self, a: &Val, b: &Val) -> int {
-        if let (Some(x), Some(y)) = (a.as_num(), b.as_num()) {
+        if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
             if is_nan(x) || is_nan(y) {
                 return -1;
             }
@@ -4512,7 +4512,7 @@ impl Vm {
         if self.throwing {
             return -1;
         }
-        if let (Some(x), Some(y)) = ((&pa).as_str(), (&pb).as_str()) {
+        if (&pa).is_str() && (&pb).is_str() { let x = (&pa).strh(); let y = (&pb).strh();
             return if jsstr::compare(self.sref(x), self.sref(y)) < 0 { 1 } else { 0 };
         }
         if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
@@ -4531,7 +4531,7 @@ impl Vm {
     }
 
     pub fn compare(&mut self, code: int, a: &Val, b: &Val) -> bool {
-        if let (Some(x), Some(y)) = (a.as_num(), b.as_num()) {
+        if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
             return match code {
                 OP_LT => x < y,
                 OP_GT => x > y,
@@ -5820,7 +5820,7 @@ impl Vm {
                     OP_CMP_JF => {
                         let b = self.pop();
                         let a = self.pop();
-                        let r = if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) {
+                        let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             match (op.b as int) {
                                 OP_LT => x < y,
                                 OP_GT => x > y,
@@ -5893,7 +5893,7 @@ impl Vm {
                     OP_CASE_JT => {
                         let b = self.pop();
                         let n = self.stack.len() - 1;
-                        let hit = if let (Some(x), Some(y)) = ((&self.stack[n]).as_num(), (&b).as_num()) {
+                        let hit = if (&self.stack[n]).is_num() && (&b).is_num() { let x = (&self.stack[n]).num(); let y = (&b).num();
                             x == y
                         } else {
                             let q = quick_eq(&self.stack[n], &b, true);
@@ -5944,7 +5944,7 @@ impl Vm {
                     OP_ADD => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) {
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             self.stack.push(Val::Num(x + y));
                         } else {
                             self.frames[fi].pc = pc;
@@ -5955,7 +5955,7 @@ impl Vm {
                     OP_DIV | OP_MOD | OP_EXP | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR | OP_USHR => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) {
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             self.stack.push(Val::Num(arith_num((op.code as int), x, y)));
                         } else {
                             self.frames[fi].pc = pc;
@@ -6002,7 +6002,7 @@ impl Vm {
                     OP_SUB => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) {
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             self.stack.push(Val::Num(x - y));
                         } else {
                             self.frames[fi].pc = pc;
@@ -6013,7 +6013,7 @@ impl Vm {
                     OP_MUL => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) {
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             self.stack.push(Val::Num(x * y));
                         } else {
                             self.frames[fi].pc = pc;
@@ -6120,7 +6120,7 @@ impl Vm {
                         let k = self.pop();
                         let v = self.pop();
                         let mut done = false;
-                        if let (Some(o), Some(n)) = ((&v).as_obj(), (&k).as_num()) {
+                        if let Some(o) = (&v).as_obj() { if let Some(n) = (&k).as_num() {
                             let ob = &self.objs[o as usize];
                             if ob.class == C_ARRAY {
                                 let i = n as int;
@@ -6130,7 +6130,7 @@ impl Vm {
                                     done = true;
                                 }
                             }
-                        }
+                        }}
                         if !done {
                             self.frames[fi].pc = pc;
                             let r = self.get_elem(&v, &k);
@@ -6142,7 +6142,7 @@ impl Vm {
                         let k = self.pop();
                         let target = self.pop();
                         let mut done = false;
-                        if let (Some(o), Some(n)) = ((&target).as_obj(), (&k).as_num()) {
+                        if let Some(o) = (&target).as_obj() { if let Some(n) = (&k).as_num() {
                             self.inc(&val);
                             let ob = &mut self.objs[o as usize];
                             let mut old: int = -1;
@@ -6179,7 +6179,7 @@ impl Vm {
                             } else {
                                 self.dec(&val);
                             }
-                        }
+                        }}
                         if !done {
                             self.frames[fi].pc = pc;
                             self.set_elem(&target, &k, val.clone());
@@ -6687,7 +6687,7 @@ impl Vm {
         }
         if id == crate::builtins::NF_NP_TOSTRING && argc <= 1 {
             let radix = if argc == 0 { Val::Num(10.0) } else { self.stack[bp as usize] };
-            if let (Some(n), Some(rx)) = ((self.stack[(fpos + 1) as usize]).as_num(), radix.as_num()) {
+            if (self.stack[(fpos + 1) as usize]).is_num() && radix.is_num() { let n = (self.stack[(fpos + 1) as usize]).num(); let rx = radix.num();
                 if rx != 2.0 && rx != 8.0 && rx != 10.0 && rx != 16.0 && rx != 36.0 {
                     return false;
                 }
@@ -6800,7 +6800,7 @@ impl Vm {
     }
 
     pub fn char_code_fast(&mut self, t: &Val, a: &Val) -> Val {
-        if let (Some(h), Some(x)) = (t.as_str(), a.as_num()) {
+        if let Some(h) = t.as_str() { if let Some(x) = a.as_num() {
             let i = x as int;
             if (i as double) != x {
                 return Val::Undef();
@@ -6812,7 +6812,7 @@ impl Vm {
             let s = self.sget(h);
             let c = if i < 0 { -1 } else { self.str_at(&s, i) };
             return Val::Num(if c < 0 { nan() } else { c as double });
-        }
+        }}
         Val::Undef()
     }
 
@@ -6999,18 +6999,18 @@ impl Vm {
     /// -1 for the ordinary way.
     #[inline]
     pub fn append_val(&mut self, cur: Val, b: Val) -> int {
-        if let (Some(h), Some(hb)) = (cur.as_str(), b.as_str()) {
+        if cur.is_str() && b.is_str() { let h = cur.strh(); let hb = b.strh();
             if hb == 0 {
                 return h;
             }
             let bs = self.sget(hb);
             return self.str_append(h, bs.as_str());
         }
-        if let (Some(h), Some(y)) = (cur.as_str(), b.as_num()) {
+        if let Some(h) = cur.as_str() { if let Some(y) = b.as_num() {
             // a number's text (a template's `${s}${i}`, `s += i`)
             let t = number_to_string(y);
             return self.str_append(h, t.as_str());
-        }
+        }}
         -1
     }
 
@@ -7023,7 +7023,7 @@ impl Vm {
             self.stack[i] = Val::Str(h);
         } else {
             let a = self.stack[i];
-            let r = if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
             self.stack[i] = r;
         }
     }
@@ -7037,7 +7037,7 @@ impl Vm {
         if let Some(_) = b.as_str() {
             let n = self.stack.len() - 1;
             let cur = self.evecs[self.objs[e as usize].elems as usize].v[i];
-            if let (Some(x), Some(y)) = (self.stack[n].as_str(), cur.as_str()) {
+            if self.stack[n].is_str() && cur.is_str() { let x = self.stack[n].strh(); let y = cur.strh();
                 if x == y {
                     let h = self.append_val(cur, b);
                     if h >= 0 {
@@ -7054,7 +7054,7 @@ impl Vm {
         }
         if !done {
             let a = self.pop();
-            let r = if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
             if !self.throwing {
                 self.put_elem(e, (i) as int, r);
             }
@@ -7065,7 +7065,7 @@ impl Vm {
     /// was worked out; a string grows in place when nothing else holds it.
     pub fn add_env(&mut self, depth: int, i: int, a: Val, b: Val) {
         let e = self.get_env(depth);
-        if let (Some(x), Some(_)) = (a.as_str(), b.as_str()) {
+        if a.is_str() && b.is_str() { let x = a.strh();
             let cur = self.evecs[self.objs[e as usize].elems as usize].v[i as usize];
             if let Some(y) = cur.as_str() {
                 if x == y {
@@ -7079,7 +7079,7 @@ impl Vm {
                 }
             }
         }
-        let r = if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+        let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
         if !self.throwing {
             self.put_elem(e, i, r);
         }
@@ -7097,7 +7097,7 @@ impl Vm {
                 let slot = self.find(o, (atom as int));
                 if slot >= 0 && self.attr_at(o, slot) == 0 {
                     let cur = self.objs[o as usize].get_slot(slot as usize);
-                    if let (Some(x), Some(y)) = ((self.stack[n - 1]).as_str(), cur.as_str()) {
+                    if (self.stack[n - 1]).is_str() && cur.is_str() { let x = (self.stack[n - 1]).strh(); let y = cur.strh();
                         if x == y {
                             let h = self.append_val(cur, b);
                             if h >= 0 {
@@ -7116,7 +7116,7 @@ impl Vm {
         if !done {
             let a = self.pop();
             let target = self.pop();
-            let r = if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
             if !self.throwing {
                 self.set(&target, (atom as int), r);
             }
@@ -7704,7 +7704,7 @@ impl Vm {
                         return false;
                     }
                     // the native made its own object: give it this one's fields
-                    if let (Some(t), Some(n)) = ((&this).as_obj(), (&r).as_obj()) {
+                    if (&this).is_obj() && (&r).is_obj() { let t = (&this).obj(); let n = (&r).obj();
                         self.compact_dict(t);
                         let keys = self.keys_of(t);
                         let vals = self.objs[t as usize].slots();

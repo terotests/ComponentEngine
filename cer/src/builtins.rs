@@ -1356,7 +1356,7 @@ impl Vm {
     }
 
     pub fn string_replace(&mut self, s: &Rc<String>, pattern: &Val, repl: &Val, all: bool) -> Val {
-        if let (Some(ph), Some(rh)) = (pattern.as_str(), repl.as_str()) {
+        if pattern.is_str() && repl.is_str() { let ph = pattern.strh(); let rh = repl.strh();
             // an ASCII text for a text without `$`: no UTF-16 units needed
             if replace_plain_ok(self.sref(ph), self.sref(rh)) {
                 let out = replace_plain(s.as_str(), self.sref(ph), self.sref(rh), all);
@@ -2367,7 +2367,7 @@ impl Vm {
             let n = self.to_number(&r);
             return if is_nan(n) { 0.0 } else { n };
         }
-        if let (Some(x), Some(y)) = (a.as_num(), b.as_num()) {
+        if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
             if x == y {
                 return 0.0;
             }

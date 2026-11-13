@@ -7743,7 +7743,7 @@ fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<
         return None;
     }
     if id >= NF_MATH + 28 && id <= NF_MATH + 30 {
-        if let (Some(_), Some(_)) = (a0.as_num(), (arg(vm, 1)).as_num()) {
+        if a0.is_num() && (arg(vm, 1)).is_num() { 
             let args = vec![a0, arg(vm, 1)];
             return Some(vm.math(id - NF_MATH, &args));
         }
@@ -7768,7 +7768,7 @@ fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<
     }
     if id == NF_NP_TOSTRING && argc <= 1 {
         let rx = if argc == 0 { Val::Num(10.0) } else { a0 };
-        if let (Some(n), Some(r)) = ((vm.stack[(fpos + 1) as usize]).as_num(), rx.as_num()) {
+        if (vm.stack[(fpos + 1) as usize]).is_num() && rx.is_num() { let n = (vm.stack[(fpos + 1) as usize]).num(); let r = rx.num();
             if r == 2.0 || r == 8.0 || r == 10.0 || r == 16.0 || r == 36.0 {
                 return Some(vm.string_val(crate::num::radix_string(n, r as int)));
             }
@@ -7792,7 +7792,7 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
     let bp = bp as int;
     let mut r = Val::Undef();
     let mut done = false;
-    if let (Some(o), Some(n)) = ((vm.rget(bp, ins.b as int)).as_obj(), (vm.rget(bp, ins.c as int)).as_num()) {
+    if (vm.rget(bp, ins.b as int)).is_obj() && (vm.rget(bp, ins.c as int)).is_num() { let o = (vm.rget(bp, ins.b as int)).obj(); let n = (vm.rget(bp, ins.c as int)).num();
         let ob = &vm.objs[o as usize];
         if ob.class == C_ARRAY {
             let i = n as int;
@@ -7830,7 +7830,7 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         }
         let fi = vm.frames.len() - 1;
         vm.frames[fi].pc = _pc as int + 1;
-        if let (Some(po), Some(kh)) = (v.as_obj(), k.as_str()) {
+        if v.is_obj() && k.is_str() { let po = v.obj(); let kh = k.strh();
             if vm.objs[po as usize].class == C_PROXY && vm.strs[kh as usize].atom >= 0 {
                 let a = vm.strs[kh as usize].atom as int;
                 let fpos = bp + vm.protos[_pi as usize].fsize;
@@ -8191,7 +8191,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         if matches!(kind, R_CMP_JFK | R_CMP_JTK | R_CMP | R_CMP_JF | R_CMP_JT | R_CASE_JT) {
             let t = |v: &Val| match v.kind() { VK::Undef => 0, VK::Null => 1, VK::Bool(_) => 2, VK::Num(_) => 3, VK::Str(_) => 4, _ => 5 };
             let mut k = 512 + ((sub - 42).clamp(0, 13) as usize) * 36 + t(vm.rget(bp, x)) * 6 + t(vm.rget(bp, y));
-            if let (Some(p), Some(q)) = ((vm.rget(bp, x)).as_str(), (vm.rget(bp, y)).as_str()) {
+            if (vm.rget(bp, x)).is_str() && (vm.rget(bp, y)).is_str() { let p = (vm.rget(bp, x)).strh(); let q = (vm.rget(bp, y)).strh();
                 let (e, f) = (&vm.strs[p as usize], &vm.strs[q as usize]);
                 // 1000 + same len * 8 + up both <0 *4 + eq content*2 + same handle
                 k = 1000 + (e.len == f.len) as usize * 8 + (e.up < 0 && f.up < 0) as usize * 4 + (vm.sref(p) == vm.sref(q)) as usize * 2 + (p == q) as usize;
@@ -8211,7 +8211,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             };
             // the interpreter's whole arm: its own fast paths first
             let mut done = false;
-            if let (Some(a), Some(b)) = ((*vm.rget(bp, w2)).as_num(), (*vm.rget(bp, w3)).as_num()) {
+            if (*vm.rget(bp, w2)).is_num() && (*vm.rget(bp, w3)).is_num() { let a = (*vm.rget(bp, w2)).num(); let b = (*vm.rget(bp, w3)).num();
                 let r = if code == OP_SUB {
                     a - b
                 } else if code == OP_MUL {
@@ -8307,7 +8307,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 vm.stack[i] = Val::Str(h);
             } else {
                 let a = vm.stack[i];
-                let r = if let (Some(x), Some(y)) = (a.as_num(), b.as_num()) {
+                let r = if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
                     Val::Num(x + y)
                 } else {
                     vm.frames[fi].pc = pc + 1;

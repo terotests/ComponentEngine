@@ -879,7 +879,7 @@ impl Vm {
             NF_SP_CHARAT | NF_SP_CHARCODEAT | NF_SP_CODEPOINTAT | NF_SP_AT => {
                 // an ASCII string value: the unit off its handle (no copy
                 // of a prefix, no scan of a string that grew in place)
-                if let (Some(h), Some(x)) = (this.as_str(), a0.as_num()) {
+                if let Some(h) = this.as_str() { if let Some(x) = a0.as_num() {
                     let mut i = to_integer(x);
                     if id == NF_SP_AT && i < 0.0 {
                         i += self.hlen(h) as double;
@@ -906,7 +906,7 @@ impl Vm {
                             }
                         };
                     }
-                }
+                }}
                 let s = self.this_str(&this);
                 if self.throwing {
                     return Val::Undef();

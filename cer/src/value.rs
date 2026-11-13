@@ -126,6 +126,23 @@ impl Val {
     pub fn as_bool(&self) -> Option<bool> {
         if (self.b >> 48) == 0xFFFB { Some((self.b & 1) != 0) } else { None }
     }
+    /// the number of a Val that is_num (the other getters likewise)
+    #[inline(always)]
+    pub fn num(&self) -> double {
+        f64::from_bits(self.b)
+    }
+    #[inline(always)]
+    pub fn obj(&self) -> int {
+        self.b.wrapping_sub(V_OBJ) as int
+    }
+    #[inline(always)]
+    pub fn strh(&self) -> int {
+        self.b.wrapping_sub(V_STR) as int
+    }
+    #[inline(always)]
+    pub fn boolv(&self) -> bool {
+        (self.b & 1) != 0
+    }
     #[inline(always)]
     pub fn is_num(&self) -> bool {
         self.b < V_TAG
@@ -236,6 +253,18 @@ impl Val {
     }
     pub fn as_bool(&self) -> Option<bool> {
         if let VK::Bool(x) = self.k { Some(x) } else { None }
+    }
+    pub fn num(&self) -> double {
+        if let VK::Num(x) = self.k { x } else { 0.0 }
+    }
+    pub fn obj(&self) -> int {
+        if let VK::Obj(x) = self.k { x } else { -1 }
+    }
+    pub fn strh(&self) -> int {
+        if let VK::Str(x) = self.k { x } else { 0 }
+    }
+    pub fn boolv(&self) -> bool {
+        if let VK::Bool(x) = self.k { x } else { false }
     }
     pub fn is_num(&self) -> bool {
         matches!(self.k, VK::Num(_))
