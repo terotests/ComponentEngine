@@ -315,6 +315,17 @@ impl Engine {
         self.vm.slice_ms = ms;
     }
 
+    /// Limits a script's depth: at most `frames` script frames at once
+    /// (10 000 by default) and `stack_bytes` of native stack below the call
+    /// into the engine (1 MB, 512 KB in WebAssembly; keep it well under the
+    /// thread's stack). Past either a call throws RangeError ("Maximum call
+    /// stack size exceeded") instead of exhausting memory or overflowing
+    /// the thread's stack.
+    pub fn set_depth_limits(&mut self, frames: int, stack_bytes: int) {
+        self.vm.max_frames = frames;
+        self.vm.stack_budget = stack_bytes;
+    }
+
     /// The script stopped when its slice ran out (`set_slice`).
     pub fn is_suspended(&self) -> bool {
         self.vm.suspended
@@ -327,6 +338,7 @@ impl Engine {
             return String::new();
         }
         self.vm.suspended = false;
+        self.vm.stack_base = vm::native_sp();
         self.vm.slice_t0 = builtins::now_ms();
         self.vm.ticks = vm::SLICE_TICKS;
         self.vm.slicing = self.vm.slice_ms > 0.0 || self.vm.prof_on;
@@ -348,6 +360,7 @@ impl Engine {
     }
 
     fn run_val(&mut self, u: unit::Unit) -> Val {
+        self.vm.stack_base = vm::native_sp();
         let entry = unit::link(&mut self.vm, u);
         let fp = self.vm.function_proto;
         let f = self.vm.alloc(C_FUNCTION, fp);
@@ -406,6 +419,7 @@ impl Engine {
     /// Calls a global function by name with no arguments; its result as a
     /// string.
     pub fn call(&mut self, name: &str) -> String {
+        self.vm.stack_base = vm::native_sp();
         let a = self.vm.intern(name);
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));

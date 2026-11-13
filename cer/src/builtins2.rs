@@ -69,12 +69,19 @@ impl Vm {
     }
 
     fn flatten_into(&mut self, out: &mut Vec<Val>, items: Vec<Val>, depth: double) {
+        if self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+            return;
+        }
         for it in items {
             if depth >= 1.0 {
                 if let Val::Obj(o) = &it {
                     if self.objs[*o as usize].class == C_ARRAY {
                         let inner = self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                         self.flatten_into(out, inner, depth - 1.0);
+                        if self.throwing {
+                            return;
+                        }
                         continue;
                     }
                 }
@@ -84,6 +91,10 @@ impl Vm {
     }
 
     fn array_join(&mut self, o: int, sep: &str, seen: &mut Vec<int>) -> String {
+        if self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+            return String::new();
+        }
         for s in seen.iter() {
             if *s == o {
                 return String::new();
@@ -97,11 +108,18 @@ impl Vm {
             if i > 0 {
                 jsstr::push_js(&mut out, sep);
             }
+            if (out.as_bytes().len() as int) > MAX_STR_BYTES {
+                self.throw_range("Invalid string length");
+                return String::new();
+            }
             match &it {
                 Val::Undef | Val::Null => {}
                 Val::Obj(x) => {
                     if self.objs[*x as usize].class == C_ARRAY {
                         let inner = self.array_join(*x, ",", seen);
+                        if self.throwing {
+                            return String::new();
+                        }
                         jsstr::push_js(&mut out, inner.as_str());
                     } else {
                         let s = self.to_str(&it);
@@ -267,6 +285,13 @@ impl Vm {
                         d
                     }
                 };
+                if self.throwing {
+                    return Val::Undef;
+                }
+                // a valueOf above may have shrunk the array
+                let cur = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+                let s = if s > cur { cur } else { s };
+                let del = if s + del > cur { cur - s } else { del };
                 let mut removed: Vec<Val> = Vec::new();
                 let mut k = 0;
                 while k < del {
@@ -300,6 +325,9 @@ impl Vm {
                             total += self.evecs[self.objs[*x as usize].elems as usize].v.len();
                         }
                     }
+                }
+                if self.elems_too_many(total as double) {
+                    return Val::Undef;
                 }
                 let mut out: Vec<Val> = Vec::with_capacity(total);
                 if plain {
@@ -668,6 +696,11 @@ impl Vm {
                 let len = if generic { self.len_of(&Val::Obj(o)) } else { self.evecs[self.objs[o as usize].elems as usize].v.len() as int };
                 let s = self.rel_index(&a1, len, 0);
                 let e = self.rel_index(&arg(&args, 2), len, len);
+                if self.throwing {
+                    return Val::Undef;
+                }
+                // a valueOf above may have shrunk the array: Set grows it back
+                let generic = generic || (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) < e;
                 let mut i = s;
                 while i < e {
                     if generic {
@@ -692,7 +725,28 @@ impl Vm {
                 let t = self.rel_index(&a0, len, 0);
                 let s = self.rel_index(&a1, len, 0);
                 let e = self.rel_index(&arg(&args, 2), len, len);
+                if self.throwing {
+                    return Val::Undef;
+                }
                 let generic = !self.is_array_obj(o);
+                if !generic && (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) < len {
+                    // a valueOf above shrank the array: read it as it is now,
+                    // as the spec's HasProperty / Get / Set / Delete do
+                    let mut j: int = 0;
+                    while s + j < e && t + j < len {
+                        if self.has_index(o, s + j) {
+                            let v = self.get_index(&Val::Obj(o), s + j);
+                            self.set_index(o, t + j, v);
+                        } else {
+                            self.delete(o, &Val::Num((t + j) as double));
+                        }
+                        if self.throwing {
+                            return Val::Undef;
+                        }
+                        j += 1;
+                    }
+                    return Val::Obj(o);
+                }
                 let mut i: int = 0;
                 while s + i < e && t + i < len {
                     if generic {
@@ -1184,9 +1238,13 @@ impl Vm {
             }
             NF_SP_PADSTART | NF_SP_PADEND => {
                 let s = self.this_str(&this);
-                let target = to_integer(self.to_number(&a0)) as int;
+                let target_d = to_integer(self.to_number(&a0));
                 let fill = if matches!(a1, Val::Undef) { String::from(" ") } else { self.to_string(&a1) };
                 let len = jsstr::len(s.as_str());
+                if target_d > (len as double) && !fill.is_empty() && self.str_too_long((s.as_bytes().len() as double) + target_d - (len as double)) {
+                    return Val::Undef;
+                }
+                let target = target_d as int;
                 if target <= len || fill.is_empty() {
                     return self.same_str_val(&this, s);
                 }
@@ -1500,9 +1558,10 @@ impl Vm {
             NF_RP_SOURCE => {
                 let ro = obj_of(&this);
                 if ro >= 0 && self.objs[ro as usize].class == C_REGEXP {
-                    let ix = self.objs[ro as usize].func as usize;
-                    if ix < self.regex_shown.len() {
-                        return self.regex_shown[ix].clone();
+                    let ix = self.objs[ro as usize].func as int;
+                    let shown = self.regex_shown_at(ix);
+                    if !matches!(shown, Val::Undef) {
+                        return shown;
                     }
                     return self.colds[self.objs[ro as usize].cold as usize].prim.clone();
                 }

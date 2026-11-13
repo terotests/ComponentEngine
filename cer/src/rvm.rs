@@ -316,6 +316,7 @@ impl Vm {
 
     /// Runs frames until the frame count falls back to `base`.
     pub fn rrun(&mut self, base: int) {
+        self.check_native_stack();
         'frames: loop {
             if self.throwing {
                 if !self.unwind(base) {
@@ -2687,6 +2688,11 @@ impl Vm {
             i += 1;
         }
         if self.stack.len() < end {
+            // the stack only grows past its high-water mark here, so a
+            // deep recursion is caught here at no cost to other calls
+            if self.too_deep() {
+                return false;
+            }
             grow_stack(&mut self.stack, end);
         }
         let mut nt = Val::Undef;

@@ -182,7 +182,11 @@ impl Parser {
         if self.is("enum") {
             self.enum_decl();
         } else {
+            // `declare const x: T;` has no initializer
+            let saved = self.ambient;
+            self.ambient = true;
             self.statement();
+            self.ambient = saved;
         }
         self.no_body = false;
         self.node(N_EMPTY)
