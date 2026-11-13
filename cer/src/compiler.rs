@@ -200,7 +200,7 @@ impl Compiler {
         if !self.error.is_empty() {
             return true;
         }
-        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::parse_stack_budget()) {
             return false;
         }
         self.fail("SyntaxError: Maximum call stack size exceeded");

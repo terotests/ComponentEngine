@@ -3603,6 +3603,14 @@ impl Vm {
             self.ta_set(o, i, &v);
             return;
         }
+        if class == C_ARGUMENTS && self.objs[o as usize].pos > 0 {
+            // a sloppy function's arguments with parameters mapped lazily
+            // (map_arg): the write maps them now and reaches the parameter
+            self.slow_args(o);
+            let a = self.index_atom(i);
+            self.set_obj(o, a, v);
+            return;
+        }
         if class == C_ARRAY || class == C_ARGUMENTS {
             let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
             if i < len {
@@ -4439,6 +4447,16 @@ impl Vm {
                 }
                 if y == 0 {
                     return Val::Str(x);
+                }
+                // a long string on the left: appended in its own buffer when
+                // nothing else holds it (x stays its text, a prefix view), so
+                // 'a' + 'a' + ... in one expression copies nothing again
+                if self.hbytes(x) >= 1024 {
+                    let ys = self.sget(y);
+                    let h = self.str_append(x, ys.as_str());
+                    if h >= 0 {
+                        return Val::Str(h);
+                    }
                 }
                 // a short string before a long one: into the room before it
                 let yb = self.hbytes(y);
@@ -7972,10 +7990,10 @@ impl Vm {
                     let slot = self.find(o, op.a as int);
                     if op.b == 1 {
                         // a private field or brand (PrivateFieldAdd)
+                        // a non-extensible (frozen) object still takes
+                        // private fields: PrivateFieldAdd does not ask
                         if slot >= 0 {
                             self.throw_private(op.a as int, "initialize twice");
-                        } else if !self.objs[o as usize].extensible {
-                            self.throw_private(op.a as int, "add to a non-extensible object");
                         } else {
                             self.add_own(o, (op.a as int), v, 0);
                         }
@@ -10598,12 +10616,14 @@ pub fn stack_deeper_than(base: int, budget: int) -> bool {
 }
 
 /// How deep native code may go below the host's entry: 1 MB, half of a
-/// spawned Rust thread's 2 MB; 512 KB in WebAssembly, whose whole stack
-/// is 1 MB.
+/// spawned Rust thread's 2 MB; 128 KB in WebAssembly, where native_sp()
+/// sees only the shadow stack and the host's machine stack (about 1 MB in
+/// V8, wasm frames included) runs out first: at 256 KB a deep JSON.parse
+/// or flat() still overflowed V8's stack (parse_stack_budget for parsing).
 #[ranger::target(rust)]
 pub fn default_stack_budget() -> int {
     if cfg!(target_arch = "wasm32") {
-        512 * 1024
+        128 * 1024
     } else {
         1024 * 1024
     }
@@ -10613,3 +10633,26 @@ pub fn default_stack_budget() -> int {
 pub fn default_stack_budget() -> int {
     0
 }
+
+/// The native stack the parsers and compilers may use: in WebAssembly
+/// twice default_stack_budget (their frames take less of V8's machine
+/// stack per byte of shadow stack: 256 KB parses 700 nested brackets and
+/// a 10 000-deep `!!!…` refuses cleanly), elsewhere the same.
+pub fn parse_stack_budget() -> int {
+    if is_wasm32() {
+        default_stack_budget() * 2
+    } else {
+        default_stack_budget()
+    }
+}
+
+#[ranger::target(rust)]
+fn is_wasm32() -> bool {
+    cfg!(target_arch = "wasm32")
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn is_wasm32() -> bool {
+    false
+}
+

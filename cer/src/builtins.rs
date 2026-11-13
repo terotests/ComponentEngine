@@ -1521,6 +1521,7 @@ impl Vm {
             let names = self.regexes[idx as usize].names.clone();
             let nidx = self.regexes[idx as usize].name_index.clone();
             let ngroups = self.regexes[idx as usize].ngroups;
+            let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
             let mut start: int = 0;
             if !global {
                 let li = self.get_obj(ro, A_LASTINDEX, pattern);
@@ -1547,7 +1548,7 @@ impl Vm {
                     if !global {
                         break;
                     }
-                    start = if me == ms { me + 1 } else { me };
+                    start = if me == ms { adv_index(units, me, uni) } else { me };
                     continue;
                 }
                 let matched = jsstr::sub_units(s.as_str(), units, ms, me);
@@ -1587,7 +1588,7 @@ impl Vm {
                 if !global {
                     break;
                 }
-                start = if me == ms { me + 1 } else { me };
+                start = if me == ms { adv_index(units, me, uni) } else { me };
             }
             if global {
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
@@ -1665,6 +1666,7 @@ impl Vm {
             let ro = obj_of(sep);
             let idx = self.objs[ro as usize].func as int;
             let ngroups = self.regexes[idx as usize].ngroups;
+            let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
             if n == 0 {
                 let caps = self.regexes[idx as usize].exec(units, 0);
                 self.rx_after();
@@ -1687,14 +1689,11 @@ impl Vm {
                     break;
                 }
                 if me == p || (me == ms && ms == q && me == p) {
-                    q = ms + 1;
-                    if me == ms {
-                        q = if ms >= q { ms + 1 } else { q };
-                    }
+                    q = adv_index(units, ms, uni);
                     continue;
                 }
                 if me == ms && ms < q {
-                    q += 1;
+                    q = adv_index(units, q, uni);
                     continue;
                 }
                 out.push(self.string_val(jsstr::sub_units(s.as_str(), units, p, ms)));
@@ -1714,7 +1713,7 @@ impl Vm {
                     g += 1;
                 }
                 p = me;
-                q = if me == ms { me + 1 } else { me };
+                q = if me == ms { adv_index(units, me, uni) } else { me };
             }
             out.push(self.string_val(jsstr::sub_units(s.as_str(), units, p, n)));
             let a = self.new_array(out);
@@ -3423,7 +3422,8 @@ impl Vm {
             y = date_digits(&cs, i, 4);
             i += 4;
         }
-        if y < 0 {
+        // -000000 is not a year (the spec's extended years)
+        if y < 0 || (sign < 0 && y == 0) {
             return nan();
         }
         nums[0] = (sign * y) as double;
@@ -4705,10 +4705,23 @@ impl Vm {
                 }
                 let keys = self.own_keys(o, false, false);
                 let mut out: Vec<Val> = Vec::new();
+                let plain = self.objs[o as usize].class == C_OBJECT;
                 for k in keys {
                     if id == NF_O_KEYS {
                         out.push(k);
                     } else {
+                        // a getter before may have deleted the property or
+                        // made it non-enumerable: it is skipped (the spec
+                        // looks at each one again before its Get)
+                        if plain {
+                            let (i, a) = self.to_key(&k);
+                            if i < 0 {
+                                let slot = self.find(o, a);
+                                if slot < 0 || (self.attr_at(o, slot) & P_HIDDEN) != 0 {
+                                    continue;
+                                }
+                            }
+                        }
                         let v = self.get_elem(&Val::Obj(o), &k);
                         if id == NF_O_VALUES {
                             out.push(v);
@@ -4965,11 +4978,21 @@ impl Vm {
                         return Val::Bool(false);
                     }
                     let sh = self.objs[o as usize].shape as int;
-                    for a in self.shape_attrs(sh).iter() {
-                        if (*a & P_FIXED) == 0 {
+                    let ks = self.shape_keys(sh);
+                    let ats = self.shape_attrs(sh);
+                    let mut j: usize = 0;
+                    while j < ats.len() {
+                        let a = ats[j];
+                        // private names (`\u{1}#x`) are no properties
+                        let private = j < ks.len() && self.atom_names[ks[j] as usize].starts_with('\u{1}');
+                        j += 1;
+                        if private {
+                            continue;
+                        }
+                        if (a & P_FIXED) == 0 {
                             return Val::Bool(false);
                         }
-                        if id == NF_O_ISFROZEN && (*a & P_ACCESSOR) == 0 && (*a & P_READONLY) == 0 {
+                        if id == NF_O_ISFROZEN && (a & P_ACCESSOR) == 0 && (a & P_READONLY) == 0 {
                             return Val::Bool(false);
                         }
                     }
@@ -5783,4 +5806,17 @@ pub fn shown_source(s: &str) -> String {
     } else {
         s.replace("/", "\\/").replace("\\\\/", "\\/").replace("\n", "\\n").replace("\r", "\\r").replace("\u{2028}", "\\u2028").replace("\u{2029}", "\\u2029")
     }
+}
+
+/// AdvanceStringIndex: past an empty match, by a whole surrogate pair in
+/// a unicode (u / v) regex.
+pub fn adv_index(units: &Vec<int>, i: int, unicode: bool) -> int {
+    if unicode && i + 1 < (units.len() as int) {
+        let c = units[i as usize];
+        let d = units[(i + 1) as usize];
+        if c >= 0xd800 && c <= 0xdbff && d >= 0xdc00 && d <= 0xdfff {
+            return i + 2;
+        }
+    }
+    i + 1
 }

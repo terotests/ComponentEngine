@@ -143,20 +143,35 @@ impl Vm {
         Val::Obj(a)
     }
 
+    /// Array.prototype.flat's walk, with its own stack of open arrays so a
+    /// deep nesting uses no native stack (in WebAssembly V8's machine stack
+    /// ran out before the shadow-stack check); deeper than 10 000 levels is
+    /// a RangeError as in V8.
     fn flatten_into(&mut self, out: &mut Vec<Val>, items: Vec<Val>, depth: double) {
-        if self.stack_exhausted() {
-            self.throw_range("Maximum call stack size exceeded");
-            return;
-        }
-        for it in items {
-            if depth >= 1.0 {
+        let mut lists: Vec<Vec<Val>> = Vec::new();
+        let mut pos: Vec<int> = Vec::new();
+        lists.push(items);
+        pos.push(0);
+        while lists.len() > 0 {
+            let top = (lists.len() as int) - 1;
+            let i = pos[top as usize];
+            if i >= (lists[top as usize].len() as int) {
+                lists.pop();
+                pos.pop();
+                continue;
+            }
+            pos[top as usize] = i + 1;
+            let it = lists[top as usize][i as usize].clone();
+            if depth - (top as double) >= 1.0 {
                 if let Some(o) = (&it).as_obj() {
                     if self.objs[o as usize].class == C_ARRAY {
-                        let inner = self.evecs[self.objs[o as usize].elems as usize].v.clone();
-                        self.flatten_into(out, inner, depth - 1.0);
-                        if self.throwing {
+                        if top >= 10000 {
+                            self.throw_range("Maximum call stack size exceeded");
                             return;
                         }
+                        let inner = self.evecs[self.objs[o as usize].elems as usize].v.clone();
+                        lists.push(inner);
+                        pos.push(0);
                         continue;
                     }
                 }
@@ -1083,6 +1098,8 @@ impl Vm {
                     NF_SP_LASTINDEXOF => {
                         let n = self.to_number(&a1);
                         let from = if is_nan(n) { len } else { to_integer(n) as int };
+                        // the spec clamps the start to 0..len
+                        let from = if from < 0 { 0 } else if from > len { len } else { from };
                         let r = jsstr::last_index_of(s.as_str(), p.as_str(), from);
                         if self.check_expired() {
                             return Val::Undef();
@@ -1280,7 +1297,11 @@ impl Vm {
                             if ms.is_empty() {
                                 let li = self.get_obj(co, A_LASTINDEX, &copy);
                                 let n = self.to_number(&li);
-                                self.set_obj(co, A_LASTINDEX, Val::Num(n + 1.0));
+                                let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
+                                let units = self.rx_take(&s);
+                                let nx = crate::builtins::adv_index(&units, n as int, uni);
+                                self.rx_put(&s, units);
+                                self.set_obj(co, A_LASTINDEX, Val::Num(nx as double));
                             }
                         }
                         out.push(m);
@@ -1306,7 +1327,8 @@ impl Vm {
                         break;
                     }
                     out.push(self.string_val(jsstr::from_units(&units, caps[0], caps[1])));
-                    start = if caps[1] == caps[0] { caps[1] + 1 } else { caps[1] };
+                    let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
+                    start = if caps[1] == caps[0] { crate::builtins::adv_index(&units, caps[1], uni) } else { caps[1] };
                 }
                 self.rx_put(&s, units);
                 self.set_obj(ro, A_LASTINDEX, Val::Num(0.0));
@@ -2068,6 +2090,56 @@ pub fn date_string(t: double) -> String {
     )
 }
 
+/// The p significant digits of v > 0 (rounded half up on its exact
+/// value, as the spec asks) and the exponent of the first: Rust from the
+/// exact decimal expansion, so 100 digits and denormals come out right.
+#[ranger::target(rust)]
+fn precision_digits(v: double, p: int) -> (String, int) {
+    // every double's exact expansion fits in 800 significant digits
+    let t = format!("{:.*e}", 800, v);
+    let (m, ex) = match t.find('e') {
+        Some(i) => (&t[..i], t[i + 1..].parse::<int>().unwrap_or(0)),
+        None => (t.as_str(), 0),
+    };
+    let all: Vec<u8> = m.bytes().filter(|c| *c != b'.').map(|c| c - b'0').collect();
+    let n = p as usize;
+    let mut d: Vec<u8> = all[..n].to_vec();
+    let mut e = ex;
+    if all[n] >= 5 {
+        // half up: carry through the nines
+        let mut i = n;
+        loop {
+            if i == 0 {
+                d.insert(0, 1);
+                d.pop();
+                e += 1;
+                break;
+            }
+            i -= 1;
+            if d[i] == 9 {
+                d[i] = 0;
+            } else {
+                d[i] += 1;
+                break;
+            }
+        }
+    }
+    (d.iter().map(|c| (b'0' + c) as char).collect(), e)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn precision_digits(v: double, p: int) -> (String, int) {
+    let mut e = v.log10().floor() as int;
+    let mut scale = pow10((p - 1 - e) as i32);
+    let mut n = (v * scale).round();
+    if n >= pow10(p as i32) {
+        e += 1;
+        scale = pow10((p - 1 - e) as i32);
+        n = (v * scale).round();
+    }
+    (format!("{}", n as int), e)
+}
+
 /// Number.prototype.toPrecision
 pub fn to_precision(x: double, p: int) -> String {
     if x == 0.0 {
@@ -2078,15 +2150,7 @@ pub fn to_precision(x: double, p: int) -> String {
     }
     let neg = x < 0.0;
     let v = if neg { -x } else { x };
-    let mut e = v.log10().floor() as int;
-    let mut scale = pow10((p - 1 - e) as i32);
-    let mut n = (v * scale).round();
-    if n >= pow10(p as i32) {
-        e += 1;
-        scale = pow10((p - 1 - e) as i32);
-        n = (v * scale).round();
-    }
-    let digits = format!("{}", n as int);
+    let (digits, e) = precision_digits(v, p);
     let body: String;
     if e < -6 || e >= p {
         let mut s = String::new();
