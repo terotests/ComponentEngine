@@ -9,14 +9,17 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY . .
-RUN cd cerxes/fuzz && cargo build --release
+RUN cd cerxes/fuzz && cargo build --profile checked
 
 FROM node:22-bookworm-slim
-COPY --from=build /src/cerxes/fuzz/target/release/cerxes-fuzz /usr/local/bin/cerxes-fuzz
+COPY --from=build /src/cerxes/fuzz/target/checked/cerxes-fuzz /usr/local/bin/cerxes-fuzz
+COPY --from=build /src/cerxes/fuzz/known/known.txt /corpus/known.txt
+COPY --from=build /src/cerxes/fuzz/seeds /corpus/seeds
 COPY --from=build /src/cerxes/tests/cases.txt /corpus/cerxes-cases.txt
 COPY --from=build /src/cer/tests/cases.txt /corpus/cer-cases.txt
 ENV MINUTES=60 JOBS=0 EXTRA=""
 VOLUME /out
 CMD j=$JOBS; [ "$j" = 0 ] && j=$(nproc); \
     exec cerxes-fuzz run --time $((MINUTES * 60)) --jobs $j --out /out \
-      --corpus /corpus/cerxes-cases.txt --corpus /corpus/cer-cases.txt $EXTRA
+      --corpus /corpus/cerxes-cases.txt --corpus /corpus/cer-cases.txt --corpus /corpus/seeds \
+      --known /corpus/known.txt $EXTRA
