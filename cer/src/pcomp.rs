@@ -235,15 +235,16 @@ pub struct PScope {
 }
 
 pub struct PRef {
-    pub name: String,
-    pub scope: int,
-    pub seq: int,
+    /// the name's index in `names`
+    pub nid: i32,
+    pub scope: i32,
+    pub seq: i32,
     /// the name a let / const / parameter declares (not a reference)
     pub decl: bool,
     /// a binding known when the reference was made
-    pub direct: int,
-    pub bind: int,
-    pub with_list: int,
+    pub direct: i32,
+    pub bind: i32,
+    pub with_list: i32,
     pub tdz: bool,
     pub param_tdz: bool,
 }
@@ -496,7 +497,6 @@ fn is_jump(op: &Op) -> bool {
 /// PComp.names (PComp.nums), so that a script's tokens stay small.
 pub struct PTok {
     pub kind: i32,
-    pub line: i32,
     /// where the token starts and ends in the source (chars)
     pub start: i32,
     pub end: i32,
@@ -525,7 +525,7 @@ pub struct PComp {
     nums: Vec<double>,
     /// the token closing each bracket (and the one opening each closing
     /// one), -1 for others
-    mate: Vec<int>,
+    mate: Vec<i32>,
     xs: Vec<TokX>,
     pos: int,
     /// counts tokens read, re-reads included: what came first
@@ -834,8 +834,8 @@ impl PComp {
                 } else if s == ")" || s == "]" || s == "}" {
                     if !stack.is_empty() {
                         let o = stack.pop().unwrap();
-                        self.mate[o as usize] = i as int;
-                        self.mate[i] = o;
+                        self.mate[o as usize] = i as i32;
+                        self.mate[i] = o as i32;
                     }
                 }
             }
@@ -861,7 +861,7 @@ impl PComp {
         } else {
             -1
         };
-        PTok { kind: t.kind as i32, line: t.line as i32, start: t.start as i32, end: t.end as i32, v: v as i32, x: x as i32, flags: flags }
+        PTok { kind: t.kind as i32, start: t.start as i32, end: t.end as i32, v: v as i32, x: x as i32, flags: flags }
     }
 
     fn name_id(&mut self, s: &str) -> int {
@@ -950,8 +950,22 @@ impl PComp {
         self.tok_text(self.pos)
     }
 
+    /// The current token's line (for an error: counted from the source,
+    /// so tokens need not carry it).
     fn line(&self) -> int {
-        self.toks[self.pos as usize].line as int
+        let start = if (self.pos as usize) < self.toks.len() { self.toks[self.pos as usize].start as int } else { 0 };
+        let mut l: int = 1;
+        let mut i: int = 0;
+        for c in self.src_rc.chars() {
+            if i >= start {
+                break;
+            }
+            if c == '\n' {
+                l += 1;
+            }
+            i += 1;
+        }
+        l
     }
 
     fn tok_count(&self) -> int {
@@ -1094,7 +1108,7 @@ impl PComp {
         if i < 0 || i >= self.tok_count() {
             return -1;
         }
-        let m = self.mate[i as usize];
+        let m = self.mate[i as usize] as int;
         if m < 0 {
             return -1;
         }
@@ -1103,7 +1117,7 @@ impl PComp {
 
     /// The token closing the bracket at `i`, or the last token.
     fn mate_of(&self, i: int) -> int {
-        let m = if i >= 0 && i < self.tok_count() { self.mate[i as usize] } else { -1 };
+        let m = if i >= 0 && i < self.tok_count() { self.mate[i as usize] as int } else { -1 };
         if m < 0 {
             return self.tok_count() - 1;
         }
@@ -1124,7 +1138,7 @@ impl PComp {
             if (t.kind as int) == T_PUNCT {
                 let s = self.names[t.v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
-                    let m = self.mate[k as usize];
+                    let m = self.mate[k as usize] as int;
                     if m < 0 {
                         return n - 1;
                     }
@@ -1536,18 +1550,24 @@ impl PComp {
     }
 
     fn new_ref(&mut self, name: &str, decl: bool, direct: int) -> int {
+        let nid = self.name_id(name) as i32;
         self.refs.push(PRef {
-            name: String::from(name),
-            scope: self.cur_scope,
-            seq: self.seq,
+            nid: nid,
+            scope: self.cur_scope as i32,
+            seq: self.seq as i32,
             decl: decl,
-            direct: direct,
+            direct: direct as i32,
             bind: -1,
             with_list: -1,
             tdz: false,
             param_tdz: false,
         });
         (self.refs.len() as int) - 1
+    }
+
+    /// The name reference r is to.
+    fn ref_name(&self, r: usize) -> String {
+        self.names[self.refs[r].nid as usize].clone()
     }
 
     /// A placeholder for the name: its op's index.
@@ -1608,15 +1628,15 @@ impl PComp {
     }
 
     fn resolve_ref(&mut self, r: usize) {
-        let direct = self.refs[r].direct;
+        let direct = (self.refs[r].direct as int);
         if direct >= 0 {
-            self.refs[r].bind = direct;
+            self.refs[r].bind = (direct) as i32;
             return;
         }
-        let name = self.refs[r].name.clone();
-        let scope = self.refs[r].scope;
+        let name = self.ref_name(r);
+        let scope = (self.refs[r].scope as int);
         let decl = self.refs[r].decl;
-        let seq = self.refs[r].seq;
+        let seq = (self.refs[r].seq as int);
         let b = self.lookup(scope, name.as_str());
         let global = b >= 0 && self.binds[b as usize].global;
         if self.has_with && !decl {
@@ -1637,14 +1657,14 @@ impl PComp {
             }
             if !list.is_empty() {
                 self.with_lists.push(list);
-                self.refs[r].with_list = (self.with_lists.len() as int) - 1;
+                self.refs[r].with_list = ((self.with_lists.len() as int) - 1) as i32;
             }
         }
         if b < 0 || global {
-            self.refs[r].bind = -1;
+            self.refs[r].bind = (-1) as i32;
             return;
         }
-        self.refs[r].bind = b;
+        self.refs[r].bind = (b) as i32;
         let kind = self.binds[b as usize].kind;
         let target = self.binds[b as usize].scope;
         let inited = seq >= self.binds[b as usize].init_seq;
@@ -1905,10 +1925,10 @@ impl PComp {
                 // goes in a scope object for it
                 let lo = dead[2 * i];
                 let hi = dead[2 * i + 1];
-                let name = self.refs[i].name.clone();
-                let x = self.lookup_here(self.refs[i].scope, name.as_str());
-                if self.refs[i].direct < 0 && (x < 0 || self.binds[x as usize].scope < lo || self.binds[x as usize].scope >= hi) {
-                    self.refs[i].bind = -1;
+                let name = self.ref_name(i);
+                let x = self.lookup_here((self.refs[i].scope as int), name.as_str());
+                if (self.refs[i].direct as int) < 0 && (x < 0 || self.binds[x as usize].scope < lo || self.binds[x as usize].scope >= hi) {
+                    self.refs[i].bind = (-1) as i32;
                 } else {
                     self.resolve_ref(i);
                 }
@@ -1956,7 +1976,7 @@ impl PComp {
                     let m = o.b as int;
                     let r = o.a as usize;
                     let stores = m == M_STORE || m == M_UPD || m == M_ADDT_STORE || m == M_WSTORE || m == M_WREF || (m == M_INIT && !self.refs[r].decl);
-                    let b = self.refs[r].bind;
+                    let b = (self.refs[r].bind as int);
                     if stores && b >= 0 {
                         st[b as usize] = true;
                     }
@@ -2273,12 +2293,12 @@ impl PComp {
 
     fn xwith_lookup(&mut self, r: usize, store: bool) -> Vec<int> {
         let mut ends: Vec<int> = Vec::new();
-        let li = self.refs[r].with_list;
+        let li = (self.refs[r].with_list as int);
         if li < 0 {
             return ends;
         }
-        let name = self.refs[r].name.clone();
-        let scope = self.refs[r].scope;
+        let name = self.ref_name(r);
+        let scope = (self.refs[r].scope as int);
         let at = self.atom(name.as_str());
         let list = self.with_lists[li as usize].clone();
         for wb in list.iter() {
@@ -2303,8 +2323,8 @@ impl PComp {
     }
 
     fn xload_name_here(&mut self, r: usize) {
-        let name = self.refs[r].name.clone();
-        let b = self.refs[r].bind;
+        let name = self.ref_name(r);
+        let b = (self.refs[r].bind as int);
         if b < 0 {
             if name.as_str() == "undefined" {
                 self.xop(OP_UNDEF);
@@ -2320,7 +2340,7 @@ impl PComp {
             self.xemit(OP_CHECK_TDZ, c, 0);
             return;
         }
-        let scope = self.refs[r].scope;
+        let scope = (self.refs[r].scope as int);
         self.xload_bind(b, scope);
         if self.refs[r].tdz {
             let c = self.xstr(name.as_str());
@@ -2345,10 +2365,10 @@ impl PComp {
     }
 
     fn xstore_name_here(&mut self, r: usize, init: bool) {
-        let name = self.refs[r].name.clone();
-        let b = self.refs[r].bind;
-        let scope = self.refs[r].scope;
-        if self.refs[r].direct >= 0 {
+        let name = self.ref_name(r);
+        let b = (self.refs[r].bind as int);
+        let scope = (self.refs[r].scope as int);
+        if (self.refs[r].direct as int) >= 0 {
             self.xstore_bind(b, init, scope);
             return;
         }
@@ -2391,8 +2411,8 @@ impl PComp {
 
     /// A plain slot of this frame: no scope object, no check, no `with`.
     fn ref_local(&self, r: usize) -> bool {
-        let b = self.refs[r].bind;
-        b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && !self.refs[r].tdz && self.refs[r].with_list < 0 && !self.refs[r].param_tdz
+        let b = (self.refs[r].bind as int);
+        b >= 0 && !self.binds[b as usize].in_env && !self.binds[b as usize].global && !self.refs[r].tdz && (self.refs[r].with_list as int) < 0 && !self.refs[r].param_tdz
     }
 
     fn expand_ref(&mut self, op: Op, top_completion: bool) {
@@ -2411,12 +2431,12 @@ impl PComp {
             return;
         }
         if (mode as int) == M_WREF {
-            let li = self.refs[r].with_list;
+            let li = (self.refs[r].with_list as int);
             if li < 0 {
                 return;
             }
-            let name = self.refs[r].name.clone();
-            let scope = self.refs[r].scope;
+            let name = self.ref_name(r);
+            let scope = (self.refs[r].scope as int);
             let list = self.with_lists[li as usize].clone();
             let mut ends: Vec<int> = Vec::new();
             for wb in list.iter() {
@@ -2438,11 +2458,11 @@ impl PComp {
             return;
         }
         if (mode as int) == M_WLOAD {
-            if self.refs[r].with_list < 0 {
+            if (self.refs[r].with_list as int) < 0 {
                 self.xload_name_here(r);
                 return;
             }
-            let at = self.atom(self.refs[r].name.clone().as_str());
+            let at = self.atom(self.ref_name(r).as_str());
             self.xop(OP_DUP);
             let jf = self.xemit(OP_JF, 0, 0);
             self.xfixed[jf as usize] = true;
@@ -2456,17 +2476,17 @@ impl PComp {
             return;
         }
         if (mode as int) == M_WSTORE {
-            if self.refs[r].with_list < 0 {
+            if (self.refs[r].with_list as int) < 0 {
                 self.xstore_name_here(r, false);
                 return;
             }
-            let at = self.atom(self.refs[r].name.clone().as_str());
+            let at = self.atom(self.ref_name(r).as_str());
             self.xop(OP_OVER);
             let jf = self.xemit(OP_JF, 0, 0);
             self.xfixed[jf as usize] = true;
             if op.c == 1 {
                 // strict: the binding must still be there
-                let name = self.refs[r].name.clone();
+                let name = self.ref_name(r);
                 self.xop(OP_OVER);
                 self.xpush_str(name.as_str());
                 self.xop(OP_SWAP);
@@ -2488,9 +2508,9 @@ impl PComp {
             return;
         }
         if (mode as int) == M_TYPEOF {
-            let b = self.refs[r].bind;
-            let name = self.refs[r].name.clone();
-            if self.refs[r].with_list >= 0 {
+            let b = (self.refs[r].bind as int);
+            let name = self.ref_name(r);
+            if (self.refs[r].with_list as int) >= 0 {
                 let ends = self.xwith_lookup(r, false);
                 if b >= 0 {
                     self.xload_name_here(r);
@@ -2524,10 +2544,10 @@ impl PComp {
         if (mode as int) == M_DELETE {
             // inside `with`: the object that has the name loses it
             let mut ends: Vec<int> = Vec::new();
-            let li = self.refs[r].with_list;
+            let li = (self.refs[r].with_list as int);
             if li >= 0 {
-                let name = self.refs[r].name.clone();
-                let scope = self.refs[r].scope;
+                let name = self.ref_name(r);
+                let scope = (self.refs[r].scope as int);
                 let at = self.atom(name.as_str());
                 let list = self.with_lists[li as usize].clone();
                 for wb in list.iter() {
@@ -2544,10 +2564,10 @@ impl PComp {
                     self.xpatch(jf);
                 }
             }
-            if self.refs[r].bind >= 0 {
+            if (self.refs[r].bind as int) >= 0 {
                 self.xop(OP_FALSE);
             } else {
-                let name = self.refs[r].name.clone();
+                let name = self.ref_name(r);
                 let g = self.atom("globalThis");
                 self.xemit(OP_GET_GLOBAL, g, 0);
                 let at = self.atom(name.as_str());
@@ -2563,7 +2583,7 @@ impl PComp {
             let prefix = (flags & (U_PREFIX as i32)) != 0;
             let inc = (flags & (U_INC as i32)) != 0;
             let discard = (flags & (U_DISCARD as i32)) != 0;
-            let b = self.refs[r].bind;
+            let b = (self.refs[r].bind as int);
             if self.ref_local(r) && self.binds[b as usize].kind != K_CONST {
                 let slot = self.binds[b as usize].slot;
                 let delta = if inc { 1 } else { -1 };
@@ -2596,19 +2616,19 @@ impl PComp {
         }
         if (mode as int) == M_ADDT_LOAD || (mode as int) == M_ADDT_STORE {
             let sr = if (mode as int) == M_ADDT_LOAD { (op.c / 2) as usize } else { r };
-            let b = self.refs[sr].bind;
+            let b = (self.refs[sr].bind as int);
             let ok = b >= 0
                 && !self.binds[b as usize].global
                 && self.binds[b as usize].kind != K_CONST
                 && self.binds[b as usize].kind != K_CALLEE
                 && !self.refs[sr].tdz
-                && self.refs[sr].with_list < 0;
+                && (self.refs[sr].with_list as int) < 0;
             let in_env = ok && self.binds[b as usize].in_env;
             let pure = if (mode as int) == M_ADDT_LOAD { (op.c % 2) == 1 } else { op.c == 1 };
             if (mode as int) == M_ADDT_LOAD {
                 if ok && in_env {
                     let slot = self.binds[b as usize].slot;
-                    let depth = self.env_depth(self.refs[sr].scope, self.binds[b as usize].scope);
+                    let depth = self.env_depth((self.refs[sr].scope as int), self.binds[b as usize].scope);
                     self.xemit(OP_GET_ENV, depth, slot);
                 } else if ok && pure {
                     // nothing: ADD_LOCAL_POP reads x
@@ -2619,7 +2639,7 @@ impl PComp {
             }
             let slot = if b >= 0 { self.binds[b as usize].slot } else { 0 };
             if ok && in_env {
-                let depth = self.env_depth(self.refs[sr].scope, self.binds[b as usize].scope);
+                let depth = self.env_depth((self.refs[sr].scope as int), self.binds[b as usize].scope);
                 self.xemit(OP_ADD_ENV_POP, depth, slot);
             } else if ok && pure {
                 self.xemit(OP_ADD_LOCAL_POP, slot, 0);
@@ -2677,7 +2697,7 @@ impl PComp {
             if (c as int) == PH_REF {
                 // a local's property: fused
                 if (o.b as int) == M_LOAD && i + 1 < n && (code[i + 1].code as int) == OP_GET_PROP && !target[i + 1] && self.ref_local(o.a as usize) {
-                    let b = self.refs[o.a as usize].bind;
+                    let b = (self.refs[o.a as usize].bind as int);
                     let slot = self.binds[b as usize].slot;
                     self.xemit(OP_GET_LOCAL_PROP, slot, (code[i + 1].a as int));
                     map[i + 1] = map[i];
@@ -3194,6 +3214,9 @@ impl PComp {
         if !self.error.is_empty() {
             return -1;
         }
+        // the parse is over: its tokens are not read again (finish works
+        // on the code, the references and the scopes)
+        self.toks = Vec::new();
         self.finish();
         if !self.error.is_empty() {
             return -1;
@@ -4561,7 +4584,7 @@ impl PComp {
             if (t.kind as int) == T_PUNCT {
                 let s = self.names[t.v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
-                    let m = self.mate[k as usize];
+                    let m = self.mate[k as usize] as int;
                     if m < 0 {
                         return end;
                     }
@@ -4871,7 +4894,7 @@ impl PComp {
         }
         let last = self.last_op();
         if e.k == E_IDENT && (last.code as int) == PH_REF {
-            let name = self.refs[e.a as usize].name.clone();
+            let name = self.ref_name(e.a as usize);
             if self.strict && (name.as_str() == "eval" || name.as_str() == "arguments") {
                 self.fail("Unexpected eval or arguments in strict mode");
                 return;
@@ -5100,7 +5123,7 @@ impl PComp {
 
     fn check_strict_target(&mut self, e: Ex) {
         if self.strict && e.k == E_IDENT {
-            let s = self.refs[e.a as usize].name.clone();
+            let s = self.ref_name(e.a as usize);
             if s.as_str() == "eval" || s.as_str() == "arguments" {
                 self.fail("Unexpected eval or arguments in strict mode");
             }
@@ -5313,7 +5336,7 @@ impl PComp {
         if left.k == E_IDENT && (last.code as int) == PH_REF && left.b == n - 1 {
             self.check_strict_target(left);
             let r = left.a;
-            let name = self.refs[r as usize].name.clone();
+            let name = self.ref_name(r as usize);
             if self.has_with && !logical {
                 // the reference is resolved before the right side
                 self.pop_op();
@@ -5338,7 +5361,7 @@ impl PComp {
                 let e = self.assign();
                 self.name_anonymous(e, name.as_str());
                 let st = self.emit3(PH_REF, r, M_STORE, 0);
-                if e.k == E_ADD && e.a >= 0 && self.refs[e.a as usize].name == name {
+                if e.k == E_ADD && e.a >= 0 && self.ref_name(e.a as usize) == name {
                     return Ex { k: E_ADDASSIGN, a: e.b, b: st, c: e.c };
                 }
                 return ex(E_OTHER);
@@ -5827,7 +5850,7 @@ impl PComp {
         let n = self.call_args();
         if n < 0 {
             self.op(OP_CALL_SPREAD);
-        } else if !optional && e.k == E_IDENT && self.refs[e.a as usize].name.as_str() == "eval" {
+        } else if !optional && e.k == E_IDENT && self.ref_name(e.a as usize).as_str() == "eval" {
             let site = self.cur_scope;
             let mut s = site;
             while s >= 0 {
@@ -7392,10 +7415,11 @@ impl PComp {
                 e += 2;
             }
             let ref_ = &self.refs[r as usize];
-            if !skip && ref_.direct < 0 {
-                let x = self.lookup_here(ref_.scope, ref_.name.as_str());
+            if !skip && (ref_.direct as int) < 0 {
+                let nm = self.names[ref_.nid as usize].as_str();
+                let x = self.lookup_here((ref_.scope as int), nm);
                 let inner = x >= 0 && self.binds[x as usize].scope >= s0;
-                if !inner && x != self.lookup_here(ds, ref_.name.as_str()) {
+                if !inner && x != self.lookup_here(ds, nm) {
                     return false;
                 }
             }
