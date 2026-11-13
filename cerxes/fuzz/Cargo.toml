@@ -21,4 +21,12 @@ overflow-checks = false
 debug = 1
 panic = "unwind"
 
+# The worker default (run-local.sh, CI): release speed with debug
+# assertions on, so the engine's unchecked indexes (get_unchecked & co,
+# guarded by debug_assert!) panic with a source line instead of reading
+# out of bounds. Costs about 10–27 % (Chart, React).
+[profile.checked]
+inherits = "release"
+debug-assertions = true
+
 [workspace]
