@@ -3,7 +3,14 @@ name: Fuzz
 # CErXes fuzzing (cerxes/fuzz/README.md). Not part of "All tests": a finding
 # does not block a pull request. Runs every night and by hand ("Run
 # workflow": minutes, jobs, extra flags). Findings are the "fuzz-out"
-# artifact; the job summary shows the counts per class.
+# artifact; the job summary shows the counts per class and the known
+# findings (cerxes/fuzz/known/known.txt) with their hits.
+#
+# Shards, all on the checked build (debug assertions on):
+#   default  generated + mutated programs, every differential oracle, Node
+#   heavy    resource limits (deep recursion, huge allocations)
+#   hostile  forged snapshots and code-cache units (60 %), preemption (30 %)
+#   jit      the wasm engine with the baseline JIT: native vs wasm, JIT off vs on
 
 on:
   schedule:
@@ -28,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [default, heavy]
+        mode: [default, heavy, hostile, jit]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -41,19 +48,27 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             cerxes/fuzz/target
-          key: fuzz-${{ hashFiles('cerxes/Cargo.lock', 'cerxes/fuzz/Cargo.toml') }}
+          key: fuzz-${{ matrix.mode }}-${{ hashFiles('cerxes/Cargo.lock', 'cerxes/fuzz/Cargo.toml') }}
       - name: Build
-        run: cd cerxes/fuzz && cargo build --release
+        run: cd cerxes/fuzz && cargo build --profile checked
+      - name: Build the wasm engine with the JIT
+        if: matrix.mode == 'jit'
+        run: echo "WASM=$(cerxes/fuzz/jit/build.sh)" >> "$GITHUB_ENV"
       - name: Fuzz
         env:
           MINUTES: ${{ github.event.inputs.minutes || '30' }}
           EXTRA: ${{ github.event.inputs.extra || '--node' }}
         run: |
           flags="$EXTRA"
-          if [ "${{ matrix.mode }}" = heavy ]; then flags="--heavy"; fi
-          cerxes/fuzz/target/release/cerxes-fuzz run \
+          case "${{ matrix.mode }}" in
+            heavy) flags="--heavy" ;;
+            hostile) flags="--hostile 60 --preempt 30" ;;
+            jit) flags="--jit $WASM --jit-pct 60" ;;
+          esac
+          cerxes/fuzz/target/checked/cerxes-fuzz run \
             --time $((MINUTES * 60)) --jobs $(nproc) --seed ${{ github.run_id }} \
-            --out fuzz-out --corpus cerxes/tests/cases.txt --corpus cer/tests/cases.txt $flags
+            --out fuzz-out --corpus cerxes/tests/cases.txt --corpus cer/tests/cases.txt \
+            --corpus cerxes/tests/v8/own --corpus cerxes/fuzz/seeds $flags
       - name: Summary
         if: always()
         run: |
