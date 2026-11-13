@@ -767,3 +767,20 @@ t(function (a, a) { arguments[0] = 9; return a; }, 1, 2);
 r.join(" ")
 ----
 9 2 2 5 1 3 4 1 8 2 6 11 undefined 5 3 function x 9 4 2 2 8 2 1 q 2 2:undefined {"value":1,"writable":true,"enumerable":true,"configurable":true}1 2,3,3,1,2 1:42 1:1 1 9 2
+
+# the collector runs inside a sort's comparator, a generator's body and an
+# async body before its first await (Vm::gc_open): the cycles made there go,
+# the sorted values and the comparator stay, also when it empties the array
+==== js
+function cyc(i) { const o = { i: i, s: "v" + i }; o.self = o; o.f = () => o.i; return o; }
+const arr = []; for (let i = 0; i < 400; i++) arr.push({ k: (i * 7919) % 401, s: "s" + i });
+const so = arr.slice().sort((a, b) => { cyc(a.k); return a.k - b.k; });
+let ok = true; for (let i = 1; i < so.length; i++) if (so[i - 1].k > so[i].k) ok = false;
+const ts = arr.toSorted((a, b) => { cyc(b.k); return b.k - a.k; }); for (let i = 1; i < ts.length; i++) if (ts[i - 1].k < ts[i].k) ok = false;
+const a2 = arr.slice(0, 50); a2.sort((a, b) => { a2.length = 0; cyc(1); return a.k - b.k; });
+function* gen(n) { for (let i = 0; i < n; i++) { const c = cyc(i); yield c.s; } }
+let total = 0; const it = gen(500); let r; while (!(r = it.next()).done) total += r.value.length; for (const s of gen(500)) total += s.length;
+let at = 0; async function main() { for (let i = 0; i < 500; i++) at += cyc(i).f(); await null; } main();
+[ok, a2.length, a2[49].s, so[0].s, total, at].join()
+----
+true,50,s4,s0,3780,124750

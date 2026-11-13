@@ -3719,6 +3719,8 @@ impl Vm {
     }
 
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
+        self.nat_top = self.nat_ff && self.native_depth == self.gc_free_depth + 1;
+        self.nat_ff = false;
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && (matches!(this, Val::Undef) || matches!(this, Val::Null)) {
             self.throw_type("Array.prototype method called on null or undefined");
             return Val::Undef;

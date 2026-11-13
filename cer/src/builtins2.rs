@@ -619,32 +619,48 @@ impl Vm {
                 acc
             }
             NF_AP_SORT | NF_AP_TOSORTED => {
+                // called from a frame: with the array, the comparator and
+                // the items rooted, the comparator's garbage (closures
+                // and their scopes) is collected while the sort runs
+                let top = self.nat_top;
                 let o = self.this_array(&this);
                 if !matches!(a0, Val::Undef) && !self.is_callable(&a0) {
                     self.throw_type("The comparison function must be either a function or undefined");
                     return Val::Undef;
                 }
                 let mut items = self.elems_of(o);
+                let nr = self.temp_roots.len();
                 self.temp_roots.push(Val::Obj(o));
-                self.merge_sort(&mut items, &a0);
-                self.temp_roots.pop();
-                if self.throwing {
-                    return Val::Undef;
-                }
-                if id == NF_AP_TOSORTED {
-                    let a = self.new_array(items);
-                    return Val::Obj(a);
-                }
-                if self.objs[o as usize].class == C_ARRAY {
-                    self.put_elems(o, items);
-                } else {
-                    let mut i: int = 0;
-                    for it in items {
-                        self.set_index(o, i, it);
-                        i += 1;
+                let open = top && obj_of(&a0) >= 0 && items.len() > 1;
+                if open {
+                    self.temp_roots.push(a0.clone());
+                    for it in items.iter() {
+                        self.temp_roots.push(*it);
                     }
                 }
-                Val::Obj(o)
+                let g = self.gc_open(open);
+                self.merge_sort(&mut items, &a0);
+                self.gc_close(g);
+                if self.throwing {
+                    self.temp_roots.truncate(nr);
+                    return Val::Undef;
+                }
+                let r = if id == NF_AP_TOSORTED {
+                    Val::Obj(self.new_array(items))
+                } else {
+                    if self.objs[o as usize].class == C_ARRAY {
+                        self.put_elems(o, items);
+                    } else {
+                        let mut i: int = 0;
+                        for it in items {
+                            self.set_index(o, i, it);
+                            i += 1;
+                        }
+                    }
+                    Val::Obj(o)
+                };
+                self.temp_roots.truncate(nr);
+                r
             }
             NF_AP_FILL => {
                 let o = self.this_array(&this);
