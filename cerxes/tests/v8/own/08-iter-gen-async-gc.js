@@ -1,0 +1,54 @@
+function T(n,f){let r;try{r=f();r=typeof r==="string"?JSON.stringify(r):(typeof r==="symbol"?r.toString():String(r))}catch(e){r="throw "+(e&&e.constructor&&e.constructor.name)}console.log(n+": "+r)}
+// Generators, async, iterator protocol re-entrancy and GC-sensitive patterns. V8 UAF/type-confusion
+// history: generator resumed while running, Promise.all/any resolve-element re-entrancy (crbug 1146861-like
+// Promise.allSettled), async iterator close, FinalizationRegistry callbacks, Array.prototype.sort + gc.
+T("gen-reenter",()=>{let g;function* f(){g.next();yield 1}g=f();g.next()});
+T("gen-return-in-finally",()=>{function* f(){try{yield 1}finally{return 5}}let g=f();g.next();return JSON.stringify(g.return(9))});
+T("gen-throw-before-start",()=>{function* f(){yield 1}let g=f();try{g.throw(new SyntaxError())}catch(e){return e.constructor.name+":"+JSON.stringify(g.next())}});
+T("gen-yield-star-return-getter",()=>{let it={[Symbol.iterator](){return this},next(){return {done:false,value:1}},get return(){throw new URIError()}};function* f(){yield* it}let g=f();g.next();g.return()});
+T("gen-yield-star-throw-missing",()=>{let closed=0;let it={[Symbol.iterator](){return this},next(){return {done:false}},return(){closed++;return {}}};function* f(){yield* it}let g=f();g.next();try{g.throw(1)}catch(e){return e.constructor.name+":"+closed}});
+T("destructure-close",()=>{let closed=0;let it={[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){closed++;return {}}}}};let [a]=it;return closed});
+T("destructure-close-throw",()=>{let it={[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){throw new EvalError()}}}};let [a]=it;return a});
+T("for-of-break-return-nonobj",()=>{let it={[Symbol.iterator](){return {next(){return {value:1,done:false}},return(){return 5}}}};for(const x of it)break});
+T("for-of-next-getter-once",()=>{let n=0;let it={[Symbol.iterator](){return {get next(){n++;let i=0;return ()=>({done:i++>2})}}}};for(const x of it);return n});
+T("spread-iter-mutate-array",()=>{let a=[1,2,3];let r=[];for(const x of a){r.push(x);if(a.length<10)a.push(x)}return r.length});
+T("array-iterator-proto-next-override",()=>{let it=[][Symbol.iterator]();let P=Object.getPrototypeOf(it);let orig=P.next;P.next=function(){return {done:true}};let r=[...[1,2,3]].length;P.next=orig;return r});
+T("Symbol.iterator-on-Array.prototype",()=>{let orig=Array.prototype[Symbol.iterator];Array.prototype[Symbol.iterator]=function*(){yield 9};let r=[...[1,2]].join()+Math.max(...[1,2]);Array.prototype[Symbol.iterator]=orig;return r});
+T("generator-deep-yield-star",()=>{function* f(n){if(n>0)yield* f(n-1);else yield 1}return [...f(2000)].length});
+const P=[];
+const A=(n,f)=>{P.push(Promise.resolve().then(f).then(r=>n+": "+(typeof r==="string"?JSON.stringify(r):String(r)),e=>n+": throw "+(e&&e.constructor&&e.constructor.name)))};
+A("promise-all-resolve-twice",()=>{let res;let p={then(r){r(1);r(2)}};return Promise.all([p]).then(v=>v.join())});
+A("promise-all-iter-throw",()=>Promise.all({[Symbol.iterator](){throw new RangeError()}}));
+A("promise-all-resolve-getter",()=>{let C=function(ex){return new Promise(ex)};C.resolve=function(v){return Promise.resolve(v)};Object.defineProperty(C,"resolve",{get(){throw new EvalError()}});return Promise.all.call(C,[1])});
+A("promise-allSettled-reenter",()=>{let calls=0;let thenable={then(f,r){f(1);f(2);r(3)}};return Promise.allSettled([thenable]).then(v=>JSON.stringify(v))});
+A("promise-any-empty",()=>Promise.any([]));
+A("promise-any-errors",()=>Promise.any([Promise.reject(1),Promise.reject(2)]).catch(e=>e.constructor.name+":"+e.errors.join()));
+A("promise-race-thenable-throw",()=>Promise.race([{get then(){throw new TypeError()}}]));
+A("promise-then-species",()=>{class P2 extends Promise{static get [Symbol.species](){return Promise}};return new P2(r=>r(1)).then(x=>x) instanceof P2});
+A("promise-resolve-self",()=>{let r;let p=new Promise(x=>r=x);r(p);return p});
+A("promise-thenable-job-order",()=>{let log=[];Promise.resolve().then(()=>log.push(1));Promise.resolve({then(f){log.push(2);f()}}).then(()=>log.push(3));return Promise.resolve().then(()=>0).then(()=>0).then(()=>0).then(()=>log.join())});
+A("await-thenable-getter",async()=>{let n=0;let t={get then(){n++;return f=>f(5)}};let v=await t;return v+":"+n});
+A("async-gen-return-while-running",async()=>{let g;async function* f(){g.return(1);yield 2}g=f();return JSON.stringify(await g.next())});
+A("async-gen-queue",async()=>{async function* f(){yield 1;yield 2}let g=f();let r=await Promise.all([g.next(),g.next(),g.next(),g.return(9)]);return JSON.stringify(r)});
+A("async-iter-close",async()=>{let closed=0;let it={[Symbol.asyncIterator](){return {next(){return Promise.resolve({value:1,done:false})},return(){closed++;return Promise.resolve({done:true})}}}};for await(const x of it)break;return closed});
+A("for-await-sync-rejected",async()=>{let r=[];try{for await(const x of [Promise.reject(new SyntaxError())])r.push(x)}catch(e){return e.constructor.name}});
+A("long-promise-chain",async()=>{let p=Promise.resolve(0);for(let i=0;i<100000;i++)p=p.then(x=>x+1);return await p});
+A("deep-await-recursion",async()=>{async function f(n){return n?await f(n-1)+1:0}return await f(3000)});
+A("FinalizationRegistry",()=>{let fr=new FinalizationRegistry(()=>{});let o={};fr.register(o,1,o);return fr.unregister(o)});
+A("FR-register-self",()=>{let fr=new FinalizationRegistry(()=>{});fr.register(fr,1);return "ok"});
+A("FR-target-equals-held",()=>{let fr=new FinalizationRegistry(()=>{});let o={};fr.register(o,o)});
+A("WeakRef-deref",()=>{let o={};let w=new WeakRef(o);return w.deref()===o});
+A("WeakMap-symbol-key",()=>{let w=new WeakMap();w.set(Symbol("x"),1);return w.size===undefined});
+A("WeakMap-registered-symbol",()=>{let w=new WeakMap();w.set(Symbol.for("x"),1)});
+A("gc-during-sort",()=>{let a=[];for(let i=0;i<1000;i++)a.push({v:1000-i});a.sort((x,y)=>{if(typeof gc==="function"&&Math.random()<0.001)gc();let t=[];for(let i=0;i<10;i++)t.push({});return x.v-y.v});return a[0].v+":"+a[999].v});
+A("gc-during-map-iter",()=>{let m=new Map();for(let i=0;i<1000;i++)m.set({i},i);let s=0;for(const [k,v] of m){if(v%100==0){m.delete(k);if(typeof gc==="function")gc()}s+=v}return s});
+A("gc-closure-capture",()=>{let fs=[];for(let i=0;i<1000;i++){let o={i};fs.push(()=>o.i)}if(typeof gc==="function")gc();return fs[999]()});
+A("gc-weakmap-churn",()=>{let w=new WeakMap();let keep=[];for(let i=0;i<20000;i++){let k={};w.set(k,{k});if(i%100==0)keep.push(k)}if(typeof gc==="function")gc();return keep.every(k=>w.get(k).k===k)});
+A("gc-string-churn",()=>{let s="";for(let i=0;i<20000;i++){s+=String.fromCharCode(65+i%26);if(s.length>1000)s=s.slice(500)}return s.length});
+A("error-stack-getter",()=>{let e=new Error("x");Object.defineProperty(e,"stack",{get(){throw new EvalError()}});return String(e)});
+A("Error.captureStackTrace",()=>{if(!Error.captureStackTrace)return "n/a";let o={};Error.captureStackTrace(o);return typeof o.stack});
+A("Error.prepareStackTrace-throw",()=>{Error.prepareStackTrace=()=>{throw new URIError()};try{let s=new Error("x").stack;return typeof s}finally{delete Error.prepareStackTrace}});
+A("error-cause-getter",()=>{let n=0;let e=new Error("m",{get cause(){n++;return 1}});return e.cause+":"+n});
+A("AggregateError-iter",()=>new AggregateError({[Symbol.iterator](){throw new RangeError()}}));
+A("queueMicrotask-throw",()=>{queueMicrotask(()=>{});return "ok"});
+Promise.all(P).then(rs=>rs.forEach(r=>console.log(r)));
