@@ -200,7 +200,7 @@ impl Compiler {
         if !self.error.is_empty() {
             return true;
         }
-        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::parse_stack_budget()) {
             return false;
         }
         self.fail("SyntaxError: Maximum call stack size exceeded");
@@ -2860,7 +2860,7 @@ impl Compiler {
         // the site's template object is made once: a constant slot keeps it
         let fi = self.fs.len() - 1;
         let slot = self.fs[fi].proto.consts.len() as int;
-        self.fs[fi].proto.consts.push(Val::Undef);
+        self.fs[fi].proto.consts.push(Val::Undef());
         let cnt = strs.len() as int;
         let site = self.emit(OP_TEMPLATE_OBJ, 0, slot);
         for s in strs.iter() {

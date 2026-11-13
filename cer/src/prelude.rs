@@ -598,6 +598,15 @@ if (typeof Object.groupBy !== 'function') hide(Object, 'groupBy', function group
   return o;
 });
 
+// ---- Error.captureStackTrace (V8's, which libraries call when present)
+hide(Error, 'captureStackTrace', function captureStackTrace(o) {
+  if (Object(o) !== o) throw new TypeError('Invalid argument');
+  var s = String(new Error().stack); var i = s.indexOf('\n');
+  var name = o.name === undefined ? 'Error' : String(o.name);
+  var msg = o.message === undefined ? '' : String(o.message);
+  defineProperty(o, 'stack', { value: (msg ? name + ': ' + msg : name) + (i >= 0 ? s.slice(i) : ''), writable: true, configurable: true });
+});
+
 // ---- Annex B accessor methods
 var OP = Object.prototype;
 hide(OP, '__defineGetter__', function __defineGetter__(name, f) {
