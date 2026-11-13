@@ -86,7 +86,7 @@ const STRS: &[&str] = &[
     "''", "'a'", "'abc'", "'ä'", "'\\u{1F600}'", "'\\uD800'", "'0'", "'-1'", "'1e3'", "' 12 '", "'length'",
     "'__proto__'", "'constructor'", "'toString'", "'a,b,c'", "'\\n'", "'aaaaaaaaaaaaaaaa'", "'İ'", "'ß'", "'𝒳'",
 ];
-const BIGS: &[&str] = &["0n", "1n", "-1n", "2n ** 64n", "-(2n ** 63n)", "123456789012345678901234567890n"];
+const BIGS: &[&str] = &["0n", "1n", "-1n", "(2n ** 64n)", "(-(2n ** 63n))", "123456789012345678901234567890n"];
 const BINOPS: &[&str] = &[
     "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", ">>>", "==", "!=", "===", "!==", "<", "<=", ">", ">=",
     "&&", "||", "??", "in", "instanceof", ",",
@@ -207,9 +207,11 @@ impl Gen {
         }
         self.depth += 1;
         let r = match self.rng.below(22) {
-            0 | 1 | 2 => format!("({} {} {})", self.expr(), self.rng.pick(BINOPS), self.expr()),
-            3 => format!("({}{})", self.rng.pick(UNOPS), self.expr()),
-            4 => format!("{}.{}", self.var(), self.rng.pick(ARR_M)),
+            // operands in parentheses: `-1 ** 2` is a SyntaxError
+            0 | 1 | 2 => format!("(({}) {} ({}))", self.expr(), self.rng.pick(BINOPS), self.expr()),
+            // `- -1` written as `--1` would be a decrement
+            3 => format!("({}({}))", self.rng.pick(UNOPS), self.expr()),
+            4 => format!("({}.{})", self.var(), self.rng.pick(ARR_M)),
             5 => format!("String({}).{}", self.atom(), self.rng.pick(STR_M)),
             6 => format!("{}({}, {})", self.rng.pick(MATH), self.expr(), self.atom()),
             7 => format!("({} ? {} : {})", self.expr(), self.expr(), self.expr()),
@@ -234,7 +236,7 @@ impl Gen {
             16 => format!("(function* () {{ yield {}; yield* {}; return {}; }})().next()", self.expr(), self.iterable(), self.atom()),
             17 => format!("new Proxy({}, {{ get(t, k) {{ return typeof k === 'string' ? k.length : undefined; }} }}).{}", self.rng.pick(&["{}", "[]", "function () {}"]), self.rng.pick(&["a", "length", "xyz"])),
             18 => format!("JSON.parse(JSON.stringify({}) ?? 'null')", self.expr()),
-            19 => format!("(() => {{ try {{ return {}; }} finally {{ {}; }} }})()", self.expr(), self.expr()),
+            19 => format!("(() => {{ try {{ return {}; }} finally {{ ({}); }} }})()", self.expr(), self.expr()),
             20 => format!("Reflect.ownKeys({}).length", self.var()),
             _ => self.literal(),
         };

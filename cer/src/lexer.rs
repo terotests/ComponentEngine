@@ -84,6 +84,9 @@ pub struct Lexer {
     buf: Vec<Tok>,
     bi: int,
     filled: bool,
+    /// where a host's compile began (CErXes' lexer checks the stack from
+    /// it; this one reads a substitution as text and does not recurse)
+    pub sp0: int,
 }
 
 /// The next token (pcomp reads them one at a time); after the last, or
@@ -176,7 +179,7 @@ pub fn push_code_point(out: &mut String, cp: int) {
 
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
-        let mut lx = Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), buf: Vec::new(), bi: 0, filled: false };
+        let mut lx = Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), buf: Vec::new(), bi: 0, filled: false, sp0: 0 };
         // a hashbang line at the very start is a comment
         if lx.src.len() >= 2 && lx.src[0] == '#' && lx.src[1] == '!' {
             while (lx.pos as usize) < lx.src.len() && lx.src[lx.pos as usize] != '\n' && lx.src[lx.pos as usize] != '\r' {
@@ -458,6 +461,12 @@ impl Lexer {
                 continue;
             }
             break;
+        }
+        if s.is_empty() {
+            // a `\` that starts no escape: step over it, or the lexer
+            // reads the same empty name forever
+            self.fail("Invalid or unexpected token");
+            self.pos += 1;
         }
         s
     }

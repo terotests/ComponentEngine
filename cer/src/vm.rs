@@ -331,6 +331,10 @@ pub struct Vm {
     pub gn_memo: Vec<i32>,
     /// Vm::ta_len_plain's lookups (typed.rs)
     pub ta_memo: Vec<i32>,
+    /// rvm r_str_method's last check of a String.prototype slot: the
+    /// prototype's shape, the shape epoch, the slot, the site (rbase + pc), and the
+    /// native charCodeAt's object when that was the slot's value (else -1)
+    pub sm_memo: Vec<i32>,
     /// array_iter_plain's memo: an array's shape, the shape epoch, its
     /// prototype, the prototype's shape and its Symbol.iterator slot
     pub ai_memo: Vec<i32>,
@@ -379,6 +383,14 @@ pub struct Vm {
     pub made: int,
     pub made_limit: int,
     pub native_depth: int,
+    /// the native stack's address where the host entered the engine
+    /// (native_sp; 0: not known) and how many bytes below it native code may
+    /// go before a call throws RangeError instead of overflowing the
+    /// thread's stack (Vm::stack_exhausted)
+    pub stack_base: int,
+    pub stack_budget: int,
+    /// the most script frames at once before a call throws RangeError
+    pub max_frames: int,
     /// the native_depth at which the collector may run (Vm::gc_due): 0,
     /// or deeper while an activation that keeps everything it holds
     /// rooted runs script under it (a resumed generator, a sort's
@@ -698,6 +710,7 @@ impl Vm {
             rx_shapes: Vec::new(),
             gn_memo: Vec::new(),
             ta_memo: Vec::new(),
+            sm_memo: Vec::new(),
             ai_memo: Vec::new(),
             js_plan: Vec::new(),
             js_slots: Vec::new(),
@@ -722,6 +735,9 @@ impl Vm {
             made: 0,
             made_limit: MADE_MIN,
             native_depth: 0,
+            stack_base: 0,
+            stack_budget: default_stack_budget(),
+            max_frames: MAX_FRAMES,
             gc_free_depth: 0,
             nat_ff: false,
             nat_top: false,
@@ -1571,7 +1587,7 @@ impl Vm {
             return -1;
         }
         let n = self.strs[i].s.as_bytes().len() as int;
-        if jsstr::joins(self.strs[i].s.as_str(), b) {
+        if n + (b.as_bytes().len() as int) > MAX_STR_BYTES || jsstr::joins(self.strs[i].s.as_str(), b) {
             return -1;
         }
         if !rc_push(&mut self.strs[i].s, b) {
@@ -1612,7 +1628,7 @@ impl Vm {
     /// only (prepend_ok); -1 when it does not apply.
     #[inline(never)]
     pub fn str_prepend(&mut self, b: &str, y: int) -> int {
-        if !prepend_ok() || y <= 0 {
+        if !prepend_ok() || y <= 0 || self.hbytes(y) + (b.as_bytes().len() as int) > MAX_STR_BYTES {
             return -1;
         }
         if jsstr::joins(b, self.sref(y)) {
@@ -1803,7 +1819,11 @@ impl Vm {
                 self.sfreed.push(i as int);
             } else if self.strs[i].flag != 2 {
                 live += 1;
-                bytes += self.strs[i].s.as_bytes().len() as int;
+                // a buffer many handles share (a script's source, which
+                // each function made from it holds) counts once: counted
+                // per handle, React's 0.8 MB bundle made the limit 1.5 GB
+                // and strings never brought a collection
+                bytes += rc_own_bytes(&self.strs[i].s);
                 if self.strs[i].flag == 0 {
                     rc_trim(&mut self.strs[i].s);
                 }
@@ -2318,6 +2338,62 @@ impl Vm {
         let p = self.range_error_proto;
         let e = self.new_error(p, msg);
         self.throw_val(Val::Obj(e));
+    }
+
+    /// Native code is deeper below the host's entry than `stack_budget`
+    /// allows (Rust; the other targets have no address to compare).
+    #[inline]
+    pub fn stack_exhausted(&self) -> bool {
+        if self.stack_base == 0 {
+            return false;
+        }
+        let sp = native_sp();
+        sp != 0 && self.stack_base - sp > self.stack_budget
+    }
+
+    /// Throws "Maximum call stack size exceeded" when a call would go past
+    /// `max_frames` script frames or past the native stack's budget; true
+    /// when it threw.
+    /// Whether a string of `n` bytes is too long; if so, RangeError thrown.
+    /// (A double: an `int` is 32 bits on some Ranger targets.)
+    #[inline(always)]
+    pub fn str_too_long(&mut self, n: double) -> bool {
+        n > (MAX_STR_BYTES as double) && self.length_refused("Invalid string length")
+    }
+
+    /// Whether an array of `n` elements is too long; if so, RangeError thrown.
+    #[inline(always)]
+    pub fn elems_too_many(&mut self, n: double) -> bool {
+        n > (MAX_ELEMS as double) && self.length_refused("Invalid array length")
+    }
+
+    #[inline(never)]
+    fn length_refused(&mut self, msg: &str) -> bool {
+        self.throw_range(msg);
+        true
+    }
+
+    /// A JS call one frame deeper than max_frames: RangeError. JS calls
+    /// from JS do not grow the native stack (the interpreter loops over
+    /// frames); a nested run does, and run / rrun check that.
+    #[inline(always)]
+    pub fn too_deep(&mut self) -> bool {
+        (self.frames.len() as int) >= self.max_frames && self.depth_exceeded()
+    }
+
+    #[inline(never)]
+    fn depth_exceeded(&mut self) -> bool {
+        self.throw_range("Maximum call stack size exceeded");
+        true
+    }
+
+    /// At the start of a nested run: when native code (getters, toString,
+    /// callbacks, the JIT) has used the stack budget up, RangeError, which
+    /// the run's loop then unwinds.
+    pub fn check_native_stack(&mut self) {
+        if !self.throwing && self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+        }
     }
 
     pub fn throw_ref(&mut self, msg: &str) {
@@ -3397,13 +3473,13 @@ impl Vm {
             self.throw_range("Invalid array length");
             return;
         }
-        let len = n as int;
         let cur = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
-        if len > cur + 100000000 {
+        if n > (cur as double) && n > (MAX_ELEMS as double) {
             // elements are stored densely: a length this far out is refused
             self.throw_range("Invalid array length");
             return;
         }
+        let len = n as int;
         if len < cur && self.objs[o as usize].pos == 3 {
             // element properties at len.. go too, down to a non-configurable one
             let mut k = cur - 1;
@@ -4365,6 +4441,9 @@ impl Vm {
                     }
                 }
                 let n = self.sref(*x).as_bytes().len() + self.sref(*y).as_bytes().len();
+                if self.str_too_long(n as double) {
+                    return Val::Undef;
+                }
                 let h = self.take_handle(n as int, 0);
                 let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
                 s.push_str(self.sref(*x));
@@ -4423,6 +4502,9 @@ impl Vm {
             let x = self.to_str(&pa);
             let y = self.to_str(&pb);
             if self.throwing {
+                return Val::Undef;
+            }
+            if self.str_too_long((x.as_bytes().len() + y.as_bytes().len()) as double) {
                 return Val::Undef;
             }
             let mut s = String::new();
@@ -5068,6 +5150,11 @@ impl Vm {
     /// Sets up a frame for the JS function `fo`; the stack holds
     /// [f, this, args…]. For a constructor call `this` is the new object.
     pub fn enter_function(&mut self, fo: int, argc: int, construct: bool, new_target: Val) -> bool {
+        if self.too_deep() {
+            let bp = (self.stack.len() as int) - argc;
+            self.stack.truncate((bp - 2) as usize);
+            return false;
+        }
         let pi = self.objs[fo as usize].func as int;
         if !construct && !self.protos[pi as usize].uses_args && self.protos[pi as usize].rest < 0 && !self.protos[pi as usize].class_ctor {
             return self.enter_plain(fo, pi, argc);
@@ -5507,7 +5594,7 @@ impl Vm {
                 Some(x) => out.push(x),
                 None => break,
             }
-            if self.throwing {
+            if self.throwing || ((out.len() as int) > MAX_ELEMS && self.elems_too_many(out.len() as double)) {
                 break;
             }
         }
@@ -5659,6 +5746,7 @@ impl Vm {
             }
             return;
         }
+        self.check_native_stack();
         'frames: loop {
             if self.throwing {
                 if !self.unwind(base) {
@@ -6885,10 +6973,17 @@ impl Vm {
                     return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
                 }
                 let l = self.get(v, A_LENGTH);
-                let n = to_integer(self.to_number(&l)) as int;
+                let nd = to_integer(self.to_number(&l));
+                if self.throwing || self.elems_too_many(nd) {
+                    return out;
+                }
+                let n = nd as int;
                 let mut i = 0;
                 while i < n {
                     let x = self.get_index(v, i);
+                    if self.throwing {
+                        return out;
+                    }
                     out.push(x);
                     i += 1;
                 }
@@ -9662,6 +9757,19 @@ pub fn rc_fill_str(rc: &mut Rc<String>, s: &str) {
     *rc = Rc::new(String::from(s));
 }
 
+/// A handle's share of its buffer's bytes: the length divided among the
+/// handles that hold the same buffer (Rust; the other targets' strings
+/// are values of their own).
+#[ranger::target(rust)]
+pub fn rc_own_bytes(rc: &Rc<String>) -> int {
+    (rc.len() / Rc::strong_count(rc)) as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_own_bytes(rc: &Rc<String>) -> int {
+    rc.as_bytes().len() as int
+}
+
 /// Rust: a string's buffer to its size when a quarter or more is spare
 /// and nothing else holds it (Vm::collect; appending in place doubles it).
 #[ranger::target(rust)]
@@ -9946,7 +10054,7 @@ pub fn json_parse_fast(vm: &mut Vm, s: &str, out: &mut Val) -> bool {
     let mut pos: usize = 0;
     let mut buf = String::new();
     let mut memo: Vec<int> = vec![-1; 128];
-    let v = jf_value(vm, s, b, &mut pos, &mut buf, &mut memo);
+    let v = jf_value(vm, s, b, &mut pos, &mut buf, &mut memo, 0);
     if vm.throwing {
         return true;
     }
@@ -10154,7 +10262,7 @@ fn jf_str_val(vm: &mut Vm, t: &str) -> Val {
 }
 
 #[ranger::target(rust)]
-fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, memo: &mut Vec<int>) -> Val {
+fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, memo: &mut Vec<int>, depth: int) -> Val {
     jf_ws(b, pos);
     let n = b.len();
     if *pos >= n {
@@ -10162,6 +10270,11 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
         return Val::Undef;
     }
     let c = b[*pos];
+    // nesting: the native stack is looked at every 32 levels
+    if (depth & 31) == 31 && (c == b'{' || c == b'[') && vm.stack_exhausted() {
+        vm.throw_range("Maximum call stack size exceeded");
+        return Val::Undef;
+    }
     if c == b'{' {
         *pos += 1;
         let o = vm.new_object();
@@ -10212,7 +10325,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
                 return Val::Undef;
             }
             *pos += 1;
-            let v = jf_value(vm, s, b, pos, buf, memo);
+            let v = jf_value(vm, s, b, pos, buf, memo, depth + 1);
             if vm.throwing {
                 vm.temp_roots.pop();
                 return Val::Undef;
@@ -10255,7 +10368,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
             return Val::Obj(a);
         }
         loop {
-            let v = jf_value(vm, s, b, pos, buf, memo);
+            let v = jf_value(vm, s, b, pos, buf, memo, depth + 1);
             if vm.throwing {
                 vm.temp_roots.pop();
                 return Val::Undef;
@@ -10348,4 +10461,61 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
     let ch = s[*pos..].chars().next().unwrap_or(' ');
     vm.throw_syntax(format!("Unexpected token '{}' in JSON", ch).as_str());
     Val::Undef
+}
+
+/// Script frames at once before a call throws RangeError (V8 allows about
+/// 10 000 small ones).
+/// The deepest JS call nesting. Frames are heap memory (a few hundred
+/// bytes each with their slots), not native stack, so the limit is high:
+/// Test262's tail-call cases recurse 100000 deep.
+pub const MAX_FRAMES: int = 200000;
+/// The longest string, in bytes (V8's limit): a longer one is a RangeError,
+/// not an allocation failure that aborts the process.
+pub const MAX_STR_BYTES: int = 536870888;
+/// The most elements an array stores (they are stored densely, 16 bytes
+/// each and a hole flag more): a longer array is a RangeError.
+pub const MAX_ELEMS: int = 33554432;
+
+/// The address of a local: where the native stack is now (Rust; it grows
+/// down). 0 on the other targets.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn native_sp() -> int {
+    let x: u8 = 0;
+    let p = std::hint::black_box(&x) as *const u8 as usize;
+    p as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn native_sp() -> int {
+    0
+}
+
+/// Whether the native stack has grown more than `budget` bytes below
+/// `base` (a native_sp() taken earlier; 0 when unknown). The parsers and
+/// compilers recurse on nesting and check it, so a deeply nested source is
+/// a SyntaxError, not a stack overflow that aborts the process.
+pub fn stack_deeper_than(base: int, budget: int) -> bool {
+    if base == 0 {
+        return false;
+    }
+    let sp = native_sp();
+    sp != 0 && base - sp > budget
+}
+
+/// How deep native code may go below the host's entry: 1 MB, half of a
+/// spawned Rust thread's 2 MB; 512 KB in WebAssembly, whose whole stack
+/// is 1 MB.
+#[ranger::target(rust)]
+pub fn default_stack_budget() -> int {
+    if cfg!(target_arch = "wasm32") {
+        512 * 1024
+    } else {
+        1024 * 1024
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn default_stack_budget() -> int {
+    0
 }

@@ -316,6 +316,7 @@ impl Vm {
 
     /// Runs frames until the frame count falls back to `base`.
     pub fn rrun(&mut self, base: int) {
+        self.check_native_stack();
         'frames: loop {
             if self.throwing {
                 if !self.unwind(base) {
@@ -392,40 +393,27 @@ impl Vm {
                         }
                         self.r_add_slow(bp, fi, pc, (w1 as int), (w2 as int), (w3 as int));
                     }
-                    R_SUB | R_MUL | R_ARITH => {
-                        let code = if ((w0 & 255) as int) == R_SUB {
-                            OP_SUB
-                        } else if ((w0 & 255) as int) == R_MUL {
-                            OP_MUL
-                        } else {
-                            (((w0 >> 8) & 255) as int)
-                        };
+                    R_SUB | R_MUL => {
+                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
+                            let r = if ((w0 & 255) as int) == R_SUB { *x - *y } else { *x * *y };
+                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                            pc = (pc + 1 + ((w0 >> 16) as int));
+                            continue;
+                        }
+                        let code = if ((w0 & 255) as int) == R_SUB { OP_SUB } else { OP_MUL };
+                        self.r_arith_slow(code, bp, fi, pc, (w1 as int), (w2 as int), (w3 as int));
+                    }
+                    R_ARITH => {
+                        let code = ((w0 >> 8) & 255) as int;
                         if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
                             let (a, b) = (*x, *y);
-                            let r = if code == OP_SUB {
-                                a - b
-                            } else if code == OP_MUL {
-                                a * b
-                            // bit operations on numbers in int32 range: ToInt32 is
-                            // the truncation
-                            } else if code >= OP_BAND && code <= OP_USHR && a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
-                                let (p, q) = (trunc_i32(a), trunc_i32(b));
-                                match code {
-                                    OP_BAND => (p & q) as double,
-                                    OP_BOR => (p | q) as double,
-                                    OP_BXOR => (p ^ q) as double,
-                                    OP_SHL => wrap32(p << (q & 31)) as double,
-                                    OP_SHR => (p >> (q & 31)) as double,
-                                    // >>>: the int32's bits as a uint32
-                                    _ => ((p & 4294967295) >> (q & 31)) as double,
-                                }
+                            let r = if code >= OP_BAND && code <= OP_USHR {
+                                bit_fast(code, a, b)
                             } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
                                 // whole non-negative int32s: an int remainder
                                 let p = a as int;
                                 let q = b as int;
                                 (p % q) as double
-                            } else if code >= OP_BAND && code <= OP_USHR {
-                                bit_num(code, a, b)
                             } else {
                                 arith_num(code, a, b)
                             };
@@ -754,6 +742,16 @@ impl Vm {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
+                        if c == -5 || c == -6 {
+                            // a site that read a typed array's (-5) or a string's
+                            // (-6) length (r_get_prop_slow)
+                            let n = self.len_site(c, o, bp, (w2 as int));
+                            if n >= 0 {
+                                self.rset((bp + (w1 as int)) as usize, Val::Num(n as double));
+                                pc = (pc + 1 + ((w0 >> 16) as int));
+                                continue;
+                            }
+                        }
                         if self.r_get_prop_slow(o, pi, rb, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int)) {
                             continue 'frames;
                         }
@@ -796,8 +794,8 @@ impl Vm {
                                 }
                             } else if ob.class == C_TYPED {
                                 // a typed array's element (ta_slot: no detached, resizable or converted buffer)
-                                let i = *n as int;
-                                if (i as double) == *n {
+                                let i = index_int(*n);
+                                if i >= 0 {
                                     let s = self.ta_slot(*o, i);
                                     if s >= 0 {
                                         r = Val::Num(cold_at(&self.colds, obj_at(&self.objs, ob.env as usize).cold as usize).nums[s as usize]);
@@ -838,11 +836,15 @@ impl Vm {
                             num = true;
                         }
                         let mut done = false;
-                        if o >= 0 && num && self.objs[o as usize].class == C_TYPED {
+                        if o >= 0 && num && obj_at(&self.objs, o as usize).class == C_TYPED {
                             if let Val::Num(x) = val {
-                                let i = n as int;
-                                if (i as double) == n && self.ta_put_num(o, i, x) {
-                                    done = true;
+                                let i = index_int(n);
+                                if i >= 0 && self.ta_put_num(o, i, x) {
+                                    if ((w0 >> 8) & 255) == 1 {
+                                        self.rset((bp + (w1 as int)) as usize, val);
+                                    }
+                                    pc = (pc + 1 + ((w0 >> 16) as int));
+                                    continue;
                                 }
                             }
                         }
@@ -1386,6 +1388,23 @@ impl Vm {
         }
     }
 
+    /// The length at an R_GET_PROP site that read a typed array's (c ==
+    /// -5) or a string's (-6): -1 when the value is not one, or the typed
+    /// array's getter is not the native one (r_get_prop_slow then).
+    #[inline(never)]
+    pub fn len_site(&mut self, c: int, o: int, bp: int, w2: int) -> int {
+        if c == -6 {
+            if let Val::Str(h) = *self.rget(bp, w2) {
+                return self.hlen(h);
+            }
+            return -1;
+        }
+        if o < 0 || obj_at(&self.objs, o as usize).class != C_TYPED {
+            return -1;
+        }
+        self.ta_len_hit(o)
+    }
+
     /// R_GET_PROP / R_GET_THIS_PROP past its inline cache.
     #[inline(never)]
     pub fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
@@ -1416,6 +1435,10 @@ impl Vm {
             if let Val::Str(h) = *self.rget(bp, w2) {
                 let n = self.hlen(h) as double;
                 self.stack[(bp + w1) as usize] = Val::Num(n);
+                if self.rcode[(rb + pc) as usize].c < 0 {
+                    // the site's next string goes through len_site
+                    self.rcode[(rb + pc) as usize].c = -6;
+                }
                 return false;
             }
         }
@@ -1953,15 +1976,33 @@ impl Vm {
             return -1;
         }
         let sp = self.string_proto;
-        let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
-        let slot = self.ic_slot(sp, atom, -16 - w3, false);
-        if slot < 0 {
-            return -1;
+        let slot = -16 - w3;
+        let sh = self.ob(sp).shape;
+        // this site's key in the slot as last checked (sm_memo): same shape
+        // and epoch, so the slot still holds it as a data property
+        let site = rb + pc;
+        let m = &self.sm_memo;
+        let known = m.len() >= 5 && i32_at(m, 0) == sh && i32_at(m, 1) == (self.shape_epoch as i32) && (i32_at(m, 2) as int) == slot && (i32_at(m, 3) as int) == site;
+        if !known {
+            let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
+            if self.ic_slot(sp, atom, slot, false) < 0 {
+                return -1;
+            }
+            let f0 = obj_of(&slot_at(self.ob(sp), slot as usize));
+            let cc = if f0 >= 0 && self.ob(f0).class == C_NATIVE && (self.ob(f0).func as int) == crate::builtins::NF_SP_CHARCODEAT { f0 } else { -1 };
+            self.sm_memo.clear();
+            self.sm_memo.push(sh);
+            self.sm_memo.push(self.shape_epoch as i32);
+            self.sm_memo.push(slot as i32);
+            self.sm_memo.push(site as i32);
+            self.sm_memo.push(cc as i32);
         }
         let v = *self.rget(bp, w2);
         let f = slot_at(self.ob(sp), slot as usize);
         let fo = obj_of(&f);
-        if fo >= 0 && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_SP_CHARCODEAT {
+        // the native charCodeAt checked then (and still: the id could be
+        // another object's by now)
+        if fo >= 0 && (fo as i32) == i32_at(&self.sm_memo, 4) && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_SP_CHARCODEAT {
             let to = self.r_char_code_call(bp, rb, pc, w0, w1, v);
             if to >= 0 {
                 return to;
@@ -1981,13 +2022,15 @@ impl Vm {
     /// nothing done.
     #[inline(always)]
     pub fn r_char_code_call(&mut self, bp: int, rb: int, pc: int, w0: int, w1: int, t: Val) -> int {
+        // the ops after a method get: a function's code ends with a return,
+        // so the get and a move are never its last
         let p1 = pc + 1 + (w0 >> 16);
-        let m = self.rcode[(rb + p1) as usize];
+        let m = op_at(&self.rcode, (rb + p1) as usize);
         if ((m.code & 255) as int) != R_MOVE || (m.a as int) != w1 + 2 {
             return -1;
         }
         let p2 = p1 + 1 + ((m.code >> 16) as int);
-        let c = self.rcode[(rb + p2) as usize];
+        let c = op_at(&self.rcode, (rb + p2) as usize);
         if ((c.code & 255) as int) != R_CALL || (c.a as int) != w1 || (c.b as int) != 1 || ((c.code >> 8) & 255) != 0 {
             return -1;
         }
@@ -2645,6 +2688,11 @@ impl Vm {
             i += 1;
         }
         if self.stack.len() < end {
+            // the stack only grows past its high-water mark here, so a
+            // deep recursion is caught here at no cost to other calls
+            if self.too_deep() {
+                return false;
+            }
             grow_stack(&mut self.stack, end);
         }
         let mut nt = Val::Undef;
@@ -3207,6 +3255,71 @@ pub fn trunc_i32(a: double) -> int {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn trunc_i32(a: double) -> int {
     a as int
+}
+
+/// A number that is a whole index below 2^31 as an int, else -1.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn index_int(n: double) -> int {
+    if n >= 0.0 && n < 2147483648.0 {
+        // SAFETY: n is inside i32 range (checked above; NaN fails it)
+        let i = unsafe { n.to_int_unchecked::<i32>() };
+        if (i as double) == n {
+            return i as int;
+        }
+    }
+    -1
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn index_int(n: double) -> int {
+    if n >= 0.0 && n < 2147483648.0 {
+        let i = n as int;
+        if (i as double) == n {
+            return i;
+        }
+    }
+    -1
+}
+
+/// A bit operation on two numbers: below 2^53 in magnitude ToInt32 is the
+/// truncation's low 32 bits, so both become int32s at once (uint32s too,
+/// `>>> 0` results); otherwise bit_num.
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn bit_fast(code: int, a: double, b: double) -> double {
+    if a.abs() < 9007199254740992.0 && b.abs() < 9007199254740992.0 {
+        // SAFETY: both are finite and inside i64 range (checked above)
+        let p = unsafe { a.to_int_unchecked::<i64>() } as i32;
+        let q = unsafe { b.to_int_unchecked::<i64>() } as i32;
+        return match code {
+            OP_BAND => (p & q) as double,
+            OP_BOR => (p | q) as double,
+            OP_BXOR => (p ^ q) as double,
+            OP_SHL => p.wrapping_shl(q as u32) as double,
+            OP_SHR => p.wrapping_shr(q as u32) as double,
+            // >>>: the int32's bits as a uint32
+            _ => (p as u32).wrapping_shr(q as u32) as double,
+        };
+    }
+    bit_num(code, a, b)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn bit_fast(code: int, a: double, b: double) -> double {
+    if a >= -2147483648.0 && a <= 2147483647.0 && b >= -2147483648.0 && b <= 2147483647.0 {
+        let p = a as int;
+        let q = b as int;
+        return match code {
+            OP_BAND => (p & q) as double,
+            OP_BOR => (p | q) as double,
+            OP_BXOR => (p ^ q) as double,
+            OP_SHL => wrap32(p << (q & 31)) as double,
+            OP_SHR => (p >> (q & 31)) as double,
+            _ => ((p & 4294967295) >> (q & 31)) as double,
+        };
+    }
+    bit_num(code, a, b)
 }
 
 /// A bit operation on two numbers outside rrun's int32 fast path (`>>>`,
