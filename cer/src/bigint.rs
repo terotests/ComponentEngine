@@ -134,6 +134,10 @@ fn mul_mag(a: &Vec<int>, b: &Vec<int>) -> Vec<int> {
     }
     let mut i: usize = 0;
     while i < a.len() {
+        if crate::builtins::time_up(b.len() as int) {
+            // past the deadline: the result is dropped (Vm::check_expired)
+            return Vec::new();
+        }
         let mut carry: int = 0;
         let mut j: usize = 0;
         while j < b.len() {
@@ -212,6 +216,9 @@ fn divmod_mag(a: &Vec<int>, b: &Vec<int>) -> (Vec<int>, Vec<int>) {
     let mut r: Vec<int> = Vec::new();
     let mut i = (a.len() as int) - 1;
     while i >= 0 {
+        if crate::builtins::time_up(14 * (b.len() as int + 1)) {
+            return (Vec::new(), Vec::new());
+        }
         // r = r * BASE + a[i]
         r.insert(0, a[i as usize]);
         trim(&mut r);
@@ -404,6 +411,9 @@ pub fn from_radix(digits: &str, radix: int) -> String {
         if d >= radix {
             return String::new();
         }
+        if crate::builtins::time_up(acc.len() as int) {
+            return String::from("0");
+        }
         acc = add_mag(&mul_small(&acc, radix), &vec![d]);
         trim(&mut acc);
         any = true;
@@ -428,6 +438,9 @@ pub fn to_radix(x: &str, radix: int) -> String {
     // k digits a pass, by short division with radix^k
     let (m, k) = radix_chunk(radix);
     while !a.is_empty() {
+        if crate::builtins::time_up(a.len() as int) {
+            return String::from("0");
+        }
         let (q, r) = div_small(&a, m);
         a = q;
         let mut v = r;
@@ -455,6 +468,9 @@ fn mag_bytes(a: &Vec<int>) -> Vec<int> {
     let mut out: Vec<int> = Vec::new();
     let mut m = a.clone();
     while !m.is_empty() {
+        if crate::builtins::time_up(m.len() as int) {
+            return out;
+        }
         let (q, r) = div_small(&m, 65536);
         out.push(r % 256);
         out.push(r / 256);
@@ -477,6 +493,9 @@ fn bytes_mag(b: &Vec<int>) -> Vec<int> {
         i -= 1;
     }
     while i >= 1 {
+        if crate::builtins::time_up(acc.len() as int) {
+            return Vec::new();
+        }
         acc = mul_small(&acc, 65536);
         let v = b[i as usize] * 256 + b[(i - 1) as usize];
         if v != 0 {
@@ -534,18 +553,20 @@ pub fn bitop(op: int, x: &str, y: &str) -> String {
     result(true, m)
 }
 
-/// 2^bits as a decimal string.
+/// 2^bits as a decimal string, 13 bits a pass (a limb times 8192 plus
+/// its carry stays below 2^31). Past the host's deadline it stops with a
+/// wrong value, which the caller's check_expired turns into the time
+/// limit's Error.
 pub fn pow2(bits: int) -> String {
     let mut acc: Vec<int> = vec![1];
     let mut i = 0;
-    // 13 bits a pass: a limb times 8192 plus its carry stays below 2^31
-    while i + 13 <= bits {
-        acc = mul_small(&acc, 8192);
-        i += 13;
-    }
     while i < bits {
-        acc = mul_small(&acc, 2);
-        i += 1;
+        if crate::builtins::time_up(acc.len() as int) {
+            return String::from("0");
+        }
+        let k = if bits - i >= 13 { 13 } else { bits - i };
+        acc = mul_small(&acc, 1 << k);
+        i += k;
     }
     result(false, acc)
 }
@@ -896,7 +917,17 @@ impl Vm {
     }
 
     /// A binary operator with a BigInt operand (after ToPrimitive).
+    /// big_arith_now; past the deadline (the limb loops stop early) the
+    /// script stops instead.
     pub fn big_arith(&mut self, code: int, a: &Val, b: &Val) -> Val {
+        let r = self.big_arith_now(code, a, b);
+        if self.check_expired() {
+            return Val::Undef;
+        }
+        r
+    }
+
+    fn big_arith_now(&mut self, code: int, a: &Val, b: &Val) -> Val {
         if !self.is_bigint(a) || !self.is_bigint(b) {
             self.throw_type("Cannot mix BigInt and other types, use explicit conversions");
             return Val::Undef;
@@ -1107,6 +1138,14 @@ impl Vm {
     }
 
     pub fn call_native_bigint(&mut self, id: int, this: Val, args: &Vec<Val>, construct: bool) -> Val {
+        let r = self.call_native_bigint_now(id, this, args, construct);
+        if self.check_expired() {
+            return Val::Undef;
+        }
+        r
+    }
+
+    fn call_native_bigint_now(&mut self, id: int, this: Val, args: &Vec<Val>, construct: bool) -> Val {
         let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
         let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
         if id == NF_BIGINT {

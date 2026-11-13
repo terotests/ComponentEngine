@@ -77,7 +77,7 @@ can mutate them: `cerxes-fuzz run --corpus cerxes/tests/v8/out/own`.
 |---|---|---|---|---|
 | 2026-11-13 first run (#153) | — | — | 220 | panics, aborts on deep recursion, OOM on string/BigInt limits, wasm traps |
 | 2026-11-13 #159 | 2606 | 347 | 22 | radix buffers, BigInt size limit, wasm32 index overflow, snapshot for-in, parser depth |
-| 2026-11-13 this round | 2668 | 290 | 7 (hang) | see below |
+| 2026-11-13 #160 | 2658 | 300 | 7 (hang) | see below |
 
 No test panics, aborts, runs out of memory or traps in WebAssembly any more; the 7 hangs are 08-for-of-next-getter-once (all five configurations) and two snap cases, listed below.
 
@@ -124,4 +124,5 @@ No test panics, aborts, runs out of memory or traps in WebAssembly any more; the
 | 08 async-iter-close, array-iterator-proto-next-override, deep yield*, deep await | iterator close in async loops, overridden %ArrayIteratorPrototype%.next, deep generator chains |
 | global-function-over-nonconfig | global function declaration over a non-configurable property |
 | 09 Intl validation, toLocaleString-reenter | Intl option validation order |
+| 04-ReDoS-nested, 04-ReDoS-alt | the regex step budget from #158 stops catastrophic backtracking with a RangeError; V8 runs it to the end |
 | snap many-vars-100k, many-object-keys (hang) | the harness snapshots every 0.05 ms; 100k-entry states are slow to copy that often, not a fault |

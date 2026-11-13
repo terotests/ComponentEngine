@@ -314,6 +314,140 @@ pub fn now_ms() -> double {
     wall_clock_ms()
 }
 
+// The running host call's deadline (Vm::begin_call) where code with no Vm
+// at hand checks it: the regex matcher, BigInt arithmetic, a number sort
+// (Vm::check_expired); and the regex matcher's backtracking budget
+// (Vm::set_regex_step_limit). Rust keeps them per thread (limits); the
+// other targets have no limits.
+
+/// A promise job stopped by its slice heads the queue as [JOB_CONT + kind,
+/// the async call's generator, the script's value, d] (Vm::run_jobs); the
+/// kinds: a reaction, an await's continuation, queueMicrotask, a thenable.
+pub const JOB_CONT: double = 1000000000.0;
+pub const JK_REACT: int = 1;
+pub const JK_ASYNC: int = 2;
+pub const JK_MICRO: int = 3;
+pub const JK_THENABLE: int = 4;
+
+/// Units of work (elements, steps, limbs) between two reads of the clock in
+/// time_up: about a millisecond's worth.
+pub const POLL_EVERY: int = 1048576;
+
+/// The default backtracking budget: about 1.5 s of matching.
+pub const REGEX_STEPS: int = 10000000;
+
+pub const LIM_SET_DEADLINE: int = 0;
+pub const LIM_TIME_UP: int = 1;
+pub const LIM_EXPIRED: int = 2;
+pub const LIM_SET_REGEX: int = 3;
+pub const LIM_REGEX: int = 4;
+pub const LIM_REGEX_OVER: int = 5;
+pub const LIM_STOPPED: int = 6;
+pub const LIM_TAKE_OVER: int = 7;
+
+/// The per-thread limit state: op LIM_* with its argument; answers a
+/// number (1 / 0 for yes / no).
+#[ranger::target(rust)]
+pub fn limits(op: int, x: double) -> double {
+    // [deadline, units left before the clock is read, expired, regex
+    // budget, regex budget ran out]
+    thread_local! {
+        static L: std::cell::Cell<[f64; 5]> = const { std::cell::Cell::new([0.0, 1048576.0, 0.0, 10000000.0, 0.0]) };
+    }
+    L.with(|c| {
+        let mut v = c.get();
+        let mut r = 0.0;
+        match op {
+            LIM_SET_DEADLINE => {
+                v[0] = x;
+                v[1] = POLL_EVERY as f64;
+                v[2] = 0.0;
+            }
+            LIM_TIME_UP => {
+                if v[0] <= 0.0 {
+                    return 0.0;
+                }
+                v[1] -= x;
+                if v[1] > 0.0 {
+                    c.set(v);
+                    return 0.0;
+                }
+                v[1] = POLL_EVERY as f64;
+                if v[2] == 0.0 && now_ms() >= v[0] {
+                    v[2] = 1.0;
+                }
+                r = v[2];
+            }
+            LIM_EXPIRED => return v[2],
+            LIM_SET_REGEX => v[3] = if x > 0.0 { x } else { 9.0e18 },
+            LIM_REGEX => return v[3],
+            LIM_REGEX_OVER => v[4] = 1.0,
+            LIM_STOPPED => return if v[4] != 0.0 || v[2] != 0.0 { 1.0 } else { 0.0 },
+            LIM_TAKE_OVER => {
+                r = v[4];
+                v[4] = 0.0;
+            }
+            _ => {}
+        }
+        c.set(v);
+        r
+    })
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn limits(op: int, _x: double) -> double {
+    if op == LIM_REGEX {
+        return 9.0e18;
+    }
+    0.0
+}
+
+pub fn set_deadline(t: double) {
+    limits(LIM_SET_DEADLINE, t);
+}
+
+/// `cost` more units of work were done: true once the deadline has passed
+/// (and from then on until the next set_deadline). Reads the clock once in
+/// POLL_EVERY units.
+pub fn time_up(cost: int) -> bool {
+    limits(LIM_TIME_UP, cost as double) != 0.0
+}
+
+/// time_up has seen the deadline pass.
+pub fn expired() -> bool {
+    limits(LIM_EXPIRED, 0.0) != 0.0
+}
+
+pub fn set_regex_limit(n: double) {
+    limits(LIM_SET_REGEX, n);
+}
+
+/// A double: the C++ target's int is 32 bits.
+pub fn regex_limit() -> double {
+    limits(LIM_REGEX, 0.0)
+}
+
+/// A match attempt has taken `steps`: true when it is to stop, past the
+/// deadline (the clock is read every 16384 steps).
+pub fn regex_time(steps: int) -> bool {
+    (steps & 16383) == 0 && time_up(1048576)
+}
+
+/// A match attempt went over the backtracking budget (regex_limit).
+pub fn regex_over() {
+    limits(LIM_REGEX_OVER, 0.0);
+}
+
+/// A match stopped (regex_time, regex_over): later attempts give up at once.
+pub fn regex_stopped() -> bool {
+    limits(LIM_STOPPED, 0.0) != 0.0
+}
+
+/// Whether an attempt ran out of the budget since the last call; clears it.
+pub fn take_regex_over() -> bool {
+    limits(LIM_TAKE_OVER, 0.0) != 0.0
+}
+
 impl Vm {
     pub fn native_fn(&mut self, name: &str, id: int, length: int) -> int {
         let fp = self.function_proto;
@@ -1151,6 +1285,7 @@ impl Vm {
             }
         }
         let caps = self.regexes[idx as usize].exec(&self.rx_units, start);
+        self.rx_after();
         if caps.is_empty() {
             if global || sticky {
                 self.set_last_index(ro, 0.0);
@@ -1408,6 +1543,10 @@ impl Vm {
                     break;
                 }
                 let caps = self.regexes[idx as usize].exec(units, start);
+                self.rx_after();
+                if self.throwing || self.poll(64) {
+                    return Val::Undef;
+                }
                 if caps.is_empty() {
                     break;
                 }
@@ -1473,7 +1612,7 @@ impl Vm {
         let mut from: int = 0;
         loop {
             let p = jsstr::index_of(s.as_str(), pat.as_str(), from);
-            if p < 0 {
+            if p < 0 || self.poll(64) {
                 break;
             }
             jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, p).as_str());
@@ -1541,6 +1680,7 @@ impl Vm {
             let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
             if n == 0 {
                 let caps = self.regexes[idx as usize].exec(units, 0);
+                self.rx_after();
                 if caps.is_empty() || caps[1] != 0 {
                     out.push(self.rc_val(s.clone()));
                 }
@@ -1551,6 +1691,7 @@ impl Vm {
             let mut q: int = 0;
             while q < n {
                 let caps = self.regexes[idx as usize].exec(units, q);
+                self.rx_after();
                 if caps.is_empty() {
                     break;
                 }
@@ -2437,10 +2578,12 @@ impl Vm {
         let kind = self.sort_kind(cmp);
         if kind >= 2 && all_nums(v) {
             num_merge_sort(v, kind == 3);
+            self.check_expired();
             return;
         }
         if matches!(cmp, Val::Undef) && all_nums(v) {
             num_str_merge_sort(v);
+            self.check_expired();
             return;
         }
         let mut src: Vec<Val> = v.clone();
@@ -2456,7 +2599,7 @@ impl Vm {
                 let mut k = lo;
                 while i < mid && j < hi {
                     let c = self.sort_compare(cmp, &src[j], &src[i]);
-                    if self.throwing {
+                    if self.throwing || self.poll(64) {
                         return;
                     }
                     if c < 0.0 {
@@ -2686,6 +2829,9 @@ impl Vm {
 
     /// writes a value json_skip does not leave out; false only when throwing
     pub fn json_write(&mut self, v: Val, replacer: &Val, allow: &Vec<String>, gap: &str, indent: &str, stack: &mut Vec<int>, out: &mut String) -> bool {
+        if self.poll(16) {
+            return false;
+        }
         match &v {
             Val::Null => {
                 out.push_str("null");
@@ -2927,6 +3073,9 @@ impl Vm {
             return Val::Undef;
         }
         let c = cs[*pos];
+        if (c == '{' || c == '[') && self.poll(64) {
+            return Val::Undef;
+        }
         if (c == '{' || c == '[') && self.stack_exhausted() {
             self.throw_range("Maximum call stack size exceeded");
             return Val::Undef;
@@ -3460,10 +3609,26 @@ impl Vm {
         out
     }
 
-    /// Runs queued promise jobs until none are left.
+    /// Runs queued promise jobs until none are left. From Engine::run /
+    /// resume with slices on (job_slices), a job's script stops where its
+    /// slice runs out as the script itself does: its frames stay, the
+    /// queue's head says how the job ends (JOB_CONT), and job_resume ends
+    /// it once Engine::resume has run the frames out.
     pub fn run_jobs(&mut self) {
+        // from the host, a call of its own for the time limit
+        let began = if self.native_depth == 0 { self.begin_call(false) } else { false };
+        let slicing = self.slicing;
+        if !self.job_slices {
+            self.slicing = self.prof_on;
+        }
+        self.run_jobs_now();
+        self.slicing = slicing;
+        self.end_call(began);
+    }
+
+    fn run_jobs_now(&mut self) {
         let mut guard: int = 0;
-        while (self.job_head as usize) < self.jobs.len() && guard < 10000000 {
+        while (self.job_head as usize) < self.jobs.len() && guard < 10000000 && !self.terminated {
             guard += 1;
             // from the front, each job's four values taken out in place:
             // a queue of n jobs costs n, not n * n moves
@@ -3492,48 +3657,183 @@ impl Vm {
                 self.temp_roots.push(d.clone());
                 self.native_depth -= 1;
             }
-            if let Val::Num(neg) = a {
+            let mut kind: int = 0;
+            let mut g: int = -1;
+            let mut val = Val::Undef;
+            let stale = match a {
+                Val::Num(x) => x >= JOB_CONT,
+                _ => false,
+            };
+            if stale {
+                // a stopped job whose frames were dropped (the time limit,
+                // a host that let a suspended script go): nothing to end
+            } else if let Val::Num(neg) = a {
                 // a reaction
                 let state = (-neg) as int;
                 let derived = obj_of(&d);
-                if self.is_callable(&b) {
-                    let r = self.call_fixed(b, Val::Undef, 1, c, Val::Undef, Val::Undef);
-                    if self.throwing {
-                        self.throwing = false;
-                        let e = self.exc.clone();
-                        self.exc = Val::Undef;
-                        if derived >= 0 {
-                            self.settle(derived, 2, e);
-                        }
-                    } else if derived >= 0 {
-                        self.settle(derived, 1, r);
-                    }
+                let bo = obj_of(&b);
+                let nf = if bo >= 0 && self.objs[bo as usize].class == C_NATIVE { self.objs[bo as usize].func as int } else { -1 };
+                if top && self.slicing && (nf == crate::coroutine::NF_ASYNC_OK || nf == crate::coroutine::NF_ASYNC_ERR) {
+                    // an await's continuation: the async body runs from
+                    // here, where its slice may stop
+                    kind = JK_ASYNC;
+                    g = self.objs[bo as usize].env as int;
+                    self.temp_roots.push(Val::Obj(g));
+                    let mode = if nf == crate::coroutine::NF_ASYNC_OK { crate::coroutine::GM_NEXT } else { crate::coroutine::GM_THROW };
+                    self.async_step_s(g, mode, c, false);
+                    self.temp_roots.pop();
+                } else if self.is_callable(&b) {
+                    kind = JK_REACT;
+                    val = self.call_fixed(b, Val::Undef, 1, c, Val::Undef, Val::Undef);
                 } else if derived >= 0 {
                     self.settle(derived, state, c);
                 }
             } else if matches!(b, Val::Undef) && matches!(c, Val::Undef) && matches!(d, Val::Undef) {
                 // queueMicrotask
+                kind = JK_MICRO;
                 self.call_fixed(a, Val::Undef, 0, Val::Undef, Val::Undef, Val::Undef);
-                if self.throwing {
-                    self.throwing = false;
-                    self.exc = Val::Undef;
-                }
             } else {
                 // thenable job: then.call(thenable, resolve, reject)
+                kind = JK_THENABLE;
                 self.call_fixed(a, b, 2, c, d.clone(), Val::Undef);
-                if self.throwing {
-                    self.throwing = false;
-                    let e = self.exc.clone();
-                    self.exc = Val::Undef;
-                    self.call_fixed(d, Val::Undef, 1, e, Val::Undef, Val::Undef);
-                    self.throwing = false;
+            }
+            if self.suspended {
+                // the slice ran out in the job's script: how it ends
+                // goes to the queue's head, with the script's value
+                let rv = self.run_result;
+                self.jobs_push_front(Val::Num(JOB_CONT + kind as double), if g >= 0 { Val::Obj(g) } else { Val::Undef }, rv, d);
+                if top {
+                    self.native_depth += 1;
+                    self.temp_roots.pop();
                 }
+                return;
+            }
+            if !self.terminated {
+                let threw = self.throwing;
+                if threw {
+                    val = self.exc.clone();
+                    self.throwing = false;
+                    self.exc = Val::Undef;
+                }
+                self.job_end(kind, d, val, threw);
             }
             if top {
                 self.native_depth += 1;
                 self.temp_roots.pop();
             }
+            if self.terminated {
+                // past the time limit: the exception leaves the call
+                if !self.throwing {
+                    self.terminate();
+                }
+                return;
+            }
         }
+    }
+
+    /// The end of a job of `kind` (JK_*) whose call gave `val`, or threw it.
+    fn job_end(&mut self, kind: int, d: Val, val: Val, threw: bool) {
+        if kind == JK_REACT {
+            let derived = obj_of(&d);
+            if derived >= 0 {
+                self.settle(derived, if threw { 2 } else { 1 }, val);
+            }
+        } else if kind == JK_ASYNC {
+            let derived = obj_of(&d);
+            if derived >= 0 {
+                self.settle(derived, 1, Val::Undef);
+            }
+        } else if kind == JK_THENABLE && threw {
+            self.call_fixed(d, Val::Undef, 1, val, Val::Undef, Val::Undef);
+            if !self.terminated {
+                self.throwing = false;
+            }
+        }
+    }
+
+    fn jobs_push_front(&mut self, a: Val, b: Val, c: Val, d: Val) {
+        if self.job_head >= 4 {
+            let h = (self.job_head - 4) as usize;
+            self.jobs[h] = a;
+            self.jobs[h + 1] = b;
+            self.jobs[h + 2] = c;
+            self.jobs[h + 3] = d;
+            self.job_head = h as int;
+            return;
+        }
+        let rest = self.pending_jobs();
+        let mut out: Vec<Val> = vec![a, b, c, d];
+        for v in rest {
+            out.push(v);
+        }
+        self.jobs = out;
+        self.job_head = 0;
+    }
+
+    /// A job stopped by its slice heads the queue (run_jobs): its frames
+    /// are the ones Engine::resume runs.
+    pub fn job_stopped(&self) -> bool {
+        let h = self.job_head as usize;
+        if h >= self.jobs.len() {
+            return false;
+        }
+        if let Val::Num(x) = self.jobs[h] {
+            return x >= JOB_CONT;
+        }
+        false
+    }
+
+    /// Engine::resume ran a stopped job's frames out (job_stopped): the
+    /// job ends as run_jobs would have ended it. Answers the script's own
+    /// value, kept for after the jobs.
+    pub fn job_resume(&mut self) -> Val {
+        let h = self.job_head as usize;
+        let a = self.jobs[h];
+        let b = self.jobs[h + 1];
+        let c = self.jobs[h + 2];
+        let d = self.jobs[h + 3];
+        self.jobs[h] = Val::Undef;
+        self.jobs[h + 1] = Val::Undef;
+        self.jobs[h + 2] = Val::Undef;
+        self.jobs[h + 3] = Val::Undef;
+        self.job_head = (h + 4) as int;
+        if (self.job_head as usize) >= self.jobs.len() {
+            self.jobs.clear();
+            self.job_head = 0;
+        }
+        let kind = match a {
+            Val::Num(x) => (x - JOB_CONT) as int,
+            _ => 0,
+        };
+        self.temp_roots.push(c.clone());
+        self.temp_roots.push(d.clone());
+        if kind == JK_ASYNC {
+            let g = obj_of(&b);
+            if g >= 0 {
+                let r = self.gen_after(g);
+                self.async_after(g, r);
+            }
+            if !self.terminated {
+                self.job_end(kind, d, Val::Undef, false);
+            }
+        } else if !self.terminated {
+            let threw = self.throwing;
+            let val = if threw {
+                let e = self.exc.clone();
+                self.throwing = false;
+                self.exc = Val::Undef;
+                e
+            } else {
+                match self.stack.pop() {
+                    Some(v) => v,
+                    None => Val::Undef,
+                }
+            };
+            self.job_end(kind, d, val, threw);
+        }
+        self.temp_roots.pop();
+        self.temp_roots.pop();
+        c
     }
 
     pub fn promise_then(&mut self, p: int, on_ok: Val, on_err: Val) -> Val {
@@ -4247,19 +4547,18 @@ impl Vm {
                             return Val::Undef;
                         }
                         let len = n as int;
-                        let mut v: Vec<Val> = Vec::new();
+                        let mut v: Vec<Val> = Vec::with_capacity(len as usize);
+                        let mut h: Vec<Val> = Vec::with_capacity(len as usize);
                         let mut i = 0;
                         while i < len {
                             v.push(Val::Undef);
+                            h.push(Val::Bool(true));
+                            if (i & 65535) == 65535 && self.poll(262144) {
+                                return Val::Undef;
+                            }
                             i += 1;
                         }
                         self.put_elems(a, v);
-                        let mut h: Vec<Val> = Vec::new();
-                        let mut j = 0;
-                        while j < len {
-                            h.push(Val::Bool(true));
-                            j += 1;
-                        }
                         self.put_elems2(a, h);
                         return Val::Obj(a);
                     }
@@ -4562,7 +4861,7 @@ impl Vm {
                 let d = arg(&args, 2);
                 self.to_descriptor(o, &k, &d);
                 if id == NF_REFLECT_DEFPROP {
-                    if self.throwing {
+                    if self.throwing && !self.terminated {
                         self.throwing = false;
                         self.exc = Val::Undef;
                         return Val::Bool(false);
@@ -5331,6 +5630,10 @@ pub fn num_merge_sort(v: &mut Vec<Val>, desc: bool) {
         src = dst;
         dst = t;
         width *= 2;
+        if crate::builtins::time_up(n as int) {
+            // past the deadline: v as it was (Vm::check_expired)
+            return;
+        }
     }
     let mut i1: usize = 0;
     while i1 < n {
@@ -5522,6 +5825,9 @@ pub fn num_str_merge_sort(v: &mut Vec<Val>) {
         src = dst;
         dst = t;
         width *= 2;
+        if crate::builtins::time_up(n as int) {
+            return;
+        }
     }
     let old: Vec<Val> = v.clone();
     let mut i2: usize = 0;
