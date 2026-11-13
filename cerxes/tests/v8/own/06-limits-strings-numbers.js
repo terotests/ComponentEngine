@@ -1,0 +1,65 @@
+function T(n,f){let r;try{r=f();r=typeof r==="string"?JSON.stringify(r):(typeof r==="symbol"?r.toString():String(r))}catch(e){r="throw "+(e&&e.constructor&&e.constructor.name)}console.log(n+": "+r)}
+// Size limits and integer overflow in string/number builtins. V8 bugs: String.prototype.repeat/padStart/
+// join length overflow, StringBuilder overflow in JSON/replace, Number.prototype.toString radix buffers,
+// toFixed/toPrecision buffer sizes, Function.prototype.apply argument count (stack exhaustion).
+T("repeat-huge",()=>"ab".repeat(2**30).length);
+T("repeat-neg",()=>"a".repeat(-1));
+T("repeat-inf",()=>"a".repeat(Infinity));
+T("repeat-empty-huge",()=>"".repeat(2**40).length);
+T("padStart-huge",()=>"a".padStart(2**31).length);
+T("padEnd-huge-fill",()=>"a".padEnd(2**30,"xyz").length);
+T("concat-to-overflow",()=>{let s="x".repeat(2**28);let t=s;for(let i=0;i<4;i++)t=t+t;return t.length});
+T("join-overflow",()=>{let a=new Array(2**20).fill("x".repeat(2**10));return a.join("y").length});
+T("join-sparse-huge",()=>{let a=[];a.length=2**32-1;return a.join("").length});
+T("join-sparse-huge-sep",()=>{let a=[];a.length=2**31;return a.join(",").length});
+T("replace-growth",()=>{let s="a".repeat(2**20);return s.replace(/a/g,"x".repeat(2**10)).length});
+T("replaceAll-empty",()=>"abc".replaceAll("","-"));
+T("split-empty-huge",()=>"x".repeat(1e6).split("").length);
+T("toString-radix",()=>[(-0).toString(2),(1e21).toString(36),(2**-1074).toString(2).length,(-(2**53)).toString(36),(0.1).toString(3).slice(0,20),(123.456).toString(16)].join("|"));
+T("toString-radix-bad",()=>(1).toString(37));
+T("toFixed",()=>[(1e21).toFixed(2),(1.005).toFixed(2),(0).toFixed(100).length,(-1.5e-10).toFixed(20),(123.456).toFixed(0)].join("|"));
+T("toFixed-101",()=>(1).toFixed(101));
+T("toPrecision",()=>[(123.456).toPrecision(100).length,(1e-7).toPrecision(1),(0).toPrecision(5),(5e-324).toPrecision(3)].join("|"));
+T("toPrecision-0",()=>(1).toPrecision(0));
+T("toExponential",()=>[(0).toExponential(),(123456).toExponential(100).length,(-0).toExponential(2),(Infinity).toExponential(200)].join("|"));
+T("number-parse-edge",()=>[Number("0x"),Number("1_0"),Number("  12  "),Number("1e400"),Number("-0"),parseInt("0x1g",16),parseFloat("1e-400"),Number("0b102"),Number(" 1 ")].map(String).join("|"));
+T("number-print",()=>[1e21,1e-7,123e-20,2**53,-1e-7,5e-324,1.7976931348623157e308,0.1+0.2,100,1e100].map(String).join("|"));
+T("parseFloat-long",()=>parseFloat("0."+"0".repeat(400)+"1")+","+parseFloat("1"+"0".repeat(400)));
+T("string-to-number-long",()=>Number("9".repeat(1000)));
+T("fromCodePoint-bad",()=>String.fromCodePoint(0x110000));
+T("fromCodePoint-frac",()=>String.fromCodePoint(1.5));
+T("lone-surrogates",()=>{let s="\uD800";return [s.length,JSON.stringify(s),encodeURIComponent("a")+(()=>{try{return encodeURIComponent(s)}catch(e){return e.constructor.name}})(),s.isWellFormed?s.isWellFormed():"n/a",(s+"\uDC00").codePointAt(0)].join("|")});
+T("lone-surrogate-concat",()=>{let a="\uD83D";let b="\uDE00";return (a+b).length+":"+(a+b).codePointAt(0)});
+T("lone-surrogate-map-key",()=>{let m=new Map();m.set("\uD800",1);m.set("\uDC00",2);return m.size+":"+m.get("\uD800")});
+T("lone-surrogate-split",()=>"😀".split("").map(c=>c.charCodeAt(0)).join());
+T("toWellFormed",()=>"a\uD800b".toWellFormed?"a\uD800b".toWellFormed().charCodeAt(1):"n/a");
+T("normalize-bad",()=>"a".normalize("X"));
+T("normalize-long",()=>"é".repeat(100000).normalize("NFC").length);
+T("localeCompare-odd",()=>"\uD800".localeCompare("\uDC00")+","+"a".localeCompare("A"));
+T("toUpperCase-expand",()=>"ß".repeat(3).toUpperCase()+","+"ŉ".toUpperCase().length+","+"İ".toLowerCase().length);
+T("trim-unicode",()=>JSON.stringify("᠎ a ﻿".trim()));
+T("substring-edge",()=>"abc".substring(NaN,-Infinity)+"|"+"abc".substr(-(2**53),2**53)+"|"+"abc".slice(2,1));
+T("string-index-huge",()=>"abc"[2**32]+","+"abc"[-0]+","+"abc"["1"]);
+T("string-raw",()=>String.raw({raw:{length:2**32+1,0:"a",1:"b"}},1).length);
+T("template-cache",()=>{let f=s=>s;let a=[];for(let i=0;i<2;i++)a.push(f`x`);return a[0]===a[1]});
+T("encodeURI-surrogate",()=>encodeURI("\uD800"));
+T("decodeURI-bad",()=>decodeURIComponent("%E0%A4%A"));
+T("decodeURI-overlong",()=>decodeURIComponent("%C0%80"));
+T("escape-unescape",()=>unescape(escape("Ā\uD800%"))==="Ā\uD800%");
+T("btoa-unicode",()=>{try{return btoa("Ā")}catch(e){return "throw "+e.constructor.name}});
+T("Date-edge",()=>[new Date(8.64e15+1).getTime(),new Date(-8.64e15).toISOString(),Date.UTC(275760,8,13),new Date(NaN)+"",Date.parse("2020-02-30")].map(String).join("|"));
+T("Date-toISO-invalid",()=>new Date(NaN).toISOString());
+T("Date-setYear-huge",()=>{let d=new Date(0);d.setUTCFullYear(1e10);return d.getTime()});
+T("Date-parse-odd",()=>[Date.parse("+275760-09-13T00:00:00.000Z"),Date.parse("-000000-01-01T00:00:00Z"),Date.parse("2020-01-01T24:00:00Z")].map(String).join("|"));
+T("Date-valueOf-reenter",()=>{let n=0;let d=new Date(2020,0,1);return d.setMonth({valueOf(){n++;return 5}}),n});
+T("Number.isSafeInteger",()=>Number.isSafeInteger(2**53)+","+Number.isSafeInteger(2**53-1)+","+Number.isInteger(5e-324));
+T("bigint-ops",()=>[(-7n)/2n,(-7n)%2n,(-1n)>>1000n,1n<<64n,BigInt.asUintN(0,5n),(2n**64n).toString(36),BigInt("0x"+"f".repeat(100))%1000n].map(String).join("|"));
+T("bigint-div0",()=>1n/0n);
+T("bigint-mix",()=>1n+1);
+T("bigint-parse-bad",()=>BigInt("1.5"));
+T("bigint-toString-huge",()=>(10n**5000n).toString().length);
+T("bigint-shift-neg-huge",()=>String(1n>>(-(2n**40n))));
+T("bigint-shift-right-huge",()=>String(5n>>(2n**64n))+","+String((-5n)>>(2n**64n)));
+T("bigint-asUintN-huge",()=>String(BigInt.asUintN(2**53-1,5n)));
+T("bigint-asIntN-huge-neg",()=>String(BigInt.asIntN(2**53-1,-5n)).length);
+T("bigint-mul-big",()=>((2n**20000n)*(3n**20000n)).toString(16).length);

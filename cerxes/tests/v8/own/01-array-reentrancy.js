@@ -1,0 +1,63 @@
+function T(n,f){let r;try{r=f();r=typeof r==="string"?JSON.stringify(r):(typeof r==="symbol"?r.toString():String(r))}catch(e){r="throw "+(e&&e.constructor&&e.constructor.name)}console.log(n+": "+r)}
+
+// Array builtins whose callbacks / valueOf / getters change the array they walk.
+// V8 had many OOB reads/writes from cached lengths in fast paths (e.g. Array.prototype.fill/
+// copyWithin/lastIndexOf/join/sort, CVE-2016-1646 Array.concat, CVE-2017-5030 Array.prototype.splice-like).
+T("fill-valueOf-shrink",()=>{let a=[1,2,3,4,5,6,7,8];return a.fill(9,{valueOf(){a.length=2;return 0}}).join()});
+T("copyWithin-valueOf-shrink",()=>{let a=[1,2,3,4,5,6,7,8];return a.copyWithin(0,{valueOf(){a.length=1;return 3}}).join()});
+T("lastIndexOf-from-shrink",()=>{let a=[1,2,3,4,5,6,7,8];return a.lastIndexOf(undefined,{valueOf(){a.length=0;return 7}})});
+T("indexOf-from-shrink",()=>{let a=[1,2,3,4,5,6,7,8];return a.indexOf(undefined,{valueOf(){a.length=0;return 0}})});
+T("includes-from-shrink",()=>{let a=[1,2,3,4,5,6,7,8];return a.includes(undefined,{valueOf(){a.length=0;return 0}})});
+T("join-toString-shrink",()=>{let a=[1,{toString(){a.length=1;return "x"}},3,4];return a.join("-")});
+T("join-toString-grow",()=>{let a=[1,{toString(){for(let i=0;i<100;i++)a.push(i);return "x"}},3];return a.join("-")});
+T("join-cyclic",()=>{let a=[1,2];a.push(a);return a.join()});
+T("toString-cyclic-deep",()=>{let a=[1];let b=[a];a.push(b);return String(a)});
+T("sort-cmp-shrink",()=>{let a=[];for(let i=0;i<50;i++)a.push(50-i);a.sort((x,y)=>{a.length=3;return x-y});return a.length+":"+a.slice(0,3).join()});
+T("sort-cmp-grow",()=>{let a=[];for(let i=0;i<50;i++)a.push(50-i);let n=0;a.sort((x,y)=>{if(n++<5)for(let i=0;i<1000;i++)a.push(i);return x-y});return a.length>=50});
+T("sort-cmp-set-holes",()=>{let a=[5,4,3,2,1];a.sort((x,y)=>{delete a[2];return x-y});return a.length});
+T("sort-getter-elems",()=>{let a=[3,2,1];Object.defineProperty(a,1,{get(){a.length=0;return 7},configurable:true});a.sort();return a.length});
+T("map-species-shrink",()=>{let a=[1,2,3,4];a.constructor={[Symbol.species]:function(n){return new Array(1)}};return a.map(x=>x*2).join()});
+T("map-cb-shrink",()=>{let a=[1,2,3,4,5,6];return a.map((x,i)=>{a.length=2;return x}).length});
+T("filter-cb-grow",()=>{let a=[1,2,3];return a.filter(x=>{a.push(x);return true}).join()});
+T("forEach-length-0",()=>{let a=[1,2,3,4];let s=0;a.forEach(x=>{s+=x;a.length=0});return s});
+T("reduce-shrink",()=>{let a=[1,2,3,4];return a.reduce((p,x)=>{a.length=1;return p+x},0)});
+T("reduceRight-shrink",()=>{let a=[1,2,3,4];return a.reduceRight((p,x)=>{a.length=1;return p+x},0)});
+T("splice-valueOf-shrink",()=>{let a=[1,2,3,4,5,6];return a.splice(0,{valueOf(){a.length=1;return 4}}).join()+"|"+a.join()});
+T("slice-valueOf-shrink",()=>{let a=[1,2,3,4,5,6];return a.slice({valueOf(){a.length=1;return 0}},5).length});
+T("concat-isConcatSpreadable-getter",()=>{let a=[1,2,3];let o={length:3,0:1,1:2,2:3,get [Symbol.isConcatSpreadable](){a.length=0;return true}};return [].concat(a,o).length});
+T("concat-huge-length",()=>{let o={length:2**53-1,[Symbol.isConcatSpreadable]:true};return [1].concat(o).length});
+T("concat-proxy-array",()=>{let p=new Proxy([1,2,3],{get(t,k){if(k==="length")return 3;return t[k]}});return [0].concat(p).join()});
+T("flat-getter-shrink",()=>{let inner=[1,2,3];let a=[inner,[4]];Object.defineProperty(inner,0,{get(){a.length=0;inner.length=0;return 1}});return a.flat().length});
+T("from-iter-mutate",()=>{let a=[1,2,3];let it=a[Symbol.iterator]();return Array.from({[Symbol.iterator](){return {next(){let r=it.next();if(!r.done)a.push(1);return a.length>20?{done:true}:r}}}}).length});
+T("from-arraylike-length-getter",()=>{let o={get length(){return 3},0:1,1:2};return Array.from(o).join()});
+T("push-max-length",()=>{let o={length:2**53-1};Array.prototype.push.call(o,1);return o.length});
+T("unshift-max-length",()=>{let o={length:2**53-1};Array.prototype.unshift.call(o,1);return o.length});
+T("splice-max-length",()=>{let o={length:2**53-1};Array.prototype.splice.call(o,0,0,1);return o.length});
+T("length-assign-2^32",()=>{let a=[];a.length=2**32;return a.length});
+T("length-assign-2^32-1",()=>{let a=[];a.length=2**32-1;a.push(1);return a.length});
+T("index-2^32-2",()=>{let a=[];a[2**32-2]=1;return a.length});
+T("index-2^32-1",()=>{let a=[];a[2**32-1]=1;return a.length});
+T("Array-ctor-2^32",()=>new Array(2**32).length);
+T("Array-ctor-neg",()=>new Array(-1).length);
+T("Array-ctor-frac",()=>new Array(1.5).length);
+T("proto-elements-holes",()=>{Array.prototype[1]="P";let a=[0,,2];let r=a.join()+a.indexOf("P")+a.includes("P");delete Array.prototype[1];return r});
+T("proto-getter-holes",()=>{let n=0;Object.defineProperty(Array.prototype,3,{get(){n++;return "G"},configurable:true});let a=[0,1,2,,4];let r=a.map(x=>x).join()+n;delete Array.prototype[3];return r});
+T("proto-setter-push",()=>{let seen=0;Object.defineProperty(Array.prototype,"2",{set(v){seen=v},configurable:true});let a=[0,1];a.push(9);let r=a.length+":"+seen+":"+a.hasOwnProperty(2);delete Array.prototype[2];return r});
+T("object-proto-elements",()=>{Object.prototype[0]="O";let a=[,1];let r=a[0]+a.join();delete Object.prototype[0];return r});
+T("frozen-push",()=>{let a=Object.freeze([1]);a.push(2)});
+T("frozen-sort",()=>{let a=Object.freeze([2,1]);a.sort()});
+T("nonwritable-length-push",()=>{let a=[1];Object.defineProperty(a,"length",{writable:false});a.push(2)});
+T("nonwritable-length-shift",()=>{let a=[1,2];Object.defineProperty(a,"length",{writable:false});a.shift()});
+T("length-defineProperty-shrink-nonconfig",()=>{let a=[1,2,3];Object.defineProperty(a,1,{value:2,configurable:false});a.length=0;return a.length});
+T("reverse-holes-proto",()=>{Array.prototype[0]="Z";let a=[,1,2];a.reverse();let r=a.join()+a.hasOwnProperty(2);delete Array.prototype[0];return r});
+T("at-neg",()=>[1,2,3].at(-4));
+T("with-valueOf-shrink",()=>{let a=[1,2,3];return a.with({valueOf(){a.length=0;return 1}},5).join()});
+T("toSorted-cmp-shrink",()=>{let a=[3,2,1,0];return a.toSorted((x,y)=>{a.length=0;return x-y}).join()});
+T("toSpliced-huge",()=>{let o={length:2**53-1};Array.prototype.toSpliced.call(o,0,0,1)});
+T("findLast-shrink",()=>{let a=[1,2,3];return a.findLast((x,i)=>{a.length=0;return false})});
+T("entries-shrink",()=>{let a=[1,2,3];let r=[];for(const [i,v] of a.entries()){r.push(v);a.length=1}return r.join()});
+T("arguments-length-huge-apply",()=>{let o={length:2**32+1};return Math.max.apply(null,o)});
+T("apply-big-arraylike",()=>{let a=new Array(200000).fill(1);return Math.max.apply(null,a)});
+T("spread-big",()=>{let a=new Array(200000).fill(2);return Math.max(...a)});
+T("copyWithin-negative",()=>[1,2,3,4,5].copyWithin(-2,-4,-3).join());
+T("fill-huge-range-obj",()=>{let o={length:3};Array.prototype.fill.call(o,1,-(2**53),2**53);return JSON.stringify(o)});
