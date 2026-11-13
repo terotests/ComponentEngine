@@ -2342,6 +2342,7 @@ impl Vm {
 
     /// Native code is deeper below the host's entry than `stack_budget`
     /// allows (Rust; the other targets have no address to compare).
+    #[inline]
     pub fn stack_exhausted(&self) -> bool {
         if self.stack_base == 0 {
             return false;
@@ -2355,20 +2356,20 @@ impl Vm {
     /// when it threw.
     /// Whether a string of `n` bytes is too long; if so, RangeError thrown.
     /// (A double: an `int` is 32 bits on some Ranger targets.)
+    #[inline(always)]
     pub fn str_too_long(&mut self, n: double) -> bool {
-        if n <= (MAX_STR_BYTES as double) {
-            return false;
-        }
-        self.throw_range("Invalid string length");
-        true
+        n > (MAX_STR_BYTES as double) && self.length_refused("Invalid string length")
     }
 
     /// Whether an array of `n` elements is too long; if so, RangeError thrown.
+    #[inline(always)]
     pub fn elems_too_many(&mut self, n: double) -> bool {
-        if n <= (MAX_ELEMS as double) {
-            return false;
-        }
-        self.throw_range("Invalid array length");
+        n > (MAX_ELEMS as double) && self.length_refused("Invalid array length")
+    }
+
+    #[inline(never)]
+    fn length_refused(&mut self, msg: &str) -> bool {
+        self.throw_range(msg);
         true
     }
 
@@ -10478,6 +10479,7 @@ pub const MAX_ELEMS: int = 33554432;
 /// The address of a local: where the native stack is now (Rust; it grows
 /// down). 0 on the other targets.
 #[ranger::target(rust)]
+#[inline(always)]
 pub fn native_sp() -> int {
     let x: u8 = 0;
     let p = std::hint::black_box(&x) as *const u8 as usize;
