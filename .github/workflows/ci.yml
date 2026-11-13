@@ -81,7 +81,19 @@ jobs:
       - name: Every case with the JIT off and on (min 0)
         run: node cerxes/bench/wjit.mjs --build --cases
       - name: Octane with the JIT on gives a score in every suite
-        run: node cerxes/bench/wjit.mjs --octane --runs=1
+        # the playground's own suites (playground/zoo/octane, prepared as
+        # the playground prepares them): no Ranger checkout needed
+        env:
+          OCTANE_DIR: /tmp/octane
+        run: |
+          mkdir -p "$OCTANE_DIR"
+          node --input-type=module -e '
+          import fs from "node:fs";
+          import { prepareOctane } from "./playground/src/zoo.js";
+          for (const f of fs.readdirSync("playground/zoo/octane"))
+            fs.writeFileSync(process.env.OCTANE_DIR + "/" + f, prepareOctane(fs.readFileSync("playground/zoo/octane/" + f, "utf8")));
+          '
+          node cerxes/bench/wjit.mjs --octane --runs=1
 
   conformance:
     name: Conformance (CEr and CErXes, no regressions)
