@@ -331,6 +331,10 @@ pub struct Vm {
     pub gn_memo: Vec<i32>,
     /// Vm::ta_len_plain's lookups (typed.rs)
     pub ta_memo: Vec<i32>,
+    /// rvm r_str_method's last check of a String.prototype slot: the
+    /// prototype's shape, the shape epoch, the slot, the site (rbase + pc), and the
+    /// native charCodeAt's object when that was the slot's value (else -1)
+    pub sm_memo: Vec<i32>,
     /// array_iter_plain's memo: an array's shape, the shape epoch, its
     /// prototype, the prototype's shape and its Symbol.iterator slot
     pub ai_memo: Vec<i32>,
@@ -698,6 +702,7 @@ impl Vm {
             rx_shapes: Vec::new(),
             gn_memo: Vec::new(),
             ta_memo: Vec::new(),
+            sm_memo: Vec::new(),
             ai_memo: Vec::new(),
             js_plan: Vec::new(),
             js_slots: Vec::new(),
