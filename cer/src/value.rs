@@ -17,8 +17,9 @@ use std::collections::HashMap;
 use crate::fxmap::HashMap;
 use std::rc::Rc;
 
+/// What a value is: `Val::kind` gives it to match on.
 #[derive(Clone, Copy)]
-pub enum Val {
+pub enum VK {
     Undef,
     Null,
     Bool(bool),
@@ -30,6 +31,132 @@ pub enum Val {
     /// a BigInt whose value is an integer below small_big_limit in
     /// magnitude (bigint.rs); larger ones are C_BIGINT objects
     Big(double),
+}
+
+/// A value. Made with Val::Num(x), Val::Undef() and the like, taken apart
+/// with `match v.kind()`. Rust: 8 bytes, NaN-boxed. A number is its own
+/// bits; the other kinds are tagged in the negative quiet-NaN range above
+/// the hardware's default NaN (0xFFF8...), which no number then uses: a
+/// NaN made from arbitrary bits is kept as the canonical one (Val::Num).
+/// The other targets keep the VK in a struct.
+#[ranger::target(rust)]
+#[derive(Clone, Copy)]
+pub struct Val {
+    pub b: u64,
+}
+
+/// The first tagged pattern: below it a Val is a number.
+#[ranger::target(rust)]
+pub const V_TAG: u64 = 0xFFF9_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_UNDEF: u64 = 0xFFF9_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_NULL: u64 = 0xFFFA_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_BOOL: u64 = 0xFFFB_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_STR: u64 = 0xFFFC_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_OBJ: u64 = 0xFFFD_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_BIG: u64 = 0xFFFE_0000_0000_0000;
+/// the payload bits of a tagged Val (a handle, or a small BigInt's value)
+#[ranger::target(rust)]
+pub const V_LOW: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+#[ranger::target(rust)]
+#[allow(non_snake_case)]
+impl Val {
+    #[inline(always)]
+    pub fn Undef() -> Val {
+        Val { b: V_UNDEF }
+    }
+    #[inline(always)]
+    pub fn Null() -> Val {
+        Val { b: V_NULL }
+    }
+    #[inline(always)]
+    pub fn Bool(x: bool) -> Val {
+        Val { b: V_BOOL | (x as u64) }
+    }
+    #[inline(always)]
+    pub fn Num(x: double) -> Val {
+        let b = x.to_bits();
+        Val { b: if b >= V_TAG { 0x7FF8_0000_0000_0000 } else { b } }
+    }
+    #[inline(always)]
+    pub fn Str(h: int) -> Val {
+        Val { b: V_STR | ((h as u64) & V_LOW) }
+    }
+    #[inline(always)]
+    pub fn Obj(o: int) -> Val {
+        Val { b: V_OBJ | ((o as u64) & V_LOW) }
+    }
+    #[inline(always)]
+    pub fn Big(n: double) -> Val {
+        debug_assert!(n.abs() < crate::bigint::small_big_limit());
+        Val { b: V_BIG | ((n as i64 as u64) & V_LOW) }
+    }
+    #[inline(always)]
+    pub fn kind(&self) -> VK {
+        let b = self.b;
+        if b < V_TAG {
+            return VK::Num(f64::from_bits(b));
+        }
+        // the payload sign-extended from 48 bits
+        let x = ((b << 16) as i64) >> 16;
+        match b >> 48 {
+            0xFFF9 => VK::Undef,
+            0xFFFA => VK::Null,
+            0xFFFB => VK::Bool(x != 0),
+            0xFFFC => VK::Str(x as int),
+            0xFFFD => VK::Obj(x as int),
+            _ => VK::Big(x as double),
+        }
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+#[derive(Clone, Copy)]
+pub struct Val {
+    pub k: VK,
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+#[allow(non_snake_case)]
+impl Val {
+    #[inline(always)]
+    pub fn Undef() -> Val {
+        Val { k: VK::Undef }
+    }
+    #[inline(always)]
+    pub fn Null() -> Val {
+        Val { k: VK::Null }
+    }
+    #[inline(always)]
+    pub fn Bool(b: bool) -> Val {
+        Val { k: VK::Bool(b) }
+    }
+    #[inline(always)]
+    pub fn Num(x: double) -> Val {
+        Val { k: VK::Num(x) }
+    }
+    #[inline(always)]
+    pub fn Str(h: int) -> Val {
+        Val { k: VK::Str(h) }
+    }
+    #[inline(always)]
+    pub fn Obj(o: int) -> Val {
+        Val { k: VK::Obj(o) }
+    }
+    #[inline(always)]
+    pub fn Big(n: double) -> Val {
+        Val { k: VK::Big(n) }
+    }
+    #[inline(always)]
+    pub fn kind(&self) -> VK {
+        self.k
+    }
 }
 
 // object classes
@@ -129,7 +256,7 @@ impl Cold {
             marks: Vec::new(),
             nums: Vec::new(),
             elems2: Vec::new(),
-            prim: Val::Undef,
+            prim: Val::Undef(),
             home: -1,
         }
     }
@@ -347,8 +474,8 @@ impl JsObj {
             class: class,
             proto: proto,
             shape: 0,
-            inl0: Val::Undef,
-            inl1: Val::Undef,
+            inl0: Val::Undef(),
+            inl1: Val::Undef(),
             vals: slots_new(),
             nv: 0,
             cold: 0,
@@ -370,8 +497,8 @@ impl JsObj {
         // the shape and the Cold are the caller's (Vm::free_shape,
         // Vm::free_cold)
         self.shape = 0;
-        self.inl0 = Val::Undef;
-        self.inl1 = Val::Undef;
+        self.inl0 = Val::Undef();
+        self.inl1 = Val::Undef();
         self.nv = 0;
         if self.vals.v.len() as int <= INDEX_AT {
             self.vals.v.truncate(0);
@@ -431,8 +558,8 @@ impl JsObj {
     /// others hold nothing counted).
     pub fn retain_slots(&mut self, keep: &Vec<bool>) {
         let all = self.slots();
-        self.inl0 = Val::Undef;
-        self.inl1 = Val::Undef;
+        self.inl0 = Val::Undef();
+        self.inl1 = Val::Undef();
         self.vals.v.truncate(0);
         self.nv = 0;
         let mut i: usize = 0;
@@ -458,9 +585,9 @@ impl JsObj {
             if n > 2 {
                 self.inl1 = self.vals.v.remove(0);
             } else {
-                self.inl1 = Val::Undef;
+                self.inl1 = Val::Undef();
                 if n == 1 {
-                    self.inl0 = Val::Undef;
+                    self.inl0 = Val::Undef();
                 }
             }
         }
@@ -994,7 +1121,7 @@ impl Proto {
             generator: false,
             is_async: false,
             lexical_ctor: false,
-            src: Val::Undef,
+            src: Val::Undef(),
             src_start: 0,
             src_end: 0,
             rbase: 0,

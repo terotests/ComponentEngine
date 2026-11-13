@@ -282,8 +282,8 @@ pub fn probe() -> Layout {
     if l.size != 16 || std::mem::align_of::<Val>() != 8 {
         return l;
     }
-    let u = bytes_of(Val::Undef);
-    let n = bytes_of(Val::Null);
+    let u = bytes_of(Val::Undef());
+    let n = bytes_of(Val::Null());
     let bt = bytes_of(Val::Bool(true));
     let bf = bytes_of(Val::Bool(false));
     let x = 1.2345678901234567e-300f64;
@@ -345,9 +345,9 @@ pub fn probe() -> Layout {
     l.ok = true;
     // the buffer pointer of a Vec<Val>: the word of the Vec that holds it
     let mut v: Vec<Val> = Vec::with_capacity(7);
-    v.push(Val::Undef);
-    v.push(Val::Undef);
-    v.push(Val::Undef);
+    v.push(Val::Undef());
+    v.push(Val::Undef());
+    v.push(Val::Undef());
     let ptr = v.as_ptr() as usize;
     let mut vl: i32 = -1;
     let vs = std::mem::size_of::<Vec<Val>>();
@@ -442,7 +442,7 @@ pub fn probe() -> Layout {
         l.vm_jit_calls_ptr = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vp;
         l.vm_jit_calls_len = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vl;
         l.str_data = str_probe(vp, vl);
-        let u = bytes_of(Val::Undef);
+        let u = bytes_of(Val::Undef());
         // SAFETY: written on the VM's thread before any code reads it
         unsafe {
             *std::ptr::addr_of_mut!(UNDEF16) = [
@@ -1055,8 +1055,8 @@ impl<'a> Cg<'a> {
             return Opnd::Reg(x as u32);
         }
         let k = (-1 - x) as usize;
-        match self.kvals.get(k) {
-            Some(Val::Num(n)) => Opnd::Num(*n),
+        match self.kvals.get(k).map(|v| v.kind()) {
+            Some(VK::Num(n)) => Opnd::Num(n),
             _ => Opnd::K(k as u32),
         }
     }
@@ -2380,8 +2380,8 @@ impl<'a> Cg<'a> {
         let l = self.lay;
         let vo = self.raw(v);
         if let Opnd::K(k) = vo {
-            match self.kvals.get(k as usize) {
-                Some(Val::Str(_)) | Some(Val::Obj(_)) | None => return false,
+            match (self.kvals.get(k as usize)).map(|v| v.kind()) {
+                Some(VK::Str(_)) | Some(VK::Obj(_)) | None => return false,
                 _ => {}
             }
         }
@@ -2451,7 +2451,7 @@ impl<'a> Cg<'a> {
     }
     /// slot r = undefined
     fn store_undef(&mut self, r: u32) {
-        let u = bytes_of(Val::Undef);
+        let u = bytes_of(Val::Undef());
         let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
         let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
         self.get(L_SP);
@@ -2570,7 +2570,7 @@ impl<'a> Cg<'a> {
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T4);
-        let u = bytes_of(Val::Undef);
+        let u = bytes_of(Val::Undef());
         let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
         let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
         self.op(BLOCK);
@@ -2709,8 +2709,8 @@ impl<'a> Cg<'a> {
         let l = self.lay;
         let vo = self.raw(v);
         if let Opnd::K(k) = vo {
-            match self.kvals.get(k as usize) {
-                Some(Val::Str(_)) | Some(Val::Obj(_)) | None => return false,
+            match (self.kvals.get(k as usize)).map(|v| v.kind()) {
+                Some(VK::Str(_)) | Some(VK::Obj(_)) | None => return false,
                 _ => {}
             }
         }
@@ -3722,7 +3722,7 @@ impl<'a> Cg<'a> {
                 break;
             }
             if k == R_RET_UNDEF {
-                let u = bytes_of(Val::Undef);
+                let u = bytes_of(Val::Undef());
                 self.w.byte(I64_CONST);
                 self.w.s(i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]));
                 self.set(L_Q0);
@@ -4652,7 +4652,7 @@ impl<'a> Cg<'a> {
             self.op(IF);
             self.op(T_VOID);
             {
-                let u = bytes_of(Val::Undef);
+                let u = bytes_of(Val::Undef());
                 let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
                 let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
                 // L_T5 = &stack[len], L_T6 = &stack[need]
@@ -4738,7 +4738,7 @@ impl<'a> Cg<'a> {
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T4);
-            let u = bytes_of(Val::Undef);
+            let u = bytes_of(Val::Undef());
             let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
             let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
             self.op(BLOCK);
@@ -5544,7 +5544,7 @@ impl<'a> Cg<'a> {
                 self.store_val(w1 as u32, L_Q0);
                 if sub == 1 {
                     // undefined in dst + 1: the bytes of Val::Undef
-                    let u = bytes_of(Val::Undef);
+                    let u = bytes_of(Val::Undef());
                     let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
                     let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
                     self.get(L_SP);
@@ -5630,7 +5630,7 @@ impl<'a> Cg<'a> {
             }
             R_SET_PROP if self.lay.obj_ok && w1 >= 0 && sub == 0 && self.caches[pc] != 0 => {
                 let raw_ok = match self.raw(w2) {
-                    Opnd::K(k) => !matches!(self.kvals.get(k as usize), Some(Val::Str(_)) | Some(Val::Obj(_)) | None),
+                    Opnd::K(k) => !matches!((self.kvals.get(k as usize)).map(|v| v.kind()), Some(VK::Str(_)) | Some(VK::Obj(_)) | None),
                     _ => true,
                 };
                 if raw_ok {
@@ -5646,7 +5646,7 @@ impl<'a> Cg<'a> {
             }
             R_INIT_PROP if self.lay.obj_ok && w1 >= 0 && self.atoms[pc] > 0 && (self.atoms[pc] & 65535) != 0 => {
                 let raw_ok = match self.raw(w2) {
-                    Opnd::K(k) => !matches!(self.kvals.get(k as usize), Some(Val::Str(_)) | Some(Val::Obj(_)) | None),
+                    Opnd::K(k) => !matches!((self.kvals.get(k as usize)).map(|v| v.kind()), Some(VK::Str(_)) | Some(VK::Obj(_)) | None),
                     _ => true,
                 };
                 if raw_ok {
@@ -5891,7 +5891,7 @@ impl<'a> Cg<'a> {
                 // not null or undefined: jump
                 let o = self.raw(w1);
                 if let Opnd::K(k) = o {
-                    let nullish = matches!(self.kvals.get(k as usize), Some(Val::Undef) | Some(Val::Null));
+                    let nullish = matches!((self.kvals.get(k as usize)).map(|v| v.kind()), Some(VK::Undef) | Some(VK::Null));
                     if !nullish {
                         self.jump(w2 as i64, (w2 as i64) <= p);
                     }
@@ -7261,7 +7261,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         let atoms = site_atoms(vm, pi, rb, n);
         let pics = if rb + n <= vm.rcode.len() { site_pics(vm, rb, n) } else { Vec::new() };
         // R_TYPEOF's strings are there before the code reads them
-        vm.type_val(&Val::Undef);
+        vm.type_val(&Val::Undef());
         let p = &vm.protos[pi];
         let lay = LAYOUT.with(|l| *l);
         f = -2;
@@ -7734,30 +7734,30 @@ unsafe fn vm_of<'a>(vm: i32) -> &'a mut crate::vm::Vm {
 /// None for the full call.
 fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<Val> {
     use crate::builtins::*;
-    let arg = |vm: &crate::vm::Vm, k: int| if k < argc { vm.stack[(fpos + 2 + k) as usize] } else { Val::Undef };
+    let arg = |vm: &crate::vm::Vm, k: int| if k < argc { vm.stack[(fpos + 2 + k) as usize] } else { Val::Undef() };
     let a0 = arg(vm, 0);
     if id >= NF_MATH && id < NF_MATH + 28 {
-        if let Val::Num(x) = a0 {
+        if let VK::Num(x) = a0.kind() {
             return Some(Val::Num(math1(id - NF_MATH, x)));
         }
         return None;
     }
     if id >= NF_MATH + 28 && id <= NF_MATH + 30 {
-        if let (Val::Num(_), Val::Num(_)) = (a0, arg(vm, 1)) {
+        if let (VK::Num(_), VK::Num(_)) = (a0.kind(), (arg(vm, 1)).kind()) {
             let args = vec![a0, arg(vm, 1)];
             return Some(vm.math(id - NF_MATH, &args));
         }
         return None;
     }
     if id == NF_STRING && argc >= 1 {
-        return match a0 {
-            Val::Str(_) => Some(a0),
-            Val::Num(n) => Some(vm.string_val(crate::num::number_to_string(n))),
+        return match a0.kind() {
+            VK::Str(_) => Some(a0),
+            VK::Num(n) => Some(vm.string_val(crate::num::number_to_string(n))),
             _ => None,
         };
     }
     if id == NF_ISFINITE {
-        if let Val::Num(n) = a0 {
+        if let VK::Num(n) = a0.kind() {
             return Some(Val::Bool(crate::num::is_finite(n)));
         }
         return None;
@@ -7765,14 +7765,14 @@ fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<
     if id == NF_SP_CHARCODEAT && argc >= 1 {
         let t = vm.stack[(fpos + 1) as usize];
         let r = vm.char_code_fast(&t, &a0);
-        if !matches!(r, Val::Undef) {
+        if !matches!(r.kind(), VK::Undef) {
             return Some(r);
         }
         return None;
     }
     if id == NF_NP_TOSTRING && argc <= 1 {
         let rx = if argc == 0 { Val::Num(10.0) } else { a0 };
-        if let (Val::Num(n), Val::Num(r)) = (vm.stack[(fpos + 1) as usize], rx) {
+        if let (VK::Num(n), VK::Num(r)) = ((vm.stack[(fpos + 1) as usize]).kind(), rx.kind()) {
             if r == 2.0 || r == 8.0 || r == 10.0 || r == 16.0 || r == 36.0 {
                 return Some(vm.string_val(crate::num::radix_string(n, r as int)));
             }
@@ -7794,22 +7794,22 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
     let vm = unsafe { vm_of(vm) };
     let ins = vm.rcode[ri as usize];
     let bp = bp as int;
-    let mut r = Val::Undef;
+    let mut r = Val::Undef();
     let mut done = false;
-    if let (Val::Obj(o), Val::Num(n)) = (vm.rget(bp, ins.b as int), vm.rget(bp, ins.c as int)) {
-        let ob = &vm.objs[*o as usize];
+    if let (VK::Obj(o), VK::Num(n)) = ((vm.rget(bp, ins.b as int)).kind(), (vm.rget(bp, ins.c as int)).kind()) {
+        let ob = &vm.objs[o as usize];
         if ob.class == C_ARRAY {
-            let i = *n as int;
+            let i = n as int;
             let ev = &vm.evecs[ob.elems as usize].v;
-            if i >= 0 && (i as usize) < ev.len() && (i as double) == *n {
+            if i >= 0 && (i as usize) < ev.len() && (i as double) == n {
                 r = ev[i as usize];
                 done = true;
             }
         } else if ob.class == C_TYPED {
             // a typed array's element (Vm::ta_slot)
-            let i = *n as int;
-            if (i as double) == *n {
-                let sl = vm.ta_slot(*o, i);
+            let i = n as int;
+            if (i as double) == n {
+                let sl = vm.ta_slot(o, i);
                 if sl >= 0 {
                     let bc = vm.objs[ob.env as usize].cold as usize;
                     r = Val::Num(vm.colds[bc].nums[sl as usize]);
@@ -7824,13 +7824,13 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
             // debug: HCOUNT[1200 + object class (0..30, 31 not an object)
             // * 3 + key kind (0 number, 1 string with an atom, 2 other)]
-            let c = match &v {
-                Val::Obj(o) => (vm.objs[*o as usize].class as usize).min(30),
+            let c = match (&v).kind() {
+                VK::Obj(o) => (vm.objs[o as usize].class as usize).min(30),
                 _ => 31,
             };
-            let kk = match &k {
-                Val::Num(_) => 0,
-                Val::Str(h) => if vm.strs[*h as usize].atom >= 0 { 1 } else { 2 },
+            let kk = match (&k).kind() {
+                VK::Num(_) => 0,
+                VK::Str(h) => if vm.strs[h as usize].atom >= 0 { 1 } else { 2 },
                 _ => 2,
             };
             HCOUNT.with(|h| {
@@ -7841,7 +7841,7 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         }
         let fi = vm.frames.len() - 1;
         vm.frames[fi].pc = _pc as int + 1;
-        if let (Val::Obj(po), Val::Str(kh)) = (v, k) {
+        if let (VK::Obj(po), VK::Str(kh)) = (v.kind(), k.kind()) {
             if vm.objs[po as usize].class == C_PROXY && vm.strs[kh as usize].atom >= 0 {
                 let a = vm.strs[kh as usize].atom as int;
                 let fpos = bp + vm.protos[_pi as usize].fsize;
@@ -7899,14 +7899,14 @@ fn h_set_elem(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
 
 fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
     let o = crate::vm::obj_of(vm.rget(bp, ins.a as int));
-    let n = match vm.rget(bp, ins.b as int) {
-        Val::Num(x) => *x,
+    let n = match (vm.rget(bp, ins.b as int)).kind() {
+        VK::Num(x) => x,
         _ => return false,
     };
     if o >= 0 && vm.objs[o as usize].class == C_TYPED {
         let i = n as int;
-        return match val {
-            Val::Num(x) => (i as double) == n && vm.ta_put_num(o, i, x),
+        return match val.kind() {
+            VK::Num(x) => (i as double) == n && vm.ta_put_num(o, i, x),
             _ => false,
         };
     }
@@ -8206,12 +8206,12 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
     if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
         let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK || kind == R_CMP { (w2, w3) } else { (w1, w2) };
         if matches!(kind, R_CMP_JFK | R_CMP_JTK | R_CMP | R_CMP_JF | R_CMP_JT | R_CASE_JT) {
-            let t = |v: &Val| match v { Val::Undef => 0, Val::Null => 1, Val::Bool(_) => 2, Val::Num(_) => 3, Val::Str(_) => 4, _ => 5 };
+            let t = |v: &Val| match v.kind() { VK::Undef => 0, VK::Null => 1, VK::Bool(_) => 2, VK::Num(_) => 3, VK::Str(_) => 4, _ => 5 };
             let mut k = 512 + ((sub - 42).clamp(0, 13) as usize) * 36 + t(vm.rget(bp, x)) * 6 + t(vm.rget(bp, y));
-            if let (Val::Str(p), Val::Str(q)) = (vm.rget(bp, x), vm.rget(bp, y)) {
-                let (e, f) = (&vm.strs[*p as usize], &vm.strs[*q as usize]);
+            if let (VK::Str(p), VK::Str(q)) = ((vm.rget(bp, x)).kind(), (vm.rget(bp, y)).kind()) {
+                let (e, f) = (&vm.strs[p as usize], &vm.strs[q as usize]);
                 // 1000 + same len * 8 + up both <0 *4 + eq content*2 + same handle
-                k = 1000 + (e.len == f.len) as usize * 8 + (e.up < 0 && f.up < 0) as usize * 4 + (vm.sref(*p) == vm.sref(*q)) as usize * 2 + (p == q) as usize;
+                k = 1000 + (e.len == f.len) as usize * 8 + (e.up < 0 && f.up < 0) as usize * 4 + (vm.sref(p) == vm.sref(q)) as usize * 2 + (p == q) as usize;
             }
             HCOUNT.with(|h| { let mut v = h.get(); v[k.min(2047)] += 1; h.set(v) });
         }
@@ -8228,7 +8228,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             };
             // the interpreter's whole arm: its own fast paths first
             let mut done = false;
-            if let (Val::Num(a), Val::Num(b)) = (*vm.rget(bp, w2), *vm.rget(bp, w3)) {
+            if let (VK::Num(a), VK::Num(b)) = ((*vm.rget(bp, w2)).kind(), (*vm.rget(bp, w3)).kind()) {
                 let r = if code == OP_SUB {
                     a - b
                 } else if code == OP_MUL {
@@ -8302,7 +8302,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_INC => {
             let dec = sub == 1;
-            if let Val::Num(x) = *vm.rget(bp, w2) {
+            if let VK::Num(x) = (*vm.rget(bp, w2)).kind() {
                 vm.rset((bp + w1) as usize, Val::Num(if dec { x - 1.0 } else { x + 1.0 }));
             } else {
                 vm.r_unary_slow(bp, fi, pc, if dec { 3 } else { 2 }, w1, w2);
@@ -8310,7 +8310,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_TONUM => {
             let neg = sub == 1;
-            if let Val::Num(x) = *vm.rget(bp, w2) {
+            if let VK::Num(x) = (*vm.rget(bp, w2)).kind() {
                 vm.rset((bp + w1) as usize, Val::Num(if neg { -x } else { x }));
             } else {
                 vm.r_unary_slow(bp, fi, pc, if neg { 1 } else if sub == 2 { 4 } else { 0 }, w1, w2);
@@ -8324,7 +8324,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 vm.stack[i] = Val::Str(h);
             } else {
                 let a = vm.stack[i];
-                let r = if let (Val::Num(x), Val::Num(y)) = (a, b) {
+                let r = if let (VK::Num(x), VK::Num(y)) = (a.kind(), b.kind()) {
                     Val::Num(x + y)
                 } else {
                     vm.frames[fi].pc = pc + 1;
@@ -8378,7 +8378,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             eprintln!("hop {} {}", w0 & 255, (w0 >> 8) & 255);
             if (w0 & 255) == R_GET_METHOD || (w0 & 255) == R_SET_ENV {
                 let v = if (w0 & 255) == R_GET_METHOD { *vm.rget(bp, w2) } else { *vm.rget(bp, w1) };
-                let cl = if let Val::Obj(o) = v { vm.objs[o as usize].class } else { -1 };
+                let cl = if let VK::Obj(o) = v.kind() { vm.objs[o as usize].class } else { -1 };
                 let tg = vm.type_index(&v);
                 let atom = vm.protos[pi].code[pc as usize].a as int;
                 let nm = if (w0 & 255) == R_GET_METHOD && atom >= 0 && (atom as usize) < vm.atom_names.len() { vm.atom_str(atom) } else { String::new() };
@@ -8386,9 +8386,9 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 if (w0 & 255) == R_SET_ENV {
                     let e = vm.get_env(w2);
                     let ov = vm.env_slot(e, w3);
-                    extra = match ov {
-                        Val::Obj(o) => format!("old obj rc{} zct{}/{}", vm.objs[o as usize].rc, vm.zct.len(), vm.zct.capacity()),
-                        Val::Str(h) => format!("old str rc{}", if h > 0 { vm.strs[h as usize].rc } else { -9 }),
+                    extra = match ov.kind() {
+                        VK::Obj(o) => format!("old obj rc{} zct{}/{}", vm.objs[o as usize].rc, vm.zct.len(), vm.zct.capacity()),
+                        VK::Str(h) => format!("old str rc{}", if h > 0 { vm.strs[h as usize].rc } else { -9 }),
                         _ => format!("old t{}", vm.type_index(&ov)),
                     };
                 }
@@ -8420,7 +8420,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             let v = vm.env_slot(e, w3);
             vm.rset((bp + w1) as usize, v);
             if sub == 1 {
-                vm.rset((bp + w1 + 1) as usize, Val::Undef);
+                vm.rset((bp + w1 + 1) as usize, Val::Undef());
             }
         }
         R_SET_ENV => {
@@ -8440,13 +8440,13 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         R_CHECK => {
             let v = *vm.rget(bp, w1);
             let bad = if sub == 0 {
-                if let Val::Obj(o) = v {
+                if let VK::Obj(o) = v.kind() {
                     o == vm.tdz_obj
                 } else {
                     false
                 }
             } else {
-                matches!(v, Val::Undef) || matches!(v, Val::Null)
+                matches!(v.kind(), VK::Undef) || matches!(v.kind(), VK::Null)
             };
             if bad {
                 vm.frames[fi].pc = pc + 1;
@@ -8474,10 +8474,10 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_GET_METHOD => {
             // a string's or number's method: its prototype's (prop_cache)
-            let o = match *vm.rget(bp, w2) {
-                Val::Obj(o) => o,
-                Val::Str(_) => vm.string_proto,
-                Val::Num(_) => vm.number_proto,
+            let o = match (*vm.rget(bp, w2)).kind() {
+                VK::Obj(o) => o,
+                VK::Str(_) => vm.string_proto,
+                VK::Num(_) => vm.number_proto,
                 _ => -1,
             };
             vm.r_get_method(bp, rb, fi, pc, w0, w1, w2, w3);
@@ -8531,8 +8531,8 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_GET_THIS_PROP => {
             let c = w3;
-            let o = match vm.frames[fi].this_val {
-                Val::Obj(x) => x,
+            let o = match vm.frames[fi].this_val.kind() {
+                VK::Obj(x) => x,
                 _ => return 1,
             };
             if c >= 65536 && ((c >> 16) as int) == vm.objs[o as usize].shape as int {
@@ -8677,7 +8677,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
         let next = pc + 1 + (w0 >> 16);
         vm.frames[fi].pc = next;
         if ((w0 >> 8) & 255) == 1 {
-            vm.stack[(fpos + 1) as usize] = Val::Undef;
+            vm.stack[(fpos + 1) as usize] = Val::Undef();
         }
         let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
         // compiled: the caller's code calls it itself (6), and h_ret ends
@@ -8718,14 +8718,14 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
             return 5;
         }
         // the callee's return left its value at fpos, the stack's end
-        let v = vm.stack.pop().unwrap_or(Val::Undef);
+        let v = vm.stack.pop().unwrap_or(Val::Undef());
         vm.grow_stack(want);
         vm.stack[dst as usize] = v;
         return after(vm);
     }
     vm.frames[fi].pc = pc + 1 + (w0 >> 16);
     if ((w0 >> 8) & 255) == 1 {
-        vm.stack[(fpos + 1) as usize] = Val::Undef;
+        vm.stack[(fpos + 1) as usize] = Val::Undef();
     }
     if vm.r_call_slow(fo, fpos, w2, bp, w3, want) {
         // one frame more, not a coroutine's (f.call(...), a function that
@@ -8748,7 +8748,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
         if vm.suspended || vm.frames.len() != nf {
             return 5;
         }
-        let v = vm.stack.pop().unwrap_or(Val::Undef);
+        let v = vm.stack.pop().unwrap_or(Val::Undef());
         vm.grow_stack(want);
         vm.stack[dst as usize] = v;
         return after(vm);
@@ -8981,7 +8981,7 @@ fn site_atoms(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<i32
 /// likely to call (guess_reg of its register f), -1 when none is known.
 /// Only a guess: inline_call checks the function object every time.
 fn guess_callee(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize) -> i32 {
-    if let Val::Obj(o) = guess_reg(vm, pi, rb, pc, vm.rcode[rb + pc].a, 2) {
+    if let VK::Obj(o) = (guess_reg(vm, pi, rb, pc, vm.rcode[rb + pc].a, 2)).kind() {
         if o >= 0 && (o as usize) < vm.objs.len() && vm.objs[o as usize].class == C_FUNCTION {
             return vm.objs[o as usize].func;
         }
@@ -8995,16 +8995,16 @@ fn guess_callee(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize) -> i32 {
 /// receiver's guess and the site's cache, or its first prototype way).
 fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth: u32) -> Val {
     if r < 0 {
-        return Val::Undef;
+        return Val::Undef();
     }
     let frame = (0..vm.frames.len()).rev().find(|&k| vm.frames[k].proto as usize == pi);
     let local = |reg: i32| -> Val {
         match frame {
             Some(fi) if reg >= 0 && (reg as int) < vm.protos[pi].nslots => {
                 let at = (vm.frames[fi].bp + reg as int) as usize;
-                if at < vm.stack.len() { vm.stack[at] } else { Val::Undef }
+                if at < vm.stack.len() { vm.stack[at] } else { Val::Undef() }
             }
-            _ => Val::Undef,
+            _ => Val::Undef(),
         }
     };
     if (r as int) < vm.protos[pi].nslots {
@@ -9025,7 +9025,7 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
             R_GET_GLOBAL => {
                 let g = vm.global;
                 let slot = vm.find(g, op.c as int);
-                if slot >= 0 { vm.objs[g as usize].get_slot(slot as usize) } else { Val::Undef }
+                if slot >= 0 { vm.objs[g as usize].get_slot(slot as usize) } else { Val::Undef() }
             }
             R_GET_ENV => match frame {
                 Some(fi) => {
@@ -9036,15 +9036,15 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
                         d -= 1;
                     }
                     let ev = if e >= 0 { vm.objs[e as usize].elems as usize } else { 0 };
-                    if e >= 0 && ev < vm.evecs.len() && (op.c as usize) < vm.evecs[ev].v.len() { vm.evecs[ev].v[op.c as usize] } else { Val::Undef }
+                    if e >= 0 && ev < vm.evecs.len() && (op.c as usize) < vm.evecs[ev].v.len() { vm.evecs[ev].v[op.c as usize] } else { Val::Undef() }
                 }
-                None => Val::Undef,
+                None => Val::Undef(),
             },
             R_MOVE if op.b >= 0 => local(op.b),
             R_GET_METHOD if depth > 0 => {
                 // an own method: the receiver's guess and the site's cache
                 if op.c >= 65536 {
-                    if let Val::Obj(o) = guess_reg(vm, pi, rb, k, op.b, depth - 1) {
+                    if let VK::Obj(o) = (guess_reg(vm, pi, rb, k, op.b, depth - 1)).kind() {
                         if o >= 0 && (o as usize) < vm.objs.len() && vm.objs[o as usize].shape == (op.c >> 16) {
                             return vm.objs[o as usize].get_slot((op.c & 65535) as usize);
                         }
@@ -9064,12 +9064,12 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
                         }
                     }
                 }
-                Val::Undef
+                Val::Undef()
             }
-            _ => Val::Undef,
+            _ => Val::Undef(),
         };
     }
-    Val::Undef
+    Val::Undef()
 }
 
 /// Cg.pics: by pc * 4, the first way of an R_GET_METHOD's or R_GET_PROP's
@@ -9197,7 +9197,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
         return settle(vm, fi, pc);
     }
     vm.frames[nf].construct = true;
-    vm.frames[nf].new_target = if m >= 0 { Val::Undef } else { f };
+    vm.frames[nf].new_target = if m >= 0 { Val::Undef() } else { f };
     if cls {
         vm.run_fields(fo, &this);
         if vm.throwing {
@@ -9221,7 +9221,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
         return 5;
     }
     // the constructor's return left the object at fpos, the stack's end
-    let v = vm.stack.pop().unwrap_or(Val::Undef);
+    let v = vm.stack.pop().unwrap_or(Val::Undef());
     vm.grow_stack(want);
     vm.stack[fpos as usize] = v;
     after(vm)
@@ -9372,11 +9372,11 @@ fn h_ret(vm: i32, bp: i32, r: i32, _pc: i32, _ri: i32) -> i32 {
     let ins = vm.rcode[(rb + at) as usize];
     let k = (ins.code & 255) as int;
     let cbp = vm.frames[top].bp;
-    let mut v = if k == R_RET { *vm.rget(cbp, ins.a as int) } else { Val::Undef };
+    let mut v = if k == R_RET { *vm.rget(cbp, ins.a as int) } else { Val::Undef() };
     let mut ok = r >= 0 && (k == R_RET || k == R_RET_UNDEF);
     if ok && vm.frames[top].construct && !crate::vm::is_obj(&v) {
         // a constructor's this, unless a derived one returned a value
-        if !matches!(v, Val::Undef) && vm.protos[tp].derived {
+        if !matches!(v.kind(), VK::Undef) && vm.protos[tp].derived {
             ok = false;
         } else {
             v = vm.frames[top].this_val;
@@ -9457,7 +9457,7 @@ fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool
     let ins = vm.rcode[(rb + at) as usize];
     let k = (ins.code & 255) as int;
     if (k == R_RET || k == R_RET_UNDEF) && !vm.frames[nf].construct {
-        let v = if k == R_RET { *vm.rget(bp, ins.a as int) } else { Val::Undef };
+        let v = if k == R_RET { *vm.rget(bp, ins.a as int) } else { Val::Undef() };
         vm.frames.pop();
         while !vm.handlers.is_empty() && vm.handlers[vm.handlers.len() - 1].frame >= nf as int {
             vm.handlers.pop();

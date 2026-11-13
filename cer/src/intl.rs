@@ -578,7 +578,7 @@ impl Vm {
             i += 1;
         }
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         while s.len() < 3 {
             s.push(String::new());

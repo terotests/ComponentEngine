@@ -67,14 +67,14 @@ impl Vm {
         let handler = self.colds[self.objs[p as usize].cold as usize].home;
         if handler < 0 || target < 0 || self.proxy_hooks < 0 {
             self.throw_type("Cannot perform an operation on a proxy that has been revoked");
-            return Val::Undef;
+            return Val::Undef();
         }
         let hook = self.evecs[self.objs[self.proxy_hooks as usize].elems as usize].v[which as usize].clone();
         let mut all: Vec<Val> = vec![Val::Obj(target), Val::Obj(handler)];
         for a in args.iter() {
             all.push(*a);
         }
-        self.call_value(hook, Val::Undef, all)
+        self.call_value(hook, Val::Undef(), all)
     }
 
     /// `p[atom]` (receiver r) for a proxy of a plain object: the trap is
@@ -89,19 +89,19 @@ impl Vm {
         }
         let trap = self.get_obj(handler, A_GET, &Val::Obj(handler));
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
-        if matches!(trap, Val::Undef) || matches!(trap, Val::Null) {
+        if matches!(trap.kind(), VK::Undef) || matches!(trap.kind(), VK::Null) {
             return self.get_obj(target, atom, &r);
         }
         if !self.is_callable(&trap) {
             self.throw_type("'get' on proxy: trap is not a function");
-            return Val::Undef;
+            return Val::Undef();
         }
         let k = self.key_val(atom);
         let v = self.call_fixed(trap, Val::Obj(handler), 3, Val::Obj(target), k, r);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         let slot = self.find(target, atom);
         if slot >= 0 {
@@ -110,17 +110,17 @@ impl Vm {
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[target as usize].get_slot(slot as usize));
                     let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
-                    if matches!(g, Val::Undef) && !matches!(v, Val::Undef) {
+                    if matches!(g.kind(), VK::Undef) && !matches!(v.kind(), VK::Undef) {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("'get' on proxy: property '{}' is a non-configurable accessor property on the proxy target and does not have a getter function, but the trap did not return 'undefined'", n).as_str());
-                        return Val::Undef;
+                        return Val::Undef();
                     }
                 } else if (attr & P_READONLY) != 0 {
                     let cur = self.objs[target as usize].get_slot(slot as usize).clone();
                     if !self.same_value(&v, &cur) {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("'get' on proxy: property '{}' is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value", n).as_str());
-                        return Val::Undef;
+                        return Val::Undef();
                     }
                 }
             }
@@ -142,7 +142,7 @@ impl Vm {
         if self.throwing {
             return false;
         }
-        if matches!(trap, Val::Undef) || matches!(trap, Val::Null) {
+        if matches!(trap.kind(), VK::Undef) || matches!(trap.kind(), VK::Null) {
             let k = self.key_val(atom);
             return self.proxy_bool(p, PH_SET, vec![k, v, r]);
         }
@@ -162,7 +162,7 @@ impl Vm {
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[target as usize].get_slot(slot as usize));
                     let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
-                    if matches!(s, Val::Undef) {
+                    if matches!(s.kind(), VK::Undef) {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("'set' on proxy: trap returned truish for property '{}' which exists in the proxy target as a non-configurable and non-writable accessor property without a setter", n).as_str());
                         return false;
@@ -235,18 +235,18 @@ impl Vm {
     }
 
     pub fn call_native_proxy(&mut self, id: int, args: &Vec<Val>, construct: bool) -> Val {
-        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
-        let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
+        let a0 = if args.is_empty() { Val::Undef() } else { args[0].clone() };
+        let a1 = if args.len() < 2 { Val::Undef() } else { args[1].clone() };
         if id == NF_PROXY {
             if !construct {
                 self.throw_type("Constructor Proxy requires 'new'");
-                return Val::Undef;
+                return Val::Undef();
             }
             let t = obj_of(&a0);
             let h = obj_of(&a1);
             if t < 0 || h < 0 {
                 self.throw_type("Cannot create proxy with a non-object as target or handler");
-                return Val::Undef;
+                return Val::Undef();
             }
             let p = self.alloc(C_PROXY, -1);
             self.put_env(p, t);
@@ -265,7 +265,7 @@ impl Vm {
                 self.put_env(p, -1);
                 self.put_home(p, -1);
             }
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_IS_PROXY {
             return Val::Bool(self.is_proxy(obj_of(&a0)));
@@ -299,7 +299,7 @@ impl Vm {
             if self.array_generic >= 0 {
                 self.roots.push(self.array_generic);
             }
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_IS_PROMISE {
             let o = obj_of(&a0);
@@ -311,9 +311,9 @@ impl Vm {
             if h >= 0 {
                 self.roots.push(h);
             }
-            return Val::Undef;
+            return Val::Undef();
         }
-        Val::Undef
+        Val::Undef()
     }
 
     /// A property key as the hooks take it: a string or a symbol.
@@ -323,7 +323,7 @@ impl Vm {
         }
         let (i, a) = self.to_key(v);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if i >= 0 {
             return self.string_val(format!("{}", i));
@@ -334,8 +334,8 @@ impl Vm {
     /// The Object and Reflect built-ins on a proxy `p` (the first argument,
     /// or `this` for the Object.prototype methods); None for the others.
     pub fn proxy_native(&mut self, id: int, p: int, args: &Vec<Val>) -> Option<Val> {
-        let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
-        let a2 = if args.len() < 3 { Val::Undef } else { args[2].clone() };
+        let a1 = if args.len() < 2 { Val::Undef() } else { args[1].clone() };
+        let a2 = if args.len() < 3 { Val::Undef() } else { args[2].clone() };
         let pv = Val::Obj(p);
         if id == NF_O_GETPROTO || id == NF_REFLECT_GETPROTO {
             let rv = self.proxy_call(p, PH_GETPROTO, Vec::new());
@@ -352,7 +352,7 @@ impl Vm {
         if id == NF_O_DEFPROP || id == NF_REFLECT_DEFPROP {
             let k = self.prop_key(&a1);
             if self.throwing {
-                return Some(Val::Undef);
+                return Some(Val::Undef());
             }
             let va2: Vec<Val> = vec![k.clone(), a2];
             let ok = self.proxy_bool(p, PH_DEFINE, va2);
@@ -368,7 +368,7 @@ impl Vm {
         if id == NF_O_OWNDESC {
             let k = self.prop_key(&a1);
             if self.throwing {
-                return Some(Val::Undef);
+                return Some(Val::Undef());
             }
             let va3: Vec<Val> = vec![k];
             let rv = self.proxy_call(p, PH_GOPD, va3);
@@ -386,15 +386,15 @@ impl Vm {
             return Some(pv);
         }
         if id == NF_OP_HASOWN || id == NF_O_HASOWN || id == NF_OP_PROPENUM {
-            let kv = if id == NF_O_HASOWN { a1 } else if args.is_empty() { Val::Undef } else { args[0].clone() };
+            let kv = if id == NF_O_HASOWN { a1 } else if args.is_empty() { Val::Undef() } else { args[0].clone() };
             let k = self.prop_key(&kv);
             if self.throwing {
-                return Some(Val::Undef);
+                return Some(Val::Undef());
             }
             let va4: Vec<Val> = vec![k];
             let d = self.proxy_call(p, PH_GOPD, va4);
             if self.throwing {
-                return Some(Val::Undef);
+                return Some(Val::Undef());
             }
             if id == NF_OP_PROPENUM {
                 if !is_obj(&d) {

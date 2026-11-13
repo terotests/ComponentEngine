@@ -617,11 +617,12 @@ pub fn small_int(s: &str) -> int {
 }
 
 /// The bound below which a BigInt keeps its value as a Num (exact) instead
-/// of decimal text: 2^53 where int is 64 bits, 2^31 on the other targets so
-/// the value is also an int there.
+/// of decimal text: 2^47 in Rust, where a Val keeps it in its 48 payload
+/// bits (value.rs), 2^31 on the other targets so the value is also an int
+/// there.
 #[ranger::target(rust)]
 pub fn small_big_limit() -> double {
-    9007199254740992.0
+    140737488355328.0
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
@@ -737,8 +738,8 @@ impl Vm {
     /// The small value of a BigInt, when it has one.
     #[inline]
     pub fn big_small_val(&self, v: &Val) -> Option<double> {
-        if let Val::Big(n) = v {
-            return Some(*n);
+        if let VK::Big(n) = v.kind() {
+            return Some(n);
         }
         None
     }
@@ -756,18 +757,18 @@ impl Vm {
     }
 
     pub fn is_bigint(&self, v: &Val) -> bool {
-        matches!(v, Val::Big(_)) || self.class_of(v) == C_BIGINT
+        matches!(v.kind(), VK::Big(_)) || self.class_of(v) == C_BIGINT
     }
 
     /// The decimal text of a BigInt value.
     pub fn big_text(&self, v: &Val) -> String {
-        if let Val::Big(n) = v {
-            return int_text(*n as int);
+        if let VK::Big(n) = v.kind() {
+            return int_text(n as int);
         }
         let o = obj_of(v);
         if o >= 0 {
             let pv = self.colds[self.objs[o as usize].cold as usize].prim;
-            if let Val::Str(s) = pv {
+            if let VK::Str(s) = pv.kind() {
                 let s = self.sget(s);
                 return s.as_ref().clone();
             }
@@ -779,16 +780,16 @@ impl Vm {
     pub fn to_bigint(&mut self, v: &Val) -> Val {
         let p = self.to_primitive(v, "number");
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
-        match &p {
-            Val::Bool(b) => return self.bigint_val(if *b { "1" } else { "0" }),
-            Val::Str(s) => {
+        match (&p).kind() {
+            VK::Bool(b) => return self.bigint_val(if b { "1" } else { "0" }),
+            VK::Str(s) => {
                 let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 if t.is_empty() {
                     self.throw_syntax(format!("Cannot convert {} to a BigInt", s).as_str());
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 return self.bigint_val(t.as_str());
             }
@@ -799,7 +800,7 @@ impl Vm {
         }
         let what = self.type_of(&p);
         self.throw_type(format!("Cannot convert a {} to a BigInt", what).as_str());
-        Val::Undef
+        Val::Undef()
     }
 
     /// thisBigIntValue: a BigInt, or the one a BigInt object holds.
@@ -812,14 +813,14 @@ impl Vm {
             return self.colds[self.objs[o as usize].cold as usize].prim.clone();
         }
         self.throw_type("BigInt.prototype method called on incompatible receiver");
-        Val::Undef
+        Val::Undef()
     }
 
     /// A binary operator with a BigInt operand (after ToPrimitive).
     pub fn big_arith(&mut self, code: int, a: &Val, b: &Val) -> Val {
         if !self.is_bigint(a) || !self.is_bigint(b) {
             self.throw_type("Cannot mix BigInt and other types, use explicit conversions");
-            return Val::Undef;
+            return Val::Undef();
         }
         // both small: in doubles, exact while the result stays below
         // small_big_limit (rounding is monotonic, so a true result past it
@@ -909,7 +910,7 @@ impl Vm {
             OP_BXOR => bitop(2, x.as_str(), y.as_str()),
             _ => {
                 self.throw_type("BigInts have no unsigned right shift, use >> instead");
-                return Val::Undef;
+                return Val::Undef();
             }
         };
         if r.is_empty() {
@@ -918,7 +919,7 @@ impl Vm {
             } else {
                 self.throw_range("Division by zero");
             }
-            return Val::Undef;
+            return Val::Undef();
         }
         self.bigint_val(r.as_str())
     }
@@ -947,7 +948,7 @@ impl Vm {
         if self.is_bigint(v) {
             return self.big_text(v);
         }
-        if let Val::Str(s) = v {
+        if let VK::Str(s) = v.kind() {
             let s = self.sget(s.clone());
             return from_string(s.as_str());
         }
@@ -958,17 +959,17 @@ impl Vm {
     pub fn big_loose_eq(&mut self, a: &Val, b: &Val) -> bool {
         let (big, other) = if self.is_bigint(a) { (a, b) } else { (b, a) };
         let x = self.big_text(big);
-        match other {
-            Val::Num(n) => {
-                let t = from_double(*n);
+        match other.kind() {
+            VK::Num(n) => {
+                let t = from_double(n);
                 !t.is_empty() && t == x
             }
-            Val::Str(s) => {
+            VK::Str(s) => {
                 let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 !t.is_empty() && t == x
             }
-            Val::Bool(bv) => x.as_str() == (if *bv { "1" } else { "0" }),
+            VK::Bool(bv) => x.as_str() == (if bv { "1" } else { "0" }),
             _ => {
                 if self.is_bigint(other) {
                     return self.big_text(other) == x;
@@ -979,23 +980,23 @@ impl Vm {
     }
 
     pub fn call_native_bigint(&mut self, id: int, this: Val, args: &Vec<Val>, construct: bool) -> Val {
-        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
-        let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
+        let a0 = if args.is_empty() { Val::Undef() } else { args[0].clone() };
+        let a1 = if args.len() < 2 { Val::Undef() } else { args[1].clone() };
         if id == NF_BIGINT {
             if construct {
                 self.throw_type("BigInt is not a constructor");
-                return Val::Undef;
+                return Val::Undef();
             }
             let p = self.to_primitive(&a0, "number");
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
-            if let Val::Num(n) = p {
+            if let VK::Num(n) = p.kind() {
                 let t = from_double(n);
                 if t.is_empty() {
                     let ns = self.to_string(&p);
                     self.throw_range(format!("The number {} cannot be converted to a BigInt because it is not an integer", ns).as_str());
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 return self.bigint_val(t.as_str());
             }
@@ -1004,15 +1005,15 @@ impl Vm {
         if id == NF_BIGINT_ASINTN || id == NF_BIGINT_ASUINTN {
             let bits = self.to_number(&a0);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             if bits != bits || bits < 0.0 || bits > 9007199254740991.0 {
                 self.throw_range("Invalid value: not (convertible to) a safe integer");
-                return Val::Undef;
+                return Val::Undef();
             }
             let x = self.to_bigint(&a1);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             let t = self.big_text(&x);
             let r = if id == NF_BIGINT_ASINTN { as_int_n(bits as int, t.as_str()) } else { as_uint_n(bits as int, t.as_str()) };
@@ -1020,15 +1021,15 @@ impl Vm {
         }
         let v = self.this_bigint(&this);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_BIGINTP_VALUEOF {
             return v;
         }
-        let radix = if matches!(a0, Val::Undef) { 10.0 } else { self.to_number(&a0) };
+        let radix = if matches!(a0.kind(), VK::Undef) { 10.0 } else { self.to_number(&a0) };
         if radix < 2.0 || radix > 36.0 || radix.floor() != radix {
             self.throw_range("toString() radix must be between 2 and 36");
-            return Val::Undef;
+            return Val::Undef();
         }
         let t = self.big_text(&v);
         self.string_val(to_radix(t.as_str(), radix as int))

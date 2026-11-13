@@ -2842,7 +2842,7 @@ impl Compiler {
         // the site's template object is made once: a constant slot keeps it
         let fi = self.fs.len() - 1;
         let slot = self.fs[fi].proto.consts.len() as int;
-        self.fs[fi].proto.consts.push(Val::Undef);
+        self.fs[fi].proto.consts.push(Val::Undef());
         let cnt = strs.len() as int;
         let site = self.emit(OP_TEMPLATE_OBJ, 0, slot);
         for s in strs.iter() {

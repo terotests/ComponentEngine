@@ -140,7 +140,7 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
                 let kb = p.code[ci].b as usize;
                 let mut si: usize = p.cstrs.len();
                 if kb < p.consts.len() {
-                    if let Val::Str(k) = p.consts[kb] {
+                    if let VK::Str(k) = p.consts[kb].kind() {
                         si = k as usize;
                     }
                 }
@@ -308,10 +308,10 @@ pub fn encode(u: &Unit, input: &str) -> String {
         put_bool(&mut out, p.is_async);
         put_bool(&mut out, p.lexical_ctor);
         // where the function's text is: none, in the source, its own
-        match &p.src {
-            Val::Undef => put_num(&mut out, 0),
-            Val::Str(k) => {
-                let s = &p.cstrs[*k as usize];
+        match (&p.src).kind() {
+            VK::Undef => put_num(&mut out, 0),
+            VK::Str(k) => {
+                let s = &p.cstrs[k as usize];
                 if s.as_str() == u.source.as_str() {
                     put_num(&mut out, 1);
                 } else {
@@ -325,23 +325,23 @@ pub fn encode(u: &Unit, input: &str) -> String {
         put_num(&mut out, p.src_end);
         put_num(&mut out, p.consts.len() as int);
         for c in p.consts.iter() {
-            match c {
-                Val::Undef => put_num(&mut out, 0),
-                Val::Null => put_num(&mut out, 1),
-                Val::Bool(b) => put_num(&mut out, if *b { 3 } else { 2 }),
-                Val::Num(x) => {
+            match c.kind() {
+                VK::Undef => put_num(&mut out, 0),
+                VK::Null => put_num(&mut out, 1),
+                VK::Bool(b) => put_num(&mut out, if b { 3 } else { 2 }),
+                VK::Num(x) => {
                     put_num(&mut out, 4);
-                    put_double(&mut out, *x);
+                    put_double(&mut out, x);
                 }
-                Val::Str(k) => {
+                VK::Str(k) => {
                     put_num(&mut out, 5);
-                    put_str(&mut out, p.cstrs[*k as usize].as_str());
+                    put_str(&mut out, p.cstrs[k as usize].as_str());
                 }
-                Val::Big(x) => {
+                VK::Big(x) => {
                     put_num(&mut out, 6);
-                    put_num(&mut out, *x as int);
+                    put_num(&mut out, x as int);
                 }
-                Val::Obj(_) => return String::new(),
+                VK::Obj(_) => return String::new(),
             }
         }
         put_num(&mut out, p.code.len() as int);
@@ -475,7 +475,7 @@ pub fn decode(text: &str, input: &str) -> Unit {
         while j < nc && !r.bad {
             let t = r.num();
             let v = if t == 1 {
-                Val::Null
+                Val::Null()
             } else if t == 2 {
                 Val::Bool(false)
             } else if t == 3 {
@@ -489,7 +489,7 @@ pub fn decode(text: &str, input: &str) -> Unit {
             } else if t == 6 {
                 Val::Big((r.num() as double) + 0.0)
             } else {
-                Val::Undef
+                Val::Undef()
             };
             p.consts.push(v);
             j += 1;

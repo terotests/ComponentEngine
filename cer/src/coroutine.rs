@@ -56,13 +56,13 @@ fn obj_val(o: int) -> Val {
     if o >= 0 {
         Val::Obj(o)
     } else {
-        Val::Undef
+        Val::Undef()
     }
 }
 
 fn num_of(v: &Val) -> int {
-    match v {
-        Val::Num(n) => *n as int,
+    match v.kind() {
+        VK::Num(n) => n as int,
         _ => -1,
     }
 }
@@ -168,7 +168,7 @@ impl Vm {
         let mut proto = if async_gen { self.async_generator_proto } else { self.generator_proto };
         if !is_async {
             let p = self.get_obj(fo, A_PROTOTYPE, &Val::Obj(fo));
-            if let Val::Obj(po) = p {
+            if let VK::Obj(po) = p.kind() {
                 proto = po;
             }
         }
@@ -192,7 +192,7 @@ impl Vm {
         // from the interpreter: the body runs to its first await with the
         // collector free to run, as the caller's frame could
         let safe = self.native_depth == self.gc_free_depth;
-        self.async_step_s(g, GM_NEXT, Val::Undef, safe);
+        self.async_step_s(g, GM_NEXT, Val::Undef(), safe);
         self.temp_roots.pop();
         self.stack.push(Val::Obj(p));
     }
@@ -243,9 +243,9 @@ impl Vm {
         if self.colds[self.objs[g as usize].cold as usize].elems2.len() < G_HANDLERS {
             // first save: the slots made, the promise and the await flag
             // kept where an async function set them
-            let promise = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_PROMISE { self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone() } else { Val::Undef };
+            let promise = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_PROMISE { self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone() } else { Val::Undef() };
             let awaiting = if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_AWAIT { self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone() } else { Val::Bool(false) };
-            let rest: Vec<Val> = vec![Val::Undef, Val::Undef, Val::Undef, Val::Undef, Val::Undef, Val::Undef, promise, awaiting];
+            let rest: Vec<Val> = vec![Val::Undef(), Val::Undef(), Val::Undef(), Val::Undef(), Val::Undef(), Val::Undef(), promise, awaiting];
             self.put_elems2(g, rest);
         } else if self.colds[self.objs[g as usize].cold as usize].elems2.len() > G_HANDLERS {
             self.cut_elems2(g, G_HANDLERS as int);
@@ -310,15 +310,15 @@ impl Vm {
         self.gen_raw = false;
         if state == GS_RUNNING {
             self.throw_type("Generator is already running");
-            return Val::Undef;
+            return Val::Undef();
         }
         if state == GS_DONE || (state == GS_START && mode != GM_NEXT) {
             self.gen_finish(g);
             if mode == GM_THROW {
                 self.throw_val(v);
-                return Val::Undef;
+                return Val::Undef();
             }
-            return if mode == GM_RETURN { v } else { Val::Undef };
+            return if mode == GM_RETURN { v } else { Val::Undef() };
         }
         let base = self.frames.len() as int;
         let start = self.stack.len() as int;
@@ -394,7 +394,7 @@ impl Vm {
         if self.throwing {
             self.gen_finish(g);
             self.gen_done = true;
-            return Val::Undef;
+            return Val::Undef();
         }
         let r = self.stack.pop().unwrap();
         if yielded {
@@ -484,7 +484,7 @@ impl Vm {
         if self.throwing {
             return 0;
         }
-        if matches!(m, Val::Undef) || matches!(m, Val::Null) {
+        if matches!(m.kind(), VK::Undef) || matches!(m.kind(), VK::Null) {
             if mode == GM_RETURN {
                 self.stack.push(received);
                 return 2;
@@ -498,7 +498,7 @@ impl Vm {
                 return 0;
             }
         }
-        let r = self.call_fixed(m, it, 1, received, Val::Undef, Val::Undef);
+        let r = self.call_fixed(m, it, 1, received, Val::Undef(), Val::Undef());
         if self.throwing {
             return 0;
         }
@@ -548,7 +548,7 @@ impl Vm {
         if self.throwing {
             return false;
         }
-        if matches!(m, Val::Undef) || matches!(m, Val::Null) {
+        if matches!(m.kind(), VK::Undef) || matches!(m.kind(), VK::Null) {
             if mode == GM_RETURN {
                 self.stack.push(received);
                 return true;
@@ -561,7 +561,7 @@ impl Vm {
                 return false;
             }
         }
-        let r = self.call_fixed(m, it, 1, received, Val::Undef, Val::Undef);
+        let r = self.call_fixed(m, it, 1, received, Val::Undef(), Val::Undef());
         if self.throwing {
             return false;
         }
@@ -609,7 +609,7 @@ impl Vm {
         if self.throwing || !self.is_callable(&m) {
             return;
         }
-        let r = self.call_fixed(m, it.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+        let r = self.call_fixed(m, it.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
         if !self.throwing && !is_obj(&r) {
             self.throw_type("Iterator result is not an object");
         }
@@ -628,7 +628,7 @@ impl Vm {
         if self.throwing {
             self.throwing = false;
             let e = self.exc.clone();
-            self.exc = Val::Undef;
+            self.exc = Val::Undef();
             if p >= 0 {
                 self.settle(p, 2, e);
             }
@@ -688,7 +688,7 @@ impl Vm {
             if self.throwing {
                 self.throwing = false;
                 let e = self.exc.clone();
-                self.exc = Val::Undef;
+                self.exc = Val::Undef();
                 self.remove_elem(q2, (0) as int);
                 self.settle(p, 2, e);
                 continue;
@@ -718,19 +718,19 @@ impl Vm {
     }
 
     pub fn call_native_co(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>) -> Val {
-        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
+        let a0 = if args.is_empty() { Val::Undef() } else { args[0].clone() };
         if id == NF_AGEN_AWAIT_OK || id == NF_AGEN_AWAIT_ERR {
             let g = self.objs[fobj as usize].env as int;
             self.put_elem2(g, (G_AWAIT) as int, Val::Bool(false));
             self.agen_run(g, if id == NF_AGEN_AWAIT_OK { GM_NEXT } else { GM_THROW }, a0, true);
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_ASYNC_FROM_SYNC {
             self.async_from_sync = obj_of(&a0);
             if self.async_from_sync >= 0 {
                 self.roots.push(self.async_from_sync);
             }
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_AGEN_NEXT || id == NF_AGEN_RETURN || id == NF_AGEN_THROW {
             let p = self.new_promise();
@@ -756,19 +756,19 @@ impl Vm {
             self.push_elem(q, Val::Obj(req));
             let idle = self.objs[g as usize].pos != GS_RUNNING as i32 && !self.truthy_v(&self.colds[self.objs[g as usize].cold as usize].elems2[G_AWAIT].clone());
             if idle && self.evecs[self.objs[q as usize].elems as usize].v.len() == 1 {
-                self.agen_run(g, GM_NEXT, Val::Undef, false);
+                self.agen_run(g, GM_NEXT, Val::Undef(), false);
             }
             return Val::Obj(p);
         }
         if id == NF_ASYNC_OK || id == NF_ASYNC_ERR {
             let g = self.objs[fobj as usize].env as int;
             self.async_step(g, if id == NF_ASYNC_OK { GM_NEXT } else { GM_THROW }, a0);
-            return Val::Undef;
+            return Val::Undef();
         }
         let g = obj_of(&this);
         if g < 0 || self.objs[g as usize].class != C_GENERATOR || self.protos[self.objs[g as usize].func as usize].is_async {
             self.throw_type("next method called on incompatible receiver");
-            return Val::Undef;
+            return Val::Undef();
         }
         let mode = if id == NF_GEN_RETURN {
             GM_RETURN
@@ -780,7 +780,7 @@ impl Vm {
         let top = self.nat_top;
         let r = self.gen_resume_s(g, mode, a0, top);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if self.gen_raw && !self.gen_done {
             return r;
@@ -795,7 +795,7 @@ impl Vm {
     pub fn iter_close_on_throw(&mut self, it: &Val) {
         let e = self.exc.clone();
         self.throwing = false;
-        self.exc = Val::Undef;
+        self.exc = Val::Undef();
         self.temp_roots.push(e.clone());
         self.iter_close(it);
         self.temp_roots.pop();
@@ -827,12 +827,12 @@ impl Vm {
                     break;
                 }
                 let k = self.get_index(&v, 0);
-                let val = if self.throwing { Val::Undef } else { self.get_index(&v, 1) };
+                let val = if self.throwing { Val::Undef() } else { self.get_index(&v, 1) };
                 if !self.throwing {
-                    self.call_fixed(adder.clone(), Val::Obj(m), 2, k, val, Val::Undef);
+                    self.call_fixed(adder.clone(), Val::Obj(m), 2, k, val, Val::Undef());
                 }
             } else {
-                self.call_fixed(adder.clone(), Val::Obj(m), 1, v, Val::Undef, Val::Undef);
+                self.call_fixed(adder.clone(), Val::Obj(m), 1, v, Val::Undef(), Val::Undef());
             }
             if self.throwing {
                 self.iter_close_on_throw(&it);
@@ -846,17 +846,17 @@ impl Vm {
 /// Whether two values hold the same counted reference (the same object or
 /// string handle), or neither holds one.
 fn same_ref(a: &Val, b: &Val) -> bool {
-    if let Val::Obj(x) = a {
-        if let Val::Obj(y) = b {
-            return *x == *y;
+    if let VK::Obj(x) = a.kind() {
+        if let VK::Obj(y) = b.kind() {
+            return x == y;
         }
         return false;
     }
-    if let Val::Str(x) = a {
-        if let Val::Str(y) = b {
-            return *x == *y;
+    if let VK::Str(x) = a.kind() {
+        if let VK::Str(y) = b.kind() {
+            return x == y;
         }
         return false;
     }
-    !matches!(b, Val::Obj(_) | Val::Str(_))
+    !matches!(b.kind(), VK::Obj(_) | VK::Str(_))
 }
