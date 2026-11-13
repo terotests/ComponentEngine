@@ -165,7 +165,7 @@ fn main() {
             }
             let objs = v.objs.capacity() * std::mem::size_of::<cerxes::value::JsObj>();
             let strs: usize = v.strs.iter().map(|s| 40 + s.s.capacity()).sum();
-            let shapes: usize = v.shapes.iter().map(|s| (s.keys.capacity() + s.attrs.capacity() + s.itab.capacity() + s.t_atom.capacity() + s.t_attr.capacity() + s.t_to.capacity()) * 8 + s.t_map.capacity() * 24 + std::mem::size_of::<cerxes::value::Shape>()).sum();
+            let shapes: usize = v.shapes.iter().map(|s| (s.keys.capacity() + s.attrs.capacity() + s.itab.capacity() + s.trans.capacity() / 2) * 8 + std::mem::size_of::<cerxes::value::Shape>()).sum();
             let colds: usize = v.colds.iter().map(|c| c.index.capacity() * 24 + c.marks.capacity() * 8 + c.nums.capacity() * 8).sum();
             let code: usize = v.protos.iter().map(|p| p.code.capacity() * std::mem::size_of::<cerxes::value::Op>() + p.consts.capacity() * vs).sum::<usize>() + v.rcode.capacity() * std::mem::size_of::<cerxes::value::Op>();
             let mb = |x: usize| x as f64 / 1048576.0;

@@ -518,6 +518,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     vm.shapes = Vec::new();
     vm.shapes.push(Shape::new());
     vm.free_shapes = Vec::new();
+    vm.t_far = TFar::new();
     let no = r.num();
     let mut for_ins: Vec<(int, Vec<int>)> = Vec::new();
     i = 0;
