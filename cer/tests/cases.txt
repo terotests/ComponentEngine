@@ -1213,3 +1213,18 @@ log.push(n);
 log.join(",")
 ----
 ag,ag,ag,bg,bg,bg,ag,222111333444,1119,50,11,6000
+
+==== js Counted repetitions too big to write out run as loops with a count register: nested {0,1000} (linkify-it's path pattern) compiles, bounds and laziness hold, optional iterations that match nothing stop, groups reset per iteration, lookbehind
+var r = [];
+r.push(/^(?:a|b){0,1000}c/.exec("ababababc")[0]);
+r.push(/((?:\[(?:[^\[\]]|\[(?:[^\[\]]|\[(?:[^\[\]]){0,1000}\]){0,1000}\]){0,1000}\]))/.exec("x[a[b[c]]d]y")[1]);
+r.push(/(?:x?){0,1000}y/.exec("xxy")[0]);
+r.push(/(?:ab){3,600}?b/.exec("abababababb")[0]);
+r.push(/(?:ab){600,}/.test("ab".repeat(599)), /(?:ab){600,}/.test("ab".repeat(600)));
+r.push(/(?:a|bc){10,700}d/.exec("aaaaaaaaaabcd") + "", /(?:a|bc){10,700}d/.exec("aaaaaaaaabcd") + "");
+r.push(/(?<=(?:ab){0,700})c/.exec("ababc").index);
+r.push(/(?:(a)|(b)){5,600}/.exec("ababab") + "");
+r.push("aaa".replace(/(?:a|q){0,1000}/g, "X"));
+r.join("|")
+----
+ababababc|[a[b[c]]d]|xxy|abababababb|false|true|aaaaaaaaaabcd|aaaaaaaaabcd|4|ababab,,b|XX

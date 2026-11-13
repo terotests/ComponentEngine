@@ -50,6 +50,19 @@ const I_CLEAR: int = 17;
 /// I_ANYNL), any number of times (b 1 greedy, 0 lazy), then pc + 2: one
 /// backtrack entry for the whole run, not one per unit
 const I_STAR: int = 18;
+/// a counted loop's head (`x{min,max}` too big to write out): a is the
+/// count register, b the pc after the loop; the next instruction is an
+/// I_CNTDATA with min in a, max in b (-1: no bound). Count < min: the body
+/// (pc + 2); count == max: b; else both, the body first when greedy.
+const I_CNTBR: int = 19;
+const I_CNTBR_LAZY: int = 20;
+const I_CNTDATA: int = 21;
+/// regs[a] = 0 (a counted loop starts)
+const I_CNTSET: int = 22;
+/// the end of a counted loop's body: fails when the iteration was an
+/// optional one (count >= b's I_CNTDATA min) that matched nothing
+/// (regs[b] still the position it started at), else regs[a] += 1
+const I_CNTINC: int = 23;
 
 struct RNode {
     kind: int,
@@ -1635,6 +1648,36 @@ impl Gen {
             let mut lo: int = -1;
             let mut hi: int = -1;
             cap_range(p, inner, &mut lo, &mut hi);
+            // written out the repetition takes max (or min) copies of the
+            // body: past a few hundred instructions (`(a{0,1000}){0,1000}`
+            // would be a million) it becomes a loop with a count register
+            let copies = if max > min { max } else { min };
+            if copies > 4 {
+                let mark = self.code.len();
+                let nregs0 = self.nregs;
+                self.gen(p, inner, flags, backward);
+                let body_len = (self.code.len() - mark) as int + 2;
+                self.code.truncate(mark);
+                self.nregs = nregs0;
+                if body_len * copies > 512 {
+                    let cnt = self.nregs;
+                    let at = self.nregs + 1;
+                    self.nregs += 2;
+                    self.emit(I_CNTSET, cnt, 0);
+                    let head = self.emit(if greedy { I_CNTBR } else { I_CNTBR_LAZY }, cnt, 0);
+                    self.emit(I_CNTDATA, min, max);
+                    self.emit(I_SETPOS, at, 0);
+                    if lo >= 0 {
+                        self.emit(I_CLEAR, lo * 2, hi * 2 + 1);
+                    }
+                    self.gen(p, inner, flags, backward);
+                    self.emit(I_CNTINC, cnt, at);
+                    self.emit(I_JMP, head, 0);
+                    let end = self.code.len() as int;
+                    self.code[head as usize].b = end;
+                    return;
+                }
+            }
             let mut i = 0;
             while i < min {
                 if lo >= 0 {
@@ -2265,7 +2308,10 @@ impl Regex {
                 work.push(pc + 2);
             } else if ins.op == I_JMP {
                 work.push(ins.a);
-            } else if ins.op == I_SAVE || ins.op == I_CLEAR || ins.op == I_SETPOS || ins.op == I_CHKPOS || ins.op == I_BOL || ins.op == I_EOL || ins.op == I_WORDB || ins.op == I_NWORDB {
+            } else if ins.op == I_CNTBR || ins.op == I_CNTBR_LAZY {
+                work.push(pc + 2);
+                work.push(ins.b);
+            } else if ins.op == I_SAVE || ins.op == I_CLEAR || ins.op == I_SETPOS || ins.op == I_CHKPOS || ins.op == I_CNTSET || ins.op == I_CNTINC || ins.op == I_BOL || ins.op == I_EOL || ins.op == I_WORDB || ins.op == I_NWORDB {
                 // nothing consumed: what follows starts the match
                 work.push(pc + 1);
             } else {
@@ -2308,7 +2354,10 @@ impl Regex {
                 work.push(ins.b);
             } else if ins.op == I_JMP {
                 work.push(ins.a);
-            } else if ins.op == I_SAVE || ins.op == I_CLEAR || ins.op == I_SETPOS || ins.op == I_CHKPOS {
+            } else if ins.op == I_CNTBR || ins.op == I_CNTBR_LAZY {
+                work.push(pc + 2);
+                work.push(ins.b);
+            } else if ins.op == I_SAVE || ins.op == I_CLEAR || ins.op == I_SETPOS || ins.op == I_CHKPOS || ins.op == I_CNTSET || ins.op == I_CNTINC {
                 work.push(pc + 1);
             } else {
                 // a unit consumed, an assertion, a lookaround or the match
@@ -2547,6 +2596,43 @@ impl Regex {
                     stack.push((2, ins.a, regs[ins.a as usize]));
                     regs[ins.a as usize] = pos;
                     pc += 1;
+                }
+                I_CNTSET => {
+                    stack.push((2, ins.a, regs[ins.a as usize]));
+                    regs[ins.a as usize] = 0;
+                    pc += 1;
+                }
+                I_CNTBR | I_CNTBR_LAZY => {
+                    steps += 1;
+                    if steps > 50000000 {
+                        stack.truncate(base);
+                        return -1;
+                    }
+                    let c = regs[ins.a as usize];
+                    let d = self.code[(pc + 1) as usize];
+                    if d.b >= 0 && c >= d.b {
+                        pc = ins.b;
+                    } else if c < d.a {
+                        pc += 2;
+                    } else if ins.op == I_CNTBR {
+                        stack.push((0, ins.b, pos));
+                        pc += 2;
+                    } else {
+                        stack.push((0, pc + 2, pos));
+                        pc = ins.b;
+                    }
+                }
+                I_CNTINC => {
+                    let c = regs[ins.a as usize];
+                    let head = self.code[(pc + 1) as usize].a;
+                    let min = self.code[(head + 1) as usize].a;
+                    if c >= min && regs[ins.b as usize] == pos {
+                        ok = false;
+                    } else {
+                        stack.push((2, ins.a, c));
+                        regs[ins.a as usize] = c + 1;
+                        pc += 1;
+                    }
                 }
                 I_CHKPOS => {
                     if regs[ins.a as usize] == pos {
