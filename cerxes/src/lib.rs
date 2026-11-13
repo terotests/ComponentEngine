@@ -293,7 +293,6 @@ impl Engine {
     /// What `run` does once the script has returned: its jobs, then its
     /// completion value or the uncaught exception.
     fn finish_run(&mut self, r: Val) -> String {
-        self.vm.slicing = self.vm.prof_on;
         if self.vm.terminated && !self.vm.throwing {
             // a native dropped the time limit's exception: it stands
             self.vm.terminate();
@@ -302,10 +301,17 @@ impl Engine {
             return self.uncaught();
         }
         // the completion value lives through the jobs: a reclaim there
-        // must not free it
+        // must not free it; a job stopped by its slice keeps it with it
         self.vm.temp_roots.push(r);
+        self.vm.run_result = r;
+        self.vm.job_slices = true;
         self.vm.run_jobs();
+        self.vm.job_slices = false;
+        self.vm.run_result = Val::Undef;
         self.vm.temp_roots.pop();
+        if self.vm.suspended {
+            return String::new();
+        }
         if self.vm.terminated && !self.vm.throwing {
             self.vm.terminate();
         }
@@ -374,13 +380,19 @@ impl Engine {
             self.vm.end_call(began);
             return String::new();
         }
-        if self.vm.throwing {
-            self.vm.end_call(began);
-            return self.uncaught();
-        }
-        let r = match self.vm.stack.pop() {
-            Some(v) => v,
-            None => Val::Undef,
+        let r = if self.vm.job_stopped() && !self.vm.terminated {
+            // a promise job's frames ran out: the job ends, the rest of
+            // the queue runs, and the script's own value is the answer
+            self.vm.job_resume()
+        } else {
+            if self.vm.throwing {
+                self.vm.end_call(began);
+                return self.uncaught();
+            }
+            match self.vm.stack.pop() {
+                Some(v) => v,
+                None => Val::Undef,
+            }
         };
         let out = self.finish_run(r);
         self.vm.end_call(began);

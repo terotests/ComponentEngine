@@ -145,3 +145,50 @@ fn regex_backtracking_limit() {
         assert_eq!(e.eval("'x-y-z'.split(/-/).join()"), "x,y,z");
     }
 }
+
+/// `src` in slices of `ms`, a snapshot at every stop and the next slice in
+/// an engine made from it; then `check` in the last engine. Answers
+/// (result of src, result of check, stops).
+fn sliced(src: &str, check: &str, ms: f64, regs: bool) -> (String, String, i64) {
+    let mut e = engine(regs, 0.0);
+    e.set_slice(ms);
+    let mut r = e.eval(src);
+    let mut stops = 0;
+    while e.is_suspended() {
+        stops += 1;
+        let snap = e.snapshot();
+        assert!(!snap.is_empty(), "no snapshot while suspended: {}", src);
+        let mut next = Engine::from_snapshot(&snap);
+        assert!(next.error.is_empty(), "restore: {}", next.error);
+        next.vm.regs = regs;
+        next.set_slice(ms);
+        r = next.resume();
+        e = next;
+    }
+    let c = e.eval(check);
+    (r, c, stops)
+}
+
+#[test]
+fn promise_jobs_and_async_bodies_stop_at_slices() {
+    let cases: &[(&str, &str)] = &[
+        ("var log=[]; Promise.resolve(5).then(function(v){ var n=0; while(n<3000000) n++; log.push(v+n); return v*2 }).then(function(v){ log.push(v) }); 7", "log.join()"),
+        ("var log=[]; (async function(){ var x = await 3; var n=0; while(n<3000000) n++; log.push(x+n); var y = await 4; while(n<6000000) n++; return y+n })().then(function(v){ log.push('done '+v) }); 8", "log.join()"),
+        ("queueMicrotask(function(){ var n=0; while(n<3000000) n++; globalThis.qm=n }); 9", "qm"),
+        ("(async function(){ await 1; try { var n=0; while(n<3000000) n++; throw new Error('boom') } catch(e) { return e.message } })().then(function(v){ globalThis.r=v }); 10", "r"),
+        ("(async function(){ await 1; var n=0; while(n<3000000) n++; throw new Error('late') })().catch(function(e){ globalThis.r2=e.message }); 11", "r2"),
+        ("var t={then(ok){ var n=0; while(n<3000000) n++; ok(n) }}; Promise.resolve(t).then(function(v){ globalThis.r3=v }); 12", "r3"),
+        ("var log=[]; for (var i=0;i<3;i++) (async function(k){ await null; var n=0; while(n<1000000) n++; log.push(k); await null; log.push(k+10) })(i); 13", "log.join()"),
+    ];
+    for regs in [true, false] {
+        for (src, check) in cases {
+            let mut plain = engine(regs, 0.0);
+            let want = plain.eval(src);
+            let want_c = plain.eval(check);
+            let (got, got_c, stops) = sliced(src, check, 2.0, regs);
+            assert_eq!(got, want, "regs {}: {}", regs, src);
+            assert_eq!(got_c, want_c, "regs {}: {}", regs, src);
+            assert!(stops >= 1, "regs {}: no stop in {}", regs, src);
+        }
+    }
+}

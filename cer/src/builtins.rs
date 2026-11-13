@@ -320,6 +320,15 @@ pub fn now_ms() -> double {
 // (Vm::set_regex_step_limit). Rust keeps them per thread (limits); the
 // other targets have no limits.
 
+/// A promise job stopped by its slice heads the queue as [JOB_CONT + kind,
+/// the async call's generator, the script's value, d] (Vm::run_jobs); the
+/// kinds: a reaction, an await's continuation, queueMicrotask, a thenable.
+pub const JOB_CONT: double = 1000000000.0;
+pub const JK_REACT: int = 1;
+pub const JK_ASYNC: int = 2;
+pub const JK_MICRO: int = 3;
+pub const JK_THENABLE: int = 4;
+
 /// Units of work (elements, steps, limbs) between two reads of the clock in
 /// time_up: about a millisecond's worth.
 pub const POLL_EVERY: int = 1048576;
@@ -3593,14 +3602,18 @@ impl Vm {
         out
     }
 
-    /// Runs queued promise jobs until none are left.
+    /// Runs queued promise jobs until none are left. From Engine::run /
+    /// resume with slices on (job_slices), a job's script stops where its
+    /// slice runs out as the script itself does: its frames stay, the
+    /// queue's head says how the job ends (JOB_CONT), and job_resume ends
+    /// it once Engine::resume has run the frames out.
     pub fn run_jobs(&mut self) {
-        // from the host, a call of its own for the time limit; the jobs
-        // never stop for a slice (their settling is native code after
-        // the call)
+        // from the host, a call of its own for the time limit
         let began = if self.native_depth == 0 { self.begin_call(false) } else { false };
         let slicing = self.slicing;
-        self.slicing = self.prof_on;
+        if !self.job_slices {
+            self.slicing = self.prof_on;
+        }
         self.run_jobs_now();
         self.slicing = slicing;
         self.end_call(began);
@@ -3637,62 +3650,181 @@ impl Vm {
                 self.temp_roots.push(d.clone());
                 self.native_depth -= 1;
             }
-            if let Val::Num(neg) = a {
+            let mut kind: int = 0;
+            let mut g: int = -1;
+            let mut val = Val::Undef;
+            let stale = match a {
+                Val::Num(x) => x >= JOB_CONT,
+                _ => false,
+            };
+            if stale {
+                // a stopped job whose frames were dropped (the time limit,
+                // a host that let a suspended script go): nothing to end
+            } else if let Val::Num(neg) = a {
                 // a reaction
                 let state = (-neg) as int;
                 let derived = obj_of(&d);
-                if self.is_callable(&b) {
-                    let r = self.call_fixed(b, Val::Undef, 1, c, Val::Undef, Val::Undef);
-                    if self.terminated {
-                        // past the time limit: the exception leaves the call
-                        if top {
-                            self.native_depth += 1;
-                            self.temp_roots.pop();
-                        }
-                        return;
-                    }
-                    if self.throwing {
-                        self.throwing = false;
-                        let e = self.exc.clone();
-                        self.exc = Val::Undef;
-                        if derived >= 0 {
-                            self.settle(derived, 2, e);
-                        }
-                    } else if derived >= 0 {
-                        self.settle(derived, 1, r);
-                    }
+                let bo = obj_of(&b);
+                let nf = if bo >= 0 && self.objs[bo as usize].class == C_NATIVE { self.objs[bo as usize].func as int } else { -1 };
+                if top && self.slicing && (nf == crate::coroutine::NF_ASYNC_OK || nf == crate::coroutine::NF_ASYNC_ERR) {
+                    // an await's continuation: the async body runs from
+                    // here, where its slice may stop
+                    kind = JK_ASYNC;
+                    g = self.objs[bo as usize].env as int;
+                    self.temp_roots.push(Val::Obj(g));
+                    let mode = if nf == crate::coroutine::NF_ASYNC_OK { crate::coroutine::GM_NEXT } else { crate::coroutine::GM_THROW };
+                    self.async_step_s(g, mode, c, false);
+                    self.temp_roots.pop();
+                } else if self.is_callable(&b) {
+                    kind = JK_REACT;
+                    val = self.call_fixed(b, Val::Undef, 1, c, Val::Undef, Val::Undef);
                 } else if derived >= 0 {
                     self.settle(derived, state, c);
                 }
             } else if matches!(b, Val::Undef) && matches!(c, Val::Undef) && matches!(d, Val::Undef) {
                 // queueMicrotask
+                kind = JK_MICRO;
                 self.call_fixed(a, Val::Undef, 0, Val::Undef, Val::Undef, Val::Undef);
-                if self.throwing && !self.terminated {
-                    self.throwing = false;
-                    self.exc = Val::Undef;
-                }
             } else {
                 // thenable job: then.call(thenable, resolve, reject)
+                kind = JK_THENABLE;
                 self.call_fixed(a, b, 2, c, d.clone(), Val::Undef);
-                if self.throwing && !self.terminated {
-                    self.throwing = false;
-                    let e = self.exc.clone();
-                    self.exc = Val::Undef;
-                    self.call_fixed(d, Val::Undef, 1, e, Val::Undef, Val::Undef);
-                    self.throwing = false;
+            }
+            if self.suspended {
+                // the slice ran out in the job's script: how it ends
+                // goes to the queue's head, with the script's value
+                let rv = self.run_result;
+                self.jobs_push_front(Val::Num(JOB_CONT + kind as double), if g >= 0 { Val::Obj(g) } else { Val::Undef }, rv, d);
+                if top {
+                    self.native_depth += 1;
+                    self.temp_roots.pop();
                 }
+                return;
+            }
+            if !self.terminated {
+                let threw = self.throwing;
+                if threw {
+                    val = self.exc.clone();
+                    self.throwing = false;
+                    self.exc = Val::Undef;
+                }
+                self.job_end(kind, d, val, threw);
             }
             if top {
                 self.native_depth += 1;
                 self.temp_roots.pop();
             }
             if self.terminated {
+                // past the time limit: the exception leaves the call
                 if !self.throwing {
                     self.terminate();
                 }
                 return;
             }
         }
+    }
+
+    /// The end of a job of `kind` (JK_*) whose call gave `val`, or threw it.
+    fn job_end(&mut self, kind: int, d: Val, val: Val, threw: bool) {
+        if kind == JK_REACT {
+            let derived = obj_of(&d);
+            if derived >= 0 {
+                self.settle(derived, if threw { 2 } else { 1 }, val);
+            }
+        } else if kind == JK_ASYNC {
+            let derived = obj_of(&d);
+            if derived >= 0 {
+                self.settle(derived, 1, Val::Undef);
+            }
+        } else if kind == JK_THENABLE && threw {
+            self.call_fixed(d, Val::Undef, 1, val, Val::Undef, Val::Undef);
+            if !self.terminated {
+                self.throwing = false;
+            }
+        }
+    }
+
+    fn jobs_push_front(&mut self, a: Val, b: Val, c: Val, d: Val) {
+        if self.job_head >= 4 {
+            let h = (self.job_head - 4) as usize;
+            self.jobs[h] = a;
+            self.jobs[h + 1] = b;
+            self.jobs[h + 2] = c;
+            self.jobs[h + 3] = d;
+            self.job_head = h as int;
+            return;
+        }
+        let mut rest = self.pending_jobs();
+        let mut out: Vec<Val> = vec![a, b, c, d];
+        out.append(&mut rest);
+        self.jobs = out;
+        self.job_head = 0;
+    }
+
+    /// A job stopped by its slice heads the queue (run_jobs): its frames
+    /// are the ones Engine::resume runs.
+    pub fn job_stopped(&self) -> bool {
+        let h = self.job_head as usize;
+        if h >= self.jobs.len() {
+            return false;
+        }
+        if let Val::Num(x) = self.jobs[h] {
+            return x >= JOB_CONT;
+        }
+        false
+    }
+
+    /// Engine::resume ran a stopped job's frames out (job_stopped): the
+    /// job ends as run_jobs would have ended it. Answers the script's own
+    /// value, kept for after the jobs.
+    pub fn job_resume(&mut self) -> Val {
+        let h = self.job_head as usize;
+        let a = self.jobs[h];
+        let b = self.jobs[h + 1];
+        let c = self.jobs[h + 2];
+        let d = self.jobs[h + 3];
+        self.jobs[h] = Val::Undef;
+        self.jobs[h + 1] = Val::Undef;
+        self.jobs[h + 2] = Val::Undef;
+        self.jobs[h + 3] = Val::Undef;
+        self.job_head = (h + 4) as int;
+        if (self.job_head as usize) >= self.jobs.len() {
+            self.jobs.clear();
+            self.job_head = 0;
+        }
+        let kind = match a {
+            Val::Num(x) => (x - JOB_CONT) as int,
+            _ => 0,
+        };
+        self.temp_roots.push(c.clone());
+        self.temp_roots.push(d.clone());
+        if kind == JK_ASYNC {
+            let g = obj_of(&b);
+            if g >= 0 {
+                let r = self.gen_after(g);
+                self.async_after(g, r);
+            }
+            if !self.terminated {
+                self.job_end(kind, d, Val::Undef, false);
+            }
+        } else if !self.terminated {
+            let threw = self.throwing;
+            let val = if threw {
+                let e = self.exc.clone();
+                self.throwing = false;
+                self.exc = Val::Undef;
+                e
+            } else {
+                match self.stack.pop() {
+                    Some(v) => v,
+                    None => Val::Undef,
+                }
+            };
+            self.job_end(kind, d, val, threw);
+        }
+        self.temp_roots.pop();
+        self.temp_roots.pop();
+        c
     }
 
     pub fn promise_then(&mut self, p: int, on_ok: Val, on_err: Val) -> Val {

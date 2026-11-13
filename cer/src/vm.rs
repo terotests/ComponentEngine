@@ -422,6 +422,10 @@ pub struct Vm {
     pub terminated: bool,
     /// a host call is running (begin_call)
     pub in_call: bool,
+    /// run_jobs may stop a job where its slice runs out (Engine::run /
+    /// resume set it), and the script's value it keeps then
+    pub job_slices: bool,
+    pub run_result: Val,
     /// units of native work left before poll reads the clock
     pub poll_left: int,
     /// set_regex_step_limit (0: none)
@@ -767,6 +771,8 @@ impl Vm {
             deadline: 0.0,
             terminated: false,
             in_call: false,
+            job_slices: false,
+            run_result: Val::Undef,
             poll_left: 1048576,
             regex_steps: 50000000.0,
             checking: false,

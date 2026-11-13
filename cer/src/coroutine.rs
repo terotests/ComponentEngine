@@ -389,6 +389,17 @@ impl Vm {
         if safe {
             self.temp_roots.pop();
         }
+        if self.suspended {
+            // its slice ran out (a promise job's async step at the top,
+            // run_jobs): the frame stays, gen_after ends the resume later
+            return Val::Undef;
+        }
+        self.gen_after(g)
+    }
+
+    /// The end of gen_resume_s once the coroutine's frame has stopped: its
+    /// state from how it stopped (yield, return, throw); the value it gave.
+    pub fn gen_after(&mut self, g: int) -> Val {
         let yielded = self.gen_yielded;
         self.gen_yielded = false;
         if self.throwing {
@@ -623,8 +634,18 @@ impl Vm {
     /// async_step; `safe` as in gen_resume_s (`g` is rooted, and with it
     /// its promise)
     pub fn async_step_s(&mut self, g: int, mode: int, v: Val, safe: bool) {
-        let p = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
         let r = self.gen_resume_s(g, mode, v, safe);
+        if self.suspended {
+            // the slice ran out in the body: async_after goes on (run_jobs)
+            return;
+        }
+        self.async_after(g, r);
+    }
+
+    /// The end of async_step_s once the body has stopped with `r`: the
+    /// call's promise settled, or the next `await` wired.
+    pub fn async_after(&mut self, g: int, r: Val) {
+        let p = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
         if self.terminated {
             // past the time limit: the exception leaves the call
             return;
