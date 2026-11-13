@@ -2167,6 +2167,7 @@ impl Vm {
                 }
                 let this = self.stack[(fpos + 1) as usize];
                 self.stack.truncate(fpos as usize);
+                let ff = self.native_depth == self.gc_free_depth;
                 self.native_depth += 1;
                 // a String.prototype / Number.prototype method of primitive
                 // operands: call_native's checks (array, proxy, typed...)
@@ -2179,7 +2180,12 @@ impl Vm {
                     }
                     k += 1;
                 }
-                let r = if direct { self.call_native2(id, fo, this, &args, false, Val::Undef) } else { self.call_native(id, fo, this, &args, false, Val::Undef) };
+                let r = if direct {
+                    self.call_native2(id, fo, this, &args, false, Val::Undef)
+                } else {
+                    self.nat_ff = ff;
+                    self.call_native(id, fo, this, &args, false, Val::Undef)
+                };
                 self.native_depth -= 1;
                 give_args(&mut self.arg_pool, args);
                 self.stack.push(r);
@@ -2499,8 +2505,9 @@ impl Vm {
         }
         let src_obj = if o >= 0 { self.colds[self.objs[o as usize].cold as usize].home } else { -1 };
         self.frames[fi].pc = pc + 1;
+        let safe = self.native_depth == self.gc_free_depth;
         loop {
-            match self.iter_next(&it) {
+            match self.iter_next_s(&it, safe) {
                 Some(v) => {
                     if src_obj >= 0 && self.objs[o as usize].class == C_ITER && self.for_in_recheck(o) {
                         // a key deleted since the loop began is skipped

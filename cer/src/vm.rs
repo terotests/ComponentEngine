@@ -379,6 +379,16 @@ pub struct Vm {
     pub made: int,
     pub made_limit: int,
     pub native_depth: int,
+    /// the native_depth at which the collector may run (Vm::gc_due): 0,
+    /// or deeper while an activation that keeps everything it holds
+    /// rooted runs script under it (a resumed generator, a sort's
+    /// comparator; Vm::gc_open)
+    pub gc_free_depth: int,
+    /// set by the interpreter's call of a native, read once by call_native
+    pub nat_ff: bool,
+    /// the running native was called straight from a frame where the
+    /// collector may run: nothing under it holds unrooted values
+    pub nat_top: bool,
     /// time slices (Engine::set_slice): the slice's length in ms, 0 for
     /// none; when it began; back jumps left before the clock is read again
     pub slice_ms: double,
@@ -708,10 +718,13 @@ impl Vm {
             gc_flag: false,
             pic_way: 0,
             alloc_count: 0,
-            gc_threshold: 200000,
+            gc_threshold: GC_MIN,
             made: 0,
             made_limit: MADE_MIN,
             native_depth: 0,
+            gc_free_depth: 0,
+            nat_ff: false,
+            nat_top: false,
             slice_ms: 0.0,
             slice_t0: 0.0,
             ticks: SLICE_TICKS,
@@ -5390,6 +5403,12 @@ impl Vm {
     /// The next value of an iterator made by `iter_values` / ITER_KEYS;
     /// None when done.
     pub fn iter_next(&mut self, it: &Val) -> Option<Val> {
+        self.iter_next_s(it, false)
+    }
+
+    /// iter_next; `safe` as in gen_resume_s (the interpreter's for-of,
+    /// whose iterator is in a slot)
+    pub fn iter_next_s(&mut self, it: &Val, safe: bool) -> Option<Val> {
         let o = obj_of(it);
         if o >= 0 && self.objs[o as usize].class == C_ITER {
             let src = self.objs[o as usize].env as int;
@@ -5438,7 +5457,7 @@ impl Vm {
         // a generator with its own next: resumed here, no result object
         let nf = obj_of(&next);
         if plain || (o >= 0 && nf >= 0 && self.objs[nf as usize].class == C_NATIVE && (self.objs[nf as usize].func as int) == crate::coroutine::NF_GEN_NEXT && self.objs[o as usize].class == C_GENERATOR && !self.protos[self.objs[o as usize].func as usize].is_async) {
-            let v = self.gen_resume(o, crate::coroutine::GM_NEXT, Val::Undef);
+            let v = self.gen_resume_s(o, crate::coroutine::GM_NEXT, Val::Undef, safe);
             if self.throwing || self.gen_done {
                 return None;
             }
@@ -6435,7 +6454,25 @@ impl Vm {
     }
 
     pub fn gc_due(&self) -> bool {
-        self.gc_flag && self.native_depth == 0
+        self.gc_flag && self.native_depth == self.gc_free_depth
+    }
+
+    /// Lets the collector run in the script that the caller is about to
+    /// run (at native_depth + 1), when the caller holds nothing unrooted
+    /// and nothing under it does (`safe`); answers the depth to give back
+    /// to gc_close.
+    #[inline]
+    pub fn gc_open(&mut self, safe: bool) -> int {
+        let old = self.gc_free_depth;
+        if safe {
+            self.gc_free_depth = self.native_depth + 1;
+        }
+        old
+    }
+
+    #[inline]
+    pub fn gc_close(&mut self, old: int) {
+        self.gc_free_depth = old;
     }
 
     /// gc_flag from the counts (Vm::gc_due): after a collection, and where
@@ -6796,6 +6833,7 @@ impl Vm {
                 }
                 let this = self.stack[(fpos + 1) as usize].clone();
                 self.stack.truncate(fpos as usize);
+                self.nat_ff = self.native_depth == self.gc_free_depth;
                 self.native_depth += 1;
                 let r = self.call_native(id, fo, this, &args, false, Val::Undef);
                 self.native_depth -= 1;
@@ -7938,8 +7976,9 @@ impl Vm {
                 let it = self.top().clone();
                 let o = obj_of(&it);
                 let src_obj = if o >= 0 { self.colds[self.objs[o as usize].cold as usize].home } else { -1 };
+                let safe = self.native_depth == self.gc_free_depth;
                 loop {
-                    match self.iter_next(&it) {
+                    match self.iter_next_s(&it, safe) {
                         Some(v) => {
                             if src_obj >= 0 && self.objs[o as usize].class == C_ITER && self.for_in_recheck(o) {
                                 // a key deleted since the loop began is skipped
@@ -8826,7 +8865,7 @@ impl Vm {
         self.freed.clear();
         self.live = live;
         self.alloc_count = 0;
-        self.gc_threshold = if live * 2 > 200000 { live * 2 } else { 200000 };
+        self.gc_threshold = if live > GC_MIN { live } else { GC_MIN };
         self.made = 0;
         self.made_limit = if live * MADE_PER_LIVE > MADE_MIN { live * MADE_PER_LIVE } else { MADE_MIN };
         self.zct_limit = self.next_zct_limit();
@@ -9238,6 +9277,11 @@ impl Vm {
 /// per live object: a collection's cost is the live heap's, so it stays a
 /// small part of the work that made the objects.
 pub const MADE_MIN: int = 262144;
+/// Unfreed objects made since the last collection that make one due, at
+/// least (Vm.gc_threshold): reference counting frees the rest, so these
+/// are mostly cycles; at live or more a collection costs no more than
+/// the objects it waits for.
+pub const GC_MIN: int = 65536;
 pub const MADE_PER_LIVE: int = 8;
 
 /// The smallest zct that makes a reclaim. Small, so that the objects a

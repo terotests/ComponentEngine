@@ -189,7 +189,10 @@ impl Vm {
         let p = self.new_promise();
         self.put_elem2(g, (G_PROMISE) as int, Val::Obj(p));
         self.temp_roots.push(Val::Obj(g));
-        self.async_step(g, GM_NEXT, Val::Undef);
+        // from the interpreter: the body runs to its first await with the
+        // collector free to run, as the caller's frame could
+        let safe = self.native_depth == self.gc_free_depth;
+        self.async_step_s(g, GM_NEXT, Val::Undef, safe);
         self.temp_roots.pop();
         self.stack.push(Val::Obj(p));
     }
@@ -295,6 +298,13 @@ impl Vm {
     /// the yielded or returned value; `gen_done` tells which. An exception
     /// out of the coroutine is left thrown.
     pub fn gen_resume(&mut self, g: int, mode: int, v: Val) -> Val {
+        self.gen_resume_s(g, mode, v, false)
+    }
+
+    /// gen_resume; `safe`: the caller holds nothing unrooted, nor does
+    /// anything under it, so the collector may run in the generator's
+    /// body (Vm::gc_open)
+    pub fn gen_resume_s(&mut self, g: int, mode: int, v: Val, safe: bool) -> Val {
         let state = self.objs[g as usize].pos as int;
         self.gen_done = true;
         self.gen_raw = false;
@@ -368,9 +378,17 @@ impl Vm {
             self.stack.push(Val::Num(mode as double));
         }
         self.gen_yielded = false;
+        if safe {
+            self.temp_roots.push(Val::Obj(g));
+        }
+        let gd = self.gc_open(safe);
         self.native_depth += 1;
         self.run(base);
         self.native_depth -= 1;
+        self.gc_close(gd);
+        if safe {
+            self.temp_roots.pop();
+        }
         let yielded = self.gen_yielded;
         self.gen_yielded = false;
         if self.throwing {
@@ -599,8 +617,14 @@ impl Vm {
 
     /// Resumes an async call's coroutine and wires the next `await`.
     pub fn async_step(&mut self, g: int, mode: int, v: Val) {
+        self.async_step_s(g, mode, v, false);
+    }
+
+    /// async_step; `safe` as in gen_resume_s (`g` is rooted, and with it
+    /// its promise)
+    pub fn async_step_s(&mut self, g: int, mode: int, v: Val, safe: bool) {
         let p = obj_of(&self.colds[self.objs[g as usize].cold as usize].elems2[G_PROMISE].clone());
-        let r = self.gen_resume(g, mode, v);
+        let r = self.gen_resume_s(g, mode, v, safe);
         if self.throwing {
             self.throwing = false;
             let e = self.exc.clone();
@@ -753,7 +777,8 @@ impl Vm {
         } else {
             GM_NEXT
         };
-        let r = self.gen_resume(g, mode, a0);
+        let top = self.nat_top;
+        let r = self.gen_resume_s(g, mode, a0, top);
         if self.throwing {
             return Val::Undef;
         }
