@@ -9455,8 +9455,8 @@ pub fn trim_proto(_p: &mut Proto) {}
 /// A free slot's buffers go (a collection: the slot may wait long for its
 /// next object).
 pub fn drop_bufs(o: &mut JsObj, elems: &mut Vec<Val>) {
-    if !o.vals.is_empty() || !elems.is_empty() {
-        o.vals = Vec::new();
+    if !o.vals.v.is_empty() || !elems.is_empty() {
+        slots_free(&mut o.vals);
         elems.truncate(0);
     }
     drop_caps(o, elems);
@@ -9477,8 +9477,8 @@ pub fn clear_elems(elems: &mut Vec<Val>) {
 /// 12 MB (59 -> 71 MB), so a collection frees them all.
 #[ranger::target(rust)]
 pub fn drop_caps(o: &mut JsObj, elems: &mut Vec<Val>) {
-    if o.vals.capacity() > KEEP_CAP {
-        o.vals = Vec::new();
+    if o.vals.v.capacity() > KEEP_CAP {
+        slots_free(&mut o.vals);
     }
     if elems.capacity() > KEEP_CAP {
         *elems = Vec::new();
@@ -9489,7 +9489,8 @@ pub fn drop_caps(o: &mut JsObj, elems: &mut Vec<Val>) {
 /// gives) instead of doubling: an object on a chain of shapes most often
 /// gets as many properties as the most the chain has seen.
 #[ranger::target(rust)]
-pub fn grow_vals(v: &mut Vec<Val>, most: usize) {
+pub fn grow_vals(s: &mut Slots, most: usize) {
+    let v = &mut s.v;
     let n = v.len();
     if n == v.capacity() && most > n + 1 {
         // at most what doubling would give (16 for a new object): a
@@ -9501,7 +9502,7 @@ pub fn grow_vals(v: &mut Vec<Val>, most: usize) {
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn grow_vals(_v: &mut Vec<Val>, _most: usize) {}
+pub fn grow_vals(_v: &mut Slots, _most: usize) {}
 
 /// A freed Cold as new (Rust: emptied in place, small buffers kept and no
 /// new hash state; a map's table goes).
@@ -9565,8 +9566,8 @@ pub fn drop_caps(_o: &mut JsObj, _elems: &mut Vec<Val>) {}
 /// or more is spare (Vm::collect); the other targets size their arrays.
 #[ranger::target(rust)]
 pub fn trim_obj(o: &mut JsObj, elems: &mut Vec<Val>) {
-    if o.vals.capacity() > o.vals.len() + o.vals.len() / 4 {
-        o.vals.shrink_to_fit();
+    if o.vals.v.capacity() > o.vals.v.len() + o.vals.v.len() / 4 {
+        o.vals.v.shrink_to_fit();
     }
     if elems.capacity() > elems.len() + elems.len() / 4 {
         elems.shrink_to_fit();

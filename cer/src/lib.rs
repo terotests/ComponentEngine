@@ -58,6 +58,12 @@ pub mod fxmap {
 pub mod evec {
     include!("evec.rs");
 }
+/// an object's property values past slot 1 as a thin vector (svec.rs):
+/// Rust only, the other targets keep their arrays
+#[ranger::target(rust)]
+pub mod svec {
+    include!("svec.rs");
+}
 
 /// the baseline JIT (wjit.rs): Rust only
 #[ranger::target(rust)]

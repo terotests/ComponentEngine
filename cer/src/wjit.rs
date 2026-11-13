@@ -376,7 +376,8 @@ pub fn probe() -> Layout {
         l.obj_ok = true;
         l.obj_size = std::mem::size_of::<JsObj>() as u32;
         l.off_shape = std::mem::offset_of!(JsObj, shape) as u32;
-        l.off_vals = (std::mem::offset_of!(JsObj, vals) + vp as usize) as u32;
+        // Slots.v is an SVec: its pointer (value 0) is all there is
+        l.off_vals = std::mem::offset_of!(JsObj, vals) as u32;
         l.off_inl0 = std::mem::offset_of!(JsObj, inl0) as u32;
         l.off_nv = std::mem::offset_of!(JsObj, nv) as u32;
         assert!(std::mem::offset_of!(JsObj, inl1) == std::mem::offset_of!(JsObj, inl0) + 16);
@@ -403,8 +404,10 @@ pub fn probe() -> Layout {
         l.off_rc = std::mem::offset_of!(JsObj, rc) as u32;
         let vc = 12 - vp - vl;
         l.off_ext = std::mem::offset_of!(JsObj, extensible) as u32;
-        l.off_vals_len = (std::mem::offset_of!(JsObj, vals)) as u32 + vl;
-        l.off_vals_cap = (std::mem::offset_of!(JsObj, vals)) as u32 + vc;
+        // in the SVec's header (vals_hdr: the pointer less 8)
+        l.off_vals_len = 0;
+        l.off_vals_cap = 4;
+        let _ = vc;
         l.vm_proxy_made = std::mem::offset_of!(crate::vm::Vm, proxy_made) as u32;
         l.vm_setters_ptr = std::mem::offset_of!(crate::vm::Vm, setter_atoms) as u32 + vp;
         l.vm_setters_len = std::mem::offset_of!(crate::vm::Vm, setter_atoms) as u32 + vl;
@@ -1388,6 +1391,14 @@ impl<'a> Cg<'a> {
         self.i32c(cell);
         self.mem(I32_LOAD, 2, 16);
         self.op(I32_ADD);
+    }
+    /// The object address on the stack becomes its vals' header address:
+    /// the SVec's pointer less 8 (svec.rs; len at 0, cap at 4).
+    fn vals_hdr(&mut self) {
+        let l = self.lay;
+        self.mem(I32_LOAD, 2, l.off_vals);
+        self.i32c(8);
+        self.op(I32_SUB);
     }
     /// The value at b + off into the heap slot at L_T2, counted as
     /// Vm::inc and dec count it: fails (before writing) for a string, old
@@ -2748,8 +2759,10 @@ impl<'a> Cg<'a> {
         self.op(I32_EQZ);
         self.op(I32_OR);
         self.get(L_T2);
+        self.vals_hdr();
         self.mem(I32_LOAD, 2, l.off_vals_len);
         self.get(L_T2);
+        self.vals_hdr();
         self.mem(I32_LOAD, 2, l.off_vals_cap);
         self.op(I32_GE_U);
         self.get(L_T2);
@@ -2800,13 +2813,16 @@ impl<'a> Cg<'a> {
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_vals);
         self.get(L_T2);
+        self.vals_hdr();
         self.mem(I32_LOAD, 2, l.off_vals_len);
         self.i32c(16);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
         self.get(L_T2);
+        self.vals_hdr();
         self.get(L_T2);
+        self.vals_hdr();
         self.mem(I32_LOAD, 2, l.off_vals_len);
         self.i32c(1);
         self.op(I32_ADD);

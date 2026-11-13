@@ -2860,7 +2860,7 @@ pub fn slot_at(o: &JsObj, i: usize) -> Val {
     } else if i == 1 {
         o.inl1
     } else {
-        *val_at(&o.vals, i - 2)
+        crate::value::slots_at(&o.vals, i - 2)
     }
 }
 
@@ -3134,12 +3134,12 @@ pub fn evec_mut(v: &mut Vec<Elems>, i: usize) -> &mut Elems {
 /// Whether a value vector has no room left (Rust: grow_vals sizes it).
 #[ranger::target(rust)]
 #[inline(always)]
-pub fn vals_full(v: &Vec<Val>) -> bool {
-    v.len() == v.capacity()
+pub fn vals_full(v: &crate::value::Slots) -> bool {
+    v.v.len() == v.v.capacity()
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-pub fn vals_full(_v: &Vec<Val>) -> bool {
+pub fn vals_full(_v: &crate::value::Slots) -> bool {
     false
 }
 

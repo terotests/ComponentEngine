@@ -151,12 +151,12 @@ fn main() {
             let mut free_cap = 0usize;
             let mut hist = std::collections::BTreeMap::new();
             for o in v.objs.iter() {
-                let c = (o.vals.capacity() + v.evecs[o.elems as usize].v.capacity() + v.colds[o.cold as usize].elems2.capacity()) * vs;
-                vals += o.vals.capacity() * vs;
+                let c = (o.vals.v.capacity() + v.evecs[o.elems as usize].v.capacity() + v.colds[o.cold as usize].elems2.capacity()) * vs;
+                vals += o.vals.v.capacity() * vs;
                 elems += v.evecs[o.elems as usize].v.capacity() * vs;
                 elems2 += v.colds[o.cold as usize].elems2.capacity() * vs;
-                used += (o.vals.len() + v.evecs[o.elems as usize].v.len() + v.colds[o.cold as usize].elems2.len()) * vs;
-                vecs += (o.vals.capacity() > 0) as usize + (v.evecs[o.elems as usize].v.capacity() > 0) as usize + (v.colds[o.cold as usize].elems2.capacity() > 0) as usize;
+                used += (o.vals.v.len() + v.evecs[o.elems as usize].v.len() + v.colds[o.cold as usize].elems2.len()) * vs;
+                vecs += (o.vals.v.capacity() > 0) as usize + (v.evecs[o.elems as usize].v.capacity() > 0) as usize + (v.colds[o.cold as usize].elems2.capacity() > 0) as usize;
                 if o.free { free_cap += c; } else { *hist.entry(o.class).or_insert(0usize) += 1; }
             }
             let objs = v.objs.capacity() * std::mem::size_of::<cerxes::value::JsObj>();
