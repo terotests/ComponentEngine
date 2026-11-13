@@ -8480,7 +8480,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 Val::Num(_) => vm.number_proto,
                 _ => -1,
             };
-            vm.r_get_method(bp, rb, fi, pc, w0, w1, w2, w3);
+            vm.r_get_method(bp, w1, w2, w3, rb, fi, pc, w0);
             if !vm.throwing && vm.frames.len() == nf {
                 let atom = vm.protos[pi].code[pc as usize].a as int;
                 cache_fill(vm, ri as usize, o, atom);
