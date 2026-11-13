@@ -61,10 +61,7 @@ fn obj_val(o: int) -> Val {
 }
 
 fn num_of(v: &Val) -> int {
-    match v.kind() {
-        VK::Num(n) => n as int,
-        _ => -1,
-    }
+    if let Some(n) = v.as_num() { n as int } else { -1 }
 }
 
 impl Vm {
@@ -168,7 +165,7 @@ impl Vm {
         let mut proto = if async_gen { self.async_generator_proto } else { self.generator_proto };
         if !is_async {
             let p = self.get_obj(fo, A_PROTOTYPE, &Val::Obj(fo));
-            if let VK::Obj(po) = p.kind() {
+            if let Some(po) = p.as_obj() {
                 proto = po;
             }
         }
@@ -484,7 +481,7 @@ impl Vm {
         if self.throwing {
             return 0;
         }
-        if matches!(m.kind(), VK::Undef) || matches!(m.kind(), VK::Null) {
+        if m.is_undef() || m.is_null() {
             if mode == GM_RETURN {
                 self.stack.push(received);
                 return 2;
@@ -548,7 +545,7 @@ impl Vm {
         if self.throwing {
             return false;
         }
-        if matches!(m.kind(), VK::Undef) || matches!(m.kind(), VK::Null) {
+        if m.is_undef() || m.is_null() {
             if mode == GM_RETURN {
                 self.stack.push(received);
                 return true;
@@ -846,14 +843,14 @@ impl Vm {
 /// Whether two values hold the same counted reference (the same object or
 /// string handle), or neither holds one.
 fn same_ref(a: &Val, b: &Val) -> bool {
-    if let VK::Obj(x) = a.kind() {
-        if let VK::Obj(y) = b.kind() {
+    if let Some(x) = a.as_obj() {
+        if let Some(y) = b.as_obj() {
             return x == y;
         }
         return false;
     }
-    if let VK::Str(x) = a.kind() {
-        if let VK::Str(y) = b.kind() {
+    if let Some(x) = a.as_str() {
+        if let Some(y) = b.as_str() {
             return x == y;
         }
         return false;

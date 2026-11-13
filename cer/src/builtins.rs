@@ -849,22 +849,18 @@ impl Vm {
     // ---- helpers
 
     pub fn this_num(&mut self, this: &Val) -> double {
-        match this.kind() {
-            VK::Num(n) => n,
-            VK::Obj(o) => {
+        if let Some(n) = this.as_num() { n } else if let Some(o) = this.as_obj() {
                 if self.objs[o as usize].class == C_NUMBER {
-                    if let VK::Num(n) = (self.colds[self.objs[o as usize].cold as usize].prim).kind() {
+                    if let Some(n) = (self.colds[self.objs[o as usize].cold as usize].prim).as_num() {
                         return n;
                     }
                 }
                 self.throw_type("Number.prototype method called on incompatible receiver");
                 0.0
-            }
-            _ => {
+            } else {
                 self.throw_type("Number.prototype method called on incompatible receiver");
                 0.0
             }
-        }
     }
 
     pub fn this_str(&mut self, this: &Val) -> Rc<String> {
@@ -879,7 +875,7 @@ impl Vm {
     }
 
     pub fn len_of(&mut self, v: &Val) -> int {
-        if let VK::Obj(o) = v.kind() {
+        if let Some(o) = v.as_obj() {
             let c = self.objs[o as usize].class;
             if c == C_ARRAY || c == C_ARGUMENTS {
                 return self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
@@ -896,7 +892,7 @@ impl Vm {
 
     /// A relative index clamped to [0, len]
     pub fn rel_index(&mut self, v: &Val, len: int, dflt: int) -> int {
-        if matches!(v.kind(), VK::Undef) {
+        if v.is_undef() {
             return dflt;
         }
         let n = to_integer(self.to_number(v));
@@ -926,9 +922,9 @@ impl Vm {
 
     /// The prototype a constructor call should use: new.target's, else `d`.
     pub fn proto_from(&mut self, new_target: &Val, d: int) -> int {
-        if let VK::Obj(nt) = new_target.kind() {
+        if let Some(nt) = new_target.as_obj() {
             let p = self.get_obj(nt, A_PROTOTYPE, new_target);
-            if let VK::Obj(po) = p.kind() {
+            if let Some(po) = p.as_obj() {
                 return po;
             }
         }
@@ -936,12 +932,11 @@ impl Vm {
     }
 
     pub fn display(&mut self, v: &Val) -> String {
-        match v.kind() {
-            VK::Obj(o) => {
+        if let Some(o) = v.as_obj() {
                 let c = self.objs[o as usize].class;
                 if c == C_SYMBOL {
                     let d = self.colds[self.objs[o as usize].cold as usize].prim.clone();
-                    let ds = if let VK::Str(s) = d.kind() { self.sref(s).to_string() } else { String::new() };
+                    let ds = if let Some(s) = d.as_str() { self.sref(s).to_string() } else { String::new() };
                     return format!("Symbol({})", ds);
                 }
                 if c == C_BIGINT {
@@ -954,17 +949,14 @@ impl Vm {
                     return String::from("[object]");
                 }
                 s
-            }
-            VK::Big(_) => format!("{}n", self.big_text(v)),
-            _ => self.to_string(v),
-        }
+            } else if v.is_big() { format!("{}n", self.big_text(v)) } else { self.to_string(v) }
     }
 
     // ---- RegExp
 
     pub fn new_regexp(&mut self, src: &Val, flags: &Val) -> Val {
-        let s = if matches!(src.kind(), VK::Undef) { String::from("(?:)") } else { self.to_string(src) };
-        let f = if matches!(flags.kind(), VK::Undef) { String::new() } else { self.to_string(flags) };
+        let s = if src.is_undef() { String::from("(?:)") } else { self.to_string(src) };
+        let f = if flags.is_undef() { String::new() } else { self.to_string(flags) };
         let idx = self.regexp_index(s.as_str(), f.as_str());
         if idx < 0 {
             return Val::Undef();
@@ -999,7 +991,7 @@ impl Vm {
     /// not the shown texts, so those are made again here when missing.
     pub fn regex_shown_at(&mut self, idx: int) -> Val {
         let ix = idx as usize;
-        if ix < self.regex_shown.len() && !matches!(self.regex_shown[ix].kind(), VK::Undef) {
+        if ix < self.regex_shown.len() && !self.regex_shown[ix].is_undef() {
             return self.regex_shown[ix].clone();
         }
         let mut key = String::new();
@@ -1038,7 +1030,7 @@ impl Vm {
         while self.regex_shown.len() <= idx as usize {
             self.regex_shown.push(Val::Undef());
         }
-        if matches!((self.regex_shown[idx as usize]).kind(), VK::Undef) {
+        if (self.regex_shown[idx as usize]).is_undef() {
             let s = self.to_string(&src);
             let shown = shown_source(s.as_str());
             self.regex_shown[idx as usize] = self.string_val(shown);
@@ -1179,7 +1171,7 @@ impl Vm {
             g += 1;
         }
         let plain = self.regexes[idx as usize].names.is_empty() && !has_indices;
-        let sv9 = if let VK::Str(_) = inp.kind() { inp } else { self.rc_val(s.clone()) };
+        let sv9 = if let Some(_) = inp.as_str() { inp } else { self.rc_val(s.clone()) };
         if plain {
             // index, input and groups (undefined): the shape they give a new
             // array kept (rx_shapes), the slots put at once
@@ -1288,7 +1280,7 @@ impl Vm {
                     }
                 }
                 if num >= 1 && num < caps.len() as int {
-                    if let VK::Str(s) = (&caps[num as usize]).kind() {
+                    if let Some(s) = (&caps[num as usize]).as_str() {
                         let s = self.sget(s.clone());
                         jsstr::push_js(&mut out, s.as_str());
                     }
@@ -1312,7 +1304,7 @@ impl Vm {
                 for g in groups.iter() {
                     let gv = g.1;
                     if g.0.as_str() == name.as_str() {
-                        if let VK::Str(s) = gv.kind() {
+                        if let Some(s) = gv.as_str() {
                             jsstr::push_js(&mut out, self.sref(s));
                         }
                     }
@@ -1334,13 +1326,10 @@ impl Vm {
     pub fn fast_wrap(&mut self, f: int, fpos: int, argc: int) -> bool {
         let inner = self.objs[f as usize].pos as int;
         let bp = (fpos + 2) as usize;
-        let h = match (self.stack[bp - 1]).kind() {
-            VK::Str(h) => h,
-            _ => return false,
-        };
+        let h = if let Some(h) = (self.stack[bp - 1]).as_str() { h } else { return false };
         let a0 = if argc >= 1 { self.stack[bp] } else { Val::Undef() };
         let a1 = if argc >= 2 { self.stack[bp + 1] } else { Val::Undef() };
-        if (inner == NF_SP_REPLACE || inner == NF_SP_REPLACEALL) && matches!(a0.kind(), VK::Str(_)) && matches!(a1.kind(), VK::Str(_)) {
+        if (inner == NF_SP_REPLACE || inner == NF_SP_REPLACEALL) && a0.is_str() && a1.is_str() {
             let s = self.sget(h);
             let r = self.string_replace(&s, &a0, &a1, inner == NF_SP_REPLACEALL);
             self.stack[fpos as usize] = r;
@@ -1357,7 +1346,7 @@ impl Vm {
                 return true;
             }
         }
-        if inner == NF_SP_SPLIT && matches!(a0.kind(), VK::Str(_)) && matches!(a1.kind(), VK::Undef) {
+        if inner == NF_SP_SPLIT && a0.is_str() && a1.is_undef() {
             let s = self.sget(h);
             let r = self.string_split(&s, &a0, &a1);
             self.stack[fpos as usize] = r;
@@ -1367,7 +1356,7 @@ impl Vm {
     }
 
     pub fn string_replace(&mut self, s: &Rc<String>, pattern: &Val, repl: &Val, all: bool) -> Val {
-        if let (VK::Str(ph), VK::Str(rh)) = (pattern.kind(), repl.kind()) {
+        if let (Some(ph), Some(rh)) = (pattern.as_str(), repl.as_str()) {
             // an ASCII text for a text without `$`: no UTF-16 units needed
             if replace_plain_ok(self.sref(ph), self.sref(rh)) {
                 let out = replace_plain(s.as_str(), self.sref(ph), self.sref(rh), all);
@@ -1504,7 +1493,7 @@ impl Vm {
     }
 
     pub fn string_split(&mut self, s: &Rc<String>, sep: &Val, limit: &Val) -> Val {
-        let lim: int = if matches!(limit.kind(), VK::Undef) {
+        let lim: int = if limit.is_undef() {
             2147483647
         } else {
             let l = to_uint32(self.to_number(limit));
@@ -1519,7 +1508,7 @@ impl Vm {
             let a = self.new_array(out);
             return Val::Obj(a);
         }
-        if matches!(sep.kind(), VK::Undef) {
+        if sep.is_undef() {
             out.push(self.rc_val(s.clone()));
             let a = self.new_array(out);
             return Val::Obj(a);
@@ -1690,23 +1679,19 @@ impl Vm {
     }
 
     pub fn map_key(&mut self, k: &Val) -> int {
-        match k.kind() {
-            VK::Num(n) => {
+        if let Some(n) = k.as_num() {
                 let x = n;
                 if x == x.floor() && x.abs() <= 1125899906842624.0 {
                     let i = x as int;
                     let z = if i >= 0 { 2 * i } else { -2 * i - 1 };
                     return -2 - 2 * z;
                 }
-            }
-            VK::Obj(o) => {
+            } else if let Some(o) = k.as_obj() {
                 return -3 - 2 * o;
-            }
-            _ => {}
-        }
+            } else {}
         // a string: twice its atom (cached per string handle); the rest:
         // twice the atom of a tagged text, plus one
-        if let VK::Str(_) = k.kind() {
+        if let Some(_) = k.as_str() {
             let (i, a) = self.to_key(k);
             if a >= 0 {
                 return 2 * a;
@@ -1748,7 +1733,7 @@ impl Vm {
                 return -1;
             }
             if e > 0 && t[(i * 2 + 1) as usize] == hash {
-                if let VK::Str(h2) = (&keys[(e - 1) as usize]).kind() {
+                if let Some(h2) = (&keys[(e - 1) as usize]).as_str() {
                     if h2 == k || self.sref(h2) == self.sref(k) {
                         return i;
                     }
@@ -1810,7 +1795,7 @@ impl Vm {
     }
 
     pub fn map_find(&mut self, m: int, k: &Val) -> int {
-        if let VK::Str(h) = k.kind() {
+        if let Some(h) = k.as_str() {
             let hash = jsstr::str_hash(self.sref(h));
             let i = self.stab_slot(m, h, hash);
             if i < 0 {
@@ -1826,10 +1811,10 @@ impl Vm {
     }
 
     pub fn map_set(&mut self, m: int, k: Val, v: Val) {
-        let is_str = matches!(k.kind(), VK::Str(_));
+        let is_str = k.is_str();
         let key = if is_str { 0 } else { self.map_key(&k) };
-        let hash = if let VK::Str(h) = (&k).kind() { jsstr::str_hash(self.sref(h)) } else { 0 };
-        let found = if let VK::Str(h) = (&k).kind() {
+        let hash = if let Some(h) = (&k).as_str() { jsstr::str_hash(self.sref(h)) } else { 0 };
+        let found = if let Some(h) = (&k).as_str() {
             let i = self.stab_slot(m, h, hash);
             if i < 0 { -1 } else { self.colds[self.objs[m as usize].cold as usize].stab[(i * 2) as usize] - 1 }
         } else {
@@ -1843,7 +1828,7 @@ impl Vm {
             return;
         }
         let pos = self.evecs[self.objs[m as usize].elems as usize].v.len() as int;
-        let kk = if let VK::Num(n) = k.kind() {
+        let kk = if let Some(n) = k.as_num() {
             if n == 0.0 {
                 Val::Num(0.0)
             } else {
@@ -1870,7 +1855,7 @@ impl Vm {
             return false;
         }
         let c = self.cold_id(m) as usize;
-        if let VK::Str(h) = k.kind() {
+        if let Some(h) = k.as_str() {
             let hash = jsstr::str_hash(self.sref(h));
             let slot = self.stab_slot(m, h, hash);
             if slot >= 0 {
@@ -2172,11 +2157,11 @@ impl Vm {
         }
         if (has_get || has_set) && i >= 0 && self.objs[o as usize].class == C_ARRAY && slot < 0 {
             // an accessor element: kept as a property
-            if has_get && !matches!(get_v.kind(), VK::Undef) && !self.is_callable(&get_v) {
+            if has_get && !get_v.is_undef() && !self.is_callable(&get_v) {
                 self.throw_type("Getter must be a function");
                 return;
             }
-            if has_set && !matches!(set_v.kind(), VK::Undef) && !self.is_callable(&set_v) {
+            if has_set && !set_v.is_undef() && !self.is_callable(&set_v) {
                 self.throw_type("Setter must be a function");
                 return;
             }
@@ -2184,14 +2169,14 @@ impl Vm {
         }
         if has_get || has_set {
             if has_get {
-                if !matches!(get_v.kind(), VK::Undef) && !self.is_callable(&get_v) {
+                if !get_v.is_undef() && !self.is_callable(&get_v) {
                     self.throw_type("Getter must be a function");
                     return;
                 }
                 self.define_accessor(o, atom, get_v, 0, false);
             }
             if has_set {
-                if !matches!(set_v.kind(), VK::Undef) && !self.is_callable(&set_v) {
+                if !set_v.is_undef() && !self.is_callable(&set_v) {
                     self.throw_type("Setter must be a function");
                     return;
                 }
@@ -2305,7 +2290,7 @@ impl Vm {
             return Val::Obj(d);
         }
         if i >= 0 && class == C_STRING {
-            if let VK::Str(s) = (self.colds[self.objs[o as usize].cold as usize].prim.clone()).kind() {
+            if let Some(s) = (self.colds[self.objs[o as usize].cold as usize].prim.clone()).as_str() {
                 let s = self.sget(s.clone());
                 let c = jsstr::at(s.as_str(), i);
                 if c >= 0 {
@@ -2331,7 +2316,7 @@ impl Vm {
             }
             if (class == C_FUNCTION || class == C_BOUND) && (atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE) {
                 let v = self.function_own(o, atom);
-                if matches!(v.kind(), VK::Undef) {
+                if v.is_undef() {
                     return Val::Undef();
                 }
                 let is_proto = atom == A_PROTOTYPE;
@@ -2363,8 +2348,8 @@ impl Vm {
     // ---- sort
 
     pub fn sort_compare(&mut self, cmp: &Val, a: &Val, b: &Val) -> double {
-        let ua = matches!(a.kind(), VK::Undef);
-        let ub = matches!(b.kind(), VK::Undef);
+        let ua = a.is_undef();
+        let ub = b.is_undef();
         if ua && ub {
             return 0.0;
         }
@@ -2374,15 +2359,15 @@ impl Vm {
         if ub {
             return -1.0;
         }
-        if !matches!(cmp.kind(), VK::Undef) {
+        if !cmp.is_undef() {
             let r = self.call2(cmp, a, b);
-            if let VK::Num(n) = r.kind() {
+            if let Some(n) = r.as_num() {
                 return if is_nan(n) { 0.0 } else { n };
             }
             let n = self.to_number(&r);
             return if is_nan(n) { 0.0 } else { n };
         }
-        if let (VK::Num(x), VK::Num(y)) = (a.kind(), b.kind()) {
+        if let (Some(x), Some(y)) = (a.as_num(), b.as_num()) {
             if x == y {
                 return 0.0;
             }
@@ -2420,7 +2405,7 @@ impl Vm {
                 self.cmp_kinds[pi] = 1;
                 return 1;
             }
-            if let VK::Str(h) = (&self.protos[pi].src).kind() {
+            if let Some(h) = (&self.protos[pi].src).as_str() {
                 let src = self.sget(h);
                 let text = jsstr::char_range(src.as_str(), a, b);
                 k = sub_cmp_kind(squeeze_ws(text.as_str()).as_str());
@@ -2440,7 +2425,7 @@ impl Vm {
             num_merge_sort(v, kind == 3);
             return;
         }
-        if matches!(cmp.kind(), VK::Undef) && all_nums(v) {
+        if cmp.is_undef() && all_nums(v) {
             num_str_merge_sort(v);
             return;
         }
@@ -2624,13 +2609,13 @@ impl Vm {
     pub fn json_val(&mut self, holder: &Val, key0: &Val, kidx: int, v0: Val, replacer: &Val) -> Val {
         let mut v = v0;
         // an object with a plan has no toJSON
-        if let VK::Obj(o) = (&v).kind() {
+        if let Some(o) = (&v).as_obj() {
             if !self.is_callable(replacer) && self.json_plan(o) >= 0 {
                 return v;
             }
         }
         // an array index key is made only when toJSON or a replacer needs it
-        let tj = if is_obj(&v) || matches!(v.kind(), VK::Big(_)) { self.get(&v, A_TOJSON) } else { Val::Undef() };
+        let tj = if is_obj(&v) || v.is_big() { self.get(&v, A_TOJSON) } else { Val::Undef() };
         let has_tj = self.is_callable(&tj);
         let mut key = key0.clone();
         if kidx >= 0 && (has_tj || self.is_callable(replacer)) {
@@ -2651,7 +2636,7 @@ impl Vm {
                 return Val::Undef();
             }
         }
-        if let VK::Obj(o) = (&v).kind() {
+        if let Some(o) = (&v).as_obj() {
             let c = self.objs[o as usize].class;
             if c == C_NUMBER || c == C_STRING || c == C_BOOLEAN {
                 v = if c == C_NUMBER {
@@ -2670,11 +2655,7 @@ impl Vm {
 
     /// true when the value is left out of the output (undefined, a function or a symbol)
     pub fn json_skip(&self, v: &Val) -> bool {
-        match v.kind() {
-            VK::Undef => true,
-            VK::Obj(o) => self.is_callable(v) || self.objs[o as usize].class == C_SYMBOL,
-            _ => false,
-        }
+        if v.is_undef() { true } else if let Some(o) = v.as_obj() { self.is_callable(v) || self.objs[o as usize].class == C_SYMBOL } else { false }
     }
 
     pub fn json_str(&mut self, holder: &Val, key0: &Val, kidx: int, v0: Val, replacer: &Val, allow: &Vec<String>, gap: &str, indent: &str, stack: &mut Vec<int>, out: &mut String) -> bool {
@@ -2761,7 +2742,7 @@ impl Vm {
                         if self.throwing {
                             return false;
                         }
-                        let iv = if is_obj(&item) || matches!(item.kind(), VK::Big(_)) {
+                        let iv = if is_obj(&item) || item.is_big() {
                             let kv = self.atom_val(a);
                             self.json_val(&v, &kv, -1, item, replacer)
                         } else {
@@ -3196,14 +3177,14 @@ impl Vm {
 
     pub fn json_revive(&mut self, holder: &Val, key: &Val, reviver: &Val) -> Val {
         let v = self.get_elem(holder, key);
-        if let VK::Obj(o) = (&v).kind() {
+        if let Some(o) = (&v).as_obj() {
             let keys = self.own_keys(o, false, false);
             for k in keys {
                 let nv = self.json_revive(&v, &k, reviver);
                 if self.throwing {
                     return Val::Undef();
                 }
-                if matches!(nv.kind(), VK::Undef) {
+                if nv.is_undef() {
                     self.delete(o, &k);
                 } else {
                     self.define_elem(o, &k, nv, 0);
@@ -3221,10 +3202,7 @@ impl Vm {
             self.throw_type("this is not a Date object.");
             return nan();
         }
-        match (self.colds[self.objs[o as usize].cold as usize].prim).kind() {
-            VK::Num(n) => n,
-            _ => nan(),
-        }
+        if let Some(n) = (self.colds[self.objs[o as usize].cold as usize].prim).as_num() { n } else { nan() }
     }
 
     pub fn make_time(fields: &Vec<double>) -> double {
@@ -3394,7 +3372,7 @@ impl Vm {
         }
         if state == 1 {
             // resolving with a thenable adopts its state
-            if let VK::Obj(o) = (&v).kind() {
+            if let Some(o) = (&v).as_obj() {
                 if o == p {
                     let e = self.new_error(self.type_error_proto, "Chaining cycle detected for promise");
                     self.settle(p, 2, Val::Obj(e));
@@ -3492,7 +3470,7 @@ impl Vm {
                 self.temp_roots.push(d.clone());
                 self.native_depth -= 1;
             }
-            if let VK::Num(neg) = a.kind() {
+            if let Some(neg) = a.as_num() {
                 // a reaction
                 let state = (-neg) as int;
                 let derived = obj_of(&d);
@@ -3511,7 +3489,7 @@ impl Vm {
                 } else if derived >= 0 {
                     self.settle(derived, state, c);
                 }
-            } else if matches!(b.kind(), VK::Undef) && matches!(c.kind(), VK::Undef) && matches!(d.kind(), VK::Undef) {
+            } else if b.is_undef() && c.is_undef() && d.is_undef() {
                 // queueMicrotask
                 self.call_fixed(a, Val::Undef(), 0, Val::Undef(), Val::Undef(), Val::Undef());
                 if self.throwing {
@@ -3769,7 +3747,7 @@ impl Vm {
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         self.nat_top = self.nat_ff && self.native_depth == self.gc_free_depth + 1;
         self.nat_ff = false;
-        if id >= NF_AP_PUSH && id <= NF_AP_WITH && (matches!(this.kind(), VK::Undef) || matches!(this.kind(), VK::Null)) {
+        if id >= NF_AP_PUSH && id <= NF_AP_WITH && (this.is_undef() || this.is_null()) {
             self.throw_type("Array.prototype method called on null or undefined");
             return Val::Undef();
         }
@@ -3778,7 +3756,7 @@ impl Vm {
             let k = (id - NF_AP_PUSH) as usize;
             if k < self.evecs[self.objs[g as usize].elems as usize].v.len() {
                 let f = self.evecs[self.objs[g as usize].elems as usize].v[k].clone();
-                if !matches!(f.kind(), VK::Undef) {
+                if !f.is_undef() {
                     return self.call_value(f, this, args.clone());
                 }
             }
@@ -3897,7 +3875,7 @@ impl Vm {
         }
         if id == NF_AP_POP || id == NF_AP_SHIFT || id == NF_AP_UNSHIFT || id == NF_AP_SPLICE || id == NF_AP_REVERSE || id == NF_AP_SORT || id == NF_AP_FILL || id == NF_AP_COPYWITHIN {
             // the in-place methods on a frozen array
-            if let VK::Obj(o) = (&this).kind() {
+            if let Some(o) = (&this).as_obj() {
                 let ob = &self.objs[o as usize];
                 if ob.class == C_ARRAY && ob.pos == 2 {
                     let n = self.evecs[ob.elems as usize].v.len();
@@ -3936,7 +3914,7 @@ impl Vm {
                 mi = 2;
             }
             let m = arg(&args, mi);
-            if !matches!(m.kind(), VK::Undef) {
+            if !m.is_undef() {
                 let ms = self.to_str(&m);
                 if self.throwing {
                     return Val::Undef();
@@ -3952,7 +3930,7 @@ impl Vm {
                 self.add_own(e, a_sup, arg(&args, 1), P_HIDDEN);
             }
             let opts = if kind == 8 { Val::Undef() } else { arg(&args, mi + 1) };
-            if let VK::Obj(oo) = (&opts).kind() {
+            if let Some(oo) = (&opts).as_obj() {
                 if self.has_atom(oo, A_CAUSE) {
                     let c = self.get(&opts, A_CAUSE);
                     self.add_own(e, A_CAUSE, c, P_HIDDEN);
@@ -4073,7 +4051,7 @@ impl Vm {
             NF_PARSEINT => {
                 let s = self.to_string(&a0);
                 let r = arg(&args, 1);
-                let radix = if matches!(r.kind(), VK::Undef) { 0 } else { to_int32(self.to_number(&r)) };
+                let radix = if r.is_undef() { 0 } else { to_int32(self.to_number(&r)) };
                 Val::Num(parse_int(s.as_str(), radix))
             }
             NF_PARSEFLOAT => {
@@ -4215,7 +4193,7 @@ impl Vm {
                 Val::Bool(b)
             }
             NF_OBJECT => {
-                if construct && !matches!(new_target.kind(), VK::Undef) {
+                if construct && !new_target.is_undef() {
                     let nt = obj_of(&new_target);
                     if nt != fobj {
                         let proto = self.proto_from(&new_target, self.object_proto);
@@ -4238,7 +4216,7 @@ impl Vm {
                 let proto = if construct { self.proto_from(&new_target, self.array_proto) } else { self.array_proto };
                 let a = self.alloc(C_ARRAY, proto);
                 if args.len() == 1 {
-                    if let VK::Num(n) = a0.kind() {
+                    if let Some(n) = a0.as_num() {
                         if n < 0.0 || n > 4294967295.0 || n != to_integer(n) {
                             self.throw_range("Invalid array length");
                             return Val::Undef();
@@ -4272,7 +4250,7 @@ impl Vm {
                     self.throw_type("Symbol is not a constructor");
                     return Val::Undef();
                 }
-                let desc = if matches!(a0.kind(), VK::Undef) { String::new() } else { self.to_string(&a0) };
+                let desc = if a0.is_undef() { String::new() } else { self.to_string(&a0) };
                 let n = self.symbols.len();
                 let name = format!("@@sym:{}:{}", n, desc);
                 let atom = self.intern(name.as_str());
@@ -4280,7 +4258,7 @@ impl Vm {
                 let s = self.alloc(C_SYMBOL, sp);
                 self.objs[s as usize].pos = atom as i32;
                 let sv2 = self.string_val(desc);
-                self.put_prim(s, if matches!(a0.kind(), VK::Undef) { Val::Undef() } else { sv2 });
+                self.put_prim(s, if a0.is_undef() { Val::Undef() } else { sv2 });
                 self.symbol_atoms.insert(atom, s);
                 if (atom as usize) < self.atom_kinds.len() {
                     self.atom_kinds[atom as usize] = 0;
@@ -4343,8 +4321,8 @@ impl Vm {
                 }
                 let n = self.get(&this, A_NAME);
                 let m = self.get(&this, A_MESSAGE);
-                let ns = if matches!(n.kind(), VK::Undef) { String::from("Error") } else { self.to_string(&n) };
-                let ms = if matches!(m.kind(), VK::Undef) { String::new() } else { self.to_string(&m) };
+                let ns = if n.is_undef() { String::from("Error") } else { self.to_string(&n) };
+                let ms = if m.is_undef() { String::new() } else { self.to_string(&m) };
                 if ns.is_empty() {
                     return self.string_val(ms);
                 }
@@ -4398,7 +4376,7 @@ impl Vm {
                 let ns = self.to_string(&n);
                 if self.objs[o as usize].class == C_FUNCTION {
                     let pi = self.objs[o as usize].func as int;
-                    if let VK::Str(src) = (&self.protos[pi as usize].src).kind() {
+                    if let Some(src) = (&self.protos[pi as usize].src).as_str() {
                         let src = self.sget(src.clone());
                         let (a, b) = (self.protos[pi as usize].src_start, self.protos[pi as usize].src_end);
                         let mut text = String::new();
@@ -4452,7 +4430,7 @@ impl Vm {
                 let mut i: usize = 1;
                 while i < args.len() {
                     let src = args[i].clone();
-                    if let VK::Obj(so) = (&src).kind() {
+                    if let Some(so) = (&src).as_obj() {
                         let keys = self.own_keys(so, false, true);
                         for k in keys {
                             let v = self.get_elem(&src, &k);
@@ -4468,7 +4446,7 @@ impl Vm {
                                 return Val::Undef();
                             }
                         }
-                    } else if let VK::Str(s) = (&src).kind() {
+                    } else if let Some(s) = (&src).as_str() {
                         let s = self.sget(s.clone());
                         let mut k: int = 0;
                         for c in s.chars() {
@@ -4484,17 +4462,13 @@ impl Vm {
                 Val::Obj(t)
             }
             NF_O_CREATE => {
-                let proto = match (&a0).kind() {
-                    VK::Obj(p) => p,
-                    VK::Null => -1,
-                    _ => {
+                let proto = if let Some(p) = (&a0).as_obj() { p } else if (&a0).is_null() { -1 } else {
                         self.throw_type("Object prototype may only be an Object or null");
                         return Val::Undef();
-                    }
-                };
+                    };
                 let o = self.alloc(C_OBJECT, proto);
                 let props = arg(&args, 1);
-                if !matches!(props.kind(), VK::Undef) {
+                if !props.is_undef() {
                     self.define_props(o, &props);
                     if self.throwing {
                         return Val::Undef();
@@ -4516,9 +4490,8 @@ impl Vm {
             }
             NF_O_SETPROTO => {
                 let p = arg(&args, 1);
-                if let VK::Obj(o) = (&a0).kind() {
-                    match p.kind() {
-                        VK::Obj(po) => {
+                if let Some(o) = (&a0).as_obj() {
+                    if let Some(po) = p.as_obj() {
                             // no cycles
                             let mut c = po;
                             while c >= 0 {
@@ -4529,13 +4502,10 @@ impl Vm {
                                 c = self.objs[c as usize].proto as int;
                             }
                             self.put_proto(o, po);
-                        }
-                        VK::Null => self.put_proto(o, -1),
-                        _ => {
+                        } else if p.is_null() { self.put_proto(o, -1) } else {
                             self.throw_type("Object prototype may only be an Object or null");
                             return Val::Undef();
                         }
-                    }
                 }
                 a0
             }
@@ -4628,7 +4598,7 @@ impl Vm {
                 Val::Obj(r)
             }
             NF_O_FREEZE | NF_O_SEAL | NF_O_PREVENTEXT => {
-                if let VK::Obj(o) = (&a0).kind() {
+                if let Some(o) = (&a0).as_obj() {
                     let o = o;
                     if id != NF_O_PREVENTEXT && self.objs[o as usize].class == C_ARRAY && (id == NF_O_SEAL || self.objs[o as usize].pos == 3) {
                         // sealed elements (or frozen ones beside element
@@ -4683,7 +4653,7 @@ impl Vm {
                 a0
             }
             NF_O_ISFROZEN | NF_O_ISSEALED => {
-                if let VK::Obj(o) = (&a0).kind() {
+                if let Some(o) = (&a0).as_obj() {
                     let o = o;
                     if self.objs[o as usize].extensible {
                         return Val::Bool(false);
@@ -4709,7 +4679,7 @@ impl Vm {
                 Val::Bool(true)
             }
             NF_O_ISEXT => {
-                if let VK::Obj(o) = (&a0).kind() {
+                if let Some(o) = (&a0).as_obj() {
                     return Val::Bool(self.objs[o as usize].extensible);
                 }
                 Val::Bool(false)
@@ -4750,7 +4720,7 @@ impl Vm {
                         return Val::Undef();
                     }
                     let cur = self.get_elem(&Val::Obj(o), &k);
-                    if let VK::Obj(a) = cur.kind() {
+                    if let Some(a) = cur.as_obj() {
                         self.push_elem(a, it);
                     } else {
                         let a = self.new_array(vec![it]);
@@ -4769,7 +4739,7 @@ impl Vm {
             }
             NF_OP_ISPROTO => {
                 let p = obj_of(&this);
-                if let VK::Obj(o) = (&a0).kind() {
+                if let Some(o) = (&a0).as_obj() {
                     let mut c = self.objs[o as usize].proto as int;
                     while c >= 0 {
                         if c == p {
@@ -4799,33 +4769,25 @@ impl Vm {
             }
             NF_OP_TOSTRING => {
                 let mut class: int = -1;
-                let tag = match (&this).kind() {
-                    VK::Undef => String::from("Undefined"),
-                    VK::Null => String::from("Null"),
-                    _ => {
+                let tag = if (&this).is_undef() { String::from("Undefined") } else if (&this).is_null() { String::from("Null") } else {
                         // a primitive reads through its prototype, as its
                         // wrapper would, without making one
-                        let (o, wc) = match (&this).kind() {
-                            VK::Num(_) => (self.number_proto, C_NUMBER),
-                            VK::Str(_) => (self.string_proto, C_STRING),
-                            VK::Bool(_) => (self.boolean_proto, C_BOOLEAN),
-                            _ => {
+                        let (o, wc) = if (&this).is_num() { (self.number_proto, C_NUMBER) } else if (&this).is_str() { (self.string_proto, C_STRING) } else if (&this).is_bool() { (self.boolean_proto, C_BOOLEAN) } else {
                                 let w = self.to_object(&this);
                                 (w, self.objs[w as usize].class)
-                            }
-                        };
+                            };
                         if self.a_tostringtag < 0 {
                             self.a_tostringtag = self.intern("@@toStringTag");
                         }
                         let a_tag = self.a_tostringtag;
                         let t = self.get_obj(o, a_tag, &this);
-                        if let VK::Str(s) = t.kind() {
+                        if let Some(s) = t.as_str() {
                             let s = self.sget(s.clone());
                             s.as_ref().clone()
                         } else {
                             let c = wc;
                             class = c as int;
-                            if (c as usize) < self.tostr_vals.len() && !matches!((self.tostr_vals[c as usize]).kind(), VK::Undef) {
+                            if (c as usize) < self.tostr_vals.len() && !(self.tostr_vals[c as usize]).is_undef() {
                                 return self.tostr_vals[c as usize].clone();
                             }
                             String::from(match c {
@@ -4845,8 +4807,7 @@ impl Vm {
                                 _ => "Object",
                             })
                         }
-                    }
-                };
+                    };
                 if class >= 0 {
                     // the answer of a class is kept (a pinned string)
                     let v = self.pin_rc(Rc::new(format!("[object {}]", tag)));
@@ -5195,7 +5156,7 @@ fn group_pairs(names: &Vec<String>, nidx: &Vec<int>, vals: &Vec<Val>) -> Vec<(St
             let mut v = vals[nidx[i] as usize].clone();
             let mut k: usize = i + 1;
             while k < names.len() {
-                if names[k].as_str() == names[i].as_str() && matches!(v.kind(), VK::Undef) {
+                if names[k].as_str() == names[i].as_str() && v.is_undef() {
                     v = vals[nidx[k] as usize].clone();
                 }
                 k += 1;
@@ -5250,7 +5211,7 @@ pub fn all_nums(v: &Vec<Val>) -> bool {
     let n = v.len();
     let mut i: usize = 0;
     while i < n {
-        if !matches!(v[i].kind(), VK::Num(_)) {
+        if !v[i].is_num() {
             return false;
         }
         i += 1;
@@ -5265,7 +5226,7 @@ pub fn num_merge_sort(v: &mut Vec<Val>, desc: bool) {
     let mut src: Vec<double> = Vec::with_capacity(n);
     let mut i0: usize = 0;
     while i0 < n {
-        if let VK::Num(x) = v[i0].kind() {
+        if let Some(x) = v[i0].as_num() {
             src.push(x);
         }
         i0 += 1;
@@ -5451,7 +5412,7 @@ pub fn num_str_merge_sort(v: &mut Vec<Val>) {
     let mut keys: Vec<String> = Vec::with_capacity(n);
     let mut i0: usize = 0;
     while i0 < n {
-        if let VK::Num(x) = v[i0].kind() {
+        if let Some(x) = v[i0].as_num() {
             keys.push(number_to_string(x));
         }
         i0 += 1;

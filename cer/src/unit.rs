@@ -140,7 +140,7 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
                 let kb = p.code[ci].b as usize;
                 let mut si: usize = p.cstrs.len();
                 if kb < p.consts.len() {
-                    if let VK::Str(k) = p.consts[kb].kind() {
+                    if let Some(k) = p.consts[kb].as_str() {
                         si = k as usize;
                     }
                 }
@@ -308,9 +308,7 @@ pub fn encode(u: &Unit, input: &str) -> String {
         put_bool(&mut out, p.is_async);
         put_bool(&mut out, p.lexical_ctor);
         // where the function's text is: none, in the source, its own
-        match (&p.src).kind() {
-            VK::Undef => put_num(&mut out, 0),
-            VK::Str(k) => {
+        if (&p.src).is_undef() { put_num(&mut out, 0) } else if let Some(k) = (&p.src).as_str() {
                 let s = &p.cstrs[k as usize];
                 if s.as_str() == u.source.as_str() {
                     put_num(&mut out, 1);
@@ -318,9 +316,7 @@ pub fn encode(u: &Unit, input: &str) -> String {
                     put_num(&mut out, 2);
                     put_str(&mut out, s.as_str());
                 }
-            }
-            _ => return String::new(),
-        }
+            } else { return String::new() }
         put_num(&mut out, p.src_start);
         put_num(&mut out, p.src_end);
         put_num(&mut out, p.consts.len() as int);

@@ -91,7 +91,7 @@ impl Vm {
         if self.throwing {
             return Val::Undef();
         }
-        if matches!(trap.kind(), VK::Undef) || matches!(trap.kind(), VK::Null) {
+        if trap.is_undef() || trap.is_null() {
             return self.get_obj(target, atom, &r);
         }
         if !self.is_callable(&trap) {
@@ -110,7 +110,7 @@ impl Vm {
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[target as usize].get_slot(slot as usize));
                     let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
-                    if matches!(g.kind(), VK::Undef) && !matches!(v.kind(), VK::Undef) {
+                    if g.is_undef() && !v.is_undef() {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("'get' on proxy: property '{}' is a non-configurable accessor property on the proxy target and does not have a getter function, but the trap did not return 'undefined'", n).as_str());
                         return Val::Undef();
@@ -142,7 +142,7 @@ impl Vm {
         if self.throwing {
             return false;
         }
-        if matches!(trap.kind(), VK::Undef) || matches!(trap.kind(), VK::Null) {
+        if trap.is_undef() || trap.is_null() {
             let k = self.key_val(atom);
             return self.proxy_bool(p, PH_SET, vec![k, v, r]);
         }
@@ -162,7 +162,7 @@ impl Vm {
                 if (attr & P_ACCESSOR) != 0 {
                     let pair = obj_of(&self.objs[target as usize].get_slot(slot as usize));
                     let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
-                    if matches!(s.kind(), VK::Undef) {
+                    if s.is_undef() {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("'set' on proxy: trap returned truish for property '{}' which exists in the proxy target as a non-configurable and non-writable accessor property without a setter", n).as_str());
                         return false;

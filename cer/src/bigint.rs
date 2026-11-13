@@ -757,7 +757,7 @@ impl Vm {
     }
 
     pub fn is_bigint(&self, v: &Val) -> bool {
-        matches!(v.kind(), VK::Big(_)) || self.class_of(v) == C_BIGINT
+        v.is_big() || self.class_of(v) == C_BIGINT
     }
 
     /// The decimal text of a BigInt value.
@@ -768,7 +768,7 @@ impl Vm {
         let o = obj_of(v);
         if o >= 0 {
             let pv = self.colds[self.objs[o as usize].cold as usize].prim;
-            if let VK::Str(s) = pv.kind() {
+            if let Some(s) = pv.as_str() {
                 let s = self.sget(s);
                 return s.as_ref().clone();
             }
@@ -782,9 +782,7 @@ impl Vm {
         if self.throwing {
             return Val::Undef();
         }
-        match (&p).kind() {
-            VK::Bool(b) => return self.bigint_val(if b { "1" } else { "0" }),
-            VK::Str(s) => {
+        if let Some(b) = (&p).as_bool() { return self.bigint_val(if b { "1" } else { "0" }) } else if let Some(s) = (&p).as_str() {
                 let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 if t.is_empty() {
@@ -792,9 +790,7 @@ impl Vm {
                     return Val::Undef();
                 }
                 return self.bigint_val(t.as_str());
-            }
-            _ => {}
-        }
+            } else {}
         if self.is_bigint(&p) {
             return p;
         }
@@ -948,7 +944,7 @@ impl Vm {
         if self.is_bigint(v) {
             return self.big_text(v);
         }
-        if let VK::Str(s) = v.kind() {
+        if let Some(s) = v.as_str() {
             let s = self.sget(s.clone());
             return from_string(s.as_str());
         }
@@ -959,24 +955,19 @@ impl Vm {
     pub fn big_loose_eq(&mut self, a: &Val, b: &Val) -> bool {
         let (big, other) = if self.is_bigint(a) { (a, b) } else { (b, a) };
         let x = self.big_text(big);
-        match other.kind() {
-            VK::Num(n) => {
+        if let Some(n) = other.as_num() {
                 let t = from_double(n);
                 !t.is_empty() && t == x
-            }
-            VK::Str(s) => {
+            } else if let Some(s) = other.as_str() {
                 let s = self.sget(s.clone());
                 let t = from_string(s.as_str());
                 !t.is_empty() && t == x
-            }
-            VK::Bool(bv) => x.as_str() == (if bv { "1" } else { "0" }),
-            _ => {
+            } else if let Some(bv) = other.as_bool() { x.as_str() == (if bv { "1" } else { "0" }) } else {
                 if self.is_bigint(other) {
                     return self.big_text(other) == x;
                 }
                 false
             }
-        }
     }
 
     pub fn call_native_bigint(&mut self, id: int, this: Val, args: &Vec<Val>, construct: bool) -> Val {
@@ -991,7 +982,7 @@ impl Vm {
             if self.throwing {
                 return Val::Undef();
             }
-            if let VK::Num(n) = p.kind() {
+            if let Some(n) = p.as_num() {
                 let t = from_double(n);
                 if t.is_empty() {
                     let ns = self.to_string(&p);
@@ -1026,7 +1017,7 @@ impl Vm {
         if id == NF_BIGINTP_VALUEOF {
             return v;
         }
-        let radix = if matches!(a0.kind(), VK::Undef) { 10.0 } else { self.to_number(&a0) };
+        let radix = if a0.is_undef() { 10.0 } else { self.to_number(&a0) };
         if radix < 2.0 || radix > 36.0 || radix.floor() != radix {
             self.throw_range("toString() radix must be between 2 and 36");
             return Val::Undef();

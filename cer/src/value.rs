@@ -84,18 +84,84 @@ impl Val {
         let b = x.to_bits();
         Val { b: if b >= V_TAG { 0x7FF8_0000_0000_0000 } else { b } }
     }
+    /// Val::Num of a number that cannot be a NaN with other bits than the
+    /// hardware's (an arithmetic result of numbers, an integer)
+    #[inline(always)]
+    pub fn NumC(x: double) -> Val {
+        debug_assert!(x.to_bits() < V_TAG);
+        Val { b: x.to_bits() }
+    }
     #[inline(always)]
     pub fn Str(h: int) -> Val {
-        Val { b: V_STR | ((h as u64) & V_LOW) }
+        debug_assert!(h >= 0 && h <= 0xFFFF_FFFF, "string handle out of range");
+        Val { b: V_STR | ((h as u64) & 0xFFFF_FFFF) }
     }
     #[inline(always)]
     pub fn Obj(o: int) -> Val {
-        Val { b: V_OBJ | ((o as u64) & V_LOW) }
+        debug_assert!(o >= 0 && o <= 0xFFFF_FFFF, "object index out of range");
+        Val { b: V_OBJ | ((o as u64) & 0xFFFF_FFFF) }
     }
     #[inline(always)]
     pub fn Big(n: double) -> Val {
         debug_assert!(n.abs() < crate::bigint::small_big_limit());
         Val { b: V_BIG | ((n as i64 as u64) & V_LOW) }
+    }
+    #[inline(always)]
+    pub fn as_num(&self) -> Option<double> {
+        if self.b < V_TAG { Some(f64::from_bits(self.b)) } else { None }
+    }
+    #[inline(always)]
+    pub fn as_obj(&self) -> Option<int> {
+        // an object's index and a string's handle are below 2^32: one
+        // subtraction both tests the tag and gives the payload
+        let d = self.b.wrapping_sub(V_OBJ);
+        if d <= 0xFFFF_FFFF { Some(d as int) } else { None }
+    }
+    #[inline(always)]
+    pub fn as_str(&self) -> Option<int> {
+        let d = self.b.wrapping_sub(V_STR);
+        if d <= 0xFFFF_FFFF { Some(d as int) } else { None }
+    }
+    #[inline(always)]
+    pub fn as_bool(&self) -> Option<bool> {
+        if (self.b >> 48) == 0xFFFB { Some((self.b & 1) != 0) } else { None }
+    }
+    #[inline(always)]
+    pub fn is_num(&self) -> bool {
+        self.b < V_TAG
+    }
+    #[inline(always)]
+    pub fn is_obj(&self) -> bool {
+        self.b.wrapping_sub(V_OBJ) <= 0xFFFF_FFFF
+    }
+    #[inline(always)]
+    pub fn is_str(&self) -> bool {
+        self.b.wrapping_sub(V_STR) <= 0xFFFF_FFFF
+    }
+    #[inline(always)]
+    pub fn is_bool(&self) -> bool {
+        (self.b >> 48) == 0xFFFB
+    }
+    #[inline(always)]
+    pub fn is_big(&self) -> bool {
+        (self.b >> 48) == 0xFFFE
+    }
+    /// an object or a string (what reference counts track)
+    #[inline(always)]
+    pub fn is_heap(&self) -> bool {
+        (self.b >> 49) == 0x7FFE
+    }
+    #[inline(always)]
+    pub fn is_undef(&self) -> bool {
+        self.b == V_UNDEF
+    }
+    #[inline(always)]
+    pub fn is_null(&self) -> bool {
+        self.b == V_NULL
+    }
+    #[inline(always)]
+    pub fn is_nullish(&self) -> bool {
+        self.b == V_UNDEF || self.b == V_NULL
     }
     #[inline(always)]
     pub fn kind(&self) -> VK {
@@ -109,8 +175,8 @@ impl Val {
             0xFFF9 => VK::Undef,
             0xFFFA => VK::Null,
             0xFFFB => VK::Bool(x != 0),
-            0xFFFC => VK::Str(x as int),
-            0xFFFD => VK::Obj(x as int),
+            0xFFFC => VK::Str((b as u32) as int),
+            0xFFFD => VK::Obj((b as u32) as int),
             _ => VK::Big(x as double),
         }
     }
@@ -141,6 +207,9 @@ impl Val {
     pub fn Num(x: double) -> Val {
         Val { k: VK::Num(x) }
     }
+    pub fn NumC(x: double) -> Val {
+        Val { k: VK::Num(x) }
+    }
     #[inline(always)]
     pub fn Str(h: int) -> Val {
         Val { k: VK::Str(h) }
@@ -153,9 +222,83 @@ impl Val {
     pub fn Big(n: double) -> Val {
         Val { k: VK::Big(n) }
     }
-    #[inline(always)]
     pub fn kind(&self) -> VK {
         self.k
+    }
+    pub fn as_num(&self) -> Option<double> {
+        if let VK::Num(x) = self.k { Some(x) } else { None }
+    }
+    pub fn as_obj(&self) -> Option<int> {
+        if let VK::Obj(x) = self.k { Some(x) } else { None }
+    }
+    pub fn as_str(&self) -> Option<int> {
+        if let VK::Str(x) = self.k { Some(x) } else { None }
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        if let VK::Bool(x) = self.k { Some(x) } else { None }
+    }
+    pub fn is_num(&self) -> bool {
+        matches!(self.k, VK::Num(_))
+    }
+    pub fn is_obj(&self) -> bool {
+        matches!(self.k, VK::Obj(_))
+    }
+    pub fn is_str(&self) -> bool {
+        matches!(self.k, VK::Str(_))
+    }
+    pub fn is_bool(&self) -> bool {
+        matches!(self.k, VK::Bool(_))
+    }
+    pub fn is_big(&self) -> bool {
+        matches!(self.k, VK::Big(_))
+    }
+    pub fn is_heap(&self) -> bool {
+        matches!(self.k, VK::Obj(_) | VK::Str(_))
+    }
+    pub fn is_undef(&self) -> bool {
+        matches!(self.k, VK::Undef)
+    }
+    pub fn is_null(&self) -> bool {
+        matches!(self.k, VK::Null)
+    }
+    pub fn is_nullish(&self) -> bool {
+        matches!(self.k, VK::Undef | VK::Null)
+    }
+}
+
+/// `===` of two values as far as their bits tell: 1 or 0, 2 when both
+/// are strings with different handles (their text decides).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn seq_quick(a: &Val, b: &Val) -> int {
+    if a.b == b.b {
+        // the same bits: equal, unless NaN
+        if a.b < V_TAG {
+            let x = f64::from_bits(a.b);
+            return if x == x { 1 } else { 0 };
+        }
+        return 1;
+    }
+    if a.b < V_TAG && b.b < V_TAG {
+        // 0 and -0
+        return if f64::from_bits(a.b) == f64::from_bits(b.b) { 1 } else { 0 };
+    }
+    if a.is_str() && b.is_str() {
+        return 2;
+    }
+    0
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn seq_quick(a: &Val, b: &Val) -> int {
+    match (a.kind(), b.kind()) {
+        (VK::Num(x), VK::Num(y)) => if x == y { 1 } else { 0 },
+        (VK::Obj(x), VK::Obj(y)) => if x == y { 1 } else { 0 },
+        (VK::Big(x), VK::Big(y)) => if x == y { 1 } else { 0 },
+        (VK::Undef, VK::Undef) | (VK::Null, VK::Null) => 1,
+        (VK::Bool(x), VK::Bool(y)) => if x == y { 1 } else { 0 },
+        (VK::Str(x), VK::Str(y)) => if x == y { 1 } else { 2 },
+        _ => 0,
     }
 }
 

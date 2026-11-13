@@ -234,10 +234,10 @@ impl Vm {
     #[inline(never)]
     pub fn r_add_env(&mut self, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let depth = (w0 >> 8) & 255;
-        if let (VK::Num(x), VK::Num(y)) = ((self.rget(bp, w1)).kind(), (self.rget(bp, w2)).kind()) {
+        if let (Some(x), Some(y)) = ((self.rget(bp, w1)).as_num(), (self.rget(bp, w2)).as_num()) {
             let r = x + y;
             let e = self.get_env(depth);
-            self.put_elem(e, w3, Val::Num(r));
+            self.put_elem(e, w3, Val::NumC(r));
             return;
         }
         self.frames[fi].pc = pc + 1;
@@ -254,7 +254,7 @@ impl Vm {
         let k = self.rget(bp, w3).clone();
         let mut f = Val::Undef();
         let mut done = false;
-        if let (VK::Obj(o), VK::Num(n)) = ((&v).kind(), (&k).kind()) {
+        if let (Some(o), Some(n)) = ((&v).as_obj(), (&k).as_num()) {
             let ob = &self.objs[o as usize];
             if ob.class == C_ARRAY {
                 let i = n as int;
@@ -397,8 +397,8 @@ impl Vm {
                     R_ADD => {
                         let mut r = Val::Undef();
                         let mut done = false;
-                        if let (VK::Num(x), VK::Num(y)) = ((self.rget(bp, (w2 as int))).kind(), (self.rget(bp, (w3 as int))).kind()) {
-                            r = Val::Num(x + y);
+                        if let (Some(x), Some(y)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
+                            r = Val::NumC(x + y);
                             done = true;
                         }
                         if done {
@@ -409,9 +409,9 @@ impl Vm {
                         self.r_add_slow(bp, fi, pc, (w1 as int), (w2 as int), (w3 as int));
                     }
                     R_SUB | R_MUL => {
-                        if let (VK::Num(x), VK::Num(y)) = ((self.rget(bp, (w2 as int))).kind(), (self.rget(bp, (w3 as int))).kind()) {
+                        if let (Some(x), Some(y)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
                             let r = if ((w0 & 255) as int) == R_SUB { x - y } else { x * y };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -420,7 +420,7 @@ impl Vm {
                     }
                     R_ARITH => {
                         let code = ((w0 >> 8) & 255) as int;
-                        if let (VK::Num(x), VK::Num(y)) = ((self.rget(bp, (w2 as int))).kind(), (self.rget(bp, (w3 as int))).kind()) {
+                        if let (Some(x), Some(y)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
                             let (a, b) = (x, y);
                             let r = if code >= OP_BAND && code <= OP_USHR {
                                 bit_fast(code, a, b)
@@ -432,7 +432,7 @@ impl Vm {
                             } else {
                                 arith_num(code, a, b)
                             };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -449,7 +449,7 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (VK::Num(a), VK::Num(b)) = ((self.rget(bp, (w1 as int))).kind(), (self.rget(bp, (w2 as int))).kind()) {
+                        if let (Some(a), Some(b)) = ((self.rget(bp, (w1 as int))).as_num(), (self.rget(bp, (w2 as int))).as_num()) {
                             num = true;
                             r = match (code as int) {
                                 OP_LT => a < b,
@@ -480,7 +480,7 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (VK::Num(a), VK::Num(b)) = ((self.rget(bp, (w1 as int))).kind(), (self.rget(bp, (w2 as int))).kind()) {
+                        if let (Some(a), Some(b)) = ((self.rget(bp, (w1 as int))).as_num(), (self.rget(bp, (w2 as int))).as_num()) {
                             num = true;
                             r = match (code as int) {
                                 OP_LT => a < b,
@@ -546,7 +546,7 @@ impl Vm {
                         continue;
                     }
                     R_JNU => {
-                        if matches!((self.rget(bp, (w1 as int))).kind(), VK::Undef) {
+                        if (self.rget(bp, (w1 as int))).is_undef() {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
@@ -584,7 +584,7 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (VK::Num(a), VK::Num(b)) = ((self.rget(bp, (w2 as int))).kind(), (self.rget(bp, (w3 as int))).kind()) {
+                        if let (Some(a), Some(b)) = ((self.rget(bp, (w2 as int))).as_num(), (self.rget(bp, (w3 as int))).as_num()) {
                             num = true;
                             r = match (code as int) {
                                 OP_LT => a < b,
@@ -653,11 +653,7 @@ impl Vm {
                     }
                     R_LOCAL_NULL_JF => {
                         let cmp = w2;
-                        let r = match (self.stack[(bp + (w1 as int)) as usize]).kind() {
-                            VK::Null => (cmp as int) == OP_SEQ || (cmp as int) == OP_EQ,
-                            VK::Undef => (cmp as int) == OP_SNE || (cmp as int) == OP_EQ,
-                            _ => (cmp as int) == OP_SNE || (cmp as int) == OP_NE,
-                        };
+                        let r = if (self.stack[(bp + (w1 as int)) as usize]).is_null() { (cmp as int) == OP_SEQ || (cmp as int) == OP_EQ } else if (self.stack[(bp + (w1 as int)) as usize]).is_undef() { (cmp as int) == OP_SNE || (cmp as int) == OP_EQ } else { (cmp as int) == OP_SNE || (cmp as int) == OP_NE };
                         if !r {
                             if (w3 as int) <= pc {
                                 self.frames[fi].pc = (w3 as int);
@@ -676,7 +672,7 @@ impl Vm {
                     }
                     R_CASE_INT_JT => {
                         let mut hit = false;
-                        if let VK::Num(x) = (self.rget(bp, (w1 as int))).kind() {
+                        if let Some(x) = (self.rget(bp, (w1 as int))).as_num() {
                             hit = x == (w2 as double);
                         }
                         if hit {
@@ -691,7 +687,7 @@ impl Vm {
                     }
                     R_SWITCH => {
                         let mut t = -1;
-                        if let VK::Num(x) = (self.rget(bp, (w1 as int))).kind() {
+                        if let Some(x) = (self.rget(bp, (w1 as int))).as_num() {
                             let k = x - (w3 as double);
                             let size = self.rtab[w2 as usize];
                             if k >= 0.0 && k < (size as double) && k == ((k as int) as double) {
@@ -721,10 +717,10 @@ impl Vm {
                         let c = w3;
                         let mut o: int = -1;
                         if ((w0 & 255) as int) == R_GET_PROP {
-                            if let VK::Obj(x) = (self.rget(bp, (w2 as int))).kind() {
+                            if let Some(x) = (self.rget(bp, (w2 as int))).as_obj() {
                                 o = x;
                             }
-                        } else if let VK::Obj(x) = (&self.frames[fi].this_val).kind() {
+                        } else if let Some(x) = (&self.frames[fi].this_val).as_obj() {
                             o = x;
                         }
                         if o >= 0 && c >= 65536 && ((c >> 16) as int) == self.ob(o).shape as int {
@@ -753,7 +749,7 @@ impl Vm {
                             // an unmodified arguments object's: a written or deleted
                             // length makes it C_SARGS)
                             let n = evec_at(&self.evecs, self.ob(o).elems as usize).v.len() as double;
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(n));
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(n));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -762,7 +758,7 @@ impl Vm {
                             // (-6) length (r_get_prop_slow)
                             let n = self.len_site(c, o, bp, (w2 as int));
                             if n >= 0 {
-                                self.rset((bp + (w1 as int)) as usize, Val::Num(n as double));
+                                self.rset((bp + (w1 as int)) as usize, Val::NumC(n as double));
                                 pc = (pc + 1 + ((w0 >> 16) as int));
                                 continue;
                             }
@@ -798,7 +794,7 @@ impl Vm {
                     R_GET_ELEM => {
                         let mut r = Val::Undef();
                         let mut done = false;
-                        if let (VK::Obj(o), VK::Num(n)) = ((self.rget(bp, (w2 as int))).kind(), (self.rget(bp, (w3 as int))).kind()) {
+                        if let (Some(o), Some(n)) = ((self.rget(bp, (w2 as int))).as_obj(), (self.rget(bp, (w3 as int))).as_num()) {
                             let ob = obj_at(&self.objs, o as usize);
                             if ob.class == C_ARRAY {
                                 let i = n as int;
@@ -827,7 +823,7 @@ impl Vm {
                         let v = self.rget(bp, (w2 as int)).clone();
                         let kv = self.rget(bp, (w3 as int)).clone();
                         self.frames[fi].pc = pc + 1;
-                        if let (VK::Obj(po), VK::Str(kh)) = (v.kind(), kv.kind()) {
+                        if let (Some(po), Some(kh)) = (v.as_obj(), kv.as_str()) {
                             if self.objs[po as usize].class == C_PROXY && self.strs[kh as usize].atom >= 0 {
                                 let a = self.strs[kh as usize].atom as int;
                                 let fpos = bp + self.protos[pi].fsize;
@@ -846,13 +842,13 @@ impl Vm {
                         let o = obj_of(self.rget(bp, (w1 as int)));
                         let mut n: double = 0.0;
                         let mut num = false;
-                        if let VK::Num(x) = (self.rget(bp, (w2 as int))).kind() {
+                        if let Some(x) = (self.rget(bp, (w2 as int))).as_num() {
                             n = x;
                             num = true;
                         }
                         let mut done = false;
                         if o >= 0 && num && obj_at(&self.objs, o as usize).class == C_TYPED {
-                            if let VK::Num(x) = val.kind() {
+                            if let Some(x) = val.as_num() {
                                 let i = index_int(n);
                                 if i >= 0 && self.ta_put_num(o, i, x) {
                                     if ((w0 >> 8) & 255) == 1 {
@@ -910,7 +906,7 @@ impl Vm {
                         }
                     }
                     R_GET_METHOD => {
-                        if matches!((self.rget(bp, (w2 as int))).kind(), VK::Str(_)) {
+                        if (self.rget(bp, (w2 as int))).is_str() {
                             // a string's method, from String.prototype's slot
                             // the site learnt (r_str_method)
                             let to = self.r_str_method(bp, rb, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
@@ -1143,8 +1139,8 @@ impl Vm {
                         continue;
                     }
                     R_ADD_ENV => {
-                        if let (VK::Num(x), VK::Num(y)) = ((self.rget(bp, (w1 as int))).kind(), (self.rget(bp, (w2 as int))).kind()) {
-                            let r = Val::Num(x + y);
+                        if let (Some(x), Some(y)) = ((self.rget(bp, (w1 as int))).as_num(), (self.rget(bp, (w2 as int))).as_num()) {
+                            let r = Val::NumC(x + y);
                             let e = self.env_of(fi, ((w0 >> 8) & 255) as int);
                             self.env_put(e, (w3 as int), r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -1158,9 +1154,9 @@ impl Vm {
                     R_CHECK => {
                         let v = *self.rget(bp, (w1 as int));
                         let bad = if ((w0 >> 8) & 255) == 0 {
-                            if let VK::Obj(o) = v.kind() { o == self.tdz_obj } else { false }
+                            if let Some(o) = v.as_obj() { o == self.tdz_obj } else { false }
                         } else {
-                            matches!(v.kind(), VK::Undef) || matches!(v.kind(), VK::Null)
+                            v.is_undef() || v.is_null()
                         };
                         if bad {
                             self.frames[fi].pc = pc + 1;
@@ -1169,18 +1165,18 @@ impl Vm {
                     }
                     R_TONUM => {
                         let neg = ((w0 >> 8) & 255) == 1;
-                        if let VK::Num(x) = (self.rget(bp, (w2 as int))).kind() {
+                        if let Some(x) = (self.rget(bp, (w2 as int))).as_num() {
                             let r = if neg { -x } else { x };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                         } else {
                             self.r_unary_slow(bp, fi, pc, if neg { 1 } else if ((w0 >> 8) & 255) == 2 { 4 } else { 0 }, (w1 as int), (w2 as int));
                         }
                     }
                     R_INC => {
                         let dec = ((w0 >> 8) & 255) == 1;
-                        if let VK::Num(x) = (self.rget(bp, (w2 as int))).kind() {
+                        if let Some(x) = (self.rget(bp, (w2 as int))).as_num() {
                             let r = if dec { x - 1.0 } else { x + 1.0 };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                         } else {
                             self.r_unary_slow(bp, fi, pc, if dec { 3 } else { 2 }, (w1 as int), (w2 as int));
                         }
@@ -1237,8 +1233,8 @@ impl Vm {
                     }
                     R_INC_LOCAL => {
                         let i = (bp + (w1 as int)) as usize;
-                        if let VK::Num(n) = self.stack[i].kind() {
-                            self.stack[i] = Val::Num(n + (w2 as double));
+                        if let Some(n) = self.stack[i].as_num() {
+                            self.stack[i] = Val::NumC(n + (w2 as double));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -1252,10 +1248,10 @@ impl Vm {
                     R_POSTINC => {
                         let i = (bp + (w2 as int)) as usize;
                         let pre = ((w0 >> 8) & 255) == 1;
-                        if let VK::Num(old) = self.stack[i].kind() {
+                        if let Some(old) = self.stack[i].as_num() {
                             let nv = old + (w3 as double);
-                            self.stack[i] = Val::Num(nv);
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(if pre { nv } else { old }));
+                            self.stack[i] = Val::NumC(nv);
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(if pre { nv } else { old }));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -1271,8 +1267,8 @@ impl Vm {
                         let b = *self.rget(bp, (w2 as int));
                         let i = (bp + (w1 as int)) as usize;
                         // numbers first: the string append below is the rarer case
-                        if let (VK::Num(x), VK::Num(y)) = ((val_at(&self.stack, i)).kind(), (&b).kind()) {
-                            let r = Val::Num(x + y);
+                        if let (Some(x), Some(y)) = ((val_at(&self.stack, i)).as_num(), (&b).as_num()) {
+                            let r = Val::NumC(x + y);
                             self.rset(i, r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
@@ -1284,8 +1280,8 @@ impl Vm {
                             let a = self.stack[i].clone();
                             let mut r = Val::Undef();
                             let mut quick = false;
-                            if let (VK::Num(x), VK::Num(y)) = ((&a).kind(), (&b).kind()) {
-                                r = Val::Num(x + y);
+                            if let (Some(x), Some(y)) = ((&a).as_num(), (&b).as_num()) {
+                                r = Val::NumC(x + y);
                                 quick = true;
                             }
                             if !quick {
@@ -1356,7 +1352,7 @@ impl Vm {
     #[inline(never)]
     pub fn r_jnull(&mut self, bp: int, w1: int, w2: int) -> int {
         let i = (bp + w1) as usize;
-        if matches!(self.stack[i].kind(), VK::Undef | VK::Null) {
+        if self.stack[i].is_nullish() {
             self.stack[i] = Val::Undef();
             return w2;
         }
@@ -1372,8 +1368,8 @@ impl Vm {
         let b = self.rget(bp, w3).clone();
         // a longer string whose buffer nothing else holds grows in place
         // (str_append: a keeps its text as a prefix), as `s += x` does
-        let b_ok = matches!(b.kind(), VK::Str(_)) || matches!(b.kind(), VK::Num(_));
-        if let VK::Str(h) = (&a).kind() {
+        let b_ok = b.is_str() || b.is_num();
+        if let Some(h) = (&a).as_str() {
             if b_ok && self.strs[h as usize].s.as_bytes().len() >= 32 {
                 let r = self.append_val(a, b);
                 if r >= 0 {
@@ -1409,7 +1405,7 @@ impl Vm {
     #[inline(never)]
     pub fn len_site(&mut self, c: int, o: int, bp: int, w2: int) -> int {
         if c == -6 {
-            if let VK::Str(h) = (*self.rget(bp, w2)).kind() {
+            if let Some(h) = (*self.rget(bp, w2)).as_str() {
                 return self.hlen(h);
             }
             return -1;
@@ -1440,16 +1436,16 @@ impl Vm {
                 -1
             };
             if n >= 0 {
-                self.stack[(bp + w1) as usize] = Val::Num(n as double);
+                self.stack[(bp + w1) as usize] = Val::NumC(n as double);
                 self.rcode[(rb + pc) as usize].c = -5;
                 return false;
             }
         }
         let atom = self.ratom(pi, pc);
         if o < 0 && atom == A_LENGTH && (w0 & 255) == R_GET_PROP {
-            if let VK::Str(h) = (*self.rget(bp, w2)).kind() {
+            if let Some(h) = (*self.rget(bp, w2)).as_str() {
                 let n = self.hlen(h) as double;
-                self.stack[(bp + w1) as usize] = Val::Num(n);
+                self.stack[(bp + w1) as usize] = Val::NumC(n);
                 if self.rcode[(rb + pc) as usize].c < 0 {
                     // the site's next string goes through len_site
                     self.rcode[(rb + pc) as usize].c = -6;
@@ -1494,7 +1490,7 @@ impl Vm {
                 return false;
             }
             if atom == A_LENGTH && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && self.find(o, atom) < 0 {
-                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
+                let r = Val::NumC(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                 self.stack[(bp + w1) as usize] = r;
                 // the next read here takes rrun's array-length path
                 self.rcode[(rb + pc) as usize].c = -4;
@@ -1520,7 +1516,7 @@ impl Vm {
                     let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
                     let ro = obj_of(&recv);
                     if ro >= 0 && self.objs[ro as usize].class == C_TYPED {
-                        self.stack[(bp + w1) as usize] = Val::Num(self.ta_length(ro) as double);
+                        self.stack[(bp + w1) as usize] = Val::NumC(self.ta_length(ro) as double);
                         return false;
                     }
                 }
@@ -1953,7 +1949,7 @@ impl Vm {
     pub fn r_get_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let v = *self.rget(bp, w2);
         if w3 <= MC_BASE {
-            if let VK::Obj(o) = v.kind() {
+            if let Some(o) = v.as_obj() {
                 // a method one prototype up: the site's entry in mcache
                 let k = ((MC_BASE - w3) * 5) as usize;
                 let (osh, p) = {
@@ -1964,7 +1960,7 @@ impl Vm {
                     let po = self.ob(p as int);
                     if po.shape == i32_at(&self.mcache, k + 3) {
                         let f = slot_at(po, i32_at(&self.mcache, k + 4) as usize);
-                        if let VK::Obj(fo) = f.kind() {
+                        if let Some(fo) = f.as_obj() {
                             let fc = self.ob(fo).class;
                             if fc == C_FUNCTION || fc == C_NATIVE {
                                 self.rset((bp + w1) as usize, f);
@@ -2051,15 +2047,15 @@ impl Vm {
         }
         let a = *self.rget(bp, m.b as int);
         let mut r = Val::Undef();
-        if let (VK::Str(h), VK::Num(x)) = (t.kind(), a.kind()) {
+        if let (Some(h), Some(x)) = (t.as_str(), a.as_num()) {
             let u = self.char_unit(h, x);
             if u != -1.0 {
-                r = Val::Num(u);
+                r = Val::NumC(u);
             }
         }
-        if matches!(r.kind(), VK::Undef) {
+        if r.is_undef() {
             r = self.char_code_fast(&t, &a);
-            if matches!(r.kind(), VK::Undef) {
+            if r.is_undef() {
                 return -1;
             }
         }
@@ -2073,11 +2069,11 @@ impl Vm {
     #[inline(never)]
     fn r_get_method_more(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, v: Val, w3: int) {
         if w3 > MC_BASE && w3 <= -16 {
-            if matches!(v.kind(), VK::Str(_)) || matches!(v.kind(), VK::Num(_)) {
+            if v.is_str() || v.is_num() {
                 // a string's (number's) method: String.prototype's
                 // (Number.prototype's) slot -16 - w3, its key checked as an
                 // inline cache's
-                let sp = if matches!(v.kind(), VK::Num(_)) { self.number_proto } else { self.string_proto };
+                let sp = if v.is_num() { self.number_proto } else { self.string_proto };
                 let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
                 let slot = self.ic_slot(sp, atom, -16 - w3, false);
                 if slot >= 0 {
@@ -2088,7 +2084,7 @@ impl Vm {
                 }
             }
         }
-        if let VK::Obj(o) = v.kind() {
+        if let Some(o) = v.as_obj() {
             if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
                 // the cache's shape: o's own data property
                 let f = slot_at(self.ob(o), (w3 & 65535) as usize);
@@ -2105,7 +2101,7 @@ impl Vm {
                 let h = self.pic_probe(site, o);
                 if h != -1 && (h < 0 || i32_at(&self.pic, (self.pic_way + 4) as usize) == 0) {
                     let f = if h >= 0 { slot_at(self.ob(h), i32_at(&self.pic, (self.pic_way + 3) as usize) as usize) } else { Val::Undef() };
-                    let fun = if let VK::Obj(fo) = f.kind() { self.ob(fo).class == C_FUNCTION } else { false };
+                    let fun = if let Some(fo) = f.as_obj() { self.ob(fo).class == C_FUNCTION } else { false };
                     if fun || ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
                         self.rset((bp + w1) as usize, f);
                         self.rset((bp + w1 + 1) as usize, v);
@@ -2120,7 +2116,7 @@ impl Vm {
     /// Keeps a method found one prototype up (holder h, slot) in the
     /// site's mcache entry, taking a new entry the first time.
     fn mc_learn(&mut self, site: int, o: int, h: int, slot: i32, w3: int, f: &Val) {
-        let fun = if let VK::Obj(fo) = f.kind() { self.ob(fo).class == C_FUNCTION || self.ob(fo).class == C_NATIVE } else { false };
+        let fun = if let Some(fo) = f.as_obj() { self.ob(fo).class == C_FUNCTION || self.ob(fo).class == C_NATIVE } else { false };
         if !fun || slot < 0 {
             return;
         }
@@ -2146,7 +2142,7 @@ impl Vm {
         let atom = self.protos[pi].code[pc as usize].a as int;
         let mut f = Val::Undef();
         let mut done = false;
-        if let VK::Obj(o) = (&v).kind() {
+        if let Some(o) = (&v).as_obj() {
             let o = o;
             let slot = self.find(o, atom);
             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
@@ -2168,11 +2164,11 @@ impl Vm {
             }
         }
         if !done {
-            if matches!(v.kind(), VK::Str(_)) || (matches!(v.kind(), VK::Num(_)) && self.number_proto >= 0) {
+            if v.is_str() || (v.is_num() && self.number_proto >= 0) {
                 if atom != A_LENGTH {
                     // String.prototype's (Number.prototype's) own method:
                     // r_get_method's primitive path next time
-                    let sp = if matches!(v.kind(), VK::Num(_)) { self.number_proto } else { self.string_proto };
+                    let sp = if v.is_num() { self.number_proto } else { self.string_proto };
                     let slot = self.find(sp, atom);
                     if slot >= 0 && slot < 65536 && (self.attr_at(sp, slot) & P_ACCESSOR) == 0 && self.is_callable(&self.objs[sp as usize].get_slot(slot as usize)) {
                         self.rcode[(rb + pc) as usize].c = (-16 - slot) as i32;
@@ -2340,7 +2336,7 @@ impl Vm {
     /// threw (a derived constructor's).
     #[inline(never)]
     fn r_ret_construct(&mut self, v: &mut Val, fi: usize, pc: int) -> bool {
-        if !matches!((*v).kind(), VK::Undef) && self.protos[self.frames[fi].proto as usize].derived {
+        if !(*v).is_undef() && self.protos[self.frames[fi].proto as usize].derived {
             self.frames[fi].pc = pc + 1;
             self.throw_type("Derived constructors may only return object or undefined");
             return true;
@@ -2529,7 +2525,7 @@ impl Vm {
         if k == 1 && (self.protos[pi].code[pc as usize].code as int) == OP_TO_ARRAY {
             // destructuring a plain array: read in place (OP_TO_ARRAY's case)
             let v = *self.rget(bp, w2);
-            if let VK::Obj(o) = v.kind() {
+            if let Some(o) = v.as_obj() {
                 if self.array_iter_plain(o) {
                     self.stack[(bp + w1) as usize] = v;
                     return;
@@ -2549,8 +2545,8 @@ impl Vm {
             // `i in arr` for an element of a plain array: no stack trip
             let ov = self.rget(bp, w3).clone();
             let nv = self.rget(bp, w2).clone();
-            if let VK::Obj(o) = ov.kind() {
-                if let VK::Num(n) = nv.kind() {
+            if let Some(o) = ov.as_obj() {
+                if let Some(n) = nv.as_num() {
                     let i = n as int;
                     if (i as double) == n && i >= 0 && self.objs[o as usize].class == C_ARRAY && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                         self.stack[(bp + w1) as usize] = Val::Bool(true);
@@ -2653,7 +2649,7 @@ impl Vm {
         if code == OP_GET_PRIVATE && op.b != -2 && w1 > 0 {
             // obj.#x as an own data property (Vm::priv_get's first case)
             let top = (bp + w1 - 1) as usize;
-            if let VK::Obj(o) = self.stack[top].kind() {
+            if let Some(o) = self.stack[top].as_obj() {
                 let s = self.find(o, op.a as int);
                 if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
                     self.stack[top] = self.objs[o as usize].get_slot(s as usize);
@@ -2663,7 +2659,7 @@ impl Vm {
         } else if code == OP_SET_PRIVATE && op.c != 1 && w1 > 1 {
             // obj.#x = v for an own data property (Vm::priv_set's case)
             let top = (bp + w1 - 1) as usize;
-            if let VK::Obj(o) = (self.stack[top - 1]).kind() {
+            if let Some(o) = (self.stack[top - 1]).as_obj() {
                 let s = self.find(o, op.a as int);
                 if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
                     let val = self.stack[top];
@@ -2675,12 +2671,12 @@ impl Vm {
             }
         }
         if done {
-        } else if code == OP_TOSTR && w1 > 0 && !matches!((self.stack[(bp + w1 - 1) as usize]).kind(), VK::Obj(_)) {
+        } else if code == OP_TOSTR && w1 > 0 && !(self.stack[(bp + w1 - 1) as usize]).is_obj() {
             // a template's primitive substitution: as is (Vm::quick_op)
             done = true;
         } else if code == OP_BIGINT && w1 > 0 {
             let top = (bp + w1 - 1) as usize;
-            if let VK::Str(h) = self.stack[top].kind() {
+            if let Some(h) = self.stack[top].as_str() {
                 let n = crate::bigint::small_big_of(self.sref(h));
                 if n < crate::bigint::small_big_limit() {
                     self.stack[top] = self.bigint_small(n);
@@ -2755,7 +2751,7 @@ impl Vm {
             let t = *val_at(&self.stack, (bp - 1) as usize);
             if strict || is_obj(&t) {
                 t
-            } else if matches!(t.kind(), VK::Undef) {
+            } else if t.is_undef() {
                 // a plain call f(): the global object, no call out
                 Val::Obj(self.global)
             } else {
@@ -2801,7 +2797,7 @@ impl Vm {
     /// undefined, a wrapper for a primitive.
     #[inline(never)]
     fn sloppy_this(&mut self, t: Val) -> Val {
-        if matches!(t.kind(), VK::Undef) || matches!(t.kind(), VK::Null) {
+        if t.is_undef() || t.is_null() {
             return Val::Obj(self.global);
         }
         let bo = self.to_object(&t);
@@ -2862,24 +2858,28 @@ impl Vm {
     #[inline(always)]
     fn fast_cmp(&self, code: int, a: &Val, b: &Val) -> int {
         let eq: int = if code == OP_SEQ || code == OP_SNE {
-            match (a.kind(), b.kind()) {
-                (VK::Num(x), VK::Num(y)) => if x == y { 1 } else { 0 },
-                (VK::Obj(x), VK::Obj(y)) => if x == y { 1 } else { 0 },
-                (VK::Big(x), VK::Big(y)) => if x == y { 1 } else { 0 },
-                (VK::Undef, VK::Undef) | (VK::Null, VK::Null) => 1,
-                (VK::Bool(x), VK::Bool(y)) => if x == y { 1 } else { 0 },
-                (VK::Str(x), VK::Str(y)) => if x == y || self.sref(x) == self.sref(y) { 1 } else { 0 },
-                _ => 0,
+            let q = crate::value::seq_quick(a, b);
+            if q != 2 {
+                q
+            } else {
+                match (a.kind(), b.kind()) {
+                    (VK::Str(x), VK::Str(y)) => if x == y || self.sref(x) == self.sref(y) { 1 } else { 0 },
+                    _ => 0,
+                }
             }
         } else if code == OP_EQ || code == OP_NE {
-            match (a.kind(), b.kind()) {
-                (VK::Undef, VK::Undef) | (VK::Null, VK::Null) | (VK::Undef, VK::Null) | (VK::Null, VK::Undef) => 1,
-                (VK::Undef, VK::Obj(_)) | (VK::Null, VK::Obj(_)) | (VK::Obj(_), VK::Undef) | (VK::Obj(_), VK::Null) => 0,
-                (VK::Undef, VK::Num(_)) | (VK::Null, VK::Num(_)) | (VK::Num(_), VK::Undef) | (VK::Num(_), VK::Null) => 0,
-                (VK::Undef, VK::Str(_)) | (VK::Null, VK::Str(_)) | (VK::Str(_), VK::Undef) | (VK::Str(_), VK::Null) => 0,
-                (VK::Undef, VK::Bool(_)) | (VK::Null, VK::Bool(_)) | (VK::Bool(_), VK::Undef) | (VK::Bool(_), VK::Null) => 0,
-                (VK::Str(x), VK::Str(y)) => if x == y || self.sref(x) == self.sref(y) { 1 } else { 0 },
-                _ => -1,
+            if a.is_nullish() || b.is_nullish() {
+                if a.is_nullish() && b.is_nullish() {
+                    1
+                } else if a.is_big() || b.is_big() {
+                    -1
+                } else {
+                    0
+                }
+            } else if let (Some(x), Some(y)) = (a.as_str(), b.as_str()) {
+                if x == y || self.sref(x) == self.sref(y) { 1 } else { 0 }
+            } else {
+                -1
             }
         } else {
             -1
@@ -2910,7 +2910,7 @@ impl Vm {
     pub fn rcompare(&mut self, code: int, _pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
         let mut num = false;
         let mut r = false;
-        if let (VK::Num(a), VK::Num(b)) = ((self.rget(bp, x)).kind(), (self.rget(bp, y)).kind()) {
+        if let (Some(a), Some(b)) = ((self.rget(bp, x)).as_num(), (self.rget(bp, y)).as_num()) {
             num = true;
             r = match code {
                 OP_LT => a < b,

@@ -153,10 +153,7 @@ fn get_str(r: &mut Reader, texts: &Vec<Rc<String>>) -> String {
 }
 
 fn in_objs(v: &Val, no: int) -> bool {
-    match v.kind() {
-        VK::Obj(o) => o >= 0 && o < no,
-        _ => true,
-    }
+    if let Some(o) = v.as_obj() { o >= 0 && o < no } else { true }
 }
 
 /// The engine's state as text; "" when it is not idle (a script running,
@@ -531,17 +528,14 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
         while k < nn && !r.bad {
             let x = get_val(&mut r, &strs);
             has_cold = true;
-            cold.nums.push(match x.kind() {
-                VK::Num(d) => d,
-                _ => 0.0,
-            });
+            cold.nums.push(if let Some(d) = x.as_num() { d } else { 0.0 });
             k += 1;
         }
         o.func = r.num() as i32;
         o.env = r.num() as i32;
         cold.prim = get_val(&mut r, &strs);
         cold.home = r.num();
-        if !matches!(cold.prim.kind(), VK::Undef) || cold.home != -1 {
+        if !cold.prim.is_undef() || cold.home != -1 {
             has_cold = true;
         }
         o.pos = r.num() as i32;
@@ -745,7 +739,7 @@ pub fn restore(vm: &mut Vm, text: &str) -> bool {
             let mut j: usize = 0;
             while j < vm.evecs[e].v.len() && j < vm.colds[c].marks.len() {
                 if vm.colds[c].marks[j] == 0 {
-                    if let VK::Str(h) = (&vm.evecs[e].v[j]).kind() {
+                    if let Some(h) = (&vm.evecs[e].v[j]).as_str() {
                         let hash = jsstr::str_hash(vm.sref(h));
                         vm.stab_add(o as int, j as int, hash);
                     }

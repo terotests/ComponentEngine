@@ -12,13 +12,10 @@ use crate::vm::*;
 
 impl Vm {
     fn this_array(&mut self, this: &Val) -> int {
-        match this.kind() {
-            VK::Obj(o) => o,
-            _ => {
+        if let Some(o) = this.as_obj() { o } else {
                 let o = self.to_object(this);
                 o
             }
-        }
     }
 
     /// HasProperty(o, k) for an index: an element in place, else the
@@ -75,7 +72,7 @@ impl Vm {
         }
         for it in items {
             if depth >= 1.0 {
-                if let VK::Obj(o) = (&it).kind() {
+                if let Some(o) = (&it).as_obj() {
                     if self.objs[o as usize].class == C_ARRAY {
                         let inner = self.evecs[self.objs[o as usize].elems as usize].v.clone();
                         self.flatten_into(out, inner, depth - 1.0);
@@ -165,13 +162,13 @@ impl Vm {
                 Val::Obj(a)
             }
             NF_A_FROM => {
-                if matches!(a0.kind(), VK::Undef) || matches!(a0.kind(), VK::Null) {
+                if a0.is_undef() || a0.is_null() {
                     self.throw_type("Array.from requires an array-like object");
                     return Val::Undef();
                 }
                 let has_iter = {
                     let f = self.get(&a0, A_ITERATOR);
-                    self.is_callable(&f) || matches!(a0.kind(), VK::Str(_))
+                    self.is_callable(&f) || a0.is_str()
                 };
                 let items = if has_iter { self.iterable_to_vec(&a0) } else { self.array_like_to_vec(&a0) };
                 if self.throwing {
@@ -320,7 +317,7 @@ impl Vm {
                     total += self.evecs[self.objs[o as usize].elems as usize].v.len();
                 }
                 for a in args.iter() {
-                    if let VK::Obj(x) = (&a).kind() {
+                    if let Some(x) = (&a).as_obj() {
                         if self.objs[x as usize].class == C_ARRAY {
                             total += self.evecs[self.objs[x as usize].elems as usize].v.len();
                         }
@@ -337,7 +334,7 @@ impl Vm {
                     out = self.elems_of(o);
                 }
                 for a in args.iter() {
-                    if let VK::Obj(x) = (&a).kind() {
+                    if let Some(x) = (&a).as_obj() {
                         if self.objs[x as usize].class == C_ARRAY {
                             let e = self.objs[x as usize].elems as usize;
                             elems_append(&mut out, &self.evecs[e]);
@@ -351,7 +348,7 @@ impl Vm {
             }
             NF_AP_JOIN => {
                 let o = self.this_array(&this);
-                let sep = if matches!(a0.kind(), VK::Undef) { String::from(",") } else { self.to_string(&a0) };
+                let sep = if a0.is_undef() { String::from(",") } else { self.to_string(&a0) };
                 let mut seen: Vec<int> = Vec::new();
                 let s = self.array_join(o, sep.as_str(), &mut seen);
                 self.string_val(s)
@@ -439,14 +436,14 @@ impl Vm {
                 }
                 // a number in a plain array: the elements compared in place
                 if plain && i >= 0 {
-                    if let VK::Num(x) = a0.kind() {
+                    if let Some(x) = a0.as_num() {
                         if x == x {
                             let e = self.objs[o as usize].elems as usize;
                             let n = self.evecs[e].v.len() as int;
                             let end = if n < len { n } else { len };
                             let mut k = i;
                             while k < end {
-                                if let VK::Num(y) = (self.evecs[e].v[k as usize]).kind() {
+                                if let Some(y) = (self.evecs[e].v[k as usize]).as_num() {
                                     if y == x {
                                         return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(k as double) };
                                     }
@@ -457,7 +454,7 @@ impl Vm {
                         }
                     }
                     // a string: handles, then lengths, then text
-                    if let VK::Str(h) = a0.kind() {
+                    if let Some(h) = a0.as_str() {
                         let e = self.objs[o as usize].elems as usize;
                         let n = self.evecs[e].v.len() as int;
                         let end = if n < len { n } else { len };
@@ -465,7 +462,7 @@ impl Vm {
                         let nb = needle.as_bytes().len();
                         let mut k = i;
                         while k < end {
-                            if let VK::Str(h2) = (self.evecs[e].v[k as usize]).kind() {
+                            if let Some(h2) = (self.evecs[e].v[k as usize]).as_str() {
                                 let st = &self.strs[h2 as usize];
                                 let l2 = if st.up < 0 { st.s.as_bytes().len() } else { st.len as usize };
                                 if h2 == h || (l2 == nb && self.sref(h2) == needle) {
@@ -534,7 +531,7 @@ impl Vm {
                     match id {
                         NF_AP_MAP => out.push(r),
                         NF_AP_FLATMAP => {
-                            if let VK::Obj(x) = (&r).kind() {
+                            if let Some(x) = (&r).as_obj() {
                                 if self.objs[x as usize].class == C_ARRAY {
                                     let items = self.evecs[self.objs[x as usize].elems as usize].v.clone();
                                     for it in items {
@@ -652,7 +649,7 @@ impl Vm {
                 // and their scopes) is collected while the sort runs
                 let top = self.nat_top;
                 let o = self.this_array(&this);
-                if !matches!(a0.kind(), VK::Undef) && !self.is_callable(&a0) {
+                if !a0.is_undef() && !self.is_callable(&a0) {
                     self.throw_type("The comparison function must be either a function or undefined");
                     return Val::Undef();
                 }
@@ -787,7 +784,7 @@ impl Vm {
             }
             NF_AP_FLAT => {
                 let o = self.this_array(&this);
-                let depth = if matches!(a0.kind(), VK::Undef) { 1.0 } else { to_integer(self.to_number(&a0)) };
+                let depth = if a0.is_undef() { 1.0 } else { to_integer(self.to_number(&a0)) };
                 let items = self.elems_of(o);
                 let mut out: Vec<Val> = Vec::new();
                 self.flatten_into(&mut out, items, depth);
@@ -882,7 +879,7 @@ impl Vm {
             NF_SP_CHARAT | NF_SP_CHARCODEAT | NF_SP_CODEPOINTAT | NF_SP_AT => {
                 // an ASCII string value: the unit off its handle (no copy
                 // of a prefix, no scan of a string that grew in place)
-                if let (VK::Str(h), VK::Num(x)) = (this.kind(), a0.kind()) {
+                if let (Some(h), Some(x)) = (this.as_str(), a0.as_num()) {
                     let mut i = to_integer(x);
                     if id == NF_SP_AT && i < 0.0 {
                         i += self.hlen(h) as double;
@@ -961,7 +958,7 @@ impl Vm {
                     if self.throwing {
                         return Val::Undef();
                     }
-                    let is_re = if matches!(m.kind(), VK::Undef) { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
+                    let is_re = if m.is_undef() { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
                     if is_re {
                         let what = if id == NF_SP_INCLUDES { "includes" } else if id == NF_SP_STARTSWITH { "startsWith" } else { "endsWith" };
                         self.throw_type(format!("First argument to String.prototype.{} must not be a regular expression", what).as_str());
@@ -969,7 +966,7 @@ impl Vm {
                     }
                 }
                 let p = self.to_str(&a0);
-                if (id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && matches!(a1.kind(), VK::Undef) {
+                if (id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && a1.is_undef() {
                     // no position: an ASCII text compared as bytes
                     let q = ascii_affix(s.as_str(), p.as_str(), id == NF_SP_ENDSWITH);
                     if q >= 0 {
@@ -1043,7 +1040,7 @@ impl Vm {
                 }
                 let len = self.str_len(&s);
                 let a = self.rel_index(&a0, len, 0);
-                let n = if matches!(a1.kind(), VK::Undef) { len - a } else { to_integer(self.to_number(&a1)) as int };
+                let n = if a1.is_undef() { len - a } else { to_integer(self.to_number(&a1)) as int };
                 if n <= 0 {
                     return self.str_val("");
                 }
@@ -1055,7 +1052,7 @@ impl Vm {
             }
             NF_SP_LOWER => {
                 let s = self.this_str(&this);
-                if let VK::Str(_) = this.kind() {
+                if let Some(_) = this.as_str() {
                     // already lower case: the same string, nothing made
                     if jsstr::ascii_lower(s.as_str()) {
                         return this;
@@ -1103,7 +1100,7 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef();
                 }
-                let form = if matches!(a0.kind(), VK::Undef) { String::from("NFC") } else { self.to_str(&a0).as_str().to_string() };
+                let form = if a0.is_undef() { String::from("NFC") } else { self.to_str(&a0).as_str().to_string() };
                 if self.throwing {
                     return Val::Undef();
                 }
@@ -1137,7 +1134,7 @@ impl Vm {
                     a0.clone()
                 } else {
                     let flags = if id == NF_SP_MATCHALL { self.str_val("g") } else { Val::Undef() };
-                    let src = if matches!(a0.kind(), VK::Undef) {
+                    let src = if a0.is_undef() {
                         Val::Undef()
                     } else {
                         let t = self.to_str(&a0);
@@ -1168,11 +1165,11 @@ impl Vm {
                     let co = obj_of(&copy);
                     loop {
                         let m = self.regexp_exec(co, &s);
-                        if matches!(m.kind(), VK::Null) {
+                        if m.is_null() {
                             break;
                         }
                         let m0 = self.get_index(&m, 0);
-                        if let VK::Str(ms) = (&m0).kind() {
+                        if let Some(ms) = (&m0).as_str() {
                             let ms = self.sget(ms.clone());
                             if ms.is_empty() {
                                 let li = self.get_obj(co, A_LASTINDEX, &copy);
@@ -1190,7 +1187,7 @@ impl Vm {
                     return Val::Obj(it);
                 }
                 if !global {
-                    let inp = if let VK::Str(_) = this.kind() { this } else { Val::Undef() };
+                    let inp = if let Some(_) = this.as_str() { this } else { Val::Undef() };
                     return self.regexp_exec_in(ro, &s, inp, true);
                 }
                 let units = self.rx_take(&s);
@@ -1239,7 +1236,7 @@ impl Vm {
             NF_SP_PADSTART | NF_SP_PADEND => {
                 let s = self.this_str(&this);
                 let target_d = to_integer(self.to_number(&a0));
-                let fill = if matches!(a1.kind(), VK::Undef) { String::from(" ") } else { self.to_string(&a1) };
+                let fill = if a1.is_undef() { String::from(" ") } else { self.to_string(&a1) };
                 let len = jsstr::len(s.as_str());
                 if target_d > (len as double) && !fill.is_empty() && self.str_too_long((s.as_bytes().len() as double) + target_d - (len as double)) {
                     return Val::Undef();
@@ -1313,10 +1310,7 @@ impl Vm {
             }
             // ---- Number / Boolean
             NF_N_ISINTEGER | NF_N_ISSAFEINTEGER | NF_N_ISFINITE | NF_N_ISNAN => {
-                let n = match a0.kind() {
-                    VK::Num(x) => x,
-                    _ => return Val::Bool(false),
-                };
+                let n = if let Some(x) = a0.as_num() { x } else { return Val::Bool(false) };
                 Val::Bool(match id {
                     NF_N_ISINTEGER => is_finite(n) && n == to_integer(n),
                     NF_N_ISSAFEINTEGER => is_finite(n) && n == to_integer(n) && n.abs() <= 9007199254740991.0,
@@ -1333,7 +1327,7 @@ impl Vm {
                 if self.throwing {
                     return Val::Undef();
                 }
-                let radix = if matches!(a0.kind(), VK::Undef) { 10 } else { to_integer(self.to_number(&a0)) as int };
+                let radix = if a0.is_undef() { 10 } else { to_integer(self.to_number(&a0)) as int };
                 if radix < 2 || radix > 36 {
                     self.throw_range("toString() radix must be between 2 and 36");
                     return Val::Undef();
@@ -1351,7 +1345,7 @@ impl Vm {
             }
             NF_NP_TOPRECISION => {
                 let n = self.this_num(&this);
-                if matches!(a0.kind(), VK::Undef) {
+                if a0.is_undef() {
                     return self.string_val(number_to_string(n));
                 }
                 let p = to_integer(self.to_number(&a0)) as int;
@@ -1366,14 +1360,14 @@ impl Vm {
             }
             NF_NP_TOEXPONENTIAL => {
                 let n = self.this_num(&this);
-                let fd = if matches!(a0.kind(), VK::Undef) { -1.0 } else { to_integer(self.to_number(&a0)) };
+                let fd = if a0.is_undef() { -1.0 } else { to_integer(self.to_number(&a0)) };
                 if self.throwing {
                     return Val::Undef();
                 }
                 if !is_finite(n) {
                     return self.string_val(number_to_string(n));
                 }
-                if !matches!(a0.kind(), VK::Undef) && (fd < 0.0 || fd > 100.0) {
+                if !a0.is_undef() && (fd < 0.0 || fd > 100.0) {
                     self.throw_range("toExponential() argument must be between 0 and 100");
                     return Val::Undef();
                 }
@@ -1406,18 +1400,14 @@ impl Vm {
                     }
                 }
                 let sp = arg(&args, 2);
-                let gap = match (&sp).kind() {
-                    VK::Num(n) => {
+                let gap = if let Some(n) = (&sp).as_num() {
                         let k = if n > 10.0 { 10 } else { n as int };
                         " ".repeat(if k > 0 { k as usize } else { 0 })
-                    }
-                    VK::Str(s) => {
+                    } else if let Some(s) = (&sp).as_str() {
                         let s = self.sget(s.clone());
                         let t = s.as_ref().clone();
                         jsstr::slice(t.as_str(), 0, 10)
-                    }
-                    _ => String::new(),
-                };
+                    } else { String::new() };
                 let holder = self.new_object();
                 self.add_own(holder, self.atom_lookup(""), a0.clone(), 0);
                 let mut out = String::new();
@@ -1478,14 +1468,14 @@ impl Vm {
                     if self.throwing {
                         return Val::Undef();
                     }
-                    is_re = if matches!(m.kind(), VK::Undef) { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
+                    is_re = if m.is_undef() { self.class_of(&a0) == C_REGEXP } else { self.truthy_v(&m) };
                 }
-                if !construct && is_re && matches!(a1.kind(), VK::Undef) {
+                if !construct && is_re && a1.is_undef() {
                     let pc = self.get(&a0, A_CONSTRUCTOR);
                     if self.throwing {
                         return Val::Undef();
                     }
-                    if let VK::Obj(c) = pc.kind() {
+                    if let Some(c) = pc.as_obj() {
                         if c == fobj {
                             return a0;
                         }
@@ -1493,7 +1483,7 @@ impl Vm {
                 }
                 let (src, fl) = if self.class_of(&a0) == C_REGEXP {
                     let src = self.colds[self.objs[obj_of(&a0) as usize].cold as usize].prim.clone();
-                    let fl = if matches!(a1.kind(), VK::Undef) { self.string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
+                    let fl = if a1.is_undef() { self.string_val(self.regexp_flags(obj_of(&a0))) } else { a1 };
                     (src, fl)
                 } else if is_re {
                     let a_source = self.atom_lookup("source");
@@ -1501,7 +1491,7 @@ impl Vm {
                     if self.throwing {
                         return Val::Undef();
                     }
-                    let fl = if matches!(a1.kind(), VK::Undef) {
+                    let fl = if a1.is_undef() {
                         let a_flags = self.atom_lookup("flags");
                         self.get(&a0, a_flags)
                     } else {
@@ -1541,10 +1531,10 @@ impl Vm {
                     return Val::Undef();
                 }
                 let s = self.to_str(&a0);
-                let inp = if let VK::Str(_) = a0.kind() { a0 } else { Val::Undef() };
+                let inp = if let Some(_) = a0.as_str() { a0 } else { Val::Undef() };
                 let m = self.regexp_exec_in(ro, &s, inp, id != NF_RP_TEST);
                 if id == NF_RP_TEST {
-                    return Val::Bool(!matches!(m.kind(), VK::Null));
+                    return Val::Bool(!m.is_null());
                 }
                 m
             }
@@ -1560,7 +1550,7 @@ impl Vm {
                 if ro >= 0 && self.objs[ro as usize].class == C_REGEXP {
                     let ix = self.objs[ro as usize].func as int;
                     let shown = self.regex_shown_at(ix);
-                    if !matches!(shown.kind(), VK::Undef) {
+                    if !shown.is_undef() {
                         return shown;
                     }
                     return self.colds[self.objs[ro as usize].cold as usize].prim.clone();
@@ -1589,13 +1579,10 @@ impl Vm {
                 } else if args.len() == 1 {
                     match (&a0).kind() {
                         VK::Str(s) => Vm::parse_date(self.sref(s)),
-                        VK::Obj(o) if self.objs[o as usize].class == C_DATE => match (self.colds[self.objs[o as usize].cold as usize].prim).kind() {
-                            VK::Num(n) => n,
-                            _ => nan(),
-                        },
+                        VK::Obj(o) if self.objs[o as usize].class == C_DATE => if let Some(n) = (self.colds[self.objs[o as usize].cold as usize].prim).as_num() { n } else { nan() },
                         _ => {
                             let p = self.to_primitive(&a0, "default");
-                            if let VK::Str(s) = (&p).kind() {
+                            if let Some(s) = (&p).as_str() {
                                 let s = self.sget(s.clone());
                                 Vm::parse_date(s.as_str())
                             } else {
@@ -1681,7 +1668,7 @@ impl Vm {
                     // weak: keys must be objects
                     self.objs[m as usize].func = 1;
                 }
-                if !matches!(a0.kind(), VK::Undef) && !matches!(a0.kind(), VK::Null) {
+                if !a0.is_undef() && !a0.is_null() {
                     // the adder, as the constructor reads it: a replaced
                     // set / add is called for each entry
                     let adder_atom = self.intern(if is_map { "set" } else { "add" });
@@ -1754,7 +1741,7 @@ impl Vm {
                         }
                         // canonical key: -0 is +0
                         let mut k = a0.clone();
-                        if let VK::Num(n) = k.kind() {
+                        if let Some(n) = k.as_num() {
                             if n == 0.0 {
                                 k = Val::Num(0.0);
                             }
@@ -1939,7 +1926,7 @@ impl Vm {
     }
 
     fn rel_index_pos(&mut self, v: &Val, len: int, dflt: int) -> int {
-        if matches!(v.kind(), VK::Undef) {
+        if v.is_undef() {
             return dflt;
         }
         let n = to_integer(self.to_number(v));

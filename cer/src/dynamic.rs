@@ -64,21 +64,21 @@ impl Vm {
         self.add_prop(gf, A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
         let fc = self.get_obj(self.global, self.atom_lookup("Function"), &Val::Obj(self.global));
-        if let VK::Obj(f) = fc.kind() {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(gf, f);
         }
         let agfp = self.async_generator_function_proto;
         let agf = self.native_fn("AsyncGeneratorFunction", NF_ASYNC_GENERATOR_FUNCTION, 1);
         self.add_prop(agf, A_PROTOTYPE, Val::Obj(agfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(agfp, A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
-        if let VK::Obj(f) = fc.kind() {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(agf, f);
         }
         let afp = self.async_function_proto;
         let af = self.native_fn("AsyncFunction", NF_ASYNC_FUNCTION, 1);
         self.add_prop(af, A_PROTOTYPE, Val::Obj(afp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(afp, A_CONSTRUCTOR, Val::Obj(af), P_HIDDEN | P_READONLY);
-        if let VK::Obj(f) = fc.kind() {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(af, f);
         }
     }
@@ -324,12 +324,12 @@ impl Vm {
             return if p >= 0 { Val::Obj(p) } else { Val::Null() };
         }
         if id == NF_PROTO_SET {
-            if matches!(this.kind(), VK::Undef) || matches!(this.kind(), VK::Null) {
+            if this.is_undef() || this.is_null() {
                 self.throw_type("Object.prototype.__proto__ called on null or undefined");
                 return Val::Undef();
             }
             let o = obj_of(&this);
-            if o < 0 || !(is_obj(&a0) || matches!(a0.kind(), VK::Null)) {
+            if o < 0 || !(is_obj(&a0) || a0.is_null()) {
                 return Val::Undef();
             }
             let p = obj_of(&a0);
@@ -362,7 +362,7 @@ impl Vm {
                 let f = self.get(&a0, self.atom_lookup("flags"));
                 (s, f)
             } else {
-                (if matches!(a0.kind(), VK::Undef) { self.str_val("") } else { a0.clone() }, a1)
+                (if a0.is_undef() { self.str_val("") } else { a0.clone() }, a1)
             };
             let fresh = self.new_regexp(&src, &fl);
             if self.throwing {
@@ -419,7 +419,7 @@ impl Vm {
             if args.is_empty() {
                 return Val::Undef();
             }
-            if let VK::Str(s) = (&args[0]).kind() {
+            if let Some(s) = (&args[0]).as_str() {
                 let s = self.sget(s.clone());
                 let src = s.as_ref().clone();
                 // an indirect eval is sloppy global code (pcomp calls a
