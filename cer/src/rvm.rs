@@ -60,7 +60,9 @@ impl Vm {
     pub fn env_of(&self, fi: usize, depth: int) -> int {
         let mut e = self.frames[fi].env;
         let mut d = depth;
-        while d > 0 {
+        // past the outermost scope: -1 (only code no compiler writes, a
+        // damaged code cache unit, gets there; env_slot answers undefined)
+        while d > 0 && e >= 0 {
             e = self.ob(e).proto as int;
             d -= 1;
         }
@@ -86,14 +88,22 @@ impl Vm {
         -1
     }
 
-    /// Slot `k` of scope `e`, unchecked: the compiler resolved it against
-    /// the scope the closure was made in.
+    /// Slot `k` of scope `e`: the compiler resolved it against the scope
+    /// the closure was made in; a scope or slot that is not there (code no
+    /// compiler writes) reads as undefined.
     #[inline(always)]
     pub fn env_slot(&self, e: int, k: int) -> Val {
+        if e < 0 {
+            return Val::Undef;
+        }
         let ev = self.ob(e).elems as usize;
         // a scope gets its slots when it is made (renter, PUSH_ENV) and
         // keeps them while a closure or frame refers to it
-        *val_at(&evec_at(&self.evecs, ev).v, k as usize)
+        let v = &evec_at(&self.evecs, ev).v;
+        if (k as usize) >= v.len() {
+            return Val::Undef;
+        }
+        *val_at(v, k as usize)
     }
 
     /// Slot `k` of scope `e` takes `v` (Vm::put_elem unchecked, as
@@ -101,7 +111,14 @@ impl Vm {
     /// the heap.
     #[inline(always)]
     pub fn env_put(&mut self, e: int, k: int, v: Val) {
+        if e < 0 {
+            return;
+        }
         let ev = self.ob(e).elems as usize;
+        if (k as usize) >= evec_at(&self.evecs, ev).v.len() {
+            // as env_slot: not a slot of the scope
+            return;
+        }
         let old = *val_at(&evec_at(&self.evecs, ev).v, k as usize);
         if is_heap(&v) || is_heap(&old) {
             self.put_elem(e, k, v);
@@ -151,14 +168,14 @@ impl Vm {
     /// -1 the time slice ended (the frame is stopped), -2 an op threw (the
     /// frame's pc is set), -3 frames changed (go on with the top one).
     pub fn jit_go(&mut self, pi: usize, bp: int, fi: usize, pc: int, head: bool) -> int {
-        let budget = if self.slicing { SLICE_TICKS } else { 1073741824 };
+        let budget = if self.checking { SLICE_TICKS } else { 1073741824 };
         let r = jit_enter(self, pi, bp, pc, budget, head);
         if r >= 0 || r == -2 || r == -3 {
             return r;
         }
         // the budget ran out: read the clock at this back edge
         let at = -4 - r;
-        if self.slicing {
+        if self.checking {
             self.ticks = 1;
             if self.brk(fi, at) {
                 return -1;
@@ -331,6 +348,14 @@ impl Vm {
 
     /// Runs frames until the frame count falls back to `base`.
     pub fn rrun(&mut self, base: int) {
+        self.rrun_loop(base);
+        if self.terminated && self.throwing {
+            // stopped at a branch past the deadline: the frames go
+            self.unwind(base);
+        }
+    }
+
+    fn rrun_loop(&mut self, base: int) {
         self.check_native_stack();
         'frames: loop {
             if self.throwing {
@@ -341,7 +366,7 @@ impl Vm {
             if (self.frames.len() as int) <= base {
                 return;
             }
-            if self.slicing && self.frame_brk() {
+            if self.checking && self.frame_brk() {
                 return;
             }
             let mut fi = self.frames.len() - 1;
@@ -424,8 +449,9 @@ impl Vm {
                             let (a, b) = (*x, *y);
                             let r = if code >= OP_BAND && code <= OP_USHR {
                                 bit_fast(code, a, b)
-                            } else if code == OP_MOD && a >= 0.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
-                                // whole non-negative int32s: an int remainder
+                            } else if code == OP_MOD && a >= 1.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
+                                // whole positive int32s: an int remainder (a 0
+                                // keeps its sign in arith_num: -0 % 5 is -0)
                                 let p = a as int;
                                 let q = b as int;
                                 (p % q) as double
@@ -471,7 +497,7 @@ impl Vm {
                                 }
                             }
                             npc = (w3 as int);
-                            if self.slicing && self.brk(fi, npc) {
+                            if self.checking && self.brk(fi, npc) {
                                 return;
                             }
                         }
@@ -508,7 +534,7 @@ impl Vm {
                         }
                         let back = (t as int) <= pc;
                         pc = (t as int);
-                        if self.slicing && self.brk(fi, pc) {
+                        if self.checking && self.brk(fi, pc) {
                             return;
                         }
                         if back && self.jit_on {
@@ -530,7 +556,7 @@ impl Vm {
                             self.rgc(want);
                         }
                         pc = (w1 as int);
-                        if self.slicing && self.brk(fi, pc) {
+                        if self.checking && self.brk(fi, pc) {
                             return;
                         }
                         if back && self.jit_on {
@@ -550,7 +576,7 @@ impl Vm {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         }
@@ -561,7 +587,7 @@ impl Vm {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         }
@@ -570,7 +596,7 @@ impl Vm {
                     R_JT => {
                         if self.truthy_v(self.rget(bp, (w1 as int))) {
                             pc = (w2 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         } else {
@@ -602,7 +628,7 @@ impl Vm {
                             self.stack[(bp + ((w1 & 65535) as int)) as usize] = Val::Bool(r);
                             if r == (((w0 & 255) as int) == R_CMP_JTK) {
                                 npc = ((w1 >> 16 as int) as int);
-                                if self.slicing && self.brk(fi, npc) {
+                                if self.checking && self.brk(fi, npc) {
                                     return;
                                 }
                             }
@@ -613,7 +639,7 @@ impl Vm {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         }
@@ -622,7 +648,7 @@ impl Vm {
                     R_JT_KEEP => {
                         if self.truthy_v(self.rget(bp, (w1 as int))) {
                             pc = (w2 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         } else {
@@ -645,7 +671,7 @@ impl Vm {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         }
@@ -666,7 +692,7 @@ impl Vm {
                                 }
                             }
                             pc = (w3 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         } else {
@@ -681,7 +707,7 @@ impl Vm {
                         }
                         if hit {
                             pc = (w3 as int);
-                            if self.slicing && self.brk(fi, pc) {
+                            if self.checking && self.brk(fi, pc) {
                                 return;
                             }
                         } else {
@@ -702,7 +728,7 @@ impl Vm {
                             t = self.rtab[(w2 + 1 + (self.rtab[w2 as usize] as int)) as usize];
                         }
                         pc = t;
-                        if self.slicing && self.brk(fi, pc) {
+                        if self.checking && self.brk(fi, pc) {
                             return;
                         }
                         continue;
@@ -711,7 +737,7 @@ impl Vm {
                         let r = self.rcmp(OP_SEQ, pi, bp, (w1 as int), (w2 as int), fi, pc);
                         if r && !self.throwing {
                             npc = (w3 as int);
-                            if self.slicing && self.brk(fi, npc) {
+                            if self.checking && self.brk(fi, npc) {
                                 return;
                             }
                         }
@@ -957,7 +983,7 @@ impl Vm {
                                 want = (bp + proto_at(&self.protos, pi).fsize) as usize;
                                 rb = proto_at(&self.protos, pi).rbase;
                                 cp = code_at(&self.rcode, rb);
-                                if self.slicing && self.frame_brk() {
+                                if self.checking && self.frame_brk() {
                                     return;
                                 }
                                 continue;
@@ -1022,7 +1048,7 @@ impl Vm {
                             want = (bp + self.protos[pi].fsize) as usize;
                             rb = self.protos[pi].rbase;
                             cp = code_at(&self.rcode, rb);
-                            if self.slicing && self.frame_brk() {
+                            if self.checking && self.frame_brk() {
                                 return;
                             }
                             continue;
@@ -1071,7 +1097,7 @@ impl Vm {
                             // the caller's slot of f or a register of its frame
                             val_put(&mut self.stack, to, v);
                             self.grow_stack(want);
-                            if self.slicing && self.frame_brk() {
+                            if self.checking && self.frame_brk() {
                                 return;
                             }
                             if self.jit_on && ((rb + pc) as usize) < self.jit_res.len() && self.jit_res[(rb + pc) as usize] {
@@ -1130,7 +1156,7 @@ impl Vm {
                     R_ITER_NEXT => {
                         if !self.r_iter_next(bp, fi, pc, (w1 as int), (w3 as int)) && !self.throwing {
                             npc = (w2 as int);
-                            if self.slicing && self.brk(fi, npc) {
+                            if self.checking && self.brk(fi, npc) {
                                 return;
                             }
                         }
@@ -1327,7 +1353,7 @@ impl Vm {
                             continue 'frames;
                         }
                         npc = p2;
-                        if npc != pc + 1 + ((w0 >> 16) as int) && self.slicing && self.brk(fi, npc) {
+                        if npc != pc + 1 + ((w0 >> 16) as int) && self.checking && self.brk(fi, npc) {
                             return;
                         }
                     }

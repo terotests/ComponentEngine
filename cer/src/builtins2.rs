@@ -186,6 +186,9 @@ impl Vm {
             if i > 0 {
                 jsstr::push_js(&mut out, sep);
             }
+            if (i & 8191) == 8191 && self.poll(131072) {
+                return String::new();
+            }
             if (out.as_bytes().len() as int) > MAX_STR_BYTES {
                 self.throw_range("Invalid string length");
                 return String::new();
@@ -494,6 +497,9 @@ impl Vm {
                         len - 1
                     };
                     while i >= 0 {
+                        if (i & 0xffff) == 0 && self.poll(0x10000) {
+                            return Val::Undef;
+                        }
                         let v = if plain && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) {
                             self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
                         } else {
@@ -526,6 +532,9 @@ impl Vm {
                             let end = if n < len { n } else { len };
                             let mut k = i;
                             while k < end {
+                                if (k & 0xffff) == 0 && self.poll(0x10000) {
+                                    return Val::Undef;
+                                }
                                 if let Val::Num(y) = self.evecs[e].v[k as usize] {
                                     if y == x {
                                         return if id == NF_AP_INCLUDES { Val::Bool(true) } else { Val::Num(k as double) };
@@ -545,6 +554,9 @@ impl Vm {
                         let nb = needle.as_bytes().len();
                         let mut k = i;
                         while k < end {
+                            if (k & 0xffff) == 0 && crate::builtins::time_up(0x10000) {
+                                break;
+                            }
                             if let Val::Str(h2) = self.evecs[e].v[k as usize] {
                                 let st = &self.strs[h2 as usize];
                                 let l2 = if st.up < 0 { st.s.as_bytes().len() } else { st.len as usize };
@@ -554,10 +566,16 @@ impl Vm {
                             }
                             k += 1;
                         }
+                        if self.check_expired() {
+                            return Val::Undef;
+                        }
                         i = if end > i { end } else { i };
                     }
                 }
                 while i < len {
+                    if (i & 0xffff) == 0 && self.poll(0x10000) {
+                        return Val::Undef;
+                    }
                     let v = if plain && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) {
                         self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone()
                     } else {
@@ -793,6 +811,9 @@ impl Vm {
                         if i < (self.colds[self.objs[o as usize].cold as usize].elems2.len() as int) {
                             self.put_elem2(o, i, Val::Bool(false));
                         }
+                    }
+                    if (i & 8191) == 8191 && self.poll(131072) {
+                        return Val::Undef;
                     }
                     i += 1;
                 }
@@ -1065,7 +1086,11 @@ impl Vm {
                     NF_SP_LASTINDEXOF => {
                         let n = self.to_number(&a1);
                         let from = if is_nan(n) { len } else { to_integer(n) as int };
-                        Val::Num(jsstr::last_index_of(s.as_str(), p.as_str(), from) as double)
+                        let r = jsstr::last_index_of(s.as_str(), p.as_str(), from);
+                        if self.check_expired() {
+                            return Val::Undef;
+                        }
+                        Val::Num(r as double)
                     }
                     NF_SP_INCLUDES => {
                         let from = self.rel_index_pos(&a1, len, 0);
@@ -1234,6 +1259,7 @@ impl Vm {
                 if id == NF_SP_SEARCH {
                     let units = self.rx_take(&s);
                     let caps = self.regexes[idx as usize].exec(&units, 0);
+                    self.rx_after();
                     self.rx_put(&s, units);
                     return Val::Num(if caps.is_empty() { -1.0 } else { caps[0] as double });
                 }
@@ -1278,6 +1304,7 @@ impl Vm {
                 let mut start: int = 0;
                 while start <= units.len() as int {
                     let caps = self.regexes[idx as usize].exec(&units, start);
+                    self.rx_after();
                     if caps.is_empty() {
                         break;
                     }
@@ -1939,7 +1966,7 @@ impl Vm {
                 self.temp_roots.push(Val::Obj(p));
                 self.call_fixed(a0, Val::Undef, 2, Val::Obj(res), Val::Obj(rej), Val::Undef);
                 self.temp_roots.pop();
-                if self.throwing {
+                if self.throwing && !self.terminated {
                     self.throwing = false;
                     let e = self.exc.clone();
                     self.exc = Val::Undef;

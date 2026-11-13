@@ -135,6 +135,11 @@ pub fn sort_nums(v: &mut Vec<double>) {
             q += 1;
         }
         w = w * 2;
+        if crate::builtins::time_up(n as int) {
+            // past the deadline (Vm::check_expired): v is still a
+            // permutation of what it was
+            return;
+        }
     }
 }
 
@@ -1040,6 +1045,9 @@ impl Vm {
                 i += 1;
             }
             sort_nums(&mut v);
+            if self.check_expired() {
+                return Val::Undef;
+            }
             i = 0;
             while i < n {
                 if !self.ta_put_num(t, i, v[i as usize]) {

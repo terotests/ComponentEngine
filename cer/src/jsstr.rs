@@ -606,12 +606,49 @@ fn index_of_units(s: &str, pat: &str, from: int) -> int {
         if k == m {
             return i;
         }
+        if (i & 65535) == 0 && crate::builtins::time_up(65536) {
+            return -1;
+        }
         i += 1;
     }
     -1
 }
 
 pub fn last_index_of(s: &str, pat: &str, from: int) -> int {
+    let r: int = ranger::native!(rust: { last_index_of_units(s, pat, from) }, es6: "{s}.lastIndexOf({pat}, {from})");
+    r
+}
+
+/// Rust: ASCII text searched as bytes (`rfind`); -2 when not ASCII.
+#[ranger::target(rust)]
+fn last_index_of_ascii(s: &str, pat: &str, from: int) -> int {
+    if !(is_ascii(s) && is_ascii(pat)) {
+        return -2;
+    }
+    let n = s.as_bytes().len() as int;
+    let m = pat.as_bytes().len() as int;
+    if m > n {
+        return -1;
+    }
+    let start = if from > n - m { n - m } else if from < 0 { 0 } else { from };
+    match s[..((start + m) as usize)].rfind(pat) {
+        Some(p) => p as int,
+        None => -1,
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn last_index_of_ascii(s: &str, pat: &str, from: int) -> int {
+    -2
+}
+
+/// Gives up (-1) once the host's time limit passed (builtins::time_up):
+/// the caller's check_expired throws.
+fn last_index_of_units(s: &str, pat: &str, from: int) -> int {
+    let fast = last_index_of_ascii(s, pat, from);
+    if fast != -2 {
+        return fast;
+    }
     let u = units(s);
     let p = units(pat);
     let n = u.len() as int;
@@ -624,6 +661,9 @@ pub fn last_index_of(s: &str, pat: &str, from: int) -> int {
         }
         if k == m {
             return i;
+        }
+        if (i & 65535) == 0 && crate::builtins::time_up(65536) {
+            return -1;
         }
         i -= 1;
     }
