@@ -3,13 +3,21 @@
 // cerxes-fuzz: see README.md.
 //
 //   cerxes-fuzz run   [--time S] [--jobs N] [--seed N] [--out DIR] [--node]
-//                     [--heavy] [--rc-check] [--mutate P] [--corpus FILE]...
+//                     [--heavy] [--rc-check] [--mutate P] [--corpus PATH]...
+//                     [--hostile P] [--preempt P] [--jit WASM] [--jit-pct P]
+//                     [--known FILE]
 //   cerxes-fuzz repro FILE.js           run the oracles in this process
 //   cerxes-fuzz min   FILE.js [--out F] shrink a finding, keeping its class
-//   cerxes-fuzz gen   [--seed N]        print one generated program
+//   cerxes-fuzz gen   [--seed N] [--preempt 100]  print one generated program
+//   cerxes-fuzz known [DIR]             which known/ findings still reproduce
 //   cerxes-fuzz worker                  (internal) programs on stdin
 
 mod gen;
+mod hostile;
+mod jit;
+mod known;
+mod preempt;
+mod stage;
 
 use cerxes::Engine;
 use std::collections::{HashMap, HashSet};
@@ -170,9 +178,19 @@ fn install_panic_hook() {
         } else {
             String::from("?")
         };
-        let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let loc = info.location().map(|l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line())).unwrap_or_default();
+        // the engine function that panicked: a signature that survives
+        // edits elsewhere in the file, unlike file:line
+        let bt = std::backtrace::Backtrace::force_capture().to_string();
+        let func = bt
+            .lines()
+            .filter_map(|l| l.trim_start().split_once(": ").map(|(_, f)| f.trim().to_string()))
+            .map(|f| match f.rfind("::h") { Some(i) if f.len() - i == 19 => f[..i].to_string(), _ => f })
+            .map(|f| if f.starts_with("<cerxes::") { f.replacen('<', "", 1).replacen('>', "", 1) } else { f })
+            .find(|f| f.starts_with("cerxes::") && !f.contains("panic") && !f.contains("{closure"))
+            .unwrap_or_default();
         if let Ok(mut m) = PANIC_MSG.lock() {
-            *m = format!("{} at {}", msg, loc);
+            *m = format!("{} in {} at {}", msg, func, loc);
         }
     }));
 }
@@ -183,6 +201,7 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
     let mut rng = gen::Rng::new(seed ^ 0xA5A5);
     let base = Config { regs: true, pcomp: true, tsx: false, slice_ms: 50.0, snapshots: false, rc_check: opts.rc_check };
     // the reference: the register VM, the product default
+    stage::set("register VM");
     let a = match catch_unwind(AssertUnwindSafe(|| run_once(src, base))) {
         Ok(r) => r,
         Err(_) => {
@@ -209,6 +228,7 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
         others.push(("slices + snapshot/restore", Config { slice_ms: 0.02, snapshots: true, ..base }));
     }
     for (name, c) in others {
+        stage::set(name);
         let b = match catch_unwind(AssertUnwindSafe(|| run_once(src, c))) {
             Ok(r) => r,
             Err(_) => {
@@ -229,20 +249,44 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
             return (format!("{}\t{}\tregister VM vs {}: {}", class, sig, name, d), a.lines);
         }
     }
-    if rng.chance(10) {
+    if rng.chance(5) {
+        stage::set("snapshot-corrupt");
         if let Some(d) = corrupt_snapshot(src, seed) {
             return (format!("snapshot-corrupt\t{}\t{}", panic_sig(&last_panic()), d), a.lines);
+        }
+    }
+    if rng.chance(opts.hostile_pct) {
+        // a forged snapshot or code-cache unit (hostile.rs)
+        let (class, regs) = match rng.below(3) {
+            0 => ("hostile-unit", rng.chance(70)),
+            _ => ("hostile-snapshot", true),
+        };
+        stage::set(class);
+        let r = catch_unwind(AssertUnwindSafe(|| if class == "hostile-unit" { hostile::unit(src, seed, regs) } else { hostile::snapshot(src, seed) }));
+        if r.is_err() {
+            let p = last_panic();
+            return (format!("{}\t{}\t{}{}: {}", class, panic_sig(&p), class, if class == "hostile-unit" && !regs { " (stack VM)" } else { "" }, p), a.lines);
         }
     }
     (String::from("ok"), a.lines)
 }
 
 fn panic_sig(p: &str) -> String {
-    // "msg at file:line": the location is the bug, the message's numbers vary
-    match p.rfind(" at ") {
-        Some(i) => p[i + 4..].to_string(),
-        None => p.chars().filter(|c| !c.is_ascii_digit()).take(60).collect(),
+    // "msg in func at file:line": the function and the kind of message are
+    // the bug (the message's numbers vary, the line moves with edits)
+    let (head, _loc) = match p.rfind(" at ") {
+        Some(i) => (&p[..i], &p[i + 4..]),
+        None => (p, ""),
+    };
+    let (msg, func) = match head.rfind(" in ") {
+        Some(i) => (&head[..i], &head[i + 4..]),
+        None => (head, ""),
+    };
+    let kind: String = msg.chars().filter(|c| !c.is_ascii_digit()).take(48).collect();
+    if func.is_empty() {
+        return format!("{} @ {}", kind.trim(), _loc);
     }
+    format!("{} @ {}", kind.trim(), func)
 }
 
 /// The first line two runs disagree on: (description, signature).
@@ -295,6 +339,9 @@ fn diff_sig(x: &str, y: &str) -> String {
 /// `<len>\n<verdict>\n<lines…>` on stdout.
 fn worker(opts: &Opts) {
     install_panic_hook();
+    if !opts.stage.is_empty() {
+        stage::open(&opts.stage);
+    }
     let stdin = std::io::stdin();
     let mut inp = BufReader::new(stdin.lock());
     let stdout = std::io::stdout();
@@ -306,17 +353,29 @@ fn worker(opts: &Opts) {
         let mut it = head.split_whitespace();
         let seed: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         let len: usize = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let generated = it.next().map(|s| s == "g").unwrap_or(false);
+        let kind = it.next().unwrap_or("m").to_string();
+        let sig = it.next().unwrap_or("").to_string();
+        let generated = kind == "g";
         let mut buf = vec![0u8; len];
         if inp.read_exact(&mut buf).is_err() {
             return;
         }
         let src = String::from_utf8_lossy(&buf).to_string();
-        let (verdict, lines) = judge(&src, seed, generated, opts);
+        let (verdict, lines) = if kind == "p" {
+            match catch_unwind(AssertUnwindSafe(|| preempt::judge(&src, &sig, seed))) {
+                Ok(v) => (v, Vec::new()),
+                Err(_) => {
+                    let p = last_panic();
+                    (format!("panic\t{}\tpreempt {}: {}", panic_sig(&p), sig, p), Vec::new())
+                }
+            }
+        } else {
+            judge(&src, seed, generated, opts)
+        };
         let mut body = verdict.replace('\n', " ");
         body.push('\n');
         for l in lines {
-            body.push_str(&l.replace('\n', "\\n"));
+            body.push_str(&l.replace('\\', "\\\\").replace('\n', "\\n"));
             body.push('\n');
         }
         let mut out = stdout.lock();
@@ -330,11 +389,13 @@ struct Worker {
     stdin: ChildStdin,
     rx: mpsc::Receiver<Option<String>>,
     stderr_path: PathBuf,
+    stage_path: PathBuf,
 }
 
 fn spawn_worker(opts: &Opts, id: usize) -> Worker {
     let exe = std::env::current_exe().expect("own path");
     let stderr_path = opts.out.join(format!(".worker{}.stderr", id));
+    let stage_path = opts.out.join(format!(".worker{}.stage", id));
     let err = std::fs::File::create(&stderr_path).expect("stderr file");
     let mut cmd = if opts.mem_mb > 0 && cfg!(unix) {
         // the address-space limit turns a runaway allocation into an abort we
@@ -349,6 +410,7 @@ fn spawn_worker(opts: &Opts, id: usize) -> Worker {
     if opts.rc_check {
         cmd.arg("--rc-check");
     }
+    cmd.arg("--hostile").arg(opts.hostile_pct.to_string()).arg("--stage").arg(&stage_path);
     let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(err)).spawn().expect("worker");
     let stdin = child.stdin.take().unwrap();
     let stdout: ChildStdout = child.stdout.take().unwrap();
@@ -372,7 +434,7 @@ fn spawn_worker(opts: &Opts, id: usize) -> Worker {
             }
         }
     });
-    Worker { child, stdin, rx, stderr_path }
+    Worker { child, stdin, rx, stderr_path, stage_path }
 }
 
 enum Outcome {
@@ -384,7 +446,40 @@ enum Outcome {
 }
 
 fn exec(w: &mut Worker, src: &str, seed: u64, generated: bool, timeout: Duration) -> Outcome {
-    let head = format!("{} {} {}\n", seed, src.len(), if generated { "g" } else { "m" });
+    if let Some(sig) = preempt_sig(src) {
+        return exec_kind(w, src, seed, "p", &sig, timeout.min(Duration::from_secs(3)));
+    }
+    exec_kind(w, src, seed, if generated { "g" } else { "m" }, "", timeout)
+}
+
+/// A line of a worker's answer, its `\\` and `\n` escapes undone.
+fn unescape_line(l: &str) -> String {
+    let mut out = String::with_capacity(l.len());
+    let mut it = l.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.next() {
+                Some('n') => out.push('\n'),
+                Some(x) => out.push(x),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A preemption program's forms, from its first line `/* preempt: … */`.
+fn preempt_sig(src: &str) -> Option<String> {
+    let l = src.lines().next()?;
+    let r = l.strip_prefix("/* preempt: ")?;
+    Some(r.trim_end_matches("*/").trim().to_string())
+}
+
+/// `kind`: g generated, m mutated, p preemption program (`sig` its forms).
+fn exec_kind(w: &mut Worker, src: &str, seed: u64, kind: &str, sig: &str, timeout: Duration) -> Outcome {
+    let head = format!("{} {} {} {}\n", seed, src.len(), kind, sig);
     if w.stdin.write_all(head.as_bytes()).and_then(|_| w.stdin.write_all(src.as_bytes())).and_then(|_| w.stdin.flush()).is_err() {
         return Outcome::Died(death_note(w));
     }
@@ -402,18 +497,22 @@ fn death_note(w: &mut Worker) -> String {
     let keys = ["panicked", "fatal", "memory allocation", "overflow", "error", "abort", "SIG"];
     let notable: Vec<&str> = err.lines().filter(|l| keys.iter().any(|k| l.contains(k))).take(4).collect();
     let text = if notable.is_empty() { err.lines().rev().take(4).collect::<Vec<_>>().join(" / ") } else { notable.join(" / ") };
-    format!("{} | {}", status, text)
+    // where it died: the stage the worker wrote last (stage.rs)
+    let st = stage::read(&w.stage_path);
+    format!("{} | {} | {}", status, if st.is_empty() { "?" } else { &st }, text)
 }
 
 fn death_class(note: &str) -> (&'static str, String) {
     let n = note.to_lowercase();
+    let mut f = note.split(" | ");
+    let status = f.next().unwrap_or("").to_string();
+    let st = f.next().unwrap_or("?").to_string();
     if n.contains("stack overflow") || n.contains("has overflowed its stack") {
-        ("stack-overflow", String::from("stack overflow"))
+        ("stack-overflow", format!("stack overflow in {}", st))
     } else if n.contains("memory allocation") || n.contains("capacity overflow") || n.contains("out of memory") {
-        ("oom", String::from("allocation failed"))
+        ("oom", format!("allocation failed in {}", st))
     } else {
-        let sig: String = note.split(" | ").next().unwrap_or("").to_string();
-        ("crash", sig)
+        ("crash", format!("{} in {}", status, st))
     }
 }
 
@@ -435,6 +534,18 @@ struct Opts {
     max_execs: u64,
     /// min / repro: the program was generated, not mutated (`--generated`)
     generated: bool,
+    /// share of programs that also get a forged snapshot or unit (hostile.rs)
+    hostile_pct: usize,
+    /// share of programs that are preemption programs (preempt.rs)
+    preempt_pct: usize,
+    /// the wasm engine with the JIT (jit/build.sh): the JIT configuration
+    jit: Option<PathBuf>,
+    /// share of well-formed generated programs also run there
+    jit_pct: usize,
+    /// known findings (known.rs)
+    known: PathBuf,
+    /// worker: where to write its stage
+    stage: String,
 }
 
 impl Opts {
@@ -453,6 +564,12 @@ impl Opts {
             mem_mb: 4096,
             max_execs: 0,
             generated: false,
+            hostile_pct: 10,
+            preempt_pct: 5,
+            jit: None,
+            jit_pct: 30,
+            known: Path::new(env!("CARGO_MANIFEST_DIR")).join("known/known.txt"),
+            stage: String::new(),
         };
         let mut rest = Vec::new();
         let mut i = 0;
@@ -469,6 +586,12 @@ impl Opts {
                 "--timeout" => { o.timeout_s = v.parse().unwrap_or(15); i += 1; }
                 "--mem-mb" => { o.mem_mb = v.parse().unwrap_or(4096); i += 1; }
                 "--execs" => { o.max_execs = v.parse().unwrap_or(0); i += 1; }
+                "--hostile" => { o.hostile_pct = v.parse().unwrap_or(10); i += 1; }
+                "--preempt" => { o.preempt_pct = v.parse().unwrap_or(5); i += 1; }
+                "--jit" => { o.jit = Some(PathBuf::from(v)); i += 1; }
+                "--jit-pct" => { o.jit_pct = v.parse().unwrap_or(30); i += 1; }
+                "--known" => { o.known = PathBuf::from(v); i += 1; }
+                "--stage" => { o.stage = v; i += 1; }
                 "--node" => o.node = true,
                 "--heavy" => o.heavy = true,
                 "--rc-check" => o.rc_check = true,
@@ -487,9 +610,14 @@ fn load_corpus(paths: &[PathBuf]) -> Vec<String> {
     let mut out = Vec::new();
     for p in paths {
         let files: Vec<PathBuf> = if p.is_dir() {
-            std::fs::read_dir(p).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default()
-        } else {
+            let mut v: Vec<PathBuf> = std::fs::read_dir(p).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
+            v.retain(|f| f.extension().map(|e| e == "js" || e == "txt" || e == "mjs").unwrap_or(false));
+            v.sort();
+            v
+        } else if p.exists() {
             vec![p.clone()]
+        } else {
+            Vec::new()
         };
         for f in files {
             let text = match std::fs::read_to_string(&f) {
@@ -525,9 +653,21 @@ struct Shared {
     stop: AtomicBool,
     counts: Mutex<HashMap<String, u64>>,
     seen: Mutex<HashSet<String>>,
+    known: known::Known,
+    /// hits per known.txt entry, then per skip line
+    known_hits: Mutex<Vec<u64>>,
+    skip_hits: Mutex<Vec<u64>>,
+    /// programs that compiled / all, generated and mutated (validity)
+    valid: Mutex<[u64; 4]>,
 }
 
 fn save_finding(opts: &Opts, sh: &Shared, class: &str, sig: &str, detail: &str, src: &str, seed: u64, generated: bool) {
+    if let Some(k) = sh.known.find(class, sig, detail) {
+        sh.known_hits.lock().unwrap()[k] += 1;
+        let mut c = sh.counts.lock().unwrap();
+        *c.entry(format!("known {}", class)).or_insert(0) += 1;
+        return;
+    }
     {
         let mut c = sh.counts.lock().unwrap();
         *c.entry(class.to_string()).or_insert(0) += 1;
@@ -582,16 +722,33 @@ fn node_lines(src: &str, dir: &Path, id: usize) -> Option<Vec<String>> {
 fn run(opts: Opts) {
     std::fs::create_dir_all(&opts.out).expect("out dir");
     let corpus = Arc::new(load_corpus(&opts.corpus));
-    let sh = Arc::new(Shared { execs: AtomicU64::new(0), stop: AtomicBool::new(false), counts: Mutex::new(HashMap::new()), seen: Mutex::new(HashSet::new()) });
+    let kn = known::Known::load(&opts.known);
+    let (ne, ns) = (kn.entries.len(), kn.skips.len());
+    let sh = Arc::new(Shared {
+        execs: AtomicU64::new(0),
+        stop: AtomicBool::new(false),
+        counts: Mutex::new(HashMap::new()),
+        seen: Mutex::new(HashSet::new()),
+        known: kn,
+        known_hits: Mutex::new(vec![0; ne]),
+        skip_hits: Mutex::new(vec![0; ns]),
+        valid: Mutex::new([0; 4]),
+    });
     eprintln!(
-        "cerxes-fuzz: {} jobs, {} s, seed {}, corpus {} scripts, out {}{}{}",
+        "cerxes-fuzz: {} jobs, {} s, seed {}, corpus {} scripts, out {}{}{}, hostile {} %, preempt {} %{}, known {} + {} skip ({})",
         opts.jobs,
         opts.time_s,
         opts.seed,
         corpus.len(),
         opts.out.display(),
         if opts.node { ", vs node" } else { "" },
-        if opts.heavy { ", heavy" } else { "" }
+        if opts.heavy { ", heavy" } else { "" },
+        opts.hostile_pct,
+        opts.preempt_pct,
+        match &opts.jit { Some(p) => format!(", jit {} % ({})", opts.jit_pct, p.display()), None => String::new() },
+        ne,
+        ns,
+        if cfg!(debug_assertions) { "checked build" } else { "release build: unchecked indexes are not asserted" }
     );
     let t0 = Instant::now();
     let mut handles = Vec::new();
@@ -607,8 +764,43 @@ fn run(opts: Opts) {
             // broken (the binary was rebuilt under it, …), not the engine
             let mut fresh_deaths = 0;
             let mut answered = false;
+            let mut jw: Option<jit::JitWorker> = None;
             while !sh.stop.load(Ordering::Relaxed) {
                 let seed = rng.next();
+                if rng.chance(opts.preempt_pct) {
+                    // a program that loops forever inside some call form
+                    let (src, sig) = preempt::program(&mut rng);
+                    if sh.known.find("preempt", &sig, "").is_some() && !rng.chance(3) {
+                        *sh.counts.lock().unwrap().entry(String::from("skipped known")).or_insert(0) += 1;
+                        continue;
+                    }
+                    match exec_kind(&mut w, &src, seed, "p", &sig, Duration::from_secs(3)) {
+                        Outcome::Answer(a) => {
+                            answered = true;
+                            fresh_deaths = 0;
+                            let verdict = a.lines().next().unwrap_or("").to_string();
+                            if verdict != "ok" {
+                                let f: Vec<&str> = verdict.splitn(3, '\t').collect();
+                                save_finding(&opts, &sh, f.first().copied().unwrap_or("?"), f.get(1).copied().unwrap_or(""), f.get(2).copied().unwrap_or(""), &src, seed, false);
+                            }
+                        }
+                        Outcome::Died(note) => {
+                            answered = false;
+                            let (class, sig2) = death_class(&note);
+                            save_finding(&opts, &sh, class, &sig2, &note, &src, seed, false);
+                            w = spawn_worker(&opts, id);
+                        }
+                        Outcome::Hang => {
+                            let _ = w.child.kill();
+                            let _ = w.child.wait();
+                            answered = false;
+                            save_finding(&opts, &sh, "preempt", &sig, &format!("{}: no slice ended in 3 s (the engine never yielded)", sig), &src, seed, false);
+                            w = spawn_worker(&opts, id);
+                        }
+                    }
+                    sh.execs.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 let mut mutated = !corpus.is_empty() && rng.chance(opts.mutate_pct);
                 let src = if mutated {
                     let base = &corpus[rng.below(corpus.len())];
@@ -626,14 +818,80 @@ fn run(opts: Opts) {
                         p
                     }
                 };
+                if let Some(k) = sh.known.skip(&src) {
+                    // a known hang: run it only now and then
+                    if !rng.chance(2) {
+                        sh.skip_hits.lock().unwrap()[k] += 1;
+                        *sh.counts.lock().unwrap().entry(String::from("skipped known")).or_insert(0) += 1;
+                        continue;
+                    }
+                }
                 match exec(&mut w, &src, seed, !mutated, timeout) {
                     Outcome::Answer(a) => {
                         answered = true;
                         fresh_deaths = 0;
                         let mut parts = a.splitn(2, '\n');
                         let verdict = parts.next().unwrap_or("").to_string();
+                        // the printed lines as the engine printed them (a line
+                        // may hold newlines: the worker escaped them)
+                        let printed: Vec<String> = parts.next().unwrap_or("").lines().map(unescape_line).collect::<Vec<_>>().join("\n").split('\n').map(|l| l.to_string()).collect();
+                        let body = printed.join("\n");
+                        {
+                            // validity: the reference run did not stop at a SyntaxError
+                            let last = body.lines().rev().find(|l| l.starts_with("=> ")).unwrap_or("");
+                            let bad = last.starts_with("=> SyntaxError") || last.starts_with("=> Uncaught SyntaxError");
+                            let mut v = sh.valid.lock().unwrap();
+                            let k = if mutated { 2 } else { 0 };
+                            v[k + 1] += 1;
+                            if !bad {
+                                v[k] += 1;
+                            }
+                        }
+                        // the wasm build reads scripts as TSX (cx_new has no syntax
+                        // switch): a script the JavaScript reader refuses is skipped
+                        let syntax_error = printed.last().map(|l| l.starts_with("=> SyntaxError")).unwrap_or(false);
+                        if verdict == "ok" && !mutated && !opts.heavy && !syntax_error && opts.jit.is_some() && rng.chance(opts.jit_pct) {
+                            if jw.is_none() {
+                                jw = jit::spawn(opts.jit.as_ref().unwrap());
+                            }
+                            if let Some(j) = jw.as_mut() {
+                                let ours: Vec<String> = printed.clone();
+                                match jit::exec(j, &src, Duration::from_secs(20)) {
+                                    jit::JitOutcome::Lines(off, on0, on64) => {
+                                        let err = [&off, &on0, &on64].iter().find_map(|r| r.as_ref().and_then(|l| l.iter().find(|x| x.starts_with("TRAP: ") || x.starts_with("HOST ERROR: ")).cloned()));
+                                        if let Some(e) = err {
+                                            let sig: String = e.chars().filter(|c| !c.is_ascii_digit()).take(80).collect();
+                                            save_finding(&opts, &sh, "jit-error", &sig, &e, &src, seed, true);
+                                        } else if let Some(off) = off.as_ref() {
+                                            if let Some((d, sig)) = first_diff(&ours, off) {
+                                                save_finding(&opts, &sh, "mismatch-wasm", &sig, &format!("native vs wasm (JIT off): {}", d), &src, seed, true);
+                                            } else {
+                                                for (name, r) in [("JIT min 0", &on0), ("JIT min 64", &on64)] {
+                                                    if let Some(r) = r.as_ref() {
+                                                        if let Some((d, sig)) = first_diff(off, r) {
+                                                            save_finding(&opts, &sh, "mismatch-jit", &sig, &format!("JIT off vs {}: {}", name, d), &src, seed, true);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    jit::JitOutcome::Died => {
+                                        save_finding(&opts, &sh, "jit-error", "worker died", "the node JIT worker died", &src, seed, true);
+                                        j.kill();
+                                        jw = None;
+                                    }
+                                    jit::JitOutcome::Hang => {
+                                        save_finding(&opts, &sh, "hang", "jit worker", "no answer from the wasm/JIT runs in 20 s", &src, seed, true);
+                                        j.kill();
+                                        jw = None;
+                                    }
+                                }
+                            }
+                        }
                         if verdict == "ok" && opts.node && !mutated && !opts.heavy {
-                            let ours: Vec<String> = parts.next().unwrap_or("").lines().filter(|l| !l.starts_with("=> ")).map(|l| l.to_string()).collect();
+                            let ours: Vec<String> = body.lines().filter(|l| !l.starts_with("=> ")).map(|l| l.to_string()).collect();
                             if let Some(theirs) = node_lines(&src, &opts.out, id) {
                                 if let Some((d, sig)) = first_diff(&theirs, &ours) {
                                     save_finding(&opts, &sh, "mismatch-node", &sig, &format!("node vs CErXes: {}", d), &src, seed, !mutated);
@@ -665,7 +923,8 @@ fn run(opts: Opts) {
                         let _ = w.child.kill();
                         let _ = w.child.wait();
                         answered = false;
-                        save_finding(&opts, &sh, "hang", "no answer", &format!("no answer in {} s: the engine did not yield or compile finished too late", opts.timeout_s), &src, seed, !mutated);
+                        let st = stage::read(&w.stage_path);
+                        save_finding(&opts, &sh, "hang", &format!("no answer in {}", st), &format!("no answer in {} s in {}: the engine did not yield or compile finished too late", opts.timeout_s, st), &src, seed, !mutated);
                         w = spawn_worker(&opts, id);
                     }
                 }
@@ -675,6 +934,9 @@ fn run(opts: Opts) {
                 }
             }
             let _ = w.child.kill();
+            if let Some(mut j) = jw {
+                j.kill();
+            }
         }));
     }
     let mut last_print = Instant::now();
@@ -711,8 +973,27 @@ fn summary_text(sh: &Shared, t0: Instant, opts: &Opts) -> String {
     let mut k: Vec<_> = c.iter().collect();
     k.sort();
     for (class, v) in k {
+        if class.starts_with("known ") || class == "skipped known" {
+            s.push_str(&format!("{:<24} {:>6} hits\n", class, v));
+            continue;
+        }
         let unique = sh.seen.lock().unwrap().iter().filter(|x| x.starts_with(&format!("{}\t", class))).count();
-        s.push_str(&format!("{:<20} {:>6} hits {:>4} unique\n", class, v, unique));
+        s.push_str(&format!("{:<24} {:>6} hits {:>4} unique\n", class, v, unique));
+    }
+    let v = sh.valid.lock().unwrap();
+    let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { a as f64 * 100.0 / b as f64 };
+    s.push_str(&format!("valid (no SyntaxError): generated {:.1} % of {}, mutated {:.1} % of {}\n", pct(v[0], v[1]), v[1], pct(v[2], v[3]), v[3]));
+    s.push_str(if cfg!(debug_assertions) { "build: checked (debug assertions)\n" } else { "build: release (unchecked indexes not asserted)\n" });
+    let kh = sh.known_hits.lock().unwrap();
+    if !kh.is_empty() {
+        s.push_str("known findings (hits; 0 = maybe fixed, check with `cerxes-fuzz known`):\n");
+        for (i, e) in sh.known.entries.iter().enumerate() {
+            s.push_str(&format!("  {:>6}  {:<16} {}  {}\n", kh[i], e.class, e.text, e.note));
+        }
+        let sk = sh.skip_hits.lock().unwrap();
+        for (i, e) in sh.known.skips.iter().enumerate() {
+            s.push_str(&format!("  {:>6}  skipped          {} {:?}  {}\n", sk[i], if e.ends { "ends-with" } else { "contains" }, e.text, e.note));
+        }
     }
     s
 }
@@ -734,7 +1015,7 @@ fn verdict_of(w: &mut Worker, src: &str, opts: &Opts, id: usize) -> (String, Wor
         Outcome::Hang => {
             let _ = w.child.kill();
             let _ = w.child.wait();
-            (String::from("hang\tno answer"), spawn_worker(opts, id))
+            (format!("hang\tno answer in {}", stage::read(&w.stage_path)), spawn_worker(opts, id))
         }
     }
 }
@@ -828,11 +1109,42 @@ fn repro(path: &str, opts: &Opts) {
     let opts = &o;
     let src = std::fs::read_to_string(path).expect("cannot read");
     let seed = finding_seed(path).unwrap_or(1);
-    let (v, lines) = judge(&src, seed, opts.generated, opts);
+    let (v, lines) = match preempt_sig(&src) {
+        Some(sig) => (preempt::judge(&src, &sig, seed), Vec::new()),
+        None => judge(&src, seed, opts.generated, opts),
+    };
     println!("verdict: {}", v.replace('\t', " | "));
     for l in lines.iter().take(200) {
         println!("  {}", l);
     }
+}
+
+/// Runs every finding in known/ (or DIR) in a worker and says which
+/// still reproduce: for whoever fixes one, and to prune known.txt.
+fn known_check(dir: Option<&str>, opts: &Opts) {
+    let dir = dir.map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("known"));
+    let mut o = opts.clone();
+    o.out = std::env::temp_dir().join(format!("cerxes-fuzz-known-{}", std::process::id()));
+    std::fs::create_dir_all(&o.out).ok();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().map(|x| x == "js").unwrap_or(false)).collect()).unwrap_or_default();
+    files.sort();
+    let mut w = spawn_worker(&o, 0);
+    for f in files {
+        let path = f.to_string_lossy().to_string();
+        let mut o2 = o.clone();
+        o2.generated = finding_was_generated(&path);
+        o2.seed = finding_seed(&path).unwrap_or(1);
+        let src = std::fs::read_to_string(&f).unwrap_or_default();
+        let (v, w2) = verdict_of(&mut w, &src, &o2, 0);
+        let _ = w.child.kill();
+        w = w2;
+        let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let expect = name.split('-').next().unwrap_or("");
+        let state = if v.starts_with("ok") || v.starts_with("slow") { "FIXED?" } else if v.starts_with(expect) { "still" } else { "other" };
+        println!("{:<7} {:<48} {}", state, name, v.replace('\t', " | "));
+    }
+    let _ = w.child.kill();
+    let _ = std::fs::remove_dir_all(&o.out);
 }
 
 fn main() {
@@ -848,10 +1160,30 @@ fn main() {
             minimize(rest.first().expect("min FILE.js"), &opts, out)
         }
         "gen" => {
-            let mut g = gen::Gen::new(opts.seed);
-            g.heavy = opts.heavy;
-            print!("{}", g.program());
+            let mut rng = gen::Rng::new(opts.seed);
+            if opts.preempt_pct >= 100 {
+                print!("{}\n", preempt::program(&mut rng).0);
+            } else {
+                let mut g = gen::Gen::new(opts.seed);
+                g.heavy = opts.heavy;
+                print!("{}", g.program());
+            }
         }
+        "lone-backslash" => {
+            // (debugging the skip heuristic) how many files of a directory it skips
+            let d = rest.first().cloned().unwrap_or_default();
+            let mut n = 0;
+            let mut hit = 0;
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                n += 1;
+                if known::lone_backslash(&std::fs::read_to_string(e.path()).unwrap_or_default()) {
+                    hit += 1;
+                    println!("{}", e.path().display());
+                }
+            }
+            eprintln!("{} of {} files", hit, n);
+        }
+        "known" => known_check(rest.first().map(|s| s.as_str()), &opts),
         _ => {
             eprintln!("usage: cerxes-fuzz run|repro|min|gen … (see cerxes/fuzz/README.md)");
             std::process::exit(2);
