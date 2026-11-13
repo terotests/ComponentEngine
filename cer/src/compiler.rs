@@ -100,6 +100,13 @@ pub struct Compiler {
     pub scopes: Vec<Scope>,
     pub binds: Vec<Binding>,
     node_scope: HashMap<int, int>,
+    /// The proto each function node compiled to: a block compiled twice
+    /// (a finally block, once for the normal path and once for the
+    /// exception path) reuses it; compiling it again would place its
+    /// bindings a second time.
+    fn_protos: HashMap<int, int>,
+    /// the native stack where compiling began (stack_deeper_than)
+    sp0: int,
     ref_bind: HashMap<int, int>,
     /// the references that check for the uninitialized marker
     tdz_refs: HashMap<int, bool>,
@@ -147,6 +154,8 @@ impl Compiler {
             scopes: Vec::new(),
             binds: Vec::new(),
             node_scope: HashMap::new(),
+            fn_protos: HashMap::new(),
+            sp0: crate::vm::native_sp(),
             ref_bind: HashMap::new(),
             tdz_refs: HashMap::new(),
             decl_idents: HashMap::new(),
@@ -183,6 +192,19 @@ impl Compiler {
         if self.error.is_empty() {
             self.error = String::from(msg);
         }
+    }
+
+    /// Whether the nesting has used the native stack up: an error, and the
+    /// walk stops there.
+    fn too_nested(&mut self) -> bool {
+        if !self.error.is_empty() {
+            return true;
+        }
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+            return false;
+        }
+        self.fail("SyntaxError: Maximum call stack size exceeded");
+        true
     }
 
     // =====================================================================
@@ -259,6 +281,9 @@ impl Compiler {
 
     /// `var` declarations of a function body, not entering nested functions.
     fn hoist_vars(&mut self, n: int, scope: int) {
+        if self.too_nested() {
+            return;
+        }
         if n < 0 {
             return;
         }
@@ -433,6 +458,9 @@ impl Compiler {
     }
 
     fn resolve(&mut self, n: int, scope: int) {
+        if self.too_nested() {
+            return;
+        }
         let name = self.ast.nodes[n as usize].s.clone();
         let b = self.lookup(scope, name.as_str());
         if !self.with_scopes.is_empty() && !self.decl_idents.contains_key(&n) {
@@ -636,6 +664,9 @@ impl Compiler {
     }
 
     fn visit(&mut self, n: int, scope: int) {
+        if self.too_nested() {
+            return;
+        }
         if n < 0 {
             return;
         }
@@ -1329,6 +1360,15 @@ impl Compiler {
 
     /// Compiles the function node `n`; answers its proto index.
     fn function(&mut self, n: int) -> int {
+        if let Some(p) = self.fn_protos.get(&n) {
+            return *p;
+        }
+        let p = self.function_new(n);
+        self.fn_protos.insert(n, p);
+        p
+    }
+
+    fn function_new(&mut self, n: int) -> int {
         let flags = self.ast.nodes[n as usize].flags;
         let scope = match self.node_scope.get(&n) {
             Some(s) => *s,
@@ -1513,6 +1553,9 @@ impl Compiler {
     // ---- statements
 
     fn statement(&mut self, n: int) {
+        if self.too_nested() {
+            return;
+        }
         if n < 0 {
             return;
         }
@@ -2401,6 +2444,9 @@ impl Compiler {
     }
 
     fn expr(&mut self, n: int) {
+        if self.too_nested() {
+            return;
+        }
         let k = self.ast.nodes[n as usize].kind;
         let (a, b, c) = (self.ast.nodes[n as usize].a, self.ast.nodes[n as usize].b, self.ast.nodes[n as usize].c);
         if k == N_YIELD {

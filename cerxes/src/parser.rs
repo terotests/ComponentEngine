@@ -17,6 +17,7 @@
 //! `@jsxFrag` comments name other functions. (`jsx.rs`.)
 
 use ranger::prelude::*;
+use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::lexer::*;
@@ -72,6 +73,16 @@ pub struct Parser {
     pub(crate) in_function: bool,
     /// `yield` is an operator (a generator's body)
     pub(crate) in_generator: bool,
+    /// the token a class or object member starts at (a method's text)
+    pub(crate) member_start: int,
+    /// the labels around the statement being read, in this function
+    pub(crate) labels: Vec<String>,
+    /// inside TypeScript's `declare`: declarations without initializers
+    pub(crate) ambient: bool,
+    /// the native stack where parsing began (stack_deeper_than)
+    pub(crate) sp0: int,
+    /// the closing bracket of each opening one scanned for an arrow
+    pub(crate) mates: HashMap<int, int>,
     pub(crate) in_class: bool,
     /// tokens a `>` was split off while reading type arguments: (index,
     /// text before), undone when a speculative read is abandoned
@@ -258,7 +269,7 @@ impl Parser {
     pub fn with_syntax(src: &str, syntax: Syntax) -> Parser {
         let mut sx = syntax;
         crate::jsx::read_pragmas(src, &mut sx);
-        Parser {
+        let mut p = Parser {
             lx: Lexer::new(src),
             toks: Vec::new(),
             pos: 0,
@@ -267,6 +278,11 @@ impl Parser {
             syntax: sx,
             no_in: false,
             in_function: false,
+            labels: Vec::new(),
+            ambient: false,
+            sp0: crate::vm::native_sp(),
+            mates: HashMap::new(),
+            member_start: 0,
             in_generator: false,
             in_class: false,
             splits: Vec::new(),
@@ -276,6 +292,22 @@ impl Parser {
             exports: Vec::new(),
             export_stars: Vec::new(),
             beyond_js: false,
+        };
+        p.ast.source = String::from(src);
+        p
+    }
+
+    /// Records that node `n`'s source text runs from token `first` to the
+    /// last token read.
+    fn span(&mut self, n: int, first: int) {
+        if first < 0 || self.pos < 1 || first >= self.pos || (self.pos as usize) > self.toks.len() {
+            return;
+        }
+        let st = self.toks[first as usize].start;
+        let en = self.toks[(self.pos - 1) as usize].end;
+        if st >= 0 && en >= st {
+            self.ast.span_start.insert(n, st);
+            self.ast.span_end.insert(n, en);
         }
     }
 
@@ -301,6 +333,39 @@ impl Parser {
                 m.list2.push(*x + off);
             }
         }
+        // function text, cut from the other tree's source
+        let mut k: int = 0;
+        while k < other.nodes.len() as int {
+            let st = match other.span_start.get(&k) {
+                Some(x) => *x,
+                None => -1,
+            };
+            if st >= 0 {
+                let en = match other.span_end.get(&k) {
+                    Some(x) => *x,
+                    None => st,
+                };
+                let mut text = String::new();
+                let mut i: int = 0;
+                for c in other.source.chars() {
+                    if i >= en {
+                        break;
+                    }
+                    if i >= st {
+                        text.push(c);
+                    }
+                    i += 1;
+                }
+                self.ast.span_text.insert(k + off, text);
+            }
+            match other.span_text.get(&k) {
+                Some(t) => {
+                    self.ast.span_text.insert(k + off, t.clone());
+                }
+                None => {}
+            }
+            k += 1;
+        }
         root + off
     }
 
@@ -325,6 +390,8 @@ impl Parser {
     /// Forgets the tokens from `from` on, last first, undoing what they did
     /// to the lexer's parentheses.
     pub(crate) fn drop_toks(&mut self, from: int) {
+        // a bracket's mate may be read again differently
+        self.mates = HashMap::new();
         while (self.toks.len() as int) > from {
             let i = self.toks.len() - 1;
             let paren = self.toks[i].paren;
@@ -515,7 +582,19 @@ impl Parser {
 
     // ---- statements
 
+    /// Whether the nesting has used the native stack up: a SyntaxError.
+    fn too_nested(&mut self) -> bool {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+            return false;
+        }
+        self.fail("Maximum call stack size exceeded");
+        true
+    }
+
     pub(crate) fn statement(&mut self) -> int {
+        if self.too_nested() {
+            return self.node(N_EMPTY);
+        }
         if self.kind() == T_PUNCT {
             if self.is("{") {
                 return self.block();
@@ -534,11 +613,13 @@ impl Parser {
             }
             if ws == "var" || ws == "const" {
                 let n = self.var_decl();
+                self.check_initializers(n);
                 self.semicolon();
                 return n;
             }
             if ws == "let" && (self.peek_kind(1) == T_IDENT || self.peek_is(1, "[") || self.peek_is(1, "{")) {
                 let n = self.var_decl();
+                self.check_initializers(n);
                 self.semicolon();
                 return n;
             }
@@ -659,9 +740,20 @@ impl Parser {
             if self.peek_is(1, ":") && !is_reserved(ws) {
                 let n = self.node(N_LABELED);
                 self.ast.nodes[n as usize].s = w.clone();
+                let mut dup = false;
+                for l in self.labels.iter() {
+                    if l.as_str() == ws {
+                        dup = true;
+                    }
+                }
+                if dup {
+                    self.fail(format!("Label '{}' has already been declared", ws).as_str());
+                }
+                self.labels.push(w.clone());
                 self.next();
                 self.next();
                 let b = self.statement();
+                self.labels.pop();
                 self.ast.nodes[n as usize].a = b;
                 return n;
             }
@@ -717,6 +809,29 @@ impl Parser {
     }
 
     /// An identifier or a destructuring pattern.
+    pub(crate) fn check_initializers(&mut self, n: int) {
+        // outside a for-in / for-of head a pattern, and a const, needs an
+        // initializer (an early error)
+        if self.ambient {
+            return;
+        }
+        let decls = self.ast.nodes[n as usize].list.clone();
+        for d in decls {
+            if self.ast.nodes[d as usize].b >= 0 {
+                continue;
+            }
+            let t = self.ast.nodes[d as usize].a;
+            if self.ast.kind(t) != N_IDENT {
+                self.fail("Missing initializer in destructuring declaration");
+                return;
+            }
+            if self.ast.nodes[n as usize].op.as_str() == "const" {
+                self.fail("Missing initializer in const declaration");
+                return;
+            }
+        }
+    }
+
     pub(crate) fn binding_target(&mut self) -> int {
         if self.is("[") || self.is("{") {
             let e = self.primary();
@@ -849,6 +964,8 @@ impl Parser {
                 let e = self.ast.add(N_EXPR, line);
                 self.ast.nodes[e as usize].a = init;
                 init = e;
+            } else {
+                self.check_initializers(init);
             }
         }
         if is_await {
@@ -943,6 +1060,10 @@ impl Parser {
     /// `function name(…) { … }`; the current token is `function`.
     pub(crate) fn function(&mut self, decl: bool, extra: int) -> int {
         let n = self.node(N_FUNC);
+        let mut first = self.pos;
+        if (extra & F_ASYNC) != 0 && first > 0 && self.toks[(first - 1) as usize].text.as_str() == "async" {
+            first -= 1;
+        }
         self.next();
         let mut flags = extra;
         if self.eat("*") {
@@ -965,6 +1086,7 @@ impl Parser {
         if self.no_body && !decl {
             self.fail("function body expected");
         }
+        self.span(n, first);
         n
     }
 
@@ -1138,6 +1260,8 @@ impl Parser {
         let saved_gen = self.in_generator;
         self.in_function = true;
         self.in_generator = (self.ast.nodes[owner as usize].flags & F_GENERATOR) != 0;
+        let saved_labels = self.labels.clone();
+        self.labels.clear();
         let n = self.node(N_BLOCK);
         self.expect("{");
         self.directives(owner);
@@ -1148,6 +1272,7 @@ impl Parser {
         }
         self.expect("}");
         self.ast.nodes[n as usize].list = body;
+        self.labels = saved_labels;
         self.in_function = saved;
         self.in_generator = saved_gen;
         n
@@ -1156,6 +1281,38 @@ impl Parser {
     /// True when the tokens from here are an arrow function's head.
     /// TypeScript: the head may carry type parameters and a return type,
     /// `<T>(a: T): T =>`.
+    /// The token that closes the bracket at token `open`, or -1. Every
+    /// bracket passed on the way is remembered (mates), so nested
+    /// parentheses are scanned once, not once for each level.
+    fn mate(&mut self, open: int) -> int {
+        if let Some(c) = self.mates.get(&open) {
+            return *c;
+        }
+        let mut stack: Vec<int> = Vec::new();
+        let mut i = open;
+        loop {
+            let tkind = self.tk(i).kind;
+            if tkind == T_PUNCT {
+                let s = self.tk(i).text.clone();
+                if s.as_str() == "(" || s.as_str() == "[" || s.as_str() == "{" {
+                    stack.push(i);
+                } else if s.as_str() == ")" || s.as_str() == "]" || s.as_str() == "}" {
+                    if stack.is_empty() {
+                        return -1;
+                    }
+                    let o = stack.pop().unwrap();
+                    self.mates.insert(o, i);
+                    if stack.is_empty() {
+                        return i;
+                    }
+                }
+            } else if tkind == T_EOF || tkind == T_ERROR {
+                return -1;
+            }
+            i += 1;
+        }
+    }
+
     pub(crate) fn arrow_ahead(&mut self) -> bool {
         if !self.error.is_empty() {
             return false;
@@ -1192,43 +1349,30 @@ impl Parser {
         if !self.peek_is(k, "(") {
             return false;
         }
-        let mut depth = 0;
-        let mut i = self.pos + k;
-        loop {
-            let tkind = self.tk(i).kind;
-            if tkind == T_PUNCT {
-                let s = self.tk(i).text.clone();
-                if s.as_str() == "(" || s.as_str() == "[" || s.as_str() == "{" {
-                    depth += 1;
-                } else if s.as_str() == ")" || s.as_str() == "]" || s.as_str() == "}" {
-                    depth -= 1;
-                    if depth == 0 {
-                        let u_arrow = self.tk(i + 1).kind == T_PUNCT && self.tk(i + 1).text.as_str() == "=>" && !self.tk(i + 1).nl;
-                        if u_arrow {
-                            return true;
-                        }
-                        let u_colon = self.tk(i + 1).kind == T_PUNCT && self.tk(i + 1).text.as_str() == ":";
-                        if self.syntax.typescript && u_colon {
-                            // a return type, then `=>`
-                            let save = self.save();
-                            self.pos = i + 2;
-                            self.return_type();
-                            let ok = self.error.is_empty() && self.is("=>") && !self.nl_before();
-                            self.restore(save);
-                            return ok;
-                        }
-                        return false;
-                    }
-                }
-            } else if tkind == T_EOF || tkind == T_ERROR {
-                return false;
-            }
-            i += 1;
+        let i = self.mate(self.pos + k);
+        if i < 0 {
+            return false;
         }
+        let u_arrow = self.tk(i + 1).kind == T_PUNCT && self.tk(i + 1).text.as_str() == "=>" && !self.tk(i + 1).nl;
+        if u_arrow {
+            return true;
+        }
+        let u_colon = self.tk(i + 1).kind == T_PUNCT && self.tk(i + 1).text.as_str() == ":";
+        if self.syntax.typescript && u_colon {
+            // a return type, then `=>`
+            let save = self.save();
+            self.pos = i + 2;
+            self.return_type();
+            let ok = self.error.is_empty() && self.is("=>") && !self.nl_before();
+            self.restore(save);
+            return ok;
+        }
+        false
     }
 
     fn arrow(&mut self) -> int {
         let n = self.node(N_FUNC);
+        let first = self.pos;
         let mut flags = F_ARROW;
         if self.is("async") && !self.peek_is(1, "=>") {
             self.next();
@@ -1268,6 +1412,7 @@ impl Parser {
             self.ast.nodes[n as usize].a = e;
             self.ast.nodes[n as usize].flags |= F_EXPR_BODY;
         }
+        self.span(n, first);
         n
     }
 
@@ -1312,12 +1457,15 @@ impl Parser {
         let f = self.node(N_FUNC);
         self.ast.nodes[f as usize].flags = flags | F_METHOD;
         self.ast.nodes[f as usize].s = String::from(name);
+        let first = self.member_start;
         self.function_rest(f);
+        self.span(f, first);
         f
     }
 
     pub(crate) fn class(&mut self, decl: bool) -> int {
         let n = self.node(N_CLASS);
+        let first = self.pos;
         self.next();
         if self.kind() == T_IDENT && !self.is("extends") && !self.is("{") && !self.is("implements") {
             let name = self.binding_ident();
@@ -1403,6 +1551,7 @@ impl Parser {
                 continue;
             }
             let mut fflags = 0;
+            let ms = self.pos;
             if self.is("async") && self.member_name_ahead() && !self.peek_is(1, "=") && !self.peek_nl(1) {
                 self.next();
                 fflags |= F_ASYNC;
@@ -1444,6 +1593,7 @@ impl Parser {
                 if is_ctor {
                     mf |= F_CTOR;
                 }
+                self.member_start = ms;
                 let f = self.method(mf, kname.as_str());
                 if self.no_body || erased {
                     // an overload or abstract signature
@@ -1479,6 +1629,7 @@ impl Parser {
             members.push(m);
         }
         self.expect("}");
+        self.span(n, first);
         self.in_class = saved;
         // fields and static blocks become two methods: one run on each
         // new instance, one run once on the constructor
@@ -1540,6 +1691,19 @@ impl Parser {
             self.ast.nodes[n as usize].b = f;
         }
         let ctor = self.ast.nodes[n as usize].b;
+        // the class's text is its constructor's
+        let cs = match self.ast.span_start.get(&n) {
+            Some(x) => *x,
+            None => -1,
+        };
+        if cs >= 0 {
+            let ce = match self.ast.span_end.get(&n) {
+                Some(x) => *x,
+                None => cs,
+            };
+            self.ast.span_start.insert(ctor, cs);
+            self.ast.span_end.insert(ctor, ce);
+        }
         let cname = self.ast.nodes[n as usize].s.clone();
         self.ast.nodes[ctor as usize].s = cname;
         if (self.ast.nodes[n as usize].flags & F_DERIVED) != 0 {
@@ -1626,6 +1790,9 @@ impl Parser {
     }
 
     pub(crate) fn assign(&mut self) -> int {
+        if self.too_nested() {
+            return self.node(N_EMPTY);
+        }
         if self.arrow_ahead() {
             return self.arrow();
         }
@@ -1759,6 +1926,9 @@ impl Parser {
             if s == "typeof" || s == "void" || s == "delete" || (s == "await" && self.in_function) {
                 self.next();
                 let a = self.unary();
+                if self.is("**") && s != "await" {
+                    self.fail("unary operator before **");
+                }
                 let n = self.ast.add(N_UNARY, line);
                 self.ast.nodes[n as usize].op = op;
                 self.ast.nodes[n as usize].a = a;
@@ -2016,6 +2186,9 @@ impl Parser {
         let mut es: Vec<int> = Vec::new();
         for src in exprs {
             let mut sp = Parser::with_syntax(src.as_str(), self.syntax.clone());
+            // the stack budget counts from the outermost parser's start
+            sp.sp0 = self.sp0;
+            sp.lx.sp0 = self.sp0;
             sp.in_function = self.in_function;
             sp.in_generator = self.in_generator;
             sp.in_class = self.in_class;
@@ -2068,6 +2241,11 @@ impl Parser {
             let s = self.text();
             let fx = self.tk(self.pos).x;
             let f = if fx >= 0 { self.lx.xs[fx as usize].flags.clone() } else { String::new() };
+            // a literal that is not a regular expression is an early error
+            let rerr = crate::regex::check(s.as_str(), f.as_str());
+            if !rerr.is_empty() {
+                self.fail(format!("Invalid regular expression: /{}/{}: {}", s, f, rerr).as_str());
+            }
             self.ast.nodes[n as usize].s = s;
             self.ast.nodes[n as usize].op = f;
             self.next();
@@ -2203,6 +2381,7 @@ impl Parser {
             }
             let mut flags = 0;
             let mut fflags = 0;
+            let ms = self.pos;
             if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, ":") && !self.peek_is(1, ",") && !self.peek_is(1, "}") && !self.peek_is(1, "=") {
                 self.next();
                 fflags |= F_ASYNC;
@@ -2232,6 +2411,7 @@ impl Parser {
             }
             if self.is("(") {
                 let kname = if computed { String::new() } else { self.key_name(key) };
+                self.member_start = ms;
                 let f = self.method(fflags | (flags & (F_GETTER | F_SETTER)), kname.as_str());
                 if self.no_body {
                     self.fail("method body expected");

@@ -121,6 +121,11 @@ pub struct Lexer {
     /// where a word `of` just ended (-1 none): `of<T>(` right after it is
     /// a method's type parameters (`static of<T>()`), not an element
     of_end: int,
+    /// the native stack where reading began (stack_deeper_than)
+    pub sp0: int,
+    /// inside a substitution's scan for its `}`: a template read there is
+    /// dropped, so its substitutions' text is not copied
+    scanning: int,
 }
 
 /// The next token (pcomp reads them one at a time, never all of them as
@@ -270,6 +275,8 @@ impl Lexer {
             type_stage: 0,
             type_depth: 0,
             of_end: -1,
+            sp0: crate::vm::native_sp(),
+            scanning: 0,
         }
     }
 
@@ -630,6 +637,12 @@ impl Lexer {
                 continue;
             }
             break;
+        }
+        if s.is_empty() {
+            // a `\` that starts no escape: step over it, or the lexer
+            // reads the same empty name forever
+            self.fail("Invalid or unexpected token");
+            self.pos += 1;
         }
         s
     }
@@ -1023,6 +1036,12 @@ impl Lexer {
         let mut x = TokX::new();
         self.pos += 1;
         let n = self.src.len() as int;
+        if crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+            // templates nested in substitutions, read recursively
+            self.fail("Maximum call stack size exceeded");
+            self.pos = n;
+            return;
+        }
         let mut cur = String::new();
         let mut ok = true;
         let mut start = self.pos;
@@ -1065,6 +1084,11 @@ impl Lexer {
                 self.paren_keyword = false;
                 let mut depth = 0;
                 let mut to = n;
+                // the templates read on the way are read again with the
+                // substitution: their extras go (kept, a template nested n
+                // deep would hold n copies of the text below it)
+                let xs_mark = self.xs.len();
+                self.scanning += 1;
                 loop {
                     let tok = self.next_token();
                     if tok.kind == T_ERROR {
@@ -1087,6 +1111,8 @@ impl Lexer {
                         }
                     }
                 }
+                self.scanning -= 1;
+                self.xs.truncate(xs_mark);
                 self.regex_ok = saved_regex;
                 self.paren_keyword = saved_kw;
                 self.parens = saved_parens;
@@ -1098,7 +1124,7 @@ impl Lexer {
                     self.pos = from;
                     self.line = from_line;
                     e = self.substitution_chars();
-                } else {
+                } else if self.scanning == 0 {
                     let mut k = from;
                     while k < to {
                         e.push(self.src[k as usize]);

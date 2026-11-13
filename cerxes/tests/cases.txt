@@ -828,3 +828,35 @@ let n = 0; for (let i = 0; i < 300; i++) n += new A(i).y + new B().z;
 [log.slice(0, 6).join(), a.x, a.y, a.a, b.z, b.a, caught, p.p, p.q, ne, g.c1, g[3], n, A.s].join()
 ----
 x,ctor2,x,ctor2,B20,x,1,2,3,20,7,boom,4,5,TypeError,2,n,6600,5
+
+# fuzzing finds (cerxes/fuzz/known): a lone backslash ends with an error,
+# it does not read the same empty name forever
+==== js
+let r = []; for (const s of ["\\", "a \\", "x\\y", "#\\"]) { try { eval(s); r.push("ran"); } catch (e) { r.push(e.name); } } r.join()
+----
+SyntaxError,SyntaxError,SyntaxError,SyntaxError
+
+# a function in a finally block is compiled once (the block is written
+# twice, for the normal path and for the exception's)
+==== js
+let out = ""; try { try { throw 1; } finally { (function () { var [x, ...z] = [1, 2, 3]; out = z.join("-"); })(); } } catch (e) { out += ":" + e; } out
+----
+2-3:1
+
+# early errors the parser reports like pcomp
+==== js
+let r = []; for (const s of ["typeof 2 ** 2", "let [a];", "const {b};", "a: a: ;", "/(?<a b)/"]) { try { eval(s); r.push("ran"); } catch (e) { r.push(e.name); } } r.join()
+----
+SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError
+
+# too long a string or array is a RangeError, not a failed allocation
+==== js
+let r = []; for (const f of [() => "x".padStart(2 ** 31), () => new Array(2 ** 32 - 1), () => { const a = []; a.length = 2 ** 32 - 1; }, () => { let s = "ab"; for (;;) s += s; }]) { try { f(); r.push("ran"); } catch (e) { r.push(e.name); } } r.join()
+----
+RangeError,RangeError,RangeError,RangeError
+
+# deep recursion is a RangeError
+==== js
+function f() { return f(); } let n; try { f(); } catch (e) { n = e.name; } n
+----
+RangeError
