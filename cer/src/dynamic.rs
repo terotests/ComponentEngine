@@ -170,6 +170,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         let fp = self.function_proto;
         let f = self.alloc(C_FUNCTION, fp);
         self.objs[f as usize].func = entry as i32;
@@ -204,6 +205,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         (entry, String::new())
     }
 
@@ -239,6 +241,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         // an arrow over the caller's environment: its `this` and new.target
         self.protos[entry as usize].arrow = true;
         self.protos[entry as usize].lexical_ctor = true;
@@ -268,6 +271,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         entry
     }
 

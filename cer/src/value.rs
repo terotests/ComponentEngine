@@ -782,6 +782,66 @@ pub const SHAPE_MAX: int = 64;
 /// Past this many transitions from a shape, the rest are hashed.
 pub const T_LINEAR: int = 8;
 
+/// The transitions of shapes past their T_LINEAR first (Shape.trans):
+/// a map by atom * 32 + attr for each such shape (Shape.tfar), as few
+/// have that many (Rust: hashed with FxHasher, as a Map's index).
+pub struct TFar {
+    pub maps: Vec<HashMap<int, int>>,
+}
+
+impl TFar {
+    pub fn new() -> TFar {
+        TFar { maps: Vec::new() }
+    }
+
+    #[inline]
+    pub fn get(&self, m: int, k: int) -> int {
+        match self.maps[m as usize].get(&k) {
+            Some(t) => *t,
+            None => -1,
+        }
+    }
+
+    /// Puts k -> to in map m, or in a new map for m < 0: the map's index.
+    pub fn put(&mut self, m: int, k: int, to: int) -> int {
+        let mut i = m;
+        if i < 0 {
+            i = self.maps.len() as int;
+            self.maps.push(HashMap::new());
+        }
+        self.maps[i as usize].insert(k, to);
+        i
+    }
+}
+
+/// Vm::link_strs' handles by text while one program is linked (Rust:
+/// hashed with FxHasher).
+pub struct StrPool {
+    pub m: HashMap<String, int>,
+}
+
+impl StrPool {
+    pub fn new() -> StrPool {
+        StrPool { m: HashMap::new() }
+    }
+
+    #[inline]
+    pub fn get(&self, s: &str) -> int {
+        match self.m.get(s) {
+            Some(h) => *h,
+            None => -1,
+        }
+    }
+
+    pub fn put(&mut self, s: &str, h: int) {
+        self.m.insert(String::from(s), h);
+    }
+}
+
+/// The longest constant link_strs shares by its text (Vm.lpool).
+pub const LPOOL_MAX: usize = 64;
+
+
 /// The keys and attributes objects share: objects that got the same
 /// properties in the same order with the same attributes have one shape.
 /// A shared shape never changes; adding a property moves an object to the
@@ -803,19 +863,21 @@ pub struct Shape {
     /// past SHAPE_HASH_AT keys, slot + 1 by key: an open-addressing table
     /// of a power-of-two size at least twice the keys, 0 for empty
     pub itab: Vec<i32>,
-    /// transitions: adding t_atom[i] with t_attr[i] leads to t_to[i];
-    /// past T_LINEAR of them, t_map by atom * 32 + attr
-    pub t_atom: Vec<int>,
-    pub t_attr: Vec<int>,
-    pub t_to: Vec<int>,
-    pub t_map: HashMap<int, int>,
+    /// transitions, (atom, attr, shape) triples: adding atom with attr
+    /// leads to that shape; past T_LINEAR of them the rest are in
+    /// Vm.t_far (one map for all shapes, as few have that many)
+    pub trans: Vec<i32>,
+    /// the map of the rest in Vm.t_far, -1 none (Rust: tfar, for_in and
+    /// ndead are i32 so that a Shape is 128 bytes: shapes[i] is a shift,
+    /// not a multiply, on the property paths)
+    pub tfar: i32,
     pub owned: bool,
     /// for-in (Vm::for_in_fast): 0 not asked yet, 1 the keys can be
     /// walked in place, 2 an index-like key comes first
     pub for_in: i32,
     /// an owned dictionary's deleted keys still in place (Vm::remove_own):
     /// the tombstone atom (TOMB_NAME, a private name), hidden
-    pub ndead: int,
+    pub ndead: i32,
 }
 
 /// A deleted key's place in a big dictionary (Vm::remove_own): a private
@@ -834,10 +896,8 @@ impl Shape {
             keys: Vec::new(),
             attrs: Vec::new(),
             itab: Vec::new(),
-            t_atom: Vec::new(),
-            t_attr: Vec::new(),
-            t_to: Vec::new(),
-            t_map: HashMap::new(),
+            trans: Vec::new(),
+            tfar: -1,
             owned: false,
             for_in: 0,
             ndead: 0,
@@ -1192,6 +1252,20 @@ pub fn reserve_ints(v: &mut Vec<int>, n: usize) {
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn reserve_ints(_v: &mut Vec<int>, _n: usize) {}
+
+/// Room for one more shape: the table grows by a quarter, not by doubling
+/// (a program makes its shapes early, and half a doubled table of
+/// 128-byte shapes would stay empty).
+#[ranger::target(rust)]
+pub fn shape_room(v: &mut Vec<Shape>) {
+    if v.len() == v.capacity() {
+        let q = v.capacity() / 4;
+        v.reserve_exact(if q < 64 { 64 } else { q });
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn shape_room(_v: &mut Vec<Shape>) {}
 
 #[derive(Clone, Copy)]
 pub struct Op {

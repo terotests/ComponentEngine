@@ -175,6 +175,7 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
         pack_code(&mut p);
         vm.protos.push(p);
     }
+    vm.link_done();
     base + u.entry
 }
 

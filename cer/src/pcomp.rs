@@ -496,17 +496,30 @@ fn is_jump(op: &Op) -> bool {
 /// A token as pcomp keeps it: its text (or number) by index into
 /// PComp.names (PComp.nums), so that a script's tokens stay small.
 pub struct PTok {
-    pub kind: i32,
     /// where the token starts and ends in the source (chars)
     pub start: i32,
     pub end: i32,
     /// the text's index in `names`
     pub v: i32,
-    /// a template's or a regular expression's extra (xs), a number's
-    /// value in `nums`, -1 for none
-    pub x: i32,
-    /// PT_NL, PT_ESCAPED
-    pub flags: i32,
+    /// the kind (3 bits), PT_NL and PT_ESCAPED (2 bits) and, above them,
+    /// x + 1: a template's or a regular expression's extra (xs), a
+    /// number's value in `nums`, -1 for none (16 bytes a token, not 24)
+    pub kfx: i32,
+}
+
+impl PTok {
+    #[inline(always)]
+    pub fn kind(&self) -> i32 {
+        self.kfx & 7
+    }
+    #[inline(always)]
+    pub fn flags(&self) -> i32 {
+        (self.kfx >> 3) & 3
+    }
+    #[inline(always)]
+    pub fn x(&self) -> i32 {
+        (self.kfx >> 5) - 1
+    }
 }
 
 /// a line break before the token
@@ -830,7 +843,7 @@ impl PComp {
         let mut i: usize = base;
         while i < n {
             self.mate.push(-1);
-            if (self.toks[i].kind as int) as int == T_PUNCT {
+            if (self.toks[i].kind() as int) as int == T_PUNCT {
                 let s = self.names[self.toks[i].v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
                     stack.push(i as int);
@@ -864,7 +877,7 @@ impl PComp {
         } else {
             -1
         };
-        PTok { kind: t.kind as i32, start: t.start as i32, end: t.end as i32, v: v as i32, x: x as i32, flags: flags }
+        PTok { start: t.start as i32, end: t.end as i32, v: v as i32, kfx: (t.kind as i32) | (flags << 3) | (((x as i32) + 1) << 5) }
     }
 
     fn name_id(&mut self, s: &str) -> int {
@@ -919,15 +932,15 @@ impl PComp {
     }
 
     fn tok_num(&self, i: int) -> double {
-        self.nums[self.toks[i as usize].x as usize]
+        self.nums[self.toks[i as usize].x() as usize]
     }
 
     fn nl_at(&self, i: int) -> bool {
-        (self.toks[i as usize].flags & PT_NL) != 0
+        (self.toks[i as usize].flags() & PT_NL) != 0
     }
 
     fn tok_escaped(&self, i: int) -> bool {
-        (self.toks[i as usize].flags & PT_ESCAPED) != 0
+        (self.toks[i as usize].flags() & PT_ESCAPED) != 0
     }
 
     pub fn atom(&mut self, s: &str) -> int {
@@ -946,7 +959,7 @@ impl PComp {
     // tokens
 
     fn kind(&self) -> int {
-        self.toks[self.pos as usize].kind as int
+        self.toks[self.pos as usize].kind() as int
     }
 
     fn text(&self) -> String {
@@ -980,7 +993,7 @@ impl PComp {
         if i >= self.tok_count() {
             return T_EOF;
         }
-        self.toks[i as usize].kind as int
+        self.toks[i as usize].kind() as int
     }
 
     /// `of` at `k` follows a punctuator other than ) ] }, so it is a name.
@@ -989,7 +1002,7 @@ impl PComp {
             return false;
         }
         let p = k - 1;
-        if (self.toks[p as usize].kind as int) != T_PUNCT {
+        if (self.toks[p as usize].kind() as int) != T_PUNCT {
             return false;
         }
         if self.tok_is(p, ")") || self.tok_is(p, "]") {
@@ -1003,7 +1016,7 @@ impl PComp {
             return false;
         }
         let t = &self.toks[i as usize];
-        ((t.kind as int) == T_PUNCT || ((t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0)) && self.names[t.v as usize].as_str() == s
+        ((t.kind() as int) == T_PUNCT || ((t.kind() as int) == T_IDENT && (t.flags() & PT_ESCAPED) == 0)) && self.names[t.v as usize].as_str() == s
     }
 
     fn peek_is(&self, k: int, s: &str) -> bool {
@@ -1150,10 +1163,10 @@ impl PComp {
         let mut k = i;
         while k < n {
             let t = &self.toks[k as usize];
-            if (t.kind as int) == T_EOF {
+            if (t.kind() as int) == T_EOF {
                 return k;
             }
-            if (t.kind as int) == T_PUNCT {
+            if (t.kind() as int) == T_PUNCT {
                 let s = self.names[t.v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
                     let m = self.mate[k as usize] as int;
@@ -1178,7 +1191,7 @@ impl PComp {
                 if hit {
                     return k;
                 }
-            } else if words && (t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "in" || self.names[t.v as usize].as_str() == "of") {
+            } else if words && (t.kind() as int) == T_IDENT && (t.flags() & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "in" || self.names[t.v as usize].as_str() == "of") {
                 return k;
             }
             k += 1;
@@ -1304,7 +1317,7 @@ impl PComp {
             let after = k + 1;
             let member = self.tok_is(before, ".") || self.tok_is(before, "?.");
             let in_test = self.tok_is(after, "in");
-            if (self.toks[k as usize].kind as int) == T_PRIVATE && !member && !in_test {
+            if (self.toks[k as usize].kind() as int) == T_PRIVATE && !member && !in_test {
                 let mut kind = if self.tok_is(k + 1, "(") { PK_METHOD } else { PK_FIELD };
                 let mut j = k - 1;
                 while self.tok_is(j, "get") || self.tok_is(j, "set") || self.tok_is(j, "async") || self.tok_is(j, "*") {
@@ -3171,13 +3184,13 @@ impl PComp {
         let mut found = false;
         let mut k = self.pos;
         let n = self.tok_count();
-        while k < n && (self.toks[k as usize].kind as int) == T_STR {
+        while k < n && (self.toks[k as usize].kind() as int) == T_STR {
             if self.text_is(k, "use strict") && !self.tok_escaped(k) {
                 found = true;
                 self.strict = true;
             }
             k += 1;
-            if k < n && (self.toks[k as usize].kind as int) == T_PUNCT && self.text_is(k, ";") {
+            if k < n && (self.toks[k as usize].kind() as int) == T_PUNCT && self.text_is(k, ";") {
                 k += 1;
             } else if !(k < n && self.tok_nl(k)) {
                 break;
@@ -4025,7 +4038,7 @@ impl PComp {
                 k = m + 1;
                 continue;
             }
-            if self.tok_is(k, "await") && self.tok_is(k + 1, "using") && (self.toks[(k + 2) as usize].kind as int) == T_IDENT {
+            if self.tok_is(k, "await") && self.tok_is(k + 1, "using") && (self.toks[(k + 2) as usize].kind() as int) == T_IDENT {
                 awaits = true;
             }
             k += 1;
@@ -4323,8 +4336,8 @@ impl PComp {
         let of = self.tok_is(kw, "of");
         let labels = self.take_labels();
         // `for (using x of …)` / `for (await using x of …)`
-        let using_sync = of && self.tok_is(head, "using") && kw == head + 2 && (self.toks[(head + 1) as usize].kind as int) == T_IDENT;
-        let using_async = of && self.tok_is(head, "await") && (self.in_async || !self.module_path.is_empty()) && self.tok_is(head + 1, "using") && kw == head + 3 && (self.toks[(head + 2) as usize].kind as int) == T_IDENT;
+        let using_sync = of && self.tok_is(head, "using") && kw == head + 2 && (self.toks[(head + 1) as usize].kind() as int) == T_IDENT;
+        let using_async = of && self.tok_is(head, "await") && (self.in_async || !self.module_path.is_empty()) && self.tok_is(head + 1, "using") && kw == head + 3 && (self.toks[(head + 2) as usize].kind() as int) == T_IDENT;
         let using = if using_async { 2 } else if using_sync { 1 } else { 0 };
         let decl = using > 0 || self.tok_is(head, "var") || self.tok_is(head, "const") || (self.tok_is(head, "let") && head + 1 < kw);
         if of && !decl && !is_await && kw == head + 1 && self.tok_is(head, "async") && !self.tok_escaped(head) {
@@ -4352,7 +4365,7 @@ impl PComp {
             }
             let eq = self.scan_to(head + 1, "=", false);
             if eq < kw && self.tok_is(eq, "=") {
-                let ident = eq == head + 2 && (self.toks[(head + 1) as usize].kind as int) == T_IDENT;
+                let ident = eq == head + 2 && (self.toks[(head + 1) as usize].kind() as int) == T_IDENT;
                 if of || kind != K_VAR || self.strict || !ident {
                     self.fail("for-in or for-of loop variable declaration may not have an initializer");
                     return;
@@ -4652,7 +4665,7 @@ impl PComp {
         let mut k = i;
         while k < end {
             let t = &self.toks[k as usize];
-            if (t.kind as int) == T_PUNCT {
+            if (t.kind() as int) == T_PUNCT {
                 let s = self.names[t.v as usize].as_str();
                 if s == "(" || s == "[" || s == "{" {
                     let m = self.mate[k as usize] as int;
@@ -4662,7 +4675,7 @@ impl PComp {
                     k = m + 1;
                     continue;
                 }
-            } else if (t.kind as int) == T_IDENT && (t.flags & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "case" || self.names[t.v as usize].as_str() == "default") {
+            } else if (t.kind() as int) == T_IDENT && (t.flags() & PT_ESCAPED) == 0 && (self.names[t.v as usize].as_str() == "case" || self.names[t.v as usize].as_str() == "default") {
                 if !(self.tok_is(k - 1, ".") || self.tok_is(k - 1, "?.")) {
                     return k;
                 }
@@ -4851,7 +4864,7 @@ impl PComp {
     fn pattern_elem(&mut self, pk: int) {
         let ts = self.pos;
         self.skip_target(pk);
-        let single = self.pos - ts == 1 && (self.toks[ts as usize].kind as int) == T_IDENT;
+        let single = self.pos - ts == 1 && (self.toks[ts as usize].kind() as int) == T_IDENT;
         if pk == K_PARAM {
             self.skip_annotation();
         }
@@ -5256,7 +5269,7 @@ impl PComp {
                 return false;
             }
             k = e;
-        } else if (self.toks[k as usize].kind as int) == T_IDENT && !self.tok_is(k, "(") {
+        } else if (self.toks[k as usize].kind() as int) == T_IDENT && !self.tok_is(k, "(") {
             return k == self.pos && self.tok_is(k + 1, "=>") && !self.tok_nl(k + 1);
         }
         if !self.tok_is(k, "(") {
@@ -6112,7 +6125,7 @@ impl PComp {
             } else if self.ts && self.is("<") {
                 // `f<T>(…)`; else a comparison
                 let a = self.type_args_end(self.pos);
-                if a >= 0 && (self.tok_is(a, "(") || (a < self.tok_count() && (self.toks[a as usize].kind as int) == T_TEMPLATE)) {
+                if a >= 0 && (self.tok_is(a, "(") || (a < self.tok_count() && (self.toks[a as usize].kind() as int) == T_TEMPLATE)) {
                     self.goto(a);
                 } else {
                     break;
@@ -6185,7 +6198,7 @@ impl PComp {
     }
 
     fn template(&mut self) -> Ex {
-        let xi = (self.toks[self.pos as usize].x as int) as usize;
+        let xi = (self.toks[self.pos as usize].x() as int) as usize;
         let parts = self.xs[xi].parts.clone();
         let exprs = self.xs[xi].exprs.clone();
         let oks = self.xs[xi].cooked_ok.clone();
@@ -6225,7 +6238,7 @@ impl PComp {
         } else {
             self.op(OP_UNDEF);
         }
-        let xi = (self.toks[self.pos as usize].x as int) as usize;
+        let xi = (self.toks[self.pos as usize].x() as int) as usize;
         let parts = self.xs[xi].parts.clone();
         let exprs = self.xs[xi].exprs.clone();
         let raws = self.xs[xi].raws.clone();
@@ -6301,7 +6314,7 @@ impl PComp {
         }
         if k == T_REGEX {
             let s = self.text();
-            let fx = self.toks[self.pos as usize].x as int;
+            let fx = self.toks[self.pos as usize].x() as int;
             let f = if fx >= 0 { self.xs[fx as usize].flags.clone() } else { String::new() };
             // a literal that is not a regular expression is an early error
             let rerr = crate::regex::check(s.as_str(), f.as_str());
@@ -6684,9 +6697,9 @@ impl PComp {
         let mut i = a;
         while i < b {
             let t = &self.toks[i as usize];
-            let k = t.kind as int;
+            let k = t.kind() as int;
             if k == T_IDENT {
-                if (t.flags & PT_ESCAPED) != 0 {
+                if (t.flags() & PT_ESCAPED) != 0 {
                     return false;
                 }
                 let w = self.names[t.v as usize].as_str();
@@ -6697,7 +6710,7 @@ impl PComp {
                         return false;
                     }
                     let p1 = p - 1;
-                    if self.tok_is(p, ":") && p1 >= a && (self.toks[p1 as usize].kind as int) == T_IDENT {
+                    if self.tok_is(p, ":") && p1 >= a && (self.toks[p1 as usize].kind() as int) == T_IDENT {
                         let q = p - 2;
                         if q < a || self.tok_is(q, ";") || self.tok_is(q, "{") || self.tok_is(q, "}") || self.tok_is(q, ")") {
                             return false;
@@ -6708,7 +6721,7 @@ impl PComp {
                     if self.tok_is(j, "*") {
                         j += 1;
                     }
-                    if j < b && (self.toks[j as usize].kind as int) == T_IDENT && !self.tok_is(j, "(") {
+                    if j < b && (self.toks[j as usize].kind() as int) == T_IDENT && !self.tok_is(j, "(") {
                         j += 1;
                     }
                     if !self.tok_is(j, "(") {
@@ -6730,7 +6743,7 @@ impl PComp {
                     return false;
                 }
             } else if k == T_TEMPLATE {
-                let xi = t.x;
+                let xi = t.x();
                 if xi >= 0 {
                     for e in self.xs[xi as usize].exprs.iter() {
                         let es = e.as_str();
@@ -6757,7 +6770,7 @@ impl PComp {
     fn iife_start(&self) -> bool {
         // cheap: a word of 8 letters or a one-letter punctuator
         let t = &self.toks[self.pos as usize];
-        let tk = t.kind as int;
+        let tk = t.kind() as int;
         let tl = self.names[t.v as usize].as_bytes().len();
         (tk == T_IDENT && tl == 8) || (tk == T_PUNCT && tl == 1)
     }
@@ -6779,7 +6792,7 @@ impl PComp {
         let mut j = f0 + 2;
         while j < pc {
             let t = &self.toks[j as usize];
-            if (t.kind as int) != T_IDENT || (t.flags & PT_ESCAPED) != 0 {
+            if (t.kind() as int) != T_IDENT || (t.flags() & PT_ESCAPED) != 0 {
                 return false;
             }
             let w = self.names[t.v as usize].clone();
@@ -6835,7 +6848,7 @@ impl PComp {
         }
         // a directive prologue may make the body strict
         let b1 = bo + 1;
-        if (self.toks[b1 as usize].kind as int) == T_STR {
+        if (self.toks[b1 as usize].kind() as int) == T_STR {
             return false;
         }
         if !self.inline_ok(b1, bc) {
@@ -6907,7 +6920,7 @@ impl PComp {
     /// `f(…)`: a call by a plain name, which `kcall_here` looks at.
     fn kcall_start(&self) -> bool {
         let t = &self.toks[self.pos as usize];
-        if (t.kind as int) != T_IDENT {
+        if (t.kind() as int) != T_IDENT {
             return false;
         }
         let p1 = self.pos + 1;
@@ -6922,7 +6935,7 @@ impl PComp {
             let mut j: int = 0;
             while j < self.main_toks {
                 let t = &self.toks[j as usize];
-                let k = t.kind as int;
+                let k = t.kind() as int;
                 if k == T_IDENT {
                     let w = self.names[t.v as usize].as_str();
                     if w == "with" || w == "eval" {
@@ -6934,7 +6947,7 @@ impl PComp {
                         }
                     }
                 } else if k == T_TEMPLATE {
-                    let xi = t.x;
+                    let xi = t.x();
                     if xi >= 0 {
                         for e in self.xs[xi as usize].exprs.iter() {
                             if e.contains("eval") || e.contains("with") {
@@ -6975,9 +6988,9 @@ impl PComp {
         let mut j: int = 0;
         while j < self.main_toks {
             let t = &self.toks[j as usize];
-            let k = t.kind as int;
+            let k = t.kind() as int;
             if k == T_TEMPLATE {
-                let xi = t.x;
+                let xi = t.x();
                 if xi >= 0 {
                     for e in self.xs[xi as usize].exprs.iter() {
                         if e.contains(name) {
@@ -6986,7 +6999,7 @@ impl PComp {
                     }
                 }
             } else if k == T_IDENT && (t.v as int) == nid {
-                if (t.flags & PT_ESCAPED) != 0 {
+                if (t.flags() & PT_ESCAPED) != 0 {
                     return -1;
                 }
                 let p = j - 1;
@@ -7021,7 +7034,7 @@ impl PComp {
         let mut i = po + 1;
         while i < pc {
             let t = &self.toks[i as usize];
-            if (t.kind as int) != T_IDENT || (t.flags & PT_ESCAPED) != 0 {
+            if (t.kind() as int) != T_IDENT || (t.flags() & PT_ESCAPED) != 0 {
                 return -1;
             }
             let w = self.names[t.v as usize].clone();
@@ -7048,7 +7061,7 @@ impl PComp {
         }
         let bc = self.mate_of(bo);
         let b1 = bo + 1;
-        if bc - bo > 120 || (self.toks[b1 as usize].kind as int) == T_STR {
+        if bc - bo > 120 || (self.toks[b1 as usize].kind() as int) == T_STR {
             return -1;
         }
         if !self.inline_ok(b1, bc) {
@@ -7058,7 +7071,7 @@ impl PComp {
         i = b1;
         while i < bc {
             let t = &self.toks[i as usize];
-            let k = t.kind as int;
+            let k = t.kind() as int;
             if k == T_IDENT && (self.tok_is(i, "function") || self.tok_is(i, "class")) {
                 return -1;
             }
@@ -7066,7 +7079,7 @@ impl PComp {
                 return -1;
             }
             if k == T_TEMPLATE {
-                let xi = t.x;
+                let xi = t.x();
                 if xi >= 0 {
                     for e in self.xs[xi as usize].exprs.iter() {
                         if e.contains("=>") || e.contains("class") {
@@ -7182,12 +7195,12 @@ impl PComp {
         let mut k = cb;
         while k < ce {
             let t = &self.toks[k as usize];
-            let tk = t.kind as int;
+            let tk = t.kind() as int;
             if tk == T_IDENT && (self.tok_is(k, "yield") || self.tok_is(k, "await")) {
                 return false;
             }
             if tk == T_TEMPLATE {
-                let xi = t.x;
+                let xi = t.x();
                 if xi >= 0 {
                     for e in self.xs[xi as usize].exprs.iter() {
                         if e.contains("yield") || e.contains("await") {
@@ -7210,7 +7223,7 @@ impl PComp {
             if i != ci {
                 let mut q = starts[i as usize];
                 while q < ends[i as usize] {
-                    let tk = self.toks[q as usize].kind as int;
+                    let tk = self.toks[q as usize].kind() as int;
                     if tk == T_TEMPLATE || self.tok_is(q, "function") || self.tok_is(q, "class") || self.tok_is(q, "=>") || self.tok_is(q, "yield") || self.tok_is(q, "await") {
                         return false;
                     }
@@ -7240,7 +7253,7 @@ impl PComp {
         let mut j = bo + 1;
         while j < bc {
             let t = &self.toks[j as usize];
-            if (t.kind as int) == T_IDENT && self.names[t.v as usize].as_str() == pname.as_str() {
+            if (t.kind() as int) == T_IDENT && self.names[t.v as usize].as_str() == pname.as_str() {
                 let p = j - 1;
                 let n1 = j + 1;
                 let n2 = j + 2;
@@ -7385,7 +7398,7 @@ impl PComp {
             return false;
         }
         let t = &self.toks[at as usize];
-        if (t.kind as int) != T_IDENT || self.names[t.v as usize].as_str() != self.ksubs[top].name.as_str() {
+        if (t.kind() as int) != T_IDENT || self.names[t.v as usize].as_str() != self.ksubs[top].name.as_str() {
             return false;
         }
         let a1 = at + 1;
@@ -7805,7 +7818,7 @@ impl PComp {
         if p + 10 + semi != end {
             return;
         }
-        if !(self.tok_is(p, "this") && self.tok_is(p + 1, ".") && self.toks[(p + 2) as usize].kind as int == T_IDENT && self.tok_is(p + 3, ".") && self.tok_is(p + 4, "apply")) {
+        if !(self.tok_is(p, "this") && self.tok_is(p + 1, ".") && self.toks[(p + 2) as usize].kind() as int == T_IDENT && self.tok_is(p + 3, ".") && self.tok_is(p + 4, "apply")) {
             return;
         }
         if !(self.tok_is(p + 5, "(") && self.tok_is(p + 6, "this") && self.tok_is(p + 7, ",") && self.tok_is(p + 8, "arguments") && self.tok_is(p + 9, ")")) {
@@ -8285,7 +8298,7 @@ impl PComp {
         if self.tp >= self.tok_count() {
             return T_EOF;
         }
-        self.toks[self.tp as usize].kind as int
+        self.toks[self.tp as usize].kind() as int
     }
 
     fn t_is(&self, s: &str) -> bool {
@@ -8301,7 +8314,7 @@ impl PComp {
         if i >= self.tok_count() {
             return T_EOF;
         }
-        self.toks[i as usize].kind as int
+        self.toks[i as usize].kind() as int
     }
 
     fn t_nl(&self) -> bool {
@@ -8343,7 +8356,7 @@ impl PComp {
 
     /// A closing `>`, one of a `>>` / `>>>` too.
     fn t_eat_gt(&mut self) {
-        if self.tbad || self.tp >= self.tok_count() || (self.toks[self.tp as usize].kind as int) != T_PUNCT {
+        if self.tbad || self.tp >= self.tok_count() || (self.toks[self.tp as usize].kind() as int) != T_PUNCT {
             self.tbad = true;
             return;
         }
@@ -8763,7 +8776,7 @@ impl PComp {
         while k < close {
             // each entry starts with `type`
             let k1 = k + 1;
-            let named = (self.toks[k1 as usize].kind as int) == T_IDENT && !self.tok_is(k1, "as");
+            let named = (self.toks[k1 as usize].kind() as int) == T_IDENT && !self.tok_is(k1, "as");
             if !(self.tok_is(k, "type") && named) {
                 return false;
             }
@@ -8822,7 +8835,7 @@ impl PComp {
     /// Past the `{ … }` that ends a declaration (`interface I extends A {`).
     fn skip_to_body(&mut self) {
         let mut k = self.pos;
-        while k < self.tok_count() && !self.tok_is(k, "{") && (self.toks[k as usize].kind as int) != T_EOF {
+        while k < self.tok_count() && !self.tok_is(k, "{") && (self.toks[k as usize].kind() as int) != T_EOF {
             if self.tok_is(k, "(") || self.tok_is(k, "[") {
                 let a = self.after_mate(k);
                 if a < 0 {
@@ -8855,7 +8868,7 @@ impl PComp {
         if self.tok_is(k, "*") {
             k += 1;
         }
-        if k < self.tok_count() && (self.toks[k as usize].kind as int) == T_IDENT && !self.tok_is(k, "(") {
+        if k < self.tok_count() && (self.toks[k as usize].kind() as int) == T_IDENT && !self.tok_is(k, "(") {
             k += 1;
         }
         self.sig_rest_end(k)
@@ -9140,7 +9153,7 @@ impl PComp {
                     // plain names only: `export const a = 1, b = 2`
                     let mut n = j + 1;
                     loop {
-                        if (self.toks[n as usize].kind as int) != T_IDENT {
+                        if (self.toks[n as usize].kind() as int) != T_IDENT {
                             self.ts_fail();
                             return;
                         }
@@ -9200,7 +9213,7 @@ impl PComp {
                 let n = self.text();
                 let a = self.pos + 2;
                 let mut e = a;
-                while e < self.tok_count() && (self.toks[e as usize].kind as int) != T_EOF && !self.tok_is(e, ";") && !(e > a && self.tok_nl(e)) {
+                while e < self.tok_count() && (self.toks[e as usize].kind() as int) != T_EOF && !self.tok_is(e, ";") && !(e > a && self.tok_nl(e)) {
                     e += 1;
                 }
                 if e == a {

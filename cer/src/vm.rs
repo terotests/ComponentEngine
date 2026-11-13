@@ -156,6 +156,11 @@ pub struct Vm {
     pub shapes: Vec<Shape>,
     /// owned shapes of freed objects, for reuse
     pub free_shapes: Vec<int>,
+    /// the transitions of shapes past their T_LINEAR first (TFar)
+    pub t_far: TFar,
+    /// link_strs' handles by text while one program is linked (emptied
+    /// after it): its functions' equal constants share one
+    pub lpool: StrPool,
     pub protos: Vec<Proto>,
     pub atoms: HashMap<String, int>,
     pub atom_names: Vec<String>,
@@ -637,6 +642,8 @@ impl Vm {
             reclaims: 0,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
+            t_far: TFar::new(),
+            lpool: StrPool::new(),
             protos: Vec::new(),
             atoms: HashMap::new(),
             atom_cache: Vec::new(),
@@ -1195,18 +1202,15 @@ impl Vm {
         {
             let s = &self.shapes[sh as usize];
             let mut i: usize = 0;
-            while i < s.t_atom.len() {
-                if s.t_atom[i] == atom && s.t_attr[i] == attr {
-                    next = s.t_to[i];
+            while i < s.trans.len() {
+                if (s.trans[i] as int) == atom && (s.trans[i + 1] as int) == attr {
+                    next = s.trans[i + 2] as int;
                     break;
                 }
-                i += 1;
+                i += 3;
             }
-            if next < 0 && !s.t_map.is_empty() {
-                next = match s.t_map.get(&(atom * 32 + attr)) {
-                    Some(t) => *t,
-                    None => -1,
-                };
+            if next < 0 && s.tfar >= 0 {
+                next = self.t_far.get(s.tfar as int, atom * 32 + attr);
             }
         }
         if next < 0 {
@@ -1234,14 +1238,16 @@ impl Vm {
                 ns.kref = next;
             }
             ns.nkeys = slot + 1;
+            shape_room(&mut self.shapes);
             self.shapes.push(ns);
             let s = &mut self.shapes[sh as usize];
-            if (s.t_atom.len() as int) < T_LINEAR {
-                s.t_atom.push(atom);
-                s.t_attr.push(attr);
-                s.t_to.push(next);
+            if (s.trans.len() as int) < T_LINEAR * 3 {
+                s.trans.push(atom as i32);
+                s.trans.push(attr as i32);
+                s.trans.push(next as i32);
             } else {
-                s.t_map.insert(atom * 32 + attr, next);
+                let m = s.tfar as int;
+                s.tfar = self.t_far.put(m, atom * 32 + attr, next) as i32;
             }
         }
         self.objs[o as usize].shape = next as i32;
@@ -1265,6 +1271,7 @@ impl Vm {
             let i = self.shapes.len() as int;
             let mut ns = ns;
             ns.kref = i;
+            shape_room(&mut self.shapes);
             self.shapes.push(ns);
             i
         } else {
@@ -1299,7 +1306,7 @@ impl Vm {
             let tomb = self.intern(TOMB_NAME);
             self.shapes[sh as usize].bury(slot, tomb);
             self.put_slot(o, slot, Val::Undef());
-            if self.shapes[sh as usize].ndead * 2 > self.shapes[sh as usize].nkeys {
+            if (self.shapes[sh as usize].ndead as int) * 2 > self.shapes[sh as usize].nkeys {
                 self.compact_dict(o);
             }
             return;
@@ -1712,6 +1719,11 @@ impl Vm {
 
     /// Links the strings of protos from a compiler (Proto.cstrs): their
     /// constants and sources become pinned string values.
+    /// After a program's protos are linked: link_strs' pool goes.
+    pub fn link_done(&mut self) {
+        self.lpool = StrPool::new();
+    }
+
     pub fn link_strs(&mut self, p: &mut Proto) {
         trim_proto(p);
         let n = p.cstrs.len();
@@ -1722,7 +1734,21 @@ impl Vm {
         let mut i: usize = 0;
         while i < n {
             let s = p.cstrs[i].clone();
-            map.push(self.pin_rc(s));
+            // a short text another function of the program has too: its
+            // handle (most constants are names and words many functions
+            // share; a pinned handle is never freed)
+            if s.as_bytes().len() <= LPOOL_MAX && !s.is_empty() {
+                let k = self.lpool.get(s.as_str());
+                if k >= 0 {
+                    map.push(Val::Str(k));
+                } else {
+                    let v = self.pin_rc(s.clone());
+                    self.lpool.put(s.as_str(), v.strh());
+                    map.push(v);
+                }
+            } else {
+                map.push(self.pin_rc(s));
+            }
             i += 1;
         }
         let nc = p.consts.len();
