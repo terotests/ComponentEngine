@@ -384,6 +384,9 @@ pub fn from_radix(digits: &str, radix: int) -> String {
         if d >= radix {
             return String::new();
         }
+        if crate::builtins::time_up(acc.len() as int) {
+            return String::from("0");
+        }
         acc = add_mag(&mul_small(&acc, radix), &vec![d]);
         trim(&mut acc);
         any = true;
@@ -431,6 +434,9 @@ fn mag_bytes(a: &Vec<int>) -> Vec<int> {
     let mut out: Vec<int> = Vec::new();
     let mut m = a.clone();
     while !m.is_empty() {
+        if crate::builtins::time_up(m.len() as int) {
+            return out;
+        }
         let (q, r) = divmod_mag(&m, &vec![256]);
         out.push(if r.is_empty() { 0 } else { r[0] });
         m = q;
@@ -442,6 +448,9 @@ fn bytes_mag(b: &Vec<int>) -> Vec<int> {
     let mut acc: Vec<int> = Vec::new();
     let mut i = (b.len() as int) - 1;
     while i >= 0 {
+        if crate::builtins::time_up(acc.len() as int) {
+            return Vec::new();
+        }
         acc = mul_small(&acc, 256);
         if b[i as usize] != 0 {
             acc = add_mag(&acc, &vec![b[i as usize]]);
@@ -499,12 +508,18 @@ pub fn bitop(op: int, x: &str, y: &str) -> String {
 }
 
 /// 2^bits as a decimal string.
+/// 30 bits a step; stops (a wrong value) past the host's deadline, which
+/// the caller's check_expired turns into the time limit's Error.
 pub fn pow2(bits: int) -> String {
     let mut acc: Vec<int> = vec![1];
     let mut i = 0;
     while i < bits {
-        acc = mul_small(&acc, 2);
-        i += 1;
+        if crate::builtins::time_up(acc.len() as int) {
+            return String::from("0");
+        }
+        let k = if bits - i >= 30 { 30 } else { bits - i };
+        acc = mul_small(&acc, 1 << k);
+        i += k;
     }
     result(false, acc)
 }

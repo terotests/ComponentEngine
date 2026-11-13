@@ -856,3 +856,20 @@ function g7(){ out: for (var i=0;i<2;i++) { for (var j=0;j<2;j++) { try { return
 function f(a){ return a % 5 } var z = -0; [Object.is(-0 % 5, -0), Object.is(z % 5, -0), Object.is(f(-0), -0), f(7), f(-7)].join()
 ----
 true,true,true,2,-2
+
+# try / catch / finally: the caught value stays under the catch block, so
+# a break or continue in the finally after a throw in the catch leaves the
+# stack as it was (both machines; register code checks depths)
+==== js
+function c1() { var n = 0; for (var i = 0; i < 100000; i++) { try { throw i } catch (e) { throw e + 1 } finally { n++; continue; } } return n; }
+function c2() { var s = 0; L: for (var i = 0; i < 3; i++) { for (var j = 0; j < 3; j++) { try { if (j == 1) throw j; s += 1 } catch (e) { s += 10; throw 'x' } finally { if (j == 1) continue L; } } } return s; }
+function c3() { var r = []; for (var x of [1,2,3]) { try { throw x } catch ({ a = x }) { r.push(a); throw 0 } finally { continue } } return r.join('-'); }
+function b1() { for (var i = 0; i < 2; i++) { try { return 1; } catch (e) {} finally { continue; } } return 'end'; }
+function b2() { for (var i = 0; i < 2; i++) { try { i; } catch (e) {} finally { continue; } } return 'end'; }
+function b3() { for (var i = 0; i < 2; i++) { try { i; } catch (e) { return 2 } finally { continue; } } return 'end'; }
+function b4() { for (var i = 0; i < 2; i++) { try { throw 1 } catch (e) { return 2 } finally { continue; } } return 'end'; }
+function b5() { for (var i = 0; i < 2; i++) { try { return 1; } catch (e) {} finally { break; } } return 'end'; }
+function b6() { x: { try { return 1; } catch (e) {} finally { break x; } } return 'end'; }
+[c1(), c2(), c3(), b1(), b2(), b3(), b4(), b5(), b6()].join()
+----
+100000,33,1-2-3,end,end,end,end,end,end

@@ -50,6 +50,7 @@ about 96 % of generated programs and 24 % of mutated ones.
 | `hostile-snapshot` | A forged snapshot (one index field of the state set to a boundary value: free list, frame pc / bp / env, handler, stack value, object proto / shape, opcode; or a number token of the text) restored and was then run, and the run panicked. `crash … in hostile-snapshot run` when it died. | yes |
 | `hostile-unit` | The same for a code-cache unit (`unit::encode` text) with an opcode or operand changed: decoded and run on the register or stack VM. | yes |
 | `preempt` | A program that loops forever inside a call form (getter, valueOf, sort comparator, Promise job, … 38 forms, two deep) or calls a long native: a 50 ms (or 5 ms) slice ran over its length + 20 ms twice, or never ended (3 s). The signature names the forms, `sort>getter`. | yes (DoS) |
+| `deadline` | The same program under a host time limit of one slice (`Engine::set_time_limit`) and no slices ran over the limit + 20 ms twice: the limit, which also holds where a slice cannot stop, failed. | yes (DoS) |
 | `mismatch-wasm` | The wasm32 build (interpreter) printed something else than the native register VM (`--jit`). | correctness |
 | `mismatch-jit` | The wasm build with the baseline JIT on (at once, or at the threshold 64) differs from it with the JIT off (`--jit`). | correctness |
 | `jit-error` | A trap (a Rust panic is an abort in wasm) or an invalid JIT module in the wasm runs (`--jit`). | yes |

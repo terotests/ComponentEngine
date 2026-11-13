@@ -4550,11 +4550,14 @@ impl PComp {
             self.next();
             let mut t2: int = -1;
             if fin >= 0 {
+                // the caught value stays on the stack under the catch
+                // block (its handler's depth includes it); a copy is bound
                 t2 = self.emit(OP_TRY, 0, 0);
                 let mut c2 = new_ctl(CT_TRY);
                 c2.fin = fin;
                 c2.installed = true;
                 self.f().ctl.push(c2);
+                self.f().ctl.push(new_ctl(CT_ITEM));
             }
             let saved = self.cur_scope;
             let s = self.new_scope(saved, false, false);
@@ -4563,10 +4566,13 @@ impl PComp {
                 if !(self.kind() == T_IDENT && self.peek_is(1, ")")) {
                     self.catch_patterns.push(s);
                 }
+                if fin >= 0 {
+                    self.op(OP_DUP);
+                }
                 self.pattern_target(K_CATCH);
                 self.skip_annotation();
                 self.expect(")");
-            } else {
+            } else if fin < 0 {
                 self.op(OP_POP);
             }
             self.emit(PH_HOIST, s, 0);
@@ -4583,11 +4589,17 @@ impl PComp {
             self.leave_block(s, saved);
             if fin >= 0 {
                 self.f().ctl.pop();
+                self.f().ctl.pop();
                 self.op(OP_END_TRY);
+                self.op(OP_POP);
                 self.block_at(fin);
                 let j2 = self.emit(OP_JUMP, 0, 0);
                 self.patch(t2);
+                // under the new exception lies the caught value: one
+                // more item a break or continue in the finally pops
+                self.f().ctl.push(new_ctl(CT_ITEM));
                 self.finally_on_exception(fin);
+                self.f().ctl.pop();
                 self.patch(j2);
             }
         } else {

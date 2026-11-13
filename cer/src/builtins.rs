@@ -334,7 +334,7 @@ pub const JK_THENABLE: int = 4;
 pub const POLL_EVERY: int = 1048576;
 
 /// The default backtracking budget: about 1.5 s of matching.
-pub const REGEX_STEPS: int = 50000000;
+pub const REGEX_STEPS: int = 10000000;
 
 pub const LIM_SET_DEADLINE: int = 0;
 pub const LIM_TIME_UP: int = 1;
@@ -352,7 +352,7 @@ pub fn limits(op: int, x: double) -> double {
     // [deadline, units left before the clock is read, expired, regex
     // budget, regex budget ran out]
     thread_local! {
-        static L: std::cell::Cell<[f64; 5]> = const { std::cell::Cell::new([0.0, 1048576.0, 0.0, 50000000.0, 0.0]) };
+        static L: std::cell::Cell<[f64; 5]> = const { std::cell::Cell::new([0.0, 1048576.0, 0.0, 10000000.0, 0.0]) };
     }
     L.with(|c| {
         let mut v = c.get();
@@ -430,17 +430,18 @@ pub fn regex_limit() -> int {
     l as int
 }
 
-/// A match attempt took `steps`: true when it is to stop (past the
-/// backtracking budget, or past the deadline).
-pub fn regex_out(steps: int, limit: int) -> bool {
-    if steps > limit {
-        limits(LIM_REGEX_OVER, 0.0);
-        return true;
-    }
-    (steps & 65535) == 0 && time_up(65536)
+/// A match attempt has taken `steps`: true when it is to stop, past the
+/// deadline (the clock is read every 16384 steps).
+pub fn regex_time(steps: int) -> bool {
+    (steps & 16383) == 0 && time_up(1048576)
 }
 
-/// A match stopped (regex_out): later attempts give up at once.
+/// A match attempt went over the backtracking budget (regex_limit).
+pub fn regex_over() {
+    limits(LIM_REGEX_OVER, 0.0);
+}
+
+/// A match stopped (regex_time, regex_over): later attempts give up at once.
 pub fn regex_stopped() -> bool {
     limits(LIM_STOPPED, 0.0) != 0.0
 }
@@ -1545,6 +1546,9 @@ impl Vm {
                 }
                 let caps = self.regexes[idx as usize].exec(units, start);
                 self.rx_after();
+                if self.throwing || self.poll(64) {
+                    return Val::Undef;
+                }
                 if caps.is_empty() {
                     break;
                 }
@@ -1610,7 +1614,7 @@ impl Vm {
         let mut from: int = 0;
         loop {
             let p = jsstr::index_of(s.as_str(), pat.as_str(), from);
-            if p < 0 {
+            if p < 0 || self.poll(64) {
                 break;
             }
             jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, p).as_str());
@@ -2829,6 +2833,9 @@ impl Vm {
 
     /// writes a value json_skip does not leave out; false only when throwing
     pub fn json_write(&mut self, v: Val, replacer: &Val, allow: &Vec<String>, gap: &str, indent: &str, stack: &mut Vec<int>, out: &mut String) -> bool {
+        if self.poll(16) {
+            return false;
+        }
         match &v {
             Val::Null => {
                 out.push_str("null");
@@ -3070,6 +3077,9 @@ impl Vm {
             return Val::Undef;
         }
         let c = cs[*pos];
+        if (c == '{' || c == '[') && self.poll(64) {
+            return Val::Undef;
+        }
         if (c == '{' || c == '[') && self.stack_exhausted() {
             self.throw_range("Maximum call stack size exceeded");
             return Val::Undef;

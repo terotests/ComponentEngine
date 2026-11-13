@@ -774,7 +774,7 @@ impl Vm {
             job_slices: false,
             run_result: Val::Undef,
             poll_left: 1048576,
-            regex_steps: 50000000.0,
+            regex_steps: 10000000.0,
             checking: false,
             prof_on: false,
             prof_t: 0.0,
@@ -6659,9 +6659,10 @@ impl Vm {
         self.check_expired();
     }
 
-    /// The most steps one regex match attempt may take before it throws
+    /// The most backtracking steps one regex match attempt may take before it throws
     /// a RangeError (backtracking such as /^(a+)+$/ grows exponentially);
-    /// 0: no limit. The default, builtins::REGEX_STEPS, is about 1.5 s.
+    /// 0: no limit. The default, builtins::REGEX_STEPS (10 million), is about
+    /// a second of a pathological pattern.
     pub fn set_regex_step_limit(&mut self, n: double) {
         self.regex_steps = if n > 0.0 { n } else { 0.0 };
         crate::builtins::set_regex_limit(self.regex_steps);
@@ -10462,6 +10463,9 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
         return Val::Undef;
     }
     let c = b[*pos];
+    if (c == b'{' || c == b'[') && vm.poll(64) {
+        return Val::Undef;
+    }
     // nesting: the native stack is looked at every 32 levels
     if (depth & 31) == 31 && (c == b'{' || c == b'[') && vm.stack_exhausted() {
         vm.throw_range("Maximum call stack size exceeded");

@@ -108,6 +108,9 @@ impl Vm {
             if i > 0 {
                 jsstr::push_js(&mut out, sep);
             }
+            if (i & 65535) == 65535 && self.poll(65536) {
+                return String::new();
+            }
             if (out.as_bytes().len() as int) > MAX_STR_BYTES {
                 self.throw_range("Invalid string length");
                 return String::new();
@@ -729,6 +732,9 @@ impl Vm {
                             self.put_elem2(o, i, Val::Bool(false));
                         }
                     }
+                    if (i & 65535) == 65535 && self.poll(65536) {
+                        return Val::Undef;
+                    }
                     i += 1;
                 }
                 Val::Obj(o)
@@ -1000,7 +1006,11 @@ impl Vm {
                     NF_SP_LASTINDEXOF => {
                         let n = self.to_number(&a1);
                         let from = if is_nan(n) { len } else { to_integer(n) as int };
-                        Val::Num(jsstr::last_index_of(s.as_str(), p.as_str(), from) as double)
+                        let r = jsstr::last_index_of(s.as_str(), p.as_str(), from);
+                        if self.check_expired() {
+                            return Val::Undef;
+                        }
+                        Val::Num(r as double)
                     }
                     NF_SP_INCLUDES => {
                         let from = self.rel_index_pos(&a1, len, 0);

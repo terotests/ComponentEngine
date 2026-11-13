@@ -2495,6 +2495,7 @@ impl Regex {
         let mut pc = pc0;
         let mut pos = start;
         let mut steps: int = 0;
+        let mut backs: int = 0;
         let limit = crate::builtins::regex_limit();
         loop {
             let ins = self.code[pc as usize];
@@ -2562,7 +2563,7 @@ impl Regex {
                 }
                 I_STAR => {
                     steps += 1;
-                    if crate::builtins::regex_out(steps, limit) {
+                    if crate::builtins::regex_time(steps) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2587,9 +2588,9 @@ impl Regex {
                 }
                 I_SPLIT => {
                     // a run without splits ends (no loop goes back without
-                    // one): the step budget is counted here
+                    // one): the clock is looked at from here
                     steps += 1;
-                    if crate::builtins::regex_out(steps, limit) {
+                    if crate::builtins::regex_time(steps) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2627,7 +2628,7 @@ impl Regex {
                 }
                 I_CNTBR | I_CNTBR_LAZY => {
                     steps += 1;
-                    if crate::builtins::regex_out(steps, limit) {
+                    if crate::builtins::regex_time(steps) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2774,7 +2775,14 @@ impl Regex {
                 }
             }
             if !ok {
-                // backtrack
+                // backtrack: the budget counts these (a match that never
+                // goes back, however long, does not use it up)
+                backs += 1;
+                if backs > limit {
+                    crate::builtins::regex_over();
+                    stack.truncate(base);
+                    return -1;
+                }
                 loop {
                     if stack.len() == base {
                         return -1;

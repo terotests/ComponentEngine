@@ -25,6 +25,7 @@ const RUNAWAYS: &[&str] = &[
     "try { for(;;){} } catch (e) { for(;;){} } finally { for(;;){} }",
     "(3n**(10n**6n)).toString().length",
     "/^(a+)+$/.test('a'.repeat(40)+'!')",
+    "new Array(1e7).fill('xy').join(',').length",
     "var a=[]; for(var i=0;i<4e5;i++)a.push('k'+((i*7919)%1000003)); a.sort(function(x,y){return x.localeCompare(y)}).length",
 ];
 
