@@ -1114,10 +1114,7 @@ impl<'a> Cg<'a> {
                 self.fail(pc);
             }
             Opnd::Reg(_) => {
-                self.tag(o);
-                let t = self.lay.t_num as i64;
-                self.i32c(t);
-                self.op(I32_NE);
+                self.not_num_o(o);
                 self.fail_if(pc);
             }
         }
@@ -1199,6 +1196,28 @@ impl<'a> Cg<'a> {
     fn i64c(&mut self, x: i64) {
         self.w.byte(I64_CONST);
         self.w.s(x);
+    }
+    /// the raw top 16 bits of the value at b + off: its tag for any value
+    /// but a number (compare with any tag but t_num)
+    fn rtag(&mut self, b: u32, off: u32) {
+        self.get(b);
+        self.mem(I32_LOAD16_U, 1, off + 6);
+    }
+    /// 1 when the value at b + off is not a number (top bits above 0xFFF8)
+    fn not_num(&mut self, b: u32, off: u32) {
+        self.rtag(b, off);
+        self.i32c(0xFFF9);
+        self.op(I32_GE_U);
+    }
+    /// not_num for an operand (a number constant never fails)
+    fn not_num_o(&mut self, o: Opnd) {
+        match o {
+            Opnd::Num(_) => self.i32c(0),
+            _ => {
+                let (b, off) = self.place(o);
+                self.not_num(b, off);
+            }
+        }
     }
     /// the tag of the value at b + off on the wasm stack: its top 16 bits
     /// for undefined .. a small BigInt (value.rs V_UNDEF ..), t_num
@@ -1423,7 +1442,7 @@ impl<'a> Cg<'a> {
         let to = l.t_obj as i64;
         // an old string the write would leave unreferenced (Vm::sdec puts
         // it in szct): the helper
-        self.tag_at(L_T2, 0);
+        self.rtag(L_T2, 0);
         self.i32c(ts);
         self.op(I32_EQ);
         self.op(IF);
@@ -1446,7 +1465,7 @@ impl<'a> Cg<'a> {
         // an old object: rc > 1, then rc - 1 (L_T3 its &objs[id])
         self.i32c(0);
         self.set(L_T3);
-        self.tag_at(L_T2, 0);
+        self.rtag(L_T2, 0);
         self.i32c(to);
         self.op(I32_EQ);
         self.op(IF);
@@ -1481,7 +1500,7 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
         // a new object: rc + 1
-        self.tag_at(b, off);
+        self.rtag(b, off);
         self.i32c(to);
         self.op(I32_EQ);
         self.op(IF);
@@ -1576,7 +1595,7 @@ impl<'a> Cg<'a> {
     /// the string at b + off, if one (handle > 0): srcs[h] op= 1
     fn str_count(&mut self, b: u32, off: u32, op: u8) {
         let l = self.lay;
-        self.tag_at(b, off);
+        self.rtag(b, off);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
         self.op(IF);
@@ -1842,7 +1861,7 @@ impl<'a> Cg<'a> {
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T4);
-        self.tag_at(L_T4, 0);
+        self.rtag(L_T4, 0);
         self.i32c(l.t_str as i64);
         self.op(I32_NE);
         self.fail_if(pc);
@@ -1898,7 +1917,7 @@ impl<'a> Cg<'a> {
             self.op(BLOCK);
             self.op(T_VOID);
             self.extra += 1;
-            self.tag_at(L_SP, r * VS);
+            self.rtag(L_SP, r * VS);
             self.i32c(l.t_str as i64);
             self.op(I32_EQ);
             self.op(IF);
@@ -2092,9 +2111,7 @@ impl<'a> Cg<'a> {
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T6);
-        self.tag_at(L_T6, l.cold_prim);
-        self.i32c(l.t_num as i64);
-        self.op(I32_NE);
+        self.not_num(L_T6, l.cold_prim);
         self.fail_if(pc);
         self.get(L_T3);
         self.op(F64_CONVERT_I32_U);
@@ -2117,9 +2134,8 @@ impl<'a> Cg<'a> {
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T6);
-        self.tag_at(L_T6, l.cold_prim);
-        self.i32c(l.t_num as i64);
-        self.op(I32_EQ);
+        self.not_num(L_T6, l.cold_prim);
+        self.op(I32_EQZ);
         self.fail_if(pc);
         self.get(L_T6);
         self.mem(I32_LOAD, 2, l.cold_home);
@@ -2270,7 +2286,7 @@ impl<'a> Cg<'a> {
     /// fail unless the value at b + off is an object
     fn need_obj(&mut self, b: u32, off: u32, pc: i64) {
         let t = self.lay.t_obj as i64;
-        self.tag_at(b, off);
+        self.rtag(b, off);
         self.i32c(t);
         self.op(I32_NE);
         self.fail_if(pc);
@@ -2447,7 +2463,7 @@ impl<'a> Cg<'a> {
         // a sloppy function's this must be an object already
         ld(self, 6);
         self.op(I32_EQZ);
-        self.tag_at(L_SP, fo + VS);
+        self.rtag(L_SP, fo + VS);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(I32_AND);
@@ -2630,7 +2646,7 @@ impl<'a> Cg<'a> {
         }
         let (vb, voff) = self.place(vo);
         // the value: no string (Vm::inc's other case)
-        self.tag_at(vb, voff);
+        self.rtag(vb, voff);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
         self.fail_if(pc);
@@ -2690,7 +2706,7 @@ impl<'a> Cg<'a> {
         self.get(L_T2);
         self.i32c((t & 65535) as i64);
         self.mem(I32_STORE, 2, l.off_shape);
-        self.tag_at(vb, voff);
+        self.rtag(vb, voff);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
         self.op(IF);
@@ -2770,7 +2786,7 @@ impl<'a> Cg<'a> {
             self.op(BLOCK);
             self.op(T_VOID);
             self.extra += 1;
-            self.tag_at(b, off);
+            self.rtag(b, off);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(BR_IF);
@@ -2862,7 +2878,7 @@ impl<'a> Cg<'a> {
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
-        self.tag_at(b, off);
+        self.rtag(b, off);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(BR_IF);
@@ -2917,7 +2933,7 @@ impl<'a> Cg<'a> {
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
-        self.tag_at(b, off);
+        self.rtag(b, off);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(BR_IF);
@@ -2959,7 +2975,7 @@ impl<'a> Cg<'a> {
         self.set(L_Q0);
         if flags == 1 {
             // a script or native function (prop_cache's check)
-            self.tag_at(L_T2, vat);
+            self.rtag(L_T2, vat);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(BR_IF);
@@ -3969,9 +3985,7 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.i32c(1);
             self.op(I32_LT_S);
-            self.tag_at(L_FB, 2 * VS);
-            self.i32c(tn);
-            self.op(I32_NE);
+            self.not_num(L_FB, 2 * VS);
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
@@ -4063,9 +4077,7 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.i32c(2);
             self.op(I32_NE);
-            self.tag_at(L_FB, 3 * VS);
-            self.i32c(tn);
-            self.op(I32_NE);
+            self.not_num(L_FB, 3 * VS);
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
@@ -4102,7 +4114,7 @@ impl<'a> Cg<'a> {
             // slot k of the call (0 f, 1 this, 2 the first argument) not an
             // object: br_if out of the innermost block
             let not_obj = |cg: &mut Cg<'a>, k: u32| {
-                cg.tag_at(L_FB, k * VS);
+                cg.rtag(L_FB, k * VS);
                 cg.i32c(to);
                 cg.op(I32_NE);
             };
@@ -4290,7 +4302,7 @@ impl<'a> Cg<'a> {
             self.op(I32_NE);
             not_obj(self, 1);
             self.op(I32_OR);
-            self.tag_at(L_FB, 2 * VS);
+            self.rtag(L_FB, 2 * VS);
             self.i32c(l.t_str as i64);
             self.op(I32_NE);
             self.op(I32_OR);
@@ -4469,7 +4481,7 @@ impl<'a> Cg<'a> {
             self.op(I32_OR);
             ld(self, 6);
             self.op(I32_EQZ);
-            self.tag_at(L_FB, VS);
+            self.rtag(L_FB, VS);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(I32_AND);
@@ -5060,10 +5072,7 @@ impl<'a> Cg<'a> {
             self.extra += 1;
             for r in regs.iter() {
                 let o = Opnd::Reg(*r);
-                self.tag(o);
-                let t = self.lay.t_num as i64;
-                self.i32c(t);
-                self.op(I32_NE);
+                self.not_num_o(o);
                 self.exit_if(pc as i64);
                 self.num(o);
                 let f = self.kn_fix[*r as usize] as u32;
@@ -5139,10 +5148,7 @@ impl<'a> Cg<'a> {
                     self.get(l);
                     return;
                 }
-                self.tag(o);
-                let t = self.lay.t_num as i64;
-                self.i32c(t);
-                self.op(I32_NE);
+                self.not_num_o(o);
                 self.exit_if(pc);
                 self.num(o);
                 if (r as usize) < self.kn.len() {
@@ -5215,7 +5221,7 @@ impl<'a> Cg<'a> {
                     self.op(I32_ADD);
                     self.set(L_T2);
                     if !strict {
-                        self.tag_at(L_T2, 0);
+                        self.rtag(L_T2, 0);
                         self.i32c(self.lay.t_obj as i64);
                         self.op(I32_NE);
                         self.fail_if(p);
@@ -5357,7 +5363,7 @@ impl<'a> Cg<'a> {
                 let o = Opnd::Reg(w1 as u32);
                 let (b, off) = self.place(o);
                 if sub == 0 {
-                    self.tag_at(b, off);
+                    self.rtag(b, off);
                     self.i32c(l.t_obj as i64);
                     self.op(I32_EQ);
                     self.get(b);
@@ -5367,10 +5373,10 @@ impl<'a> Cg<'a> {
                     self.op(I32_EQ);
                     self.op(I32_AND);
                 } else {
-                    self.tag_at(b, off);
+                    self.rtag(b, off);
                     self.i32c(l.t_undef as i64);
                     self.op(I32_EQ);
-                    self.tag_at(b, off);
+                    self.rtag(b, off);
                     self.i32c(l.t_null as i64);
                     self.op(I32_EQ);
                     self.op(I32_OR);
