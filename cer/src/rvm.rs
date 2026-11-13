@@ -945,7 +945,7 @@ impl Vm {
                                 continue;
                             }
                         }
-                        self.r_get_method(bp, rb, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
+                        self.r_get_method(bp, (w1 as int), (w2 as int), (w3 as int), rb, fi, pc, (w0 as int));
                     }
                     R_CALL => {
                         let argc = w2;
@@ -1976,7 +1976,7 @@ impl Vm {
     /// R_GET_METHOD: the method and its receiver into w1, w1 + 1; the
     /// chain cache answers here, the rest goes to r_get_method_slow.
     #[inline(never)]
-    pub fn r_get_method(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+    pub fn r_get_method(&mut self, bp: int, w1: int, w2: int, w3: int, rb: int, fi: usize, pc: int, w0: int) {
         let v = *self.rget(bp, w2);
         if w3 <= MC_BASE {
             if let Val::Obj(o) = v {
