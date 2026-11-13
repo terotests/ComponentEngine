@@ -946,3 +946,16 @@ function of(x) { return x; } let r = []; for (var e = of([1, 2]); e.length; e = 
 let s = (0, eval)("'a'" + "+'aaaaaaaaaa'".repeat(2000)); s.length
 ----
 20001
+
+# deep recursion through compiled code (wasm JIT): calls the JIT runs as
+# nested interpreter runs (f.call, a function using arguments, new) must
+# stop nesting before the native stack's budget, not throw RangeError
+# (Octane EarleyBoyer, 2026-11-13)
+==== js deep recursion through nested runs of compiled code
+function g(n) { var s = 0; for (var i = 0; i < 3; i++) s += i; if (n == 0) return s; return g.call(null, n - 1) + 1; }
+function h(n) { var s = 0; for (var i = 0; i < 3; i++) s += i; if (n == 0) return s; return h(n - 1) + arguments.length; }
+function k(n) { var s = 0; for (var i = 0; i < 3; i++) s += i; if (n == 0) return { v: s }; return { v: new K(n - 1).v + 1 }; }
+function K(n) { this.v = k(n).v; }
+[g(300), h(300), k(150).v].join()
+----
+303,303,153

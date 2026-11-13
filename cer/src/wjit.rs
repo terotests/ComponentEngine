@@ -8479,7 +8479,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
         // with slices on, or deep in nesting, the callee's frame is pushed
         // here and the interpreter runs it (5); the caller's code is
         // entered again at its return (rvm.rs, R_RET)
-        let deep = vm.slicing || NEST.with(|n| n.get()) >= NEST_MAX;
+        let deep = no_nesting(vm);
         let next = pc + 1 + (w0 >> 16);
         vm.frames[fi].pc = next;
         if ((w0 >> 8) & 255) == 1 {
@@ -8536,7 +8536,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
     if vm.r_call_slow(fo, fpos, w2, bp, w3, want) {
         // one frame more, not a coroutine's (f.call(...), a function that
         // uses arguments...): it runs here, nested, as a plain call does
-        let deep = vm.slicing || NEST.with(|n| n.get()) >= NEST_MAX;
+        let deep = no_nesting(vm);
         if deep || vm.throwing || vm.frames.len() != nf + 1 || MASK.with(|m| m.get()) & (1u64 << 56) != 0 {
             return 5;
         }
@@ -8960,7 +8960,7 @@ fn site_caches(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<u3
 /// the interpreter's.
 fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int, w0: int, argc: int, w3: int, want: usize) -> i32 {
     let fi = nf - 1;
-    if fo < 0 || vm.objs[fo as usize].class != C_FUNCTION || vm.slicing || NEST.with(|n| n.get()) >= NEST_MAX {
+    if fo < 0 || vm.objs[fo as usize].class != C_FUNCTION || no_nesting(vm) {
         return new_win(vm, bp, fi, pc, w0, w3, want);
     }
     // the constructor to enter: a class with the default derived
@@ -9287,6 +9287,19 @@ thread_local! {
 }
 /// compiled code calling compiled code nests wasm frames too (call_op)
 const DEPTH_MAX: i32 = 400;
+
+/// Whether a call from compiled code must not run nested (a native rrun
+/// on the stack): slices on, NEST_MAX nested runs, or half of the native
+/// stack's budget used. Each nested run takes several KB of the shadow
+/// stack (rrun's frame, h_call, call_compiled, jit_enter), and in
+/// WebAssembly the budget is 128 KB: 16 levels with compiled code between
+/// them used it up in Octane's EarleyBoyer, and the next rrun threw
+/// RangeError at 185 script frames. Past it the interpreter makes the
+/// call, which grows no native stack.
+#[inline(always)]
+fn no_nesting(vm: &crate::vm::Vm) -> bool {
+    vm.slicing || NEST.with(|n| n.get()) >= NEST_MAX || (vm.stack_base != 0 && vm.stack_base - crate::vm::native_sp() > vm.stack_budget / 2)
+}
 
 thread_local! {
     static NEST: std::cell::Cell<u32> = std::cell::Cell::new(0);
