@@ -3513,7 +3513,8 @@ impl Vm {
 
     pub fn set(&mut self, target: &Val, atom: int, v: Val) {
         if let Some(o) = target.as_obj() {
-            return self.set_obj(o, atom, v);
+            self.set_obj(o, atom, v);
+            return;
         }
         match target.kind() {
             VK::Obj(o) => self.set_obj(o, atom, v),
