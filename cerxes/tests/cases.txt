@@ -807,6 +807,28 @@ i32[1] = 4294967295;
 ----
 3,-1,-4,-8,-1,536870911 0,-1294967263,-1294967263,1705032704,-647483648,1500000000 2,-1,-3,-4,-1,1073741823 -2147483648,-1,2147483647,0,-1,1 0,0,0,0,0,0 0,1,1,0,0,0 | 4,3,2,2,2,4 | 65,228,NaN,-3,66 | 250,253,0,3 | -2,-1 | 1
 
+# a base class's field initializer runs as a frame before the constructor's
+# body (rvm r_fields_frame), defines fields with DEFINE_FIELD (rvm win_op):
+# order, this, a throw from an initializer, frozen and non-extensible cases
+==== js
+const log = [];
+class A { x = (log.push("x"), 1); y = this.x + 1; static s = 5; constructor(a) { log.push("ctor" + this.y); this.a = a; } }
+class B extends A { z = this.y * 10; constructor() { super(7); log.push("B" + this.z); } }
+const a = new A(3), b = new B();
+class T { f = (() => { throw new Error("boom"); })(); }
+let caught = ""; try { new T(); } catch (e) { caught = e.message; }
+class P { #p = 4; q = this.#p + 1; get p() { return this.#p; } }
+const p = new P();
+class D { constructor() { Object.preventExtensions(this); } }
+class E extends D { e = 1; }
+let ne = ""; try { new E(); } catch (e) { ne = e.constructor.name; }
+class G { ["c" + 1] = 2; 3 = "n"; }
+const g = new G();
+let n = 0; for (let i = 0; i < 300; i++) n += new A(i).y + new B().z;
+[log.slice(0, 6).join(), a.x, a.y, a.a, b.z, b.a, caught, p.p, p.q, ne, g.c1, g[3], n, A.s].join()
+----
+x,ctor2,x,ctor2,B20,x,1,2,3,20,7,boom,4,5,TypeError,2,n,6600,5
+
 # fuzzing finds (cerxes/fuzz/known): a lone backslash ends with an error,
 # it does not read the same empty name forever
 ==== js
@@ -838,3 +860,27 @@ RangeError,RangeError,RangeError,RangeError
 function f() { return f(); } let n; try { f(); } catch (e) { n = e.name; } n
 ----
 RangeError
+
+# a huge number in a small radix
+==== js
+[(1e300).toString(3).length, (255.5).toString(16), (-1e21).toString(36)].join()
+----
+629,ff.8,-5v1j4f4ds7c000
+
+# copyWithin and splice on an array a valueOf shrank
+==== js
+let a = [1, 2, 3, 4, 5, 6, 7, 8]; a.copyWithin({ valueOf() { a.length = 6; return 2; } }, 0); let b = [1, 2, 3, 4, 5, 6]; let r = b.splice(1, { valueOf() { b.length = 3; return 1; } }, "x", "y"); [a.join(), r.join(), b.join(), b.length].join("|")
+----
+1,2,1,2,3,4,5,6|2|1,x,y,3,,,|7
+
+# an index of 2 ** 32 or more is a property, not element 0
+==== js
+let a = [10, 20, 30]; a[2 ** 32] = "X"; [a[0], a[2 ** 32 + 1], a.length, Object.keys(a).join()].join("|")
+----
+10||3|0,1,2,4294967296
+
+# BigInt results past 2 ** 30 bits are a RangeError; asUintN of a small value is quick
+==== js
+let r = []; for (const f of [() => 1n << (2n ** 40n), () => 2n ** (2n ** 40n), () => BigInt.asUintN(2 ** 53 - 1, 5n), () => BigInt.asIntN(2 ** 53 - 1, -5n), () => 5n >> (2n ** 64n), () => (-5n) >> (2n ** 64n), () => (-1n) ** (2n ** 70n), () => (1n << 4000n).toString(16).length]) { try { r.push(String(f())); } catch (e) { r.push(e.name); } } r.join()
+----
+RangeError,RangeError,5,-5,0,-1,1,1001

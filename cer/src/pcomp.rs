@@ -6731,6 +6731,11 @@ impl PComp {
             if is_reserved(w.as_str()) || is_strict_reserved(w.as_str()) || w.as_str() == "eval" || w.as_str() == "arguments" || w.as_str() == "let" || w.as_str() == "yield" || w.as_str() == "await" || w.as_str() == "async" {
                 return false;
             }
+            // inlined calls are small: a long list is left to a real call
+            // (and its duplicate check here would be quadratic)
+            if params.len() >= 64 {
+                return false;
+            }
             for q in params.iter() {
                 if q.as_str() == w.as_str() {
                     return false;
@@ -7776,16 +7781,15 @@ impl PComp {
                 }
             }
         }
+        let mut seen: HashMap<String, int> = HashMap::new();
         let mut i: usize = 0;
         while i < names.len() {
-            let mut j = i + 1;
-            while j < names.len() {
-                if names[i] == names[j] {
-                    self.fail("Duplicate parameter name not allowed in this context");
-                    return;
-                }
-                j += 1;
+            let nm = names[i].clone();
+            if seen.contains_key(&nm) {
+                self.fail("Duplicate parameter name not allowed in this context");
+                return;
             }
+            seen.insert(nm, 1);
             i += 1;
         }
     }

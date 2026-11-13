@@ -1,0 +1,55 @@
+# Known findings, not fixed yet (known.rs has the format). A run counts
+# them as `known <class>` and lists the hits per line in summary.txt; an
+# entry whose hits stay 0 may be fixed: check with `cerxes-fuzz known`
+# and remove the line once its fix is merged. Columns are TAB-separated.
+#
+# class	text in the signature or detail	note
+#
+# A panic's signature is its message without numbers and the engine
+# function it happened in (`… @ cerxes::vm::Vm::put_elem`), so an entry
+# survives edits elsewhere in the file.
+
+# --- first fuzz runs (2026-11-12): all four fixed in #154 (lone backslash,
+# RegExp source after restore, tree compiler idx -1, Map proto stack
+# overflow), with frame / native stack / string / array limits. Their
+# cases stay in this directory as regression cases (`cerxes-fuzz known`).
+# There is still no total heap limit: --heavy may still report oom.
+oom	*	no total heap limit (many arrays just under the 2^25 element cap)
+
+# --- audit 2026-11-13 (/mnt/project-files/cerxes-audit), being fixed in "Audit CErXes code and fuzzing"
+panic	Vm::put_elem	F1 fill/copyWithin when valueOf shrinks the array
+panic	EVec::remove	F1 splice when valueOf shrinks the array
+mismatch-vm	stack depths differ	F2 register VM: return in try + break/continue in finally
+crash	in hostile-	A1/A2: forged snapshot or unit passes validation, SIGSEGV when run (remove once validation lands)
+# A3: no time check while native_depth != 0 (vm.rs slice_due): an
+# endless loop under any native call never yields. A4: long natives never
+# read the clock. The forms below never yielded on main e7655b3 (22 of
+# 38; proxy-get and setter on one VM only). A two-deep program fails when
+# either form does. Forms not listed here yield.
+preempt	Map.forEach	A3 endless loop under this call form never yields
+preempt	Reflect.apply	A3 endless loop under this call form never yields
+preempt	async-await	A3 endless loop under this call form never yields
+preempt	async	A3 endless loop under this call form never yields
+preempt	defineProperty	A3 endless loop under this call form never yields
+preempt	eval	A3 endless loop under this call form never yields
+preempt	generator	A3 endless loop under this call form never yields
+preempt	getter	A3 endless loop under this call form never yields
+preempt	hasInstance	A3 endless loop under this call form never yields
+preempt	iterator	A3 endless loop under this call form never yields
+preempt	join	A3 endless loop under this call form never yields
+preempt	reduce	A3 endless loop under this call form never yields
+preempt	replace	A3 endless loop under this call form never yields
+preempt	reviver	A3 endless loop under this call form never yields
+preempt	sort	A3 endless loop under this call form never yields
+preempt	spread	A3 endless loop under this call form never yields
+preempt	then	A3 endless loop under this call form never yields
+preempt	toJSON	A3 endless loop under this call form never yields
+preempt	toPrimitive	A3 endless loop under this call form never yields
+preempt	toString	A3 endless loop under this call form never yields
+preempt	valueOf	A3 endless loop under this call form never yields
+preempt	proxy-get	A3 (one of the two VMs)
+preempt	setter	A3 (one of the two VMs)
+preempt	native:	A4 long natives (BigInt pow, indexOf, sort, JSON, regexp, join, shifts)
+
+# --- known V8 bug classes (thread "Test CErXes against known V8 bugs", /mnt/project-files/v8-bugs/classes.md)
+panic	num::quick_radix	(1e300).toString(3): radix conversion of a big number
