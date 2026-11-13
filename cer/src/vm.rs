@@ -4893,6 +4893,7 @@ impl Vm {
         if self.objs[o as usize].class != C_ARGUMENTS {
             return;
         }
+        let lazy = self.objs[o as usize].pos;
         self.compact_dict(o);
         let keys = self.keys_of(o);
         let mut vals: Vec<Val> = Vec::new();
@@ -4942,15 +4943,31 @@ impl Vm {
             k += 1;
         }
         // the parameters map_arg left for now (lazy): mapped from here on
-        let m = self.colds[self.objs[o as usize].cold as usize].marks.clone();
-        let mut q: usize = 0;
-        while q + 1 < m.len() {
-            let slot = self.find(o, m[q]);
-            if slot >= 0 {
-                let at = self.attr_at(o, slot);
-                self.set_attr(o, slot, at | P_MAPPED);
+        if lazy > 0 {
+            let pi = (lazy - 1) as usize;
+            let env = self.objs[o as usize].env as int;
+            self.objs[o as usize].pos = 0;
+            let n = self.protos[pi].code.len();
+            let mut kk: usize = 0;
+            while kk < n {
+                let op = self.protos[pi].code[kk];
+                if (op.code as int) == OP_ARGUMENTS && op.a >= 2 && ((op.b as int) & (1 << 30)) != 0 {
+                    let a = self.index_atom((op.a as int) - 2);
+                    let slot = self.find(o, a);
+                    if slot >= 0 && env >= 0 {
+                        if self.colds[self.objs[o as usize].cold as usize].home != env {
+                            self.put_home(o, env);
+                        }
+                        let c = self.cold_id(o) as usize;
+                        self.colds[c].marks.push(a);
+                        self.colds[c].marks.push(((op.b as int) & ((1 << 30) - 1)) >> 8);
+                        let at = self.attr_at(o, slot);
+                        self.set_attr(o, slot, at | P_MAPPED);
+                    }
+                }
+                kk += 1;
             }
-            q += 2;
+            self.put_env(o, -1);
         }
     }
 
@@ -4959,20 +4976,16 @@ impl Vm {
     pub fn map_arg(&mut self, o: int, j: int, b0: int) {
         let b = b0 & ((1 << 30) - 1);
         if (b0 & (1 << 30)) != 0 && self.objs[o as usize].class == C_ARGUMENTS {
-            // a parameter nothing assigns: the element holds its value
+            // parameters nothing assigns: the elements hold their values
             // until the object itself is written, and slow_args (the only
-            // way a write gets in) maps it then from this mark
-            if j >= self.evecs[self.objs[o as usize].elems as usize].v.len() as int {
-                return;
+            // way a write gets in) maps them then from the function's
+            // OP_ARGUMENTS ops: pos = its proto + 1, env = their env
+            if self.objs[o as usize].pos == 0 {
+                let fi = self.frames.len() - 1;
+                self.objs[o as usize].pos = (self.frames[fi].proto as i32) + 1;
+                let env = self.get_env(b & 255);
+                self.put_env(o, env);
             }
-            let env = self.get_env(b & 255);
-            if self.colds[self.objs[o as usize].cold as usize].home != env {
-                self.put_home(o, env);
-            }
-            let a = self.index_atom(j);
-            let c = self.cold_id(o) as usize;
-            self.colds[c].marks.push(a);
-            self.colds[c].marks.push(b >> 8);
             return;
         }
         self.slow_args(o);
