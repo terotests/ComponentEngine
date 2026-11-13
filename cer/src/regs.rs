@@ -435,11 +435,11 @@ impl Tr {
     fn kval(&mut self, v: Val) -> int {
         let mut i: usize = 0;
         while i < self.kv.len() && i < 32 {
-            let same = match (&self.kv[i], &v) {
-                (Val::Undef, Val::Undef) => true,
-                (Val::Null, Val::Null) => true,
-                (Val::Bool(x), Val::Bool(y)) => *x == *y,
-                (Val::Num(x), Val::Num(y)) => *x == *y && (1.0 / *x) == (1.0 / *y),
+            let same = match ((&self.kv[i]).kind(), (&v).kind()) {
+                (VK::Undef, VK::Undef) => true,
+                (VK::Null, VK::Null) => true,
+                (VK::Bool(x), VK::Bool(y)) => x == y,
+                (VK::Num(x), VK::Num(y)) => x == y && (1.0 / x) == (1.0 / y),
                 _ => false,
             };
             if same {
@@ -628,8 +628,8 @@ impl Tr {
             let mut next = i + 1;
             if (c as int) == OP_UNDEF || (c as int) == OP_NULL || (c as int) == OP_TRUE || (c as int) == OP_FALSE || (c as int) == OP_INT {
                 let v = match (c as int) {
-                    OP_UNDEF => Val::Undef,
-                    OP_NULL => Val::Null,
+                    OP_UNDEF => Val::Undef(),
+                    OP_NULL => Val::Null(),
                     OP_TRUE => Val::Bool(true),
                     OP_FALSE => Val::Bool(false),
                     _ => Val::Num(op.a as double),
@@ -809,7 +809,7 @@ impl Tr {
                 let mut sub = 0;
                 let tk = (w + 1) as usize;
                 if self.el[tk] >= 0 && self.es[tk] < 0 {
-                    if let Val::Undef = self.kv[(-1 - self.es[tk] - self.kbase) as usize] {
+                    if let VK::Undef = (self.kv[(-1 - self.es[tk] - self.kbase) as usize]).kind() {
                         sub = 1;
                         self.es[tk] = ns + w + 1;
                         self.el[tk] = -1;

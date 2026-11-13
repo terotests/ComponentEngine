@@ -64,21 +64,21 @@ impl Vm {
         self.add_prop(gf, A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
         let fc = self.get_obj(self.global, self.atom_lookup("Function"), &Val::Obj(self.global));
-        if let Val::Obj(f) = fc {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(gf, f);
         }
         let agfp = self.async_generator_function_proto;
         let agf = self.native_fn("AsyncGeneratorFunction", NF_ASYNC_GENERATOR_FUNCTION, 1);
         self.add_prop(agf, A_PROTOTYPE, Val::Obj(agfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(agfp, A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
-        if let Val::Obj(f) = fc {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(agf, f);
         }
         let afp = self.async_function_proto;
         let af = self.native_fn("AsyncFunction", NF_ASYNC_FUNCTION, 1);
         self.add_prop(af, A_PROTOTYPE, Val::Obj(afp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(afp, A_CONSTRUCTOR, Val::Obj(af), P_HIDDEN | P_READONLY);
-        if let Val::Obj(f) = fc {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(af, f);
         }
     }
@@ -122,13 +122,13 @@ impl Vm {
             if !err.is_empty() {
                 let msg = err.replace("SyntaxError: ", "");
                 self.throw_syntax(msg.as_str());
-                return Val::Undef;
+                return Val::Undef();
             }
             let (entry, error) = self.pcomp_program(js.as_str(), strict, is_eval);
             if entry < 0 {
                 let msg = error.replace("SyntaxError: ", "");
                 self.throw_syntax(msg.as_str());
-                return Val::Undef;
+                return Val::Undef();
             }
             let fp = self.function_proto;
             let f = self.alloc(C_FUNCTION, fp);
@@ -145,7 +145,7 @@ impl Vm {
         if !p.error.is_empty() {
             let msg = p.error.replace("SyntaxError: ", "");
             self.throw_syntax(msg.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.atoms_sync();
         let atoms = self.atoms.clone();
@@ -160,7 +160,7 @@ impl Vm {
         if !c.error.is_empty() || entry < 0 {
             let msg = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
             self.throw_syntax(msg.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.atoms = c.atoms;
         self.atom_names = c.atom_names;
@@ -229,7 +229,7 @@ impl Vm {
         if !c.error.is_empty() || entry < 0 {
             let e = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
             self.throw_syntax(e.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.atoms = c.atoms;
         self.atom_names = c.atom_names;
@@ -243,7 +243,7 @@ impl Vm {
         self.protos[entry as usize].arrow = true;
         self.protos[entry as usize].lexical_ctor = true;
         let f = self.closure(entry);
-        self.call_value(Val::Obj(f), Val::Undef, Vec::new())
+        self.call_value(Val::Obj(f), Val::Undef(), Vec::new())
     }
 
     /// A module's function (`parser::module_source`) compiled with pcomp
@@ -289,17 +289,17 @@ impl Vm {
             return self.colds[self.objs[o as usize].cold as usize].prim.clone();
         }
         self.throw_type("Symbol.prototype method called on incompatible receiver");
-        Val::Undef
+        Val::Undef()
     }
 
     pub fn call_native_dynamic_this(&mut self, id: int, this: Val, args: &Vec<Val>) -> Val {
-        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
+        let a0 = if args.is_empty() { Val::Undef() } else { args[0].clone() };
         if id == NF_SYMP_VALUEOF {
             return self.this_symbol(&this);
         }
         if id == NF_THROWER {
             self.throw_type("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_FN_CALLER {
             // a sloppy function's caller / arguments: null here; a strict,
@@ -310,27 +310,27 @@ impl Vm {
                 let p = &self.protos[pi];
                 if p.strict || p.arrow || p.method || p.class_ctor || p.generator || p.is_async {
                     self.throw_type("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
-                    return Val::Undef;
+                    return Val::Undef();
                 }
             }
-            return Val::Null;
+            return Val::Null();
         }
         if id == NF_PROTO_GET {
             let o = self.to_object(&this);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             let p = self.proto_of(o);
-            return if p >= 0 { Val::Obj(p) } else { Val::Null };
+            return if p >= 0 { Val::Obj(p) } else { Val::Null() };
         }
         if id == NF_PROTO_SET {
-            if matches!(this, Val::Undef) || matches!(this, Val::Null) {
+            if this.is_undef() || this.is_null() {
                 self.throw_type("Object.prototype.__proto__ called on null or undefined");
-                return Val::Undef;
+                return Val::Undef();
             }
             let o = obj_of(&this);
-            if o < 0 || !(is_obj(&a0) || matches!(a0, Val::Null)) {
-                return Val::Undef;
+            if o < 0 || !(is_obj(&a0) || a0.is_null()) {
+                return Val::Undef();
             }
             let p = obj_of(&a0);
             // no cycles
@@ -338,35 +338,35 @@ impl Vm {
             while c >= 0 {
                 if c == o {
                     self.throw_type("Cyclic __proto__ value");
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 c = self.objs[c as usize].proto as int;
             }
             if !self.objs[o as usize].extensible && self.objs[o as usize].proto != p as i32 {
                 self.throw_type("#<Object> is not extensible");
-                return Val::Undef;
+                return Val::Undef();
             }
             self.put_proto(o, p);
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_RE_COMPILE {
             // Annex B: the regexp takes a new pattern and flags
             let o = obj_of(&this);
             if o < 0 || self.objs[o as usize].class != C_REGEXP {
                 self.throw_type("RegExp.prototype.compile called on incompatible receiver");
-                return Val::Undef;
+                return Val::Undef();
             }
-            let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
+            let a1 = if args.len() < 2 { Val::Undef() } else { args[1].clone() };
             let (src, fl) = if self.class_of(&a0) == C_REGEXP {
                 let s = self.get(&a0, self.atom_lookup("source"));
                 let f = self.get(&a0, self.atom_lookup("flags"));
                 (s, f)
             } else {
-                (if matches!(a0, Val::Undef) { self.str_val("") } else { a0.clone() }, a1)
+                (if a0.is_undef() { self.str_val("") } else { a0.clone() }, a1)
             };
             let fresh = self.new_regexp(&src, &fl);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             let n = obj_of(&fresh);
             let func = self.objs[n as usize].func as int;
@@ -395,12 +395,12 @@ impl Vm {
             }
             return this;
         }
-        Val::Undef
+        Val::Undef()
     }
 
     pub fn call_native_esm(&mut self, args: &Vec<Val>) -> Val {
-        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
-        let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
+        let a0 = if args.is_empty() { Val::Undef() } else { args[0].clone() };
+        let a1 = if args.len() < 2 { Val::Undef() } else { args[1].clone() };
         let src = self.to_str(&a0);
         let path = self.to_str(&a1);
         let is_async = args.len() > 2 && self.truthy_v(&args[2]);
@@ -409,7 +409,7 @@ impl Vm {
             let msg = m.error.clone();
             let t = if msg.starts_with("SyntaxError: ") { String::from(&msg[13..]) } else { msg };
             self.throw_syntax(t.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.str_val(m.json.as_str())
     }
@@ -417,9 +417,9 @@ impl Vm {
     pub fn call_native_dynamic(&mut self, id: int, args: &Vec<Val>, new_target: Val) -> Val {
         if id == NF_EVAL {
             if args.is_empty() {
-                return Val::Undef;
+                return Val::Undef();
             }
-            if let Val::Str(s) = &args[0] {
+            if let Some(s) = (&args[0]).as_str() {
                 let s = self.sget(s.clone());
                 let src = s.as_ref().clone();
                 // an indirect eval is sloppy global code (pcomp calls a
@@ -444,7 +444,7 @@ impl Vm {
         }
         let body = if n > 0 { self.to_string(&args[n - 1]) } else { String::new() };
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         let head = if id == NF_GENERATOR_FUNCTION {
             "function*"
@@ -458,7 +458,7 @@ impl Vm {
         let src = format!("({} anonymous({}\n) {{\n{}\n}})", head, params, body);
         let f = self.eval_source(src.as_str(), false, false);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         // a subclass's instance
         let fo = obj_of(&f);

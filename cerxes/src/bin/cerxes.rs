@@ -217,7 +217,7 @@ fn main() {
                 let (mut e2, mut pr, mut hm, mut ps, mut fu, mut en, mut co, mut el) = (0, 0, 0, 0, 0, 0, 0, 0);
                 for o in v.objs.iter().filter(|o| !o.free) {
                     if !v.colds[o.cold as usize].elems2.is_empty() { e2 += 1; }
-                    if !matches!(v.colds[o.cold as usize].prim, cerxes::value::Val::Undef) { pr += 1; }
+                    if !matches!((v.colds[o.cold as usize].prim).kind(), cerxes::value::VK::Undef) { pr += 1; }
                     if v.colds[o.cold as usize].home >= 0 { hm += 1; }
                     if o.pos != 0 { ps += 1; }
                     if o.func >= 0 { fu += 1; }

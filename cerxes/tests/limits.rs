@@ -115,14 +115,14 @@ fn time_limit_from_the_host_vm_calls() {
     let g = e.vm.global;
     let f = e.vm.get_obj(g, a, &cerxes::value::Val::Obj(g));
     let t0 = Instant::now();
-    e.vm.call_top(f, cerxes::value::Val::Undef, Vec::new());
+    e.vm.call_top(f, cerxes::value::Val::Undef(), Vec::new());
     assert!(e.vm.throwing && e.vm.terminated);
     assert!(t0.elapsed().as_millis() < 600);
     e.vm.throwing = false;
-    e.vm.exc = cerxes::value::Val::Undef;
+    e.vm.exc = cerxes::value::Val::Undef();
     let a = e.vm.intern("later");
     let f = e.vm.get_obj(g, a, &cerxes::value::Val::Obj(g));
-    let r = e.vm.call_top(f, cerxes::value::Val::Undef, Vec::new());
+    let r = e.vm.call_top(f, cerxes::value::Val::Undef(), Vec::new());
     assert!(!e.vm.throwing);
     assert_eq!(e.vm.display(&r), "1");
     let t0 = Instant::now();

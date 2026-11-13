@@ -45,22 +45,22 @@ impl Strings {
 }
 
 fn put_val(out: &mut String, st: &mut Strings, vm: &Vm, v: &Val) {
-    match v {
-        Val::Undef => put_num(out, 0),
-        Val::Null => put_num(out, 1),
-        Val::Bool(b) => put_num(out, if *b { 3 } else { 2 }),
-        Val::Num(x) => put_number(out, *x),
-        Val::Str(s) => {
+    match v.kind() {
+        VK::Undef => put_num(out, 0),
+        VK::Null => put_num(out, 1),
+        VK::Bool(b) => put_num(out, if b { 3 } else { 2 }),
+        VK::Num(x) => put_number(out, x),
+        VK::Str(s) => {
             put_num(out, 5);
-            put_num(out, st.id(vm.sref(*s)));
+            put_num(out, st.id(vm.sref(s)));
         }
-        Val::Obj(o) => {
+        VK::Obj(o) => {
             put_num(out, 6);
-            put_num(out, *o);
+            put_num(out, o);
         }
-        Val::Big(n) => {
+        VK::Big(n) => {
             put_num(out, 8);
-            put_num(out, *n as int);
+            put_num(out, n as int);
         }
     }
 }
@@ -79,9 +79,9 @@ fn put_number(out: &mut String, x: double) {
 fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
     let t = r.num();
     if t == 0 {
-        Val::Undef
+        Val::Undef()
     } else if t == 1 {
-        Val::Null
+        Val::Null()
     } else if t == 2 {
         Val::Bool(false)
     } else if t == 3 {
@@ -92,7 +92,7 @@ fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
         let i = r.num();
         if i < 0 || i >= strs.len() as int {
             r.bad = true;
-            return Val::Undef;
+            return Val::Undef();
         }
         strs[i as usize].clone()
     } else if t == 6 {
@@ -103,7 +103,7 @@ fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
         Val::Big((r.num() as double) + 0.0)
     } else {
         r.bad = true;
-        Val::Undef
+        Val::Undef()
     }
 }
 
@@ -153,10 +153,7 @@ fn get_str(r: &mut Reader, texts: &Vec<Rc<String>>) -> String {
 }
 
 fn in_objs(v: &Val, no: int) -> bool {
-    match v {
-        Val::Obj(o) => *o >= 0 && *o < no,
-        _ => true,
-    }
+    if let Some(o) = v.as_obj() { o >= 0 && o < no } else { true }
 }
 
 /// The engine's state as text; "" when it is not idle (a script running,
@@ -551,17 +548,14 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
         while k < nn && !r.bad {
             let x = get_val(&mut r, &strs);
             has_cold = true;
-            cold.nums.push(match x {
-                Val::Num(d) => d,
-                _ => 0.0,
-            });
+            cold.nums.push(if let Some(d) = x.as_num() { d } else { 0.0 });
             k += 1;
         }
         o.func = r.num() as i32;
         o.env = r.num() as i32;
         cold.prim = get_val(&mut r, &strs);
         cold.home = r.num();
-        if !matches!(cold.prim, Val::Undef) || cold.home != -1 {
+        if !cold.prim.is_undef() || cold.home != -1 {
             has_cold = true;
         }
         o.pos = r.num() as i32;
@@ -600,7 +594,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
             while j < keys.len() {
                 // the value straight in: the objects it names may come
                 // later, and recount() counts them at the end
-                let slot = vm.add_own(oi, keys[j], Val::Undef, attrs[j]);
+                let slot = vm.add_own(oi, keys[j], Val::Undef(), attrs[j]);
                 vm.objs[oi as usize].set_slot(slot as usize, vals[j].clone());
                 j += 1;
             }
@@ -632,7 +626,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
         ob.pos = 0;
         let c = vm.cold_id(*it) as usize;
         vm.colds[c].home = if src >= 0 { src } else { -1 };
-        vm.colds[c].prim = Val::Undef;
+        vm.colds[c].prim = Val::Undef();
         if src < 0 {
             vm.objs[*it as usize].env = -1;
         }
@@ -800,8 +794,8 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
             let mut j: usize = 0;
             while j < vm.evecs[e].v.len() && j < vm.colds[c].marks.len() {
                 if vm.colds[c].marks[j] == 0 {
-                    if let Val::Str(h) = &vm.evecs[e].v[j] {
-                        let hash = jsstr::str_hash(vm.sref(*h));
+                    if let Some(h) = (&vm.evecs[e].v[j]).as_str() {
+                        let hash = jsstr::str_hash(vm.sref(h));
                         vm.stab_add(o as int, j as int, hash);
                     }
                 }

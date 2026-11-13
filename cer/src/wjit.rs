@@ -35,19 +35,23 @@ use crate::vm::{A_LENGTH, A_NAME, A_PROTOTYPE};
 
 // ---------------------------------------------------------------- layout
 
+/// a value's size in memory (value.rs Val: 8 bytes, NaN-boxed)
+pub const VS: u32 = 8;
+const VSU: usize = VS as usize;
+
 /// Where the parts of a Val lie in memory.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub ok: bool,
     pub size: u32,
-    pub t_undef: u8,
-    pub t_null: u8,
-    pub t_bool: u8,
-    pub t_num: u8,
-    pub t_str: u8,
-    pub t_obj: u8,
+    pub t_undef: u32,
+    pub t_null: u32,
+    pub t_bool: u32,
+    pub t_num: u32,
+    pub t_str: u32,
+    pub t_obj: u32,
     /// Val::Big (a small BigInt): its value is a double at off_num
-    pub t_big: u8,
+    pub t_big: u32,
     /// offsets of the payloads
     pub off_bool: u32,
     pub off_num: u32,
@@ -161,21 +165,9 @@ pub struct Layout {
 }
 
 fn bytes_of(v: Val) -> [u8; 16] {
-    let mut buf = [0u8; 16];
+    // a value's 8 bytes, then 8 zero bytes
     let mut out = [0u8; 16];
-    if std::mem::size_of::<Val>() != 16 {
-        return out;
-    }
-    // SAFETY: buf is 16 bytes, zeroed, and Val (Copy, 16 bytes) is written
-    // into it unaligned; the bytes are then read one at a time with volatile
-    // loads, so a padding byte the write left alone reads as its zero and
-    // the compiler cannot reason the reads away
-    unsafe {
-        std::ptr::write_unaligned(buf.as_mut_ptr() as *mut Val, v);
-        for i in 0..16 {
-            out[i] = std::ptr::read_volatile(buf.as_ptr().add(i));
-        }
-    }
+    out[..8].copy_from_slice(&v.b.to_le_bytes());
     out
 }
 
@@ -279,75 +271,30 @@ pub fn probe() -> Layout {
         cold_nums_p: 0,
         cold_nums_l: 0,
     };
-    if l.size != 16 || std::mem::align_of::<Val>() != 8 {
+    if l.size != VS || std::mem::align_of::<Val>() != 8 {
         return l;
     }
-    let u = bytes_of(Val::Undef);
-    let n = bytes_of(Val::Null);
-    let bt = bytes_of(Val::Bool(true));
-    let bf = bytes_of(Val::Bool(false));
-    let x = 1.2345678901234567e-300f64;
-    let nm = bytes_of(Val::Num(x));
-    let s = bytes_of(Val::Str(0x5a3c_1e2d));
-    let o = bytes_of(Val::Obj(0x1b2c_3d4e));
-    let bg = bytes_of(Val::Big(x));
-    l.t_undef = u[0];
-    l.t_null = n[0];
-    l.t_bool = bt[0];
-    l.t_num = nm[0];
-    l.t_str = s[0];
-    l.t_obj = o[0];
-    l.t_big = bg[0];
-    let tags = [l.t_undef, l.t_null, l.t_bool, l.t_num, l.t_str, l.t_obj, l.t_big];
-    for i in 0..tags.len() {
-        for j in (i + 1)..tags.len() {
-            if tags[i] == tags[j] {
-                return l;
-            }
-        }
-    }
-    if bf[0] != bt[0] {
+    // NaN-boxed (value.rs): the tag is a value's top 16 bits, a number's
+    // is taken as 0xFFF8 (tag_at); the payloads are the low bits
+    l.t_undef = (crate::value::V_UNDEF >> 48) as u32;
+    l.t_null = (crate::value::V_NULL >> 48) as u32;
+    l.t_bool = (crate::value::V_BOOL >> 48) as u32;
+    l.t_num = 0xFFF8;
+    l.t_str = (crate::value::V_STR >> 48) as u32;
+    l.t_obj = (crate::value::V_OBJ >> 48) as u32;
+    l.t_big = (crate::value::V_BIG >> 48) as u32;
+    if Val::Obj(0x1b2c_3d4e).b != crate::value::V_OBJ | 0x1b2c_3d4e || Val::Num(1.5).b != 1.5f64.to_bits() {
         return l;
     }
-    // the bool: the one byte true and false differ in
-    let mut ob: i32 = -1;
-    for i in 1..16 {
-        if bt[i] != bf[i] {
-            if ob >= 0 || bt[i] != 1 || bf[i] != 0 {
-                return l;
-            }
-            ob = i as i32;
-        }
-    }
-    let xb = x.to_le_bytes();
-    let mut on: i32 = -1;
-    for off in [8usize, 4, 1] {
-        if off + 8 <= 16 && nm[off..off + 8] == xb {
-            on = off as i32;
-            break;
-        }
-    }
-    let sb = 0x5a3c_1e2di32.to_le_bytes();
-    let obb = 0x1b2c_3d4ei32.to_le_bytes();
-    let mut oi: i32 = -1;
-    for off in [4usize, 8, 1] {
-        if s[off..off + 4] == sb && o[off..off + 4] == obb {
-            oi = off as i32;
-            break;
-        }
-    }
-    if ob < 0 || on < 0 || oi < 0 || bg[on as usize..on as usize + 8] != xb {
-        return l;
-    }
-    l.off_bool = ob as u32;
-    l.off_num = on as u32;
-    l.off_int = oi as u32;
+    l.off_bool = 0;
+    l.off_num = 0;
+    l.off_int = 0;
     l.ok = true;
     // the buffer pointer of a Vec<Val>: the word of the Vec that holds it
     let mut v: Vec<Val> = Vec::with_capacity(7);
-    v.push(Val::Undef);
-    v.push(Val::Undef);
-    v.push(Val::Undef);
+    v.push(Val::Undef());
+    v.push(Val::Undef());
+    v.push(Val::Undef());
     let ptr = v.as_ptr() as usize;
     let mut vl: i32 = -1;
     let vs = std::mem::size_of::<Vec<Val>>();
@@ -380,7 +327,7 @@ pub fn probe() -> Layout {
         l.off_vals = std::mem::offset_of!(JsObj, vals) as u32;
         l.off_inl0 = std::mem::offset_of!(JsObj, inl0) as u32;
         l.off_nv = std::mem::offset_of!(JsObj, nv) as u32;
-        assert!(std::mem::offset_of!(JsObj, inl1) == std::mem::offset_of!(JsObj, inl0) + 16);
+        assert!(std::mem::offset_of!(JsObj, inl1) == std::mem::offset_of!(JsObj, inl0) + VS as usize);
         l.off_proto = std::mem::offset_of!(JsObj, proto) as u32;
         l.off_class = std::mem::offset_of!(JsObj, class) as u32;
         l.off_epoch = std::mem::offset_of!(crate::vm::Vm, shape_epoch) as u32;
@@ -442,7 +389,7 @@ pub fn probe() -> Layout {
         l.vm_jit_calls_ptr = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vp;
         l.vm_jit_calls_len = std::mem::offset_of!(crate::vm::Vm, jit_calls) as u32 + vl;
         l.str_data = str_probe(vp, vl);
-        let u = bytes_of(Val::Undef);
+        let u = bytes_of(Val::Undef());
         // SAFETY: written on the VM's thread before any code reads it
         unsafe {
             *std::ptr::addr_of_mut!(UNDEF16) = [
@@ -565,6 +512,16 @@ const I32_LOAD: u8 = 0x28;
 const I64_LOAD: u8 = 0x29;
 const F64_LOAD: u8 = 0x2b;
 const I32_LOAD8_U: u8 = 0x2d;
+const I32_LOAD16_U: u8 = 0x2f;
+const I32_GT_U: u8 = 0x4b;
+const I64_EXTEND_I32_U: u8 = 0xad;
+const I64_OR: u8 = 0x84;
+const I64_SHL: u8 = 0x86;
+const I64_SHR_U: u8 = 0x88;
+const I64_NE: u8 = 0x52;
+const I64_EQ: u8 = 0x51;
+const I64_AND: u8 = 0x83;
+const I32_WRAP_I64: u8 = 0xa7;
 const I64_STORE: u8 = 0x37;
 const F64_STORE: u8 = 0x39;
 const I32_STORE8: u8 = 0x3a;
@@ -1055,16 +1012,16 @@ impl<'a> Cg<'a> {
             return Opnd::Reg(x as u32);
         }
         let k = (-1 - x) as usize;
-        match self.kvals.get(k) {
-            Some(Val::Num(n)) => Opnd::Num(*n),
+        match self.kvals.get(k).map(|v| v.kind()) {
+            Some(VK::Num(n)) => Opnd::Num(n),
             _ => Opnd::K(k as u32),
         }
     }
     /// base local and byte offset of an operand's value in memory
     fn place(&self, o: Opnd) -> (u32, u32) {
         match o {
-            Opnd::Reg(r) => (L_SP, r * 16),
-            Opnd::K(k) => (L_KV, k * 16),
+            Opnd::Reg(r) => (L_SP, r * VS),
+            Opnd::K(k) => (L_KV, k * VS),
             Opnd::Num(_) => (L_SP, 0),
         }
     }
@@ -1122,8 +1079,7 @@ impl<'a> Cg<'a> {
             }
             _ => {
                 let (b, off) = self.place(o);
-                self.get(b);
-                self.mem(I32_LOAD8_U, 0, off);
+                self.tag_at(b, off);
             }
         }
     }
@@ -1158,10 +1114,7 @@ impl<'a> Cg<'a> {
                 self.fail(pc);
             }
             Opnd::Reg(_) => {
-                self.tag(o);
-                let t = self.lay.t_num as i64;
-                self.i32c(t);
-                self.op(I32_NE);
+                self.not_num_o(o);
                 self.fail_if(pc);
             }
         }
@@ -1226,53 +1179,75 @@ impl<'a> Cg<'a> {
     /// slot r = Num(local l)
     fn store_num(&mut self, r: u32, l: u32) {
         self.get(L_SP);
-        let t = self.lay.t_num as i64;
-        self.i32c(t);
-        self.mem(I32_STORE8, 0, r * 16);
-        self.get(L_SP);
         self.get(l);
-        let on = self.lay.off_num;
-        self.mem(F64_STORE, 3, r * 16 + on);
+        self.mem(F64_STORE, 3, r * VS);
     }
-    /// slot r = Bool(the i32 on the wasm stack); it goes through L_TAG
+    /// slot r = Bool(the i32 on the wasm stack)
     fn store_bool(&mut self, r: u32) {
         self.set(L_TAG);
         self.get(L_SP);
-        let t = self.lay.t_bool as i64;
-        self.i32c(t);
-        self.mem(I32_STORE8, 0, r * 16);
-        self.get(L_SP);
         self.get(L_TAG);
-        let ob = self.lay.off_bool;
-        self.mem(I32_STORE8, 0, r * 16 + ob);
+        self.op(I64_EXTEND_I32_U);
+        self.i64c(crate::value::V_BOOL as i64);
+        self.op(I64_OR);
+        self.mem(I64_STORE, 3, r * VS);
     }
-    /// the 16 bytes of an operand as two i64 into locals q, q + 1
+    /// an i64 constant on the wasm stack
+    fn i64c(&mut self, x: i64) {
+        self.w.byte(I64_CONST);
+        self.w.s(x);
+    }
+    /// the raw top 16 bits of the value at b + off: its tag for any value
+    /// but a number (compare with any tag but t_num)
+    fn rtag(&mut self, b: u32, off: u32) {
+        self.get(b);
+        self.mem(I32_LOAD16_U, 1, off + 6);
+    }
+    /// 1 when the value at b + off is not a number (top bits above 0xFFF8)
+    fn not_num(&mut self, b: u32, off: u32) {
+        self.rtag(b, off);
+        self.i32c(0xFFF9);
+        self.op(I32_GE_U);
+    }
+    /// not_num for an operand (a number constant never fails)
+    fn not_num_o(&mut self, o: Opnd) {
+        match o {
+            Opnd::Num(_) => self.i32c(0),
+            _ => {
+                let (b, off) = self.place(o);
+                self.not_num(b, off);
+            }
+        }
+    }
+    /// the tag of the value at b + off on the wasm stack: its top 16 bits
+    /// for undefined .. a small BigInt (value.rs V_UNDEF ..), t_num
+    /// (0xFFF8) for a number
+    fn tag_at(&mut self, b: u32, off: u32) {
+        self.get(b);
+        self.mem(I32_LOAD16_U, 1, off + 6);
+        self.i32c(0xFFF8);
+        self.get(b);
+        self.mem(I32_LOAD16_U, 1, off + 6);
+        self.i32c(0xFFF8);
+        self.op(I32_GT_U);
+        self.op(SELECT);
+    }
+    /// the address on the wasm stack gets the bits of a value of tag t
+    /// with a payload of 0 (a payload store at the same address after it
+    /// makes the whole value)
+    fn st_tag(&mut self, off: u32, t: u32) {
+        self.i64c(((t as u64) << 48) as i64);
+        self.mem(I64_STORE, 3, off);
+    }
+    /// the 8 bytes of an operand as an i64 into local q
     fn load_val(&mut self, o: Opnd, q: u32) -> bool {
         match o {
-            Opnd::Num(_) | Opnd::K(_) => {
-                let (b, off) = match o {
-                    Opnd::Num(_) => {
-                        // a number constant: its kvals entry
-                        return false;
-                    }
-                    _ => self.place(o),
-                };
-                self.get(b);
-                self.mem(I64_LOAD, 3, off);
-                self.set(q);
-                self.get(b);
-                self.mem(I64_LOAD, 3, off + 8);
-                self.set(q + 1);
-                true
-            }
-            Opnd::Reg(_) => {
+            Opnd::Num(_) => false,
+            _ => {
                 let (b, off) = self.place(o);
                 self.get(b);
                 self.mem(I64_LOAD, 3, off);
                 self.set(q);
-                self.get(b);
-                self.mem(I64_LOAD, 3, off + 8);
-                self.set(q + 1);
                 true
             }
         }
@@ -1280,10 +1255,7 @@ impl<'a> Cg<'a> {
     fn store_val(&mut self, r: u32, q: u32) {
         self.get(L_SP);
         self.get(q);
-        self.mem(I64_STORE, 3, r * 16);
-        self.get(L_SP);
-        self.get(q + 1);
-        self.mem(I64_STORE, 3, r * 16 + 8);
+        self.mem(I64_STORE, 3, r * VS);
     }
     /// the raw operand (a kvals index for constants, numbers included)
     fn raw(&self, x: i32) -> Opnd {
@@ -1310,7 +1282,7 @@ impl<'a> Cg<'a> {
         self.tag(o);
         self.set(L_TAG);
         let l = self.lay;
-        // number or small BigInt: n != 0 && n == n
+        // number: n != 0 && n == n
         self.get(b);
         self.mem(F64_LOAD, 3, off + l.off_num);
         self.set(L_A);
@@ -1322,33 +1294,37 @@ impl<'a> Cg<'a> {
         self.get(L_A);
         self.op(F64_EQ);
         self.op(I32_AND);
-        // bool: its byte; a string: its handle is not 0 (the empty
-        // string); otherwise object
+        // small BigInt: its 48 payload bits are not all 0
         self.get(b);
-        self.mem(I32_LOAD8_U, 0, off + l.off_bool);
+        self.mem(I64_LOAD, 3, off);
+        self.i64c(16);
+        self.op(I64_SHL);
+        self.i64c(0);
+        self.op(I64_NE);
+        // bool or string: the low word (bool's bit, the string handle,
+        // 0 for the empty string) is not 0; otherwise object
         self.get(b);
-        self.mem(I32_LOAD, 2, off + l.off_int);
+        self.mem(I32_LOAD, 2, off);
         self.i32c(0);
         self.op(I32_NE);
-        // an object (0n is a Val::Big)
         self.get(L_TAG);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
         self.get(L_TAG);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
-        self.op(SELECT);
         self.get(L_TAG);
         self.i32c(l.t_bool as i64);
+        self.op(I32_EQ);
+        self.op(I32_OR);
+        self.op(SELECT);
+        self.get(L_TAG);
+        self.i32c(l.t_big as i64);
         self.op(I32_EQ);
         self.op(SELECT);
         self.get(L_TAG);
         self.i32c(l.t_num as i64);
         self.op(I32_EQ);
-        self.get(L_TAG);
-        self.i32c(l.t_big as i64);
-        self.op(I32_EQ);
-        self.op(I32_OR);
         self.op(SELECT);
     }
     /// x <cmp> y for two numbers as an i32, or return pc
@@ -1380,7 +1356,7 @@ impl<'a> Cg<'a> {
     /// * 65536 + slot, as the interpreter's R_GET_PROP) saw when this was
     /// compiled: the slot read from the object's vals
     fn get_prop_ic(&mut self, dst: u32, obj: u32, c: i32, pc: i64) -> bool {
-        self.get_prop_at(dst, L_SP, obj * 16, c, pc)
+        self.get_prop_at(dst, L_SP, obj * VS, c, pc)
     }
     /// &objs[id] for the object id on the wasm stack
     fn obj_addr(&mut self) {
@@ -1404,10 +1380,11 @@ impl<'a> Cg<'a> {
     /// Vm::inc and dec count it: fails (before writing) for a string, old
     /// or new, and for an old object the write would leave unreferenced
     /// (Vm::dec_o puts it in the zct).
-    /// tags 0..4 are typeof's indices (vm.rs type_index)
+    /// tags 0xFFF8 (number) .. 0xFFFC (string) map to typeof's indices
+    /// (vm.rs type_index) by TYPE_NIB
     fn typeof_ok(&self) -> bool {
         let l = self.lay;
-        l.t_undef == 0 && l.t_null == 1 && l.t_bool == 2 && l.t_num == 3 && l.t_str == 4
+        l.t_num == 0xFFF8 && l.t_undef == 0xFFF9 && l.t_null == 0xFFFA && l.t_bool == 0xFFFB && l.t_str == 0xFFFC
     }
     /// heap_store through the module's hstore(src, slot, .., vm, ..)
     fn heap_store(&mut self, b: u32, off: u32, pc: i64) {
@@ -1465,8 +1442,7 @@ impl<'a> Cg<'a> {
         let to = l.t_obj as i64;
         // an old string the write would leave unreferenced (Vm::sdec puts
         // it in szct): the helper
-        self.get(L_T2);
-        self.mem(I32_LOAD8_U, 0, 0);
+        self.rtag(L_T2, 0);
         self.i32c(ts);
         self.op(I32_EQ);
         self.op(IF);
@@ -1489,8 +1465,7 @@ impl<'a> Cg<'a> {
         // an old object: rc > 1, then rc - 1 (L_T3 its &objs[id])
         self.i32c(0);
         self.set(L_T3);
-        self.get(L_T2);
-        self.mem(I32_LOAD8_U, 0, 0);
+        self.rtag(L_T2, 0);
         self.i32c(to);
         self.op(I32_EQ);
         self.op(IF);
@@ -1525,8 +1500,7 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
         // a new object: rc + 1
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.rtag(b, off);
         self.i32c(to);
         self.op(I32_EQ);
         self.op(IF);
@@ -1605,10 +1579,6 @@ impl<'a> Cg<'a> {
         self.get(b);
         self.mem(I64_LOAD, 3, off);
         self.mem(I64_STORE, 3, 0);
-        self.get(L_T2);
-        self.get(b);
-        self.mem(I64_LOAD, 3, off + 8);
-        self.mem(I64_STORE, 3, 8);
     }
     /// &Vm.strs[local h].rc on the wasm stack
     fn srcs_addr(&mut self, h: u32) {
@@ -1625,8 +1595,7 @@ impl<'a> Cg<'a> {
     /// the string at b + off, if one (handle > 0): srcs[h] op= 1
     fn str_count(&mut self, b: u32, off: u32, op: u8) {
         let l = self.lay;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.rtag(b, off);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
         self.op(IF);
@@ -1676,7 +1645,7 @@ impl<'a> Cg<'a> {
         self.mem(I32_LOAD, 2, l.vm_evecs_ptr);
         self.op(I32_ADD);
         self.mem(I32_LOAD, 2, l.elems_vp);
-        self.i32c(slot as i64 * 16);
+        self.i32c(slot as i64 * VS as i64);
         self.op(I32_ADD);
         self.set(L_T2);
     }
@@ -1690,9 +1659,9 @@ impl<'a> Cg<'a> {
     /// fails to the helper.
     fn for_in_step(&mut self, it: u32, dst: u32, pc: i64) {
         let l = self.lay;
-        self.need_obj(L_SP, it * 16, pc);
+        self.need_obj(L_SP, it * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, it * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, it * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -1772,16 +1741,13 @@ impl<'a> Cg<'a> {
             self.get(L_T5);
             self.mem(I32_LOAD, 2, l.elems_vp);
             self.get(L_T6);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T4);
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.set(L_Q0);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.set(L_Q0 + 1);
             self.store_val(dst, L_Q0);
             self.op(BR);
             self.w.u((self.extra - ok) as u64);
@@ -1891,12 +1857,11 @@ impl<'a> Cg<'a> {
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_avals_ptr);
         self.get(L_T4);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T4 as u64);
-        self.mem(I32_LOAD8_U, 0, 0);
+        self.set(L_T4);
+        self.rtag(L_T4, 0);
         self.i32c(l.t_str as i64);
         self.op(I32_NE);
         self.fail_if(pc);
@@ -1908,9 +1873,6 @@ impl<'a> Cg<'a> {
         self.get(L_T4);
         self.mem(I64_LOAD, 3, 0);
         self.set(L_Q0);
-        self.get(L_T4);
-        self.mem(I64_LOAD, 3, 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         self.extra -= 1;
         self.op(END);
@@ -1918,9 +1880,9 @@ impl<'a> Cg<'a> {
     /// dst = the array at register ob's length
     fn array_len(&mut self, dst: u32, ob: u32, pc: i64) -> bool {
         let l = self.lay;
-        self.need_obj(L_SP, ob * 16, pc);
+        self.need_obj(L_SP, ob * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, ob * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -1943,7 +1905,7 @@ impl<'a> Cg<'a> {
     }
     fn get_elem_fast(&mut self, dst: u32, ob: u32, key: Opnd, pc: i64) -> bool {
         let l = self.lay;
-        self.need_obj(L_SP, ob * 16, pc);
+        self.need_obj(L_SP, ob * VS, pc);
         let skey = match key {
             Opnd::Reg(r) if MASK.with(|m| m.get()) & (1u64 << 50) == 0 => Some(r),
             _ => None,
@@ -1955,8 +1917,7 @@ impl<'a> Cg<'a> {
             self.op(BLOCK);
             self.op(T_VOID);
             self.extra += 1;
-            self.get(L_SP);
-            self.mem(I32_LOAD8_U, 0, r * 16);
+            self.rtag(L_SP, r * VS);
             self.i32c(l.t_str as i64);
             self.op(I32_EQ);
             self.op(IF);
@@ -1965,7 +1926,7 @@ impl<'a> Cg<'a> {
             let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
             let o_atom = std::mem::offset_of!(crate::vm::SEnt, atom) as u32;
             self.get(L_SP);
-            self.mem(I32_LOAD, 2, r * 16 + l.off_int);
+            self.mem(I32_LOAD, 2, r * VS + l.off_int);
             self.i32c(sz);
             self.op(I32_MUL);
             self.get(L_VM);
@@ -1978,7 +1939,7 @@ impl<'a> Cg<'a> {
             self.op(I32_LT_S);
             self.fail_if(pc);
             self.get(L_SP);
-            self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+            self.mem(I32_LOAD, 2, ob * VS + l.off_int);
             self.obj_addr();
             self.get(L_T3);
             self.get(L_VM);
@@ -1991,9 +1952,6 @@ impl<'a> Cg<'a> {
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.set(L_Q0);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.set(L_Q0 + 1);
             self.store_val(dst, L_Q0);
             self.op(BR);
             self.w.u((self.extra - done) as u64);
@@ -2002,7 +1960,7 @@ impl<'a> Cg<'a> {
         }
         self.need_num(key, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, ob * VS + l.off_int);
         self.obj_addr();
         self.set(L_T2);
         let typed = MASK.with(|m| m.get()) & (1u64 << 61) == 0;
@@ -2080,16 +2038,13 @@ impl<'a> Cg<'a> {
         self.get(L_T4);
         self.mem(I32_LOAD, 2, l.elems_vp);
         self.get(L_T3);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T4);
         self.get(L_T4);
         self.mem(I64_LOAD, 3, 0);
         self.set(L_Q0);
-        self.get(L_T4);
-        self.mem(I64_LOAD, 3, 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         if typed {
             self.extra -= 1;
@@ -2155,11 +2110,8 @@ impl<'a> Cg<'a> {
         self.i32c(l.cold_size as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T6 as u64);
-        self.mem(I32_LOAD8_U, 0, l.cold_prim);
-        self.i32c(l.t_num as i64);
-        self.op(I32_NE);
+        self.set(L_T6);
+        self.not_num(L_T6, l.cold_prim);
         self.fail_if(pc);
         self.get(L_T3);
         self.op(F64_CONVERT_I32_U);
@@ -2181,11 +2133,9 @@ impl<'a> Cg<'a> {
         self.i32c(l.cold_size as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T6 as u64);
-        self.mem(I32_LOAD8_U, 0, l.cold_prim);
-        self.i32c(l.t_num as i64);
-        self.op(I32_EQ);
+        self.set(L_T6);
+        self.not_num(L_T6, l.cold_prim);
+        self.op(I32_EQZ);
         self.fail_if(pc);
         self.get(L_T6);
         self.mem(I32_LOAD, 2, l.cold_home);
@@ -2242,11 +2192,11 @@ impl<'a> Cg<'a> {
         if keep && matches!(val, Opnd::Num(_)) {
             return false;
         }
-        self.need_obj(L_SP, ob * 16, pc);
+        self.need_obj(L_SP, ob * VS, pc);
         self.need_num(key, pc);
         self.need_num(val, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, ob * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, ob * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -2336,8 +2286,7 @@ impl<'a> Cg<'a> {
     /// fail unless the value at b + off is an object
     fn need_obj(&mut self, b: u32, off: u32, pc: i64) {
         let t = self.lay.t_obj as i64;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.rtag(b, off);
         self.i32c(t);
         self.op(I32_NE);
         self.fail_if(pc);
@@ -2358,19 +2307,16 @@ impl<'a> Cg<'a> {
         let slot = (c & 65535) as u32;
         // slots 0 and 1 in the object, the rest in vals
         let at = if slot < 2 {
-            l.off_inl0 + slot * 16
+            l.off_inl0 + slot * VS
         } else {
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_vals);
             self.set(L_T2);
-            (slot - 2) * 16
+            (slot - 2) * VS
         };
         self.get(L_T2);
         self.mem(I64_LOAD, 3, at);
         self.set(L_Q0);
-        self.get(L_T2);
-        self.mem(I64_LOAD, 3, at + 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         true
     }
@@ -2380,15 +2326,15 @@ impl<'a> Cg<'a> {
         let l = self.lay;
         let vo = self.raw(v);
         if let Opnd::K(k) = vo {
-            match self.kvals.get(k as usize) {
-                Some(Val::Str(_)) | Some(Val::Obj(_)) | None => return false,
+            match (self.kvals.get(k as usize)).map(|v| v.kind()) {
+                Some(VK::Str(_)) | Some(VK::Obj(_)) | None => return false,
                 _ => {}
             }
         }
         let (vb, voff) = self.place(vo);
-        self.need_obj(L_SP, obj * 16, pc);
+        self.need_obj(L_SP, obj * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, obj * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -2400,10 +2346,10 @@ impl<'a> Cg<'a> {
         let slot = (c & 65535) as u32;
         self.get(L_T2);
         if slot < 2 {
-            self.i32c((l.off_inl0 + slot * 16) as i64);
+            self.i32c((l.off_inl0 + slot * VS) as i64);
         } else {
             self.mem(I32_LOAD, 2, l.off_vals);
-            self.i32c(((slot - 2) * 16) as i64);
+            self.i32c(((slot - 2) * VS) as i64);
         }
         self.op(I32_ADD);
         self.set(L_T2);
@@ -2416,13 +2362,13 @@ impl<'a> Cg<'a> {
     fn set_prop_cached(&mut self, obj: u32, v: i32, a: u32, t: i32, atom: i32, pc: i64) -> bool {
         let l = self.lay;
         let (vb, voff) = self.place(self.raw(v));
-        self.need_obj(L_SP, obj * 16, pc);
+        self.need_obj(L_SP, obj * VS, pc);
         // block $done
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, obj * VS + l.off_int);
         self.obj_addr();
         self.i32c(a as i64);
         self.get(L_VM);
@@ -2451,17 +2397,12 @@ impl<'a> Cg<'a> {
     }
     /// slot r = undefined
     fn store_undef(&mut self, r: u32) {
-        let u = bytes_of(Val::Undef);
+        let u = bytes_of(Val::Undef());
         let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-        let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
         self.get(L_SP);
         self.w.byte(I64_CONST);
         self.w.s(lo);
-        self.mem(I64_STORE, 3, r * 16);
-        self.get(L_SP);
-        self.w.byte(I64_CONST);
-        self.w.s(hi);
-        self.mem(I64_STORE, 3, r * 16 + 8);
+        self.mem(I64_STORE, 3, r * VS);
     }
     /// A plain call's frame pushed as renter pushes it, for the callee the
     /// site's call cache at `a` names (h_call fills it: proto, table
@@ -2474,7 +2415,7 @@ impl<'a> Cg<'a> {
             cg.i32c(a as i64);
             cg.mem(I32_LOAD, 2, k * 4);
         };
-        let fo = f as u32 * 16;
+        let fo = f as u32 * VS;
         // f: a script function of the cached proto
         self.need_obj(L_SP, fo, pc);
         self.get(L_SP);
@@ -2522,8 +2463,7 @@ impl<'a> Cg<'a> {
         // a sloppy function's this must be an object already
         ld(self, 6);
         self.op(I32_EQZ);
-        self.get(L_SP);
-        self.mem(I32_LOAD8_U, 0, fo + 16);
+        self.rtag(L_SP, fo + VS);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(I32_AND);
@@ -2553,26 +2493,25 @@ impl<'a> Cg<'a> {
             cg.op(I32_LT_S);
             cg.op(SELECT);
         };
-        let cbp = (f as u32 + 2) * 16;
+        let cbp = (f as u32 + 2) * VS;
         self.get(L_SP);
         self.i32c(cbp as i64);
         self.op(I32_ADD);
         self.w.byte(LOCAL_TEE);
         self.w.u(L_C as u64);
         keep(self);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
         self.get(L_C);
         ld(self, 3);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T4);
-        let u = bytes_of(Val::Undef);
+        let u = bytes_of(Val::Undef());
         let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-        let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
         self.op(BLOCK);
         self.op(T_VOID);
         self.op(LOOP);
@@ -2587,11 +2526,7 @@ impl<'a> Cg<'a> {
         self.w.s(lo);
         self.mem(I64_STORE, 3, 0);
         self.get(L_T3);
-        self.w.byte(I64_CONST);
-        self.w.s(hi);
-        self.mem(I64_STORE, 3, 8);
-        self.get(L_T3);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_ADD);
         self.set(L_T3);
         self.op(BR);
@@ -2638,14 +2573,9 @@ impl<'a> Cg<'a> {
         // this_val = the slot after f
         self.get(L_T3);
         self.get(L_SP);
-        self.mem(I64_LOAD, 3, fo + 16);
+        self.mem(I64_LOAD, 3, fo + VS);
         self.mem(I64_STORE, 3, l.frame_this);
-        self.get(L_T3);
-        self.get(L_SP);
-        self.mem(I64_LOAD, 3, fo + 24);
-        self.mem(I64_STORE, 3, l.frame_this + 8);
         st_k(self, l.fr_new_target, lo);
-        st_k(self, l.fr_new_target + 8, hi);
         st_k(self, l.fr_args_obj, -1);
         self.get(L_T3);
         self.i32c(0);
@@ -2709,15 +2639,14 @@ impl<'a> Cg<'a> {
         let l = self.lay;
         let vo = self.raw(v);
         if let Opnd::K(k) = vo {
-            match self.kvals.get(k as usize) {
-                Some(Val::Str(_)) | Some(Val::Obj(_)) | None => return false,
+            match (self.kvals.get(k as usize)).map(|v| v.kind()) {
+                Some(VK::Str(_)) | Some(VK::Obj(_)) | None => return false,
                 _ => {}
             }
         }
         let (vb, voff) = self.place(vo);
         // the value: no string (Vm::inc's other case)
-        self.get(vb);
-        self.mem(I32_LOAD8_U, 0, voff);
+        self.rtag(vb, voff);
         self.i32c(l.t_str as i64);
         self.op(I32_EQ);
         self.fail_if(pc);
@@ -2740,9 +2669,9 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
         }
-        self.need_obj(L_SP, obj * 16, pc);
+        self.need_obj(L_SP, obj * VS, pc);
         self.get(L_SP);
-        self.mem(I32_LOAD, 2, obj * 16 + l.off_int);
+        self.mem(I32_LOAD, 2, obj * VS + l.off_int);
         self.obj_addr();
         self.w.byte(LOCAL_TEE);
         self.w.u(L_T2 as u64);
@@ -2777,8 +2706,7 @@ impl<'a> Cg<'a> {
         self.get(L_T2);
         self.i32c((t & 65535) as i64);
         self.mem(I32_STORE, 2, l.off_shape);
-        self.get(vb);
-        self.mem(I32_LOAD8_U, 0, voff);
+        self.rtag(vb, voff);
         self.i32c(l.t_obj as i64);
         self.op(I32_EQ);
         self.op(IF);
@@ -2800,7 +2728,7 @@ impl<'a> Cg<'a> {
         self.op(I32_ADD);
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_nv);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
@@ -2815,7 +2743,7 @@ impl<'a> Cg<'a> {
         self.get(L_T2);
         self.vals_hdr();
         self.mem(I32_LOAD, 2, l.off_vals_len);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_T3);
@@ -2832,10 +2760,6 @@ impl<'a> Cg<'a> {
         self.get(vb);
         self.mem(I64_LOAD, 3, voff);
         self.mem(I64_STORE, 3, 0);
-        self.get(L_T3);
-        self.get(vb);
-        self.mem(I64_LOAD, 3, voff + 8);
-        self.mem(I64_STORE, 3, 8);
         self.get(L_T2);
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_nv);
@@ -2862,8 +2786,7 @@ impl<'a> Cg<'a> {
             self.op(BLOCK);
             self.op(T_VOID);
             self.extra += 1;
-            self.get(b);
-            self.mem(I32_LOAD8_U, 0, off);
+            self.rtag(b, off);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(BR_IF);
@@ -2908,7 +2831,7 @@ impl<'a> Cg<'a> {
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
-            // slot * 16 < 32 in the object, else in vals
+            // slot * VS < 2 * VS in the object, else in vals
             self.get(L_T2);
             self.i32c(l.off_inl0 as i64);
             self.op(I32_ADD);
@@ -2918,19 +2841,16 @@ impl<'a> Cg<'a> {
             self.mem(I32_LOAD, 2, l.off_vals);
             self.get(L_T3);
             self.op(I32_ADD);
-            self.i32c(32);
+            self.i32c(2 * VS as i64);
             self.op(I32_SUB);
             self.get(L_T3);
-            self.i32c(32);
+            self.i32c(2 * VS as i64);
             self.op(I32_LT_U);
             self.op(SELECT);
             self.set(L_T4);
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.set(L_Q0);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.set(L_Q0 + 1);
             self.store_val(dst, L_Q0);
             self.op(BR);
             self.w.u(1);
@@ -2958,8 +2878,7 @@ impl<'a> Cg<'a> {
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.rtag(b, off);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(BR_IF);
@@ -2976,19 +2895,16 @@ impl<'a> Cg<'a> {
         self.w.u(0);
         let slot = (ic & 65535) as u32;
         let at = if slot < 2 {
-            l.off_inl0 + slot * 16
+            l.off_inl0 + slot * VS
         } else {
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_vals);
             self.set(L_T2);
-            (slot - 2) * 16
+            (slot - 2) * VS
         };
         self.get(L_T2);
         self.mem(I64_LOAD, 3, at);
         self.set(L_Q0);
-        self.get(L_T2);
-        self.mem(I64_LOAD, 3, at + 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         self.op(BR);
         self.w.u(1);
@@ -3017,8 +2933,7 @@ impl<'a> Cg<'a> {
         self.op(BLOCK);
         self.op(T_VOID);
         self.extra += 1;
-        self.get(b);
-        self.mem(I32_LOAD8_U, 0, off);
+        self.rtag(b, off);
         self.i32c(l.t_obj as i64);
         self.op(I32_NE);
         self.op(BR_IF);
@@ -3048,23 +2963,19 @@ impl<'a> Cg<'a> {
         self.op(BR_IF);
         self.w.u(0);
         let vat = if slot < 2 {
-            l.off_inl0 + slot * 16
+            l.off_inl0 + slot * VS
         } else {
             self.get(L_T2);
             self.mem(I32_LOAD, 2, l.off_vals);
             self.set(L_T2);
-            (slot - 2) * 16
+            (slot - 2) * VS
         };
         self.get(L_T2);
         self.mem(I64_LOAD, 3, vat);
         self.set(L_Q0);
-        self.get(L_T2);
-        self.mem(I64_LOAD, 3, vat + 8);
-        self.set(L_Q0 + 1);
         if flags == 1 {
             // a script or native function (prop_cache's check)
-            self.get(L_T2);
-            self.mem(I32_LOAD8_U, 0, vat);
+            self.rtag(L_T2, vat);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(BR_IF);
@@ -3088,9 +2999,6 @@ impl<'a> Cg<'a> {
             self.get(b);
             self.mem(I64_LOAD, 3, off);
             self.set(L_Q2);
-            self.get(b);
-            self.mem(I64_LOAD, 3, off + 8);
-            self.set(L_Q2 + 1);
         }
         self.store_val(dst, L_Q0);
         if flags != 0 {
@@ -3108,7 +3016,7 @@ impl<'a> Cg<'a> {
     fn pget_call(&mut self, dst: u32, b: u32, off: u32, a: u32, flags: i64, pc: i64) -> bool {
         self.get(L_SP);
         if dst != 0 {
-            self.i32c(dst as i64 * 16);
+            self.i32c(dst as i64 * VS as i64);
             self.op(I32_ADD);
         }
         self.i32c(a as i64);
@@ -3189,8 +3097,7 @@ impl<'a> Cg<'a> {
         let l = self.lay;
         if method {
             // L_T5 = the object, or a string's or number's prototype
-            self.get(b);
-            self.mem(I32_LOAD8_U, 0, off);
+            self.tag_at(b, off);
             self.set(L_T6);
             self.get(b);
             self.mem(I32_LOAD, 2, off + l.off_int);
@@ -3229,9 +3136,6 @@ impl<'a> Cg<'a> {
             self.get(b);
             self.mem(I64_LOAD, 3, off);
             self.set(L_Q2);
-            self.get(b);
-            self.mem(I64_LOAD, 3, off + 8);
-            self.set(L_Q2 + 1);
         }
         // look(&objs[id], cache, epoch): &value, or 0 (a miss)
         self.get(L_T5);
@@ -3270,9 +3174,6 @@ impl<'a> Cg<'a> {
         self.get(L_T4);
         self.mem(I64_LOAD, 3, 0);
         self.set(L_Q0);
-        self.get(L_T4);
-        self.mem(I64_LOAD, 3, 8);
-        self.set(L_Q0 + 1);
         self.store_val(dst, L_Q0);
         if method {
             self.store_val(dst + 1, L_Q2);
@@ -3366,7 +3267,7 @@ impl<'a> Cg<'a> {
         let (bb, bo) = self.place(b);
         let num_k = matches!(a, Opnd::Num(_)) || matches!(b, Opnd::Num(_));
         if !num_k {
-            // two small BigInts: their values
+            // two small BigInts: their bits
             self.get(L_TAG);
             self.i32c(l.t_big as i64);
             self.op(I32_EQ);
@@ -3374,10 +3275,10 @@ impl<'a> Cg<'a> {
             self.op(T_VOID);
             self.extra += 1;
             self.get(ab);
-            self.mem(F64_LOAD, 3, ao + l.off_num);
+            self.mem(I64_LOAD, 3, ao);
             self.get(bb);
-            self.mem(F64_LOAD, 3, bo + l.off_num);
-            self.op(F64_EQ);
+            self.mem(I64_LOAD, 3, bo);
+            self.op(I64_EQ);
             self.op(BR);
             self.w.u(1);
             self.extra -= 1;
@@ -3663,7 +3564,7 @@ impl<'a> Cg<'a> {
             self.store_undef(f as u32 + 1);
         }
         // f: c's function object; room on the stack for its frame
-        let fo = f as u32 * 16;
+        let fo = f as u32 * VS;
         self.need_obj(L_SP, fo, pc);
         self.get(L_SP);
         self.mem(I32_LOAD, 2, fo + l.off_int);
@@ -3691,7 +3592,7 @@ impl<'a> Cg<'a> {
         self.set(L_SENV);
         // the callee's frame: sp and bp at f + 2
         self.get(L_SP);
-        self.i32c((f as i64 + 2) * 16);
+        self.i32c((f as i64 + 2) * VS as i64);
         self.op(I32_ADD);
         self.set(L_SP);
         self.get(L_BP);
@@ -3709,7 +3610,7 @@ impl<'a> Cg<'a> {
         self.caches = c.caches.clone();
         self.atoms = c.atoms.clone();
         self.fsize = c.fsize;
-        self.inl_this = Some(((f as u32 + 1) * 16, c.strict));
+        self.inl_this = Some(((f as u32 + 1) * VS, c.strict));
         let mut cp = c.entry;
         let mut ret = false;
         while cp < c.code.len() && !self.inl_bad {
@@ -3722,13 +3623,10 @@ impl<'a> Cg<'a> {
                 break;
             }
             if k == R_RET_UNDEF {
-                let u = bytes_of(Val::Undef);
+                let u = bytes_of(Val::Undef());
                 self.w.byte(I64_CONST);
                 self.w.s(i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]));
                 self.set(L_Q0);
-                self.w.byte(I64_CONST);
-                self.w.s(i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]));
-                self.set(L_Q0 + 1);
                 ret = true;
                 break;
             }
@@ -3906,7 +3804,7 @@ impl<'a> Cg<'a> {
             self.get(L_VM);
             self.mem(I32_LOAD, 2, l.vm_stack_ptr);
             self.get(L_BP);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_SP);
@@ -3930,11 +3828,7 @@ impl<'a> Cg<'a> {
             self.get(L_SP);
             self.i32c(cell);
             self.mem(I64_LOAD, 3, 48);
-            self.mem(I64_STORE, 3, dst as u32 * 16);
-            self.get(L_SP);
-            self.i32c(cell);
-            self.mem(I64_LOAD, 3, 56);
-            self.mem(I64_STORE, 3, dst as u32 * 16 + 8);
+            self.mem(I64_STORE, 3, dst as u32 * VS);
             self.i32c(0);
             self.set(L_TAG);
             self.op(ELSE);
@@ -3998,7 +3892,7 @@ impl<'a> Cg<'a> {
         for (lb, lr) in [(L_FB, L_F), (L_DB, L_DST)] {
             self.get(L_SP);
             self.get(lr);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(lb);
@@ -4065,7 +3959,7 @@ impl<'a> Cg<'a> {
             self.op(I32_SUB);
             self.set(L_ARGC);
             self.get(L_FB);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_ADD);
             self.set(L_FB);
             // the function it calls, as f above
@@ -4091,15 +3985,12 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.i32c(1);
             self.op(I32_LT_S);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 32);
-            self.i32c(tn);
-            self.op(I32_NE);
+            self.not_num(L_FB, 2 * VS);
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
             self.get(L_FB);
-            self.mem(F64_LOAD, 3, 32 + on);
+            self.mem(F64_LOAD, 3, 2 * VS + on);
             self.set(L_A);
             let done = |cg: &mut Cg<'a>| {
                 // L_A into dst; 0 (the caller reloads its registers' address
@@ -4108,9 +3999,6 @@ impl<'a> Cg<'a> {
                 cg.i32c(cell);
                 cg.get(L_SP);
                 cg.mem(I32_STORE, 2, 0);
-                cg.get(L_DB);
-                cg.i32c(tn);
-                cg.mem(I32_STORE8, 0, 0);
                 cg.get(L_DB);
                 cg.get(L_A);
                 cg.mem(F64_STORE, 3, on);
@@ -4189,10 +4077,7 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.i32c(2);
             self.op(I32_NE);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 48);
-            self.i32c(tn);
-            self.op(I32_NE);
+            self.not_num(L_FB, 3 * VS);
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
@@ -4200,7 +4085,7 @@ impl<'a> Cg<'a> {
                 is(self, k);
                 self.get(L_A);
                 self.get(L_FB);
-                self.mem(F64_LOAD, 3, 48 + on);
+                self.mem(F64_LOAD, 3, 3 * VS + on);
                 self.op(op);
                 done(self);
                 self.op(END);
@@ -4218,19 +4103,18 @@ impl<'a> Cg<'a> {
                 cg.get(L_SP);
                 cg.mem(I32_STORE, 2, 0);
                 cg.get(L_DB);
-                cg.i32c(l.t_bool as i64);
-                cg.mem(I32_STORE8, 0, 0);
-                cg.get(L_DB);
                 cg.get(L_TAG);
-                cg.mem(I32_STORE8, 0, l.off_bool);
+                cg.op(I64_EXTEND_I32_U);
+                cg.i64c(crate::value::V_BOOL as i64);
+                cg.op(I64_OR);
+                cg.mem(I64_STORE, 3, 0);
                 cg.i32c(0);
                 cg.op(RETURN);
             };
             // slot k of the call (0 f, 1 this, 2 the first argument) not an
             // object: br_if out of the innermost block
             let not_obj = |cg: &mut Cg<'a>, k: u32| {
-                cg.get(L_FB);
-                cg.mem(I32_LOAD8_U, 0, k * 16);
+                cg.rtag(L_FB, k * VS);
                 cg.i32c(to);
                 cg.op(I32_NE);
             };
@@ -4258,7 +4142,7 @@ impl<'a> Cg<'a> {
                 done(self);
                 self.op(END);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.obj_addr();
                 self.mem(I32_LOAD, 2, l.off_class);
                 self.i32c(class as i64);
@@ -4283,7 +4167,7 @@ impl<'a> Cg<'a> {
                 self.op(BR_IF);
                 self.w.u(0);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 16 + l.off_int);
+                self.mem(I32_LOAD, 2, VS + l.off_int);
                 self.obj_addr();
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T2 as u64);
@@ -4336,8 +4220,7 @@ impl<'a> Cg<'a> {
                 self.w.u(0);
                 // the value's reference (Vm::inc): an object's rc, a
                 // string handle's (> 0) rc
-                self.get(L_FB);
-                self.mem(I32_LOAD8_U, 0, 32);
+                self.tag_at(L_FB, 2 * VS);
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_TAG as u64);
                 self.i32c(to);
@@ -4345,7 +4228,7 @@ impl<'a> Cg<'a> {
                 self.op(IF);
                 self.op(T_VOID);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.obj_addr();
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T4 as u64);
@@ -4361,14 +4244,14 @@ impl<'a> Cg<'a> {
                 self.i32c(l.t_str as i64);
                 self.op(I32_EQ);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.i32c(0);
                 self.op(I32_GT_S);
                 self.op(I32_AND);
                 self.op(IF);
                 self.op(T_VOID);
                 self.get(L_FB);
-                self.mem(I32_LOAD, 2, 32 + l.off_int);
+                self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
                 self.i32c(ssz);
                 self.op(I32_MUL);
                 self.get(L_VM);
@@ -4386,18 +4269,14 @@ impl<'a> Cg<'a> {
                 self.get(L_T5);
                 self.mem(I32_LOAD, 2, l.elems_vp);
                 self.get(L_T6);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T4 as u64);
                 self.get(L_FB);
-                self.mem(I64_LOAD, 3, 32);
+                self.mem(I64_LOAD, 3, 2 * VS);
                 self.mem(I64_STORE, 3, 0);
-                self.get(L_T4);
-                self.get(L_FB);
-                self.mem(I64_LOAD, 3, 40);
-                self.mem(I64_STORE, 3, 8);
                 self.get(L_T6);
                 self.i32c(1);
                 self.op(I32_ADD);
@@ -4409,9 +4288,6 @@ impl<'a> Cg<'a> {
                 self.i32c(cell);
                 self.get(L_SP);
                 self.mem(I32_STORE, 2, 0);
-                self.get(L_DB);
-                self.i32c(l.t_num as i64);
-                self.mem(I32_STORE8, 0, 0);
                 self.get(L_DB);
                 self.get(L_T6);
                 self.op(F64_CONVERT_I32_S);
@@ -4426,15 +4302,14 @@ impl<'a> Cg<'a> {
             self.op(I32_NE);
             not_obj(self, 1);
             self.op(I32_OR);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 32);
+            self.rtag(L_FB, 2 * VS);
             self.i32c(l.t_str as i64);
             self.op(I32_NE);
             self.op(I32_OR);
             self.op(BR_IF);
             self.w.u(0);
             self.get(L_FB);
-            self.mem(I32_LOAD, 2, 16 + l.off_int);
+            self.mem(I32_LOAD, 2, VS + l.off_int);
             self.obj_addr();
             self.w.byte(LOCAL_TEE);
             self.w.u(L_T2 as u64);
@@ -4447,7 +4322,7 @@ impl<'a> Cg<'a> {
             let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
             let o_atom = std::mem::offset_of!(crate::vm::SEnt, atom) as u32;
             self.get(L_FB);
-            self.mem(I32_LOAD, 2, 32 + l.off_int);
+            self.mem(I32_LOAD, 2, 2 * VS + l.off_int);
             self.i32c(sz);
             self.op(I32_MUL);
             self.get(L_VM);
@@ -4550,11 +4425,9 @@ impl<'a> Cg<'a> {
             {
                 let ob = bytes_of(Val::Obj(0));
                 let lo = i64::from_le_bytes([ob[0], ob[1], ob[2], ob[3], ob[4], ob[5], ob[6], ob[7]]);
-                let hi = i64::from_le_bytes([ob[8], ob[9], ob[10], ob[11], ob[12], ob[13], ob[14], ob[15]]);
                 ld(self, 6);
                 self.op(I32_EQZ);
-                self.get(L_FB);
-                self.mem(I32_LOAD8_U, 0, 16);
+                self.tag_at(L_FB, VS);
                 self.w.byte(LOCAL_TEE);
                 self.w.u(L_T3 as u64);
                 self.i32c(l.t_undef as i64);
@@ -4569,15 +4442,11 @@ impl<'a> Cg<'a> {
                 self.get(L_FB);
                 self.w.byte(I64_CONST);
                 self.w.s(lo);
-                self.mem(I64_STORE, 3, 16);
-                self.get(L_FB);
-                self.w.byte(I64_CONST);
-                self.w.s(hi);
-                self.mem(I64_STORE, 3, 24);
+                self.mem(I64_STORE, 3, VS);
                 self.get(L_FB);
                 self.get(L_VM);
                 self.mem(I32_LOAD, 2, l.vm_global);
-                self.mem(I32_STORE, 2, 16 + l.off_int);
+                self.mem(I32_STORE, 2, VS + l.off_int);
                 self.op(END);
             }
             ld(self, 1);
@@ -4612,8 +4481,7 @@ impl<'a> Cg<'a> {
             self.op(I32_OR);
             ld(self, 6);
             self.op(I32_EQZ);
-            self.get(L_FB);
-            self.mem(I32_LOAD8_U, 0, 16);
+            self.rtag(L_FB, VS);
             self.i32c(l.t_obj as i64);
             self.op(I32_NE);
             self.op(I32_AND);
@@ -4652,22 +4520,21 @@ impl<'a> Cg<'a> {
             self.op(IF);
             self.op(T_VOID);
             {
-                let u = bytes_of(Val::Undef);
+                let u = bytes_of(Val::Undef());
                 let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-                let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
                 // L_T5 = &stack[len], L_T6 = &stack[need]
                 self.get(L_VM);
                 self.mem(I32_LOAD, 2, l.vm_stack_ptr);
                 self.set(L_T6);
                 self.get(L_T6);
                 self.get(L_T3);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.set(L_T5);
                 self.get(L_T6);
                 self.get(L_T4);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.set(L_T6);
@@ -4685,11 +4552,7 @@ impl<'a> Cg<'a> {
                 self.w.s(lo);
                 self.mem(I64_STORE, 3, 0);
                 self.get(L_T5);
-                self.w.byte(I64_CONST);
-                self.w.s(hi);
-                self.mem(I64_STORE, 3, 8);
-                self.get(L_T5);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_ADD);
                 self.set(L_T5);
                 self.op(BR);
@@ -4718,7 +4581,7 @@ impl<'a> Cg<'a> {
             self.mem(I64_STORE, 3, l.fr_pc);
             // locals past the arguments: undefined (L_C the callee's sp)
             self.get(L_FB);
-            self.i32c(32);
+            self.i32c(2 * VS as i64);
             self.op(I32_ADD);
             self.w.byte(LOCAL_TEE);
             self.w.u(L_C as u64);
@@ -4728,19 +4591,18 @@ impl<'a> Cg<'a> {
             self.get(L_ARGC);
             self.op(I32_LT_S);
             self.op(SELECT);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T3);
             self.get(L_C);
             ld(self, 3);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_MUL);
             self.op(I32_ADD);
             self.set(L_T4);
-            let u = bytes_of(Val::Undef);
+            let u = bytes_of(Val::Undef());
             let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-            let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
             self.op(BLOCK);
             self.op(T_VOID);
             self.op(LOOP);
@@ -4755,11 +4617,7 @@ impl<'a> Cg<'a> {
             self.w.s(lo);
             self.mem(I64_STORE, 3, 0);
             self.get(L_T3);
-            self.w.byte(I64_CONST);
-            self.w.s(hi);
-            self.mem(I64_STORE, 3, 8);
-            self.get(L_T3);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_ADD);
             self.set(L_T3);
             self.op(BR);
@@ -4814,7 +4672,7 @@ impl<'a> Cg<'a> {
             self.op(I32_ADD);
             self.op(ELSE);
             self.get(L_FB);
-            self.i32c(16);
+            self.i32c(VS as i64);
             self.op(I32_ADD);
             self.op(END);
             self.set(L_T4);
@@ -4822,12 +4680,7 @@ impl<'a> Cg<'a> {
             self.get(L_T4);
             self.mem(I64_LOAD, 3, 0);
             self.mem(I64_STORE, 3, l.frame_this);
-            self.get(L_T3);
-            self.get(L_T4);
-            self.mem(I64_LOAD, 3, 8);
-            self.mem(I64_STORE, 3, l.frame_this + 8);
             st_k(self, l.fr_new_target, lo);
-            st_k(self, l.fr_new_target + 8, hi);
             st_k(self, l.fr_args_obj, -1);
             self.get(L_T3);
             self.i32c(0);
@@ -4968,7 +4821,7 @@ impl<'a> Cg<'a> {
         self.get(L_VM);
         self.mem(I32_LOAD, 2, l.vm_stack_ptr);
         self.get(L_BP);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_SP);
@@ -4997,7 +4850,7 @@ impl<'a> Cg<'a> {
         // the value into dst (db is from the sp before the call)
         self.get(L_SP);
         self.get(L_DST);
-        self.i32c(16);
+        self.i32c(VS as i64);
         self.op(I32_MUL);
         self.op(I32_ADD);
         self.set(L_DB);
@@ -5005,10 +4858,6 @@ impl<'a> Cg<'a> {
         self.i32c(cell);
         self.mem(I64_LOAD, 3, 48);
         self.mem(I64_STORE, 3, 0);
-        self.get(L_DB);
-        self.i32c(cell);
-        self.mem(I64_LOAD, 3, 56);
-        self.mem(I64_STORE, 3, 8);
         self.i32c(0);
         self.set(L_TAG);
         self.op(ELSE);
@@ -5224,10 +5073,7 @@ impl<'a> Cg<'a> {
             self.extra += 1;
             for r in regs.iter() {
                 let o = Opnd::Reg(*r);
-                self.tag(o);
-                let t = self.lay.t_num as i64;
-                self.i32c(t);
-                self.op(I32_NE);
+                self.not_num_o(o);
                 self.exit_if(pc as i64);
                 self.num(o);
                 let f = self.kn_fix[*r as usize] as u32;
@@ -5303,10 +5149,7 @@ impl<'a> Cg<'a> {
                     self.get(l);
                     return;
                 }
-                self.tag(o);
-                let t = self.lay.t_num as i64;
-                self.i32c(t);
-                self.op(I32_NE);
+                self.not_num_o(o);
                 self.exit_if(pc);
                 self.num(o);
                 if (r as usize) < self.kn.len() {
@@ -5339,7 +5182,7 @@ impl<'a> Cg<'a> {
             self.get(L_SP);
             self.get(l);
             let on = self.lay.off_num;
-            self.mem(F64_STORE, 3, dst as u32 * 16 + on);
+            self.mem(F64_STORE, 3, dst as u32 * VS + on);
         } else {
             self.store_num(dst as u32, l);
         }
@@ -5379,8 +5222,7 @@ impl<'a> Cg<'a> {
                     self.op(I32_ADD);
                     self.set(L_T2);
                     if !strict {
-                        self.get(L_T2);
-                        self.mem(I32_LOAD8_U, 0, 0);
+                        self.rtag(L_T2, 0);
                         self.i32c(self.lay.t_obj as i64);
                         self.op(I32_NE);
                         self.fail_if(p);
@@ -5395,9 +5237,6 @@ impl<'a> Cg<'a> {
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);
                 self.set(L_Q0);
-                self.get(L_T2);
-                self.mem(I64_LOAD, 3, 8);
-                self.set(L_Q0 + 1);
                 self.store_val(w1 as u32, L_Q0);
                 true
             }
@@ -5443,8 +5282,7 @@ impl<'a> Cg<'a> {
                 let l = self.lay;
                 let o = self.raw(w2);
                 let (b, off) = self.place(o);
-                self.get(b);
-                self.mem(I32_LOAD8_U, 0, off);
+                self.tag_at(b, off);
                 self.set(L_T2);
                 self.get(L_T2);
                 self.i32c(l.t_obj as i64);
@@ -5479,6 +5317,25 @@ impl<'a> Cg<'a> {
                 self.set(L_T2);
                 self.extra -= 1;
                 self.op(END);
+                // number .. string (0xFFF8 ..= 0xFFFC): its index from
+                // TYPE_NIB's nibbles
+                self.get(L_T2);
+                self.i32c(0xFFF8);
+                self.op(I32_SUB);
+                self.set(L_T3);
+                self.i32c(TYPE_NIB);
+                self.get(L_T3);
+                self.i32c(4);
+                self.op(I32_MUL);
+                self.op(I32_SHR_U);
+                self.i32c(15);
+                self.op(I32_AND);
+                self.get(L_T2);
+                self.get(L_T3);
+                self.i32c(5);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                self.set(L_T2);
                 // a small BigInt: 7 (its tag is not its type_index)
                 self.i32c(7);
                 self.get(L_T2);
@@ -5490,16 +5347,13 @@ impl<'a> Cg<'a> {
                 self.get(L_VM);
                 self.mem(I32_LOAD, 2, l.vm_type_vals_ptr);
                 self.get(L_T2);
-                self.i32c(16);
+                self.i32c(VS as i64);
                 self.op(I32_MUL);
                 self.op(I32_ADD);
                 self.set(L_T2);
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);
                 self.set(L_Q0);
-                self.get(L_T2);
-                self.mem(I64_LOAD, 3, 8);
-                self.set(L_Q0 + 1);
                 self.store_val(w1 as u32, L_Q0);
                 true
             }
@@ -5510,8 +5364,7 @@ impl<'a> Cg<'a> {
                 let o = Opnd::Reg(w1 as u32);
                 let (b, off) = self.place(o);
                 if sub == 0 {
-                    self.get(b);
-                    self.mem(I32_LOAD8_U, 0, off);
+                    self.rtag(b, off);
                     self.i32c(l.t_obj as i64);
                     self.op(I32_EQ);
                     self.get(b);
@@ -5521,12 +5374,10 @@ impl<'a> Cg<'a> {
                     self.op(I32_EQ);
                     self.op(I32_AND);
                 } else {
-                    self.get(b);
-                    self.mem(I32_LOAD8_U, 0, off);
+                    self.rtag(b, off);
                     self.i32c(l.t_undef as i64);
                     self.op(I32_EQ);
-                    self.get(b);
-                    self.mem(I32_LOAD8_U, 0, off);
+                    self.rtag(b, off);
                     self.i32c(l.t_null as i64);
                     self.op(I32_EQ);
                     self.op(I32_OR);
@@ -5539,23 +5390,15 @@ impl<'a> Cg<'a> {
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);
                 self.set(L_Q0);
-                self.get(L_T2);
-                self.mem(I64_LOAD, 3, 8);
-                self.set(L_Q0 + 1);
                 self.store_val(w1 as u32, L_Q0);
                 if sub == 1 {
-                    // undefined in dst + 1: the bytes of Val::Undef
-                    let u = bytes_of(Val::Undef);
+                    // undefined in dst + 1: the bytes of Val::Undef()
+                    let u = bytes_of(Val::Undef());
                     let lo = i64::from_le_bytes([u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]]);
-                    let hi = i64::from_le_bytes([u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]]);
                     self.get(L_SP);
                     self.w.byte(I64_CONST);
                     self.w.s(lo);
-                    self.mem(I64_STORE, 3, (w1 as u32 + 1) * 16);
-                    self.get(L_SP);
-                    self.w.byte(I64_CONST);
-                    self.w.s(hi);
-                    self.mem(I64_STORE, 3, (w1 as u32 + 1) * 16 + 8);
+                    self.mem(I64_STORE, 3, (w1 as u32 + 1) * VS);
                 }
                 true
             }
@@ -5584,8 +5427,7 @@ impl<'a> Cg<'a> {
                     cg.op(F64_ADD);
                     cg.set(L_A);
                     cg.env_slot_addr(sub as i32, w3);
-                    cg.get(L_T2);
-                    cg.mem(I32_LOAD8_U, 0, 0);
+                    cg.tag_at(L_T2, 0);
                     cg.set(L_TAG);
                     cg.get(L_TAG);
                     cg.i32c(l.t_num as i64);
@@ -5595,9 +5437,6 @@ impl<'a> Cg<'a> {
                     cg.op(I32_NE);
                     cg.op(I32_AND);
                     cg.fail_if(p);
-                    cg.get(L_T2);
-                    cg.i32c(l.t_num as i64);
-                    cg.mem(I32_STORE8, 0, 0);
                     cg.get(L_T2);
                     cg.get(L_A);
                     cg.mem(F64_STORE, 3, l.off_num);
@@ -5631,7 +5470,7 @@ impl<'a> Cg<'a> {
             }
             R_SET_PROP if self.lay.obj_ok && w1 >= 0 && sub == 0 && self.caches[pc] != 0 => {
                 let raw_ok = match self.raw(w2) {
-                    Opnd::K(k) => !matches!(self.kvals.get(k as usize), Some(Val::Str(_)) | Some(Val::Obj(_)) | None),
+                    Opnd::K(k) => !matches!((self.kvals.get(k as usize)).map(|v| v.kind()), Some(VK::Str(_)) | Some(VK::Obj(_)) | None),
                     _ => true,
                 };
                 if raw_ok {
@@ -5647,7 +5486,7 @@ impl<'a> Cg<'a> {
             }
             R_INIT_PROP if self.lay.obj_ok && w1 >= 0 && self.atoms[pc] > 0 && (self.atoms[pc] & 65535) != 0 => {
                 let raw_ok = match self.raw(w2) {
-                    Opnd::K(k) => !matches!(self.kvals.get(k as usize), Some(Val::Str(_)) | Some(Val::Obj(_)) | None),
+                    Opnd::K(k) => !matches!((self.kvals.get(k as usize)).map(|v| v.kind()), Some(VK::Str(_)) | Some(VK::Obj(_)) | None),
                     _ => true,
                 };
                 if raw_ok {
@@ -5660,7 +5499,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_METHOD if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * 16, a, if sub == 0 { 1 } else { 2 }, -1, p))
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * VS, a, if sub == 0 { 1 } else { 2 }, -1, p))
             }
             R_GET_ELEM if self.lay.obj_ok && w1 >= 0 && w2 >= 0 => {
                 let key = self.opnd(w3);
@@ -5686,7 +5525,7 @@ impl<'a> Cg<'a> {
             }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && self.caches[pc] != 0 => {
                 let a = self.caches[pc];
-                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * 16, a, 0, w3, p))
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.pget_pic(w1 as u32, L_SP, w2 as u32 * VS, a, 0, w3, p))
             }
             R_CMP_JF | R_CMP_JT | R_LOOP | R_CMP_JFK | R_CMP_JTK => {
                 let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK { (w2, w3) } else { (w1, w2) };
@@ -5822,20 +5661,10 @@ impl<'a> Cg<'a> {
                     self.get(b);
                     self.mem(I64_LOAD, 3, off);
                     self.mem(I64_STORE, 3, 48);
-                    self.i32c(cell);
-                    self.get(b);
-                    self.mem(I64_LOAD, 3, off + 8);
-                    self.mem(I64_STORE, 3, 56);
                 } else {
-                    let t = self.lay.t_undef as i64;
                     self.i32c(cell);
-                    self.w.byte(I64_CONST);
-                    self.w.s(t);
+                    self.i64c(crate::value::V_UNDEF as i64);
                     self.mem(I64_STORE, 3, 48);
-                    self.i32c(cell);
-                    self.w.byte(I64_CONST);
-                    self.w.s(0);
-                    self.mem(I64_STORE, 3, 56);
                 }
                 self.i32c(cell);
                 self.i32c(p);
@@ -5892,7 +5721,7 @@ impl<'a> Cg<'a> {
                 // not null or undefined: jump
                 let o = self.raw(w1);
                 if let Opnd::K(k) = o {
-                    let nullish = matches!(self.kvals.get(k as usize), Some(Val::Undef) | Some(Val::Null));
+                    let nullish = matches!((self.kvals.get(k as usize)).map(|v| v.kind()), Some(VK::Undef) | Some(VK::Null));
                     if !nullish {
                         self.jump(w2 as i64, (w2 as i64) <= p);
                     }
@@ -6776,21 +6605,21 @@ fn eget_body(l: Layout) -> Vec<u8> {
             k(&mut w, P_ACCESSOR as i64);
             w.byte(I32_AND);
             ret0(&mut w);
-            // slot i: i * 16 < 32 in the object, else in vals
+            // slot i: i * VS < 2 * VS in the object, else in vals
             get(&mut w, 0);
             k(&mut w, l.off_inl0 as i64);
             w.byte(I32_ADD);
             get(&mut w, 5);
-            k(&mut w, 16);
+            k(&mut w, VS as i64);
             w.byte(I32_MUL);
             w.byte(I32_ADD);
             get(&mut w, 0);
             ld(&mut w, l.off_vals);
             get(&mut w, 5);
-            k(&mut w, 16);
+            k(&mut w, VS as i64);
             w.byte(I32_MUL);
             w.byte(I32_ADD);
-            k(&mut w, 32);
+            k(&mut w, 2 * VS as i64);
             w.byte(I32_SUB);
             get(&mut w, 5);
             k(&mut w, 2);
@@ -7081,7 +6910,7 @@ fn look_body(l: Layout) -> Vec<u8> {
         k(&mut w, unsafe { std::ptr::addr_of!(UNDEF16) } as usize as i64);
         w.byte(RETURN);
         w.byte(END);
-        // the slot's address: slot * 16 < 32 in the object, else in vals
+        // the slot's address: slot * VS < 2 * VS in the object, else in vals
         get(&mut w, 6);
         k(&mut w, l.off_inl0 as i64);
         w.byte(I32_ADD);
@@ -7093,11 +6922,11 @@ fn look_body(l: Layout) -> Vec<u8> {
         get(&mut w, 5);
         ld(&mut w, 8);
         w.byte(I32_ADD);
-        k(&mut w, 32);
+        k(&mut w, 2 * VS as i64);
         w.byte(I32_SUB);
         get(&mut w, 5);
         ld(&mut w, 8);
-        k(&mut w, 32);
+        k(&mut w, 2 * VS as i64);
         w.byte(I32_LT_U);
         w.byte(SELECT);
         w.byte(RETURN);
@@ -7262,7 +7091,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
         let atoms = site_atoms(vm, pi, rb, n);
         let pics = if rb + n <= vm.rcode.len() { site_pics(vm, rb, n) } else { Vec::new() };
         // R_TYPEOF's strings are there before the code reads them
-        vm.type_val(&Val::Undef);
+        vm.type_val(&Val::Undef());
         let p = &vm.protos[pi];
         let lay = LAYOUT.with(|l| *l);
         f = -2;
@@ -7648,7 +7477,7 @@ fn run_at(vm: &mut crate::vm::Vm, f: i64, pi: usize, bp: i64, pc: i64, budget: i
     }
     ENTRIES.with(|e| e.set(e.get() + 1));
     fill_from(vm, bp as i32);
-    let sp = vm.stack.as_ptr() as usize + (bp as usize) * 16;
+    let sp = vm.stack.as_ptr() as usize + (bp as usize) * VSU;
     let kv = vm.kvals.as_ptr() as usize;
     let vp = vm as *mut crate::vm::Vm as usize;
     let r = host::call(f as i32, sp, kv, pc as i32, budget, vp, bp as i32);
@@ -7735,30 +7564,26 @@ unsafe fn vm_of<'a>(vm: i32) -> &'a mut crate::vm::Vm {
 /// None for the full call.
 fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<Val> {
     use crate::builtins::*;
-    let arg = |vm: &crate::vm::Vm, k: int| if k < argc { vm.stack[(fpos + 2 + k) as usize] } else { Val::Undef };
+    let arg = |vm: &crate::vm::Vm, k: int| if k < argc { vm.stack[(fpos + 2 + k) as usize] } else { Val::Undef() };
     let a0 = arg(vm, 0);
     if id >= NF_MATH && id < NF_MATH + 28 {
-        if let Val::Num(x) = a0 {
+        if let Some(x) = a0.as_num() {
             return Some(Val::Num(math1(id - NF_MATH, x)));
         }
         return None;
     }
     if id >= NF_MATH + 28 && id <= NF_MATH + 30 {
-        if let (Val::Num(_), Val::Num(_)) = (a0, arg(vm, 1)) {
+        if a0.is_num() && (arg(vm, 1)).is_num() { 
             let args = vec![a0, arg(vm, 1)];
             return Some(vm.math(id - NF_MATH, &args));
         }
         return None;
     }
     if id == NF_STRING && argc >= 1 {
-        return match a0 {
-            Val::Str(_) => Some(a0),
-            Val::Num(n) => Some(vm.string_val(crate::num::number_to_string(n))),
-            _ => None,
-        };
+        return if a0.is_str() { Some(a0) } else if let Some(n) = a0.as_num() { Some(vm.string_val(crate::num::number_to_string(n))) } else { None };
     }
     if id == NF_ISFINITE {
-        if let Val::Num(n) = a0 {
+        if let Some(n) = a0.as_num() {
             return Some(Val::Bool(crate::num::is_finite(n)));
         }
         return None;
@@ -7766,14 +7591,14 @@ fn pure_native(vm: &mut crate::vm::Vm, id: int, fpos: int, argc: int) -> Option<
     if id == NF_SP_CHARCODEAT && argc >= 1 {
         let t = vm.stack[(fpos + 1) as usize];
         let r = vm.char_code_fast(&t, &a0);
-        if !matches!(r, Val::Undef) {
+        if !r.is_undef() {
             return Some(r);
         }
         return None;
     }
     if id == NF_NP_TOSTRING && argc <= 1 {
         let rx = if argc == 0 { Val::Num(10.0) } else { a0 };
-        if let (Val::Num(n), Val::Num(r)) = (vm.stack[(fpos + 1) as usize], rx) {
+        if (vm.stack[(fpos + 1) as usize]).is_num() && rx.is_num() { let n = (vm.stack[(fpos + 1) as usize]).num(); let r = rx.num();
             if r == 2.0 || r == 8.0 || r == 10.0 || r == 16.0 || r == 36.0 {
                 return Some(vm.string_val(crate::num::radix_string(n, r as int)));
             }
@@ -7795,22 +7620,22 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
     let vm = unsafe { vm_of(vm) };
     let ins = vm.rcode[ri as usize];
     let bp = bp as int;
-    let mut r = Val::Undef;
+    let mut r = Val::Undef();
     let mut done = false;
-    if let (Val::Obj(o), Val::Num(n)) = (vm.rget(bp, ins.b as int), vm.rget(bp, ins.c as int)) {
-        let ob = &vm.objs[*o as usize];
+    if (vm.rget(bp, ins.b as int)).is_obj() && (vm.rget(bp, ins.c as int)).is_num() { let o = (vm.rget(bp, ins.b as int)).obj(); let n = (vm.rget(bp, ins.c as int)).num();
+        let ob = &vm.objs[o as usize];
         if ob.class == C_ARRAY {
-            let i = *n as int;
+            let i = n as int;
             let ev = &vm.evecs[ob.elems as usize].v;
-            if i >= 0 && i < (ev.len() as int) && (i as double) == *n {
+            if i >= 0 && i < (ev.len() as int) && (i as double) == n {
                 r = ev[i as usize];
                 done = true;
             }
         } else if ob.class == C_TYPED {
             // a typed array's element (Vm::ta_slot)
-            let i = *n as int;
-            if (i as double) == *n {
-                let sl = vm.ta_slot(*o, i);
+            let i = n as int;
+            if (i as double) == n {
+                let sl = vm.ta_slot(o, i);
                 if sl >= 0 {
                     let bc = vm.objs[ob.env as usize].cold as usize;
                     r = Val::Num(vm.colds[bc].nums[sl as usize]);
@@ -7825,15 +7650,8 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
             // debug: HCOUNT[1200 + object class (0..30, 31 not an object)
             // * 3 + key kind (0 number, 1 string with an atom, 2 other)]
-            let c = match &v {
-                Val::Obj(o) => (vm.objs[*o as usize].class as usize).min(30),
-                _ => 31,
-            };
-            let kk = match &k {
-                Val::Num(_) => 0,
-                Val::Str(h) => if vm.strs[*h as usize].atom >= 0 { 1 } else { 2 },
-                _ => 2,
-            };
+            let c = if let Some(o) = (&v).as_obj() { (vm.objs[o as usize].class as usize).min(30) } else { 31 };
+            let kk = if (&k).is_num() { 0 } else if let Some(h) = (&k).as_str() { if vm.strs[h as usize].atom >= 0 { 1 } else { 2 } } else { 2 };
             HCOUNT.with(|h| {
                 let mut t = h.get();
                 t[1200 + c * 3 + kk] += 1;
@@ -7842,7 +7660,7 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
         }
         let fi = vm.frames.len() - 1;
         vm.frames[fi].pc = _pc as int + 1;
-        if let (Val::Obj(po), Val::Str(kh)) = (v, k) {
+        if v.is_obj() && k.is_str() { let po = v.obj(); let kh = k.strh();
             if vm.objs[po as usize].class == C_PROXY && vm.strs[kh as usize].atom >= 0 {
                 let a = vm.strs[kh as usize].atom as int;
                 let fpos = bp + vm.protos[_pi as usize].fsize;
@@ -7900,16 +7718,10 @@ fn h_set_elem(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
 
 fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
     let o = crate::vm::obj_of(vm.rget(bp, ins.a as int));
-    let n = match vm.rget(bp, ins.b as int) {
-        Val::Num(x) => *x,
-        _ => return false,
-    };
+    let n = if let Some(x) = (vm.rget(bp, ins.b as int)).as_num() { x } else { return false };
     if o >= 0 && vm.objs[o as usize].class == C_TYPED {
         let i = n as int;
-        return match val {
-            Val::Num(x) => (i as double) == n && vm.ta_put_num(o, i, x),
-            _ => false,
-        };
+        return if let Some(x) = val.as_num() { (i as double) == n && vm.ta_put_num(o, i, x) } else { false };
     }
     if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos >= 2 {
         return false;
@@ -8094,7 +7906,7 @@ fn fill_from(v: &crate::vm::Vm, bp: i32) {
     // SAFETY: CELL is only touched on this (the VM's) thread
     unsafe {
         let c = &mut *std::ptr::addr_of_mut!(CELL);
-        c[0] = (v.stack.as_ptr() as usize + (bp as usize) * 16) as i32;
+        c[0] = (v.stack.as_ptr() as usize + (bp as usize) * VSU) as i32;
         c[1] = v.kvals.as_ptr() as usize as i32;
         c[4] = v.objs.as_ptr() as usize as i32;
         c[5] = top_this(v);
@@ -8207,12 +8019,12 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
     if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
         let (x, y) = if kind == R_CMP_JFK || kind == R_CMP_JTK || kind == R_CMP { (w2, w3) } else { (w1, w2) };
         if matches!(kind, R_CMP_JFK | R_CMP_JTK | R_CMP | R_CMP_JF | R_CMP_JT | R_CASE_JT) {
-            let t = |v: &Val| match v { Val::Undef => 0, Val::Null => 1, Val::Bool(_) => 2, Val::Num(_) => 3, Val::Str(_) => 4, _ => 5 };
+            let t = |v: &Val| match v.kind() { VK::Undef => 0, VK::Null => 1, VK::Bool(_) => 2, VK::Num(_) => 3, VK::Str(_) => 4, _ => 5 };
             let mut k = 512 + ((sub - 42).clamp(0, 13) as usize) * 36 + t(vm.rget(bp, x)) * 6 + t(vm.rget(bp, y));
-            if let (Val::Str(p), Val::Str(q)) = (vm.rget(bp, x), vm.rget(bp, y)) {
-                let (e, f) = (&vm.strs[*p as usize], &vm.strs[*q as usize]);
+            if (vm.rget(bp, x)).is_str() && (vm.rget(bp, y)).is_str() { let p = (vm.rget(bp, x)).strh(); let q = (vm.rget(bp, y)).strh();
+                let (e, f) = (&vm.strs[p as usize], &vm.strs[q as usize]);
                 // 1000 + same len * 8 + up both <0 *4 + eq content*2 + same handle
-                k = 1000 + (e.len == f.len) as usize * 8 + (e.up < 0 && f.up < 0) as usize * 4 + (vm.sref(*p) == vm.sref(*q)) as usize * 2 + (p == q) as usize;
+                k = 1000 + (e.len == f.len) as usize * 8 + (e.up < 0 && f.up < 0) as usize * 4 + (vm.sref(p) == vm.sref(q)) as usize * 2 + (p == q) as usize;
             }
             HCOUNT.with(|h| { let mut v = h.get(); v[k.min(2047)] += 1; h.set(v) });
         }
@@ -8229,7 +8041,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             };
             // the interpreter's whole arm: its own fast paths first
             let mut done = false;
-            if let (Val::Num(a), Val::Num(b)) = (*vm.rget(bp, w2), *vm.rget(bp, w3)) {
+            if (*vm.rget(bp, w2)).is_num() && (*vm.rget(bp, w3)).is_num() { let a = (*vm.rget(bp, w2)).num(); let b = (*vm.rget(bp, w3)).num();
                 let r = if code == OP_SUB {
                     a - b
                 } else if code == OP_MUL {
@@ -8303,7 +8115,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_INC => {
             let dec = sub == 1;
-            if let Val::Num(x) = *vm.rget(bp, w2) {
+            if let Some(x) = (*vm.rget(bp, w2)).as_num() {
                 vm.rset((bp + w1) as usize, Val::Num(if dec { x - 1.0 } else { x + 1.0 }));
             } else {
                 vm.r_unary_slow(bp, fi, pc, if dec { 3 } else { 2 }, w1, w2);
@@ -8311,7 +8123,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_TONUM => {
             let neg = sub == 1;
-            if let Val::Num(x) = *vm.rget(bp, w2) {
+            if let Some(x) = (*vm.rget(bp, w2)).as_num() {
                 vm.rset((bp + w1) as usize, Val::Num(if neg { -x } else { x }));
             } else {
                 vm.r_unary_slow(bp, fi, pc, if neg { 1 } else if sub == 2 { 4 } else { 0 }, w1, w2);
@@ -8325,7 +8137,7 @@ fn h_slow(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 vm.stack[i] = Val::Str(h);
             } else {
                 let a = vm.stack[i];
-                let r = if let (Val::Num(x), Val::Num(y)) = (a, b) {
+                let r = if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
                     Val::Num(x + y)
                 } else {
                     vm.frames[fi].pc = pc + 1;
@@ -8379,7 +8191,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             eprintln!("hop {} {}", w0 & 255, (w0 >> 8) & 255);
             if (w0 & 255) == R_GET_METHOD || (w0 & 255) == R_SET_ENV {
                 let v = if (w0 & 255) == R_GET_METHOD { *vm.rget(bp, w2) } else { *vm.rget(bp, w1) };
-                let cl = if let Val::Obj(o) = v { vm.objs[o as usize].class } else { -1 };
+                let cl = if let Some(o) = v.as_obj() { vm.objs[o as usize].class } else { -1 };
                 let tg = vm.type_index(&v);
                 let atom = vm.protos[pi].code[pc as usize].a as int;
                 let nm = if (w0 & 255) == R_GET_METHOD && atom >= 0 && (atom as usize) < vm.atom_names.len() { vm.atom_str(atom) } else { String::new() };
@@ -8387,11 +8199,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 if (w0 & 255) == R_SET_ENV {
                     let e = vm.get_env(w2);
                     let ov = vm.env_slot(e, w3);
-                    extra = match ov {
-                        Val::Obj(o) => format!("old obj rc{} zct{}/{}", vm.objs[o as usize].rc, vm.zct.len(), vm.zct.capacity()),
-                        Val::Str(h) => format!("old str rc{}", if h > 0 { vm.strs[h as usize].rc } else { -9 }),
-                        _ => format!("old t{}", vm.type_index(&ov)),
-                    };
+                    extra = if let Some(o) = ov.as_obj() { format!("old obj rc{} zct{}/{}", vm.objs[o as usize].rc, vm.zct.len(), vm.zct.capacity()) } else if let Some(h) = ov.as_str() { format!("old str rc{}", if h > 0 { vm.strs[h as usize].rc } else { -9 }) } else { format!("old t{}", vm.type_index(&ov)) };
                 }
                 eprintln!("hopx {} t{} c{} {} {}", w0 & 255, tg, cl, nm, extra);
             }
@@ -8421,7 +8229,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             let v = vm.env_slot(e, w3);
             vm.rset((bp + w1) as usize, v);
             if sub == 1 {
-                vm.rset((bp + w1 + 1) as usize, Val::Undef);
+                vm.rset((bp + w1 + 1) as usize, Val::Undef());
             }
         }
         R_SET_ENV => {
@@ -8441,13 +8249,13 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         R_CHECK => {
             let v = *vm.rget(bp, w1);
             let bad = if sub == 0 {
-                if let Val::Obj(o) = v {
+                if let Some(o) = v.as_obj() {
                     o == vm.tdz_obj
                 } else {
                     false
                 }
             } else {
-                matches!(v, Val::Undef) || matches!(v, Val::Null)
+                v.is_undef() || v.is_null()
             };
             if bad {
                 vm.frames[fi].pc = pc + 1;
@@ -8475,10 +8283,10 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_GET_METHOD => {
             // a string's or number's method: its prototype's (prop_cache)
-            let o = match *vm.rget(bp, w2) {
-                Val::Obj(o) => o,
-                Val::Str(_) => vm.string_proto,
-                Val::Num(_) => vm.number_proto,
+            let o = match (*vm.rget(bp, w2)).kind() {
+                VK::Obj(o) => o,
+                VK::Str(_) => vm.string_proto,
+                VK::Num(_) => vm.number_proto,
                 _ => -1,
             };
             vm.r_get_method(bp, w1, w2, w3, rb, fi, pc, w0);
@@ -8532,10 +8340,7 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         }
         R_GET_THIS_PROP => {
             let c = w3;
-            let o = match vm.frames[fi].this_val {
-                Val::Obj(x) => x,
-                _ => return 1,
-            };
+            let o = if let Some(x) = vm.frames[fi].this_val.as_obj() { x } else { return 1 };
             if c >= 65536 && ((c >> 16) as int) == vm.objs[o as usize].shape as int {
                 let r = vm.objs[o as usize].get_slot((c & 65535) as usize);
                 vm.rset((bp + w1) as usize, r);
@@ -8678,7 +8483,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
         let next = pc + 1 + (w0 >> 16);
         vm.frames[fi].pc = next;
         if ((w0 >> 8) & 255) == 1 {
-            vm.stack[(fpos + 1) as usize] = Val::Undef;
+            vm.stack[(fpos + 1) as usize] = Val::Undef();
         }
         let dst = if w3 > 0 { bp + w3 - 1 } else { fpos };
         // compiled: the caller's code calls it itself (6), and h_ret ends
@@ -8719,14 +8524,14 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
             return 5;
         }
         // the callee's return left its value at fpos, the stack's end
-        let v = vm.stack.pop().unwrap_or(Val::Undef);
+        let v = vm.stack.pop().unwrap_or(Val::Undef());
         vm.grow_stack(want);
         vm.stack[dst as usize] = v;
         return after(vm);
     }
     vm.frames[fi].pc = pc + 1 + (w0 >> 16);
     if ((w0 >> 8) & 255) == 1 {
-        vm.stack[(fpos + 1) as usize] = Val::Undef;
+        vm.stack[(fpos + 1) as usize] = Val::Undef();
     }
     if vm.r_call_slow(fo, fpos, w2, bp, w3, want) {
         // one frame more, not a coroutine's (f.call(...), a function that
@@ -8749,7 +8554,7 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
         if vm.suspended || vm.frames.len() != nf {
             return 5;
         }
-        let v = vm.stack.pop().unwrap_or(Val::Undef);
+        let v = vm.stack.pop().unwrap_or(Val::Undef());
         vm.grow_stack(want);
         vm.stack[dst as usize] = v;
         return after(vm);
@@ -8772,8 +8577,11 @@ fn h_call(vm: i32, bp: i32, _pi: i32, pc: i32, ri: i32) -> i32 {
 // replace. In Vm.jit_caches, whose buffers do not move, by rcode index.
 
 const CACHE_WAYS: u32 = 4;
+/// typeof's index (vm.rs type_index) of tag 0xFFF8 + t in nibble t:
+/// number 3, undefined 0, null 1, bool 2, string 4
+const TYPE_NIB: i64 = 0x42103;
 /// a way's slot * 16 for a property absent from the whole chain
-const SLOT_ABSENT: i32 = -16;
+const SLOT_ABSENT: i32 = -(VS as i32);
 
 /// undefined as a value's 16 bytes, for an absent property (look);
 /// layout() writes it
@@ -8832,7 +8640,7 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
         if (vm.attr_at(o, own) & P_ACCESSOR) != 0 {
             return;
         }
-        way[2] = (own * 16) as i32;
+        way[2] = (own * VS as i64) as i32;
     } else {
         // a dictionary receiver gains keys without an epoch (add_own)
         if (!plain(cls) && !sp) || vm.shapes[ob.shape as usize].owned {
@@ -8866,7 +8674,7 @@ fn cache_fill(vm: &mut crate::vm::Vm, ri: usize, o: int, atom: int) {
                     return;
                 }
                 way[1] = d as i32;
-                way[2] = (k * 16) as i32;
+                way[2] = (k * VS as i64) as i32;
                 break;
             }
             if !plain(pc) {
@@ -8982,7 +8790,7 @@ fn site_atoms(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> Vec<i32
 /// likely to call (guess_reg of its register f), -1 when none is known.
 /// Only a guess: inline_call checks the function object every time.
 fn guess_callee(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize) -> i32 {
-    if let Val::Obj(o) = guess_reg(vm, pi, rb, pc, vm.rcode[rb + pc].a, 2) {
+    if let Some(o) = (guess_reg(vm, pi, rb, pc, vm.rcode[rb + pc].a, 2)).as_obj() {
         if o >= 0 && (o as usize) < vm.objs.len() && vm.objs[o as usize].class == C_FUNCTION {
             return vm.objs[o as usize].func;
         }
@@ -8996,16 +8804,16 @@ fn guess_callee(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize) -> i32 {
 /// receiver's guess and the site's cache, or its first prototype way).
 fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth: u32) -> Val {
     if r < 0 {
-        return Val::Undef;
+        return Val::Undef();
     }
     let frame = (0..vm.frames.len()).rev().find(|&k| vm.frames[k].proto as usize == pi);
     let local = |reg: i32| -> Val {
         match frame {
             Some(fi) if reg >= 0 && (reg as int) < vm.protos[pi].nslots => {
                 let at = (vm.frames[fi].bp + reg as int) as usize;
-                if at < vm.stack.len() { vm.stack[at] } else { Val::Undef }
+                if at < vm.stack.len() { vm.stack[at] } else { Val::Undef() }
             }
-            _ => Val::Undef,
+            _ => Val::Undef(),
         }
     };
     if (r as int) < vm.protos[pi].nslots {
@@ -9026,7 +8834,7 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
             R_GET_GLOBAL => {
                 let g = vm.global;
                 let slot = vm.find(g, op.c as int);
-                if slot >= 0 { vm.objs[g as usize].get_slot(slot as usize) } else { Val::Undef }
+                if slot >= 0 { vm.objs[g as usize].get_slot(slot as usize) } else { Val::Undef() }
             }
             R_GET_ENV => match frame {
                 Some(fi) => {
@@ -9037,15 +8845,15 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
                         d -= 1;
                     }
                     let ev = if e >= 0 { vm.objs[e as usize].elems as usize } else { 0 };
-                    if e >= 0 && ev < vm.evecs.len() && (op.c as usize) < vm.evecs[ev].v.len() { vm.evecs[ev].v[op.c as usize] } else { Val::Undef }
+                    if e >= 0 && ev < vm.evecs.len() && (op.c as usize) < vm.evecs[ev].v.len() { vm.evecs[ev].v[op.c as usize] } else { Val::Undef() }
                 }
-                None => Val::Undef,
+                None => Val::Undef(),
             },
             R_MOVE if op.b >= 0 => local(op.b),
             R_GET_METHOD if depth > 0 => {
                 // an own method: the receiver's guess and the site's cache
                 if op.c >= 65536 {
-                    if let Val::Obj(o) = guess_reg(vm, pi, rb, k, op.b, depth - 1) {
+                    if let Some(o) = (guess_reg(vm, pi, rb, k, op.b, depth - 1)).as_obj() {
                         if o >= 0 && (o as usize) < vm.objs.len() && vm.objs[o as usize].shape == (op.c >> 16) {
                             return vm.objs[o as usize].get_slot((op.c & 65535) as usize);
                         }
@@ -9065,12 +8873,12 @@ fn guess_reg(vm: &crate::vm::Vm, pi: usize, rb: usize, pc: usize, r: i32, depth:
                         }
                     }
                 }
-                Val::Undef
+                Val::Undef()
             }
-            _ => Val::Undef,
+            _ => Val::Undef(),
         };
     }
-    Val::Undef
+    Val::Undef()
 }
 
 /// Cg.pics: by pc * 4, the first way of an R_GET_METHOD's or R_GET_PROP's
@@ -9198,7 +9006,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
         return settle(vm, fi, pc);
     }
     vm.frames[nf].construct = true;
-    vm.frames[nf].new_target = if m >= 0 { Val::Undef } else { f };
+    vm.frames[nf].new_target = if m >= 0 { Val::Undef() } else { f };
     if cls {
         vm.run_fields(fo, &this);
         if vm.throwing {
@@ -9222,7 +9030,7 @@ fn h_new(vm: &mut crate::vm::Vm, bp: int, fo: int, fpos: int, nf: usize, pc: int
         return 5;
     }
     // the constructor's return left the object at fpos, the stack's end
-    let v = vm.stack.pop().unwrap_or(Val::Undef);
+    let v = vm.stack.pop().unwrap_or(Val::Undef());
     vm.grow_stack(want);
     vm.stack[fpos as usize] = v;
     after(vm)
@@ -9314,7 +9122,7 @@ fn direct(vm: &mut crate::vm::Vm, nf: usize, f: i64) -> i32 {
         c[2] = entry as i32;
         c[7] = f as i32;
         c[8] = cbp as i32;
-        c[10] = (vm.stack.as_ptr() as usize + (cbp as usize) * 16) as i32;
+        c[10] = (vm.stack.as_ptr() as usize + (cbp as usize) * VSU) as i32;
     }
     6
 }
@@ -9373,11 +9181,11 @@ fn h_ret(vm: i32, bp: i32, r: i32, _pc: i32, _ri: i32) -> i32 {
     let ins = vm.rcode[(rb + at) as usize];
     let k = (ins.code & 255) as int;
     let cbp = vm.frames[top].bp;
-    let mut v = if k == R_RET { *vm.rget(cbp, ins.a as int) } else { Val::Undef };
+    let mut v = if k == R_RET { *vm.rget(cbp, ins.a as int) } else { Val::Undef() };
     let mut ok = r >= 0 && (k == R_RET || k == R_RET_UNDEF);
     if ok && vm.frames[top].construct && !crate::vm::is_obj(&v) {
         // a constructor's this, unless a derived one returned a value
-        if !matches!(v, Val::Undef) && vm.protos[tp].derived {
+        if !v.is_undef() && vm.protos[tp].derived {
             ok = false;
         } else {
             v = vm.frames[top].this_val;
@@ -9458,7 +9266,7 @@ fn call_compiled(vm: &mut crate::vm::Vm, tp: usize, nf: usize, dst: int) -> bool
     let ins = vm.rcode[(rb + at) as usize];
     let k = (ins.code & 255) as int;
     if (k == R_RET || k == R_RET_UNDEF) && !vm.frames[nf].construct {
-        let v = if k == R_RET { *vm.rget(bp, ins.a as int) } else { Val::Undef };
+        let v = if k == R_RET { *vm.rget(bp, ins.a as int) } else { Val::Undef() };
         vm.frames.pop();
         while !vm.handlers.is_empty() && vm.handlers[vm.handlers.len() - 1].frame >= nf as int {
             vm.handlers.pop();

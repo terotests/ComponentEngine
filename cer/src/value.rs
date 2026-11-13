@@ -17,8 +17,9 @@ use std::collections::HashMap;
 use crate::fxmap::HashMap;
 use std::rc::Rc;
 
+/// What a value is: `Val::kind` gives it to match on.
 #[derive(Clone, Copy)]
-pub enum Val {
+pub enum VK {
     Undef,
     Null,
     Bool(bool),
@@ -30,6 +31,299 @@ pub enum Val {
     /// a BigInt whose value is an integer below small_big_limit in
     /// magnitude (bigint.rs); larger ones are C_BIGINT objects
     Big(double),
+}
+
+/// A value. Made with Val::Num(x), Val::Undef() and the like, taken apart
+/// with `match v.kind()`. Rust: 8 bytes, NaN-boxed. A number is its own
+/// bits; the other kinds are tagged in the negative quiet-NaN range above
+/// the hardware's default NaN (0xFFF8...), which no number then uses: a
+/// NaN made from arbitrary bits is kept as the canonical one (Val::Num).
+/// The other targets keep the VK in a struct.
+#[ranger::target(rust)]
+#[derive(Clone, Copy)]
+pub struct Val {
+    pub b: u64,
+}
+
+/// The first tagged pattern: below it a Val is a number.
+#[ranger::target(rust)]
+pub const V_TAG: u64 = 0xFFF9_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_UNDEF: u64 = 0xFFF9_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_NULL: u64 = 0xFFFA_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_BOOL: u64 = 0xFFFB_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_STR: u64 = 0xFFFC_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_OBJ: u64 = 0xFFFD_0000_0000_0000;
+#[ranger::target(rust)]
+pub const V_BIG: u64 = 0xFFFE_0000_0000_0000;
+/// the payload bits of a tagged Val (a handle, or a small BigInt's value)
+#[ranger::target(rust)]
+pub const V_LOW: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+#[ranger::target(rust)]
+#[allow(non_snake_case)]
+impl Val {
+    #[inline(always)]
+    pub fn Undef() -> Val {
+        Val { b: V_UNDEF }
+    }
+    #[inline(always)]
+    pub fn Null() -> Val {
+        Val { b: V_NULL }
+    }
+    #[inline(always)]
+    pub fn Bool(x: bool) -> Val {
+        Val { b: V_BOOL | (x as u64) }
+    }
+    #[inline(always)]
+    pub fn Num(x: double) -> Val {
+        let b = x.to_bits();
+        Val { b: if b >= V_TAG { 0x7FF8_0000_0000_0000 } else { b } }
+    }
+    /// Val::Num of a number that cannot be a NaN with other bits than the
+    /// hardware's (an arithmetic result of numbers, an integer)
+    #[inline(always)]
+    pub fn NumC(x: double) -> Val {
+        debug_assert!(x.to_bits() < V_TAG);
+        Val { b: x.to_bits() }
+    }
+    #[inline(always)]
+    pub fn Str(h: int) -> Val {
+        debug_assert!(h >= 0 && h <= 0xFFFF_FFFF, "string handle out of range");
+        Val { b: V_STR | ((h as u64) & 0xFFFF_FFFF) }
+    }
+    #[inline(always)]
+    pub fn Obj(o: int) -> Val {
+        debug_assert!(o >= 0 && o <= 0xFFFF_FFFF, "object index out of range");
+        Val { b: V_OBJ | ((o as u64) & 0xFFFF_FFFF) }
+    }
+    #[inline(always)]
+    pub fn Big(n: double) -> Val {
+        debug_assert!(n.abs() < crate::bigint::small_big_limit());
+        Val { b: V_BIG | ((n as i64 as u64) & V_LOW) }
+    }
+    #[inline(always)]
+    pub fn as_num(&self) -> Option<double> {
+        if self.b < V_TAG { Some(f64::from_bits(self.b)) } else { None }
+    }
+    #[inline(always)]
+    pub fn as_obj(&self) -> Option<int> {
+        // an object's index and a string's handle are below 2^32: one
+        // subtraction both tests the tag and gives the payload
+        let d = self.b.wrapping_sub(V_OBJ);
+        if d <= 0xFFFF_FFFF { Some(d as int) } else { None }
+    }
+    #[inline(always)]
+    pub fn as_str(&self) -> Option<int> {
+        let d = self.b.wrapping_sub(V_STR);
+        if d <= 0xFFFF_FFFF { Some(d as int) } else { None }
+    }
+    /// the number of a Val that is_num (the other getters likewise)
+    #[inline(always)]
+    pub fn num(&self) -> double {
+        f64::from_bits(self.b)
+    }
+    #[inline(always)]
+    pub fn obj(&self) -> int {
+        self.b.wrapping_sub(V_OBJ) as int
+    }
+    #[inline(always)]
+    pub fn strh(&self) -> int {
+        self.b.wrapping_sub(V_STR) as int
+    }
+    // no as_bool() -> Option<bool>: rgrc's C++ keeps an Option<bool> as a plain
+    // bool (None and Some(false) alike); is_bool() and boolv() instead
+    #[inline(always)]
+    pub fn boolv(&self) -> bool {
+        (self.b & 1) != 0
+    }
+    #[inline(always)]
+    pub fn is_num(&self) -> bool {
+        self.b < V_TAG
+    }
+    #[inline(always)]
+    pub fn is_obj(&self) -> bool {
+        self.b.wrapping_sub(V_OBJ) <= 0xFFFF_FFFF
+    }
+    #[inline(always)]
+    pub fn is_str(&self) -> bool {
+        self.b.wrapping_sub(V_STR) <= 0xFFFF_FFFF
+    }
+    #[inline(always)]
+    pub fn is_bool(&self) -> bool {
+        (self.b >> 48) == 0xFFFB
+    }
+    #[inline(always)]
+    pub fn is_big(&self) -> bool {
+        (self.b >> 48) == 0xFFFE
+    }
+    /// an object or a string (what reference counts track)
+    #[inline(always)]
+    pub fn is_heap(&self) -> bool {
+        (self.b >> 49) == 0x7FFE
+    }
+    #[inline(always)]
+    pub fn is_undef(&self) -> bool {
+        self.b == V_UNDEF
+    }
+    #[inline(always)]
+    pub fn is_null(&self) -> bool {
+        self.b == V_NULL
+    }
+    #[inline(always)]
+    pub fn is_nullish(&self) -> bool {
+        self.b == V_UNDEF || self.b == V_NULL
+    }
+    #[inline(always)]
+    pub fn kind(&self) -> VK {
+        let b = self.b;
+        if b < V_TAG {
+            return VK::Num(f64::from_bits(b));
+        }
+        // the payload sign-extended from 48 bits
+        let x = ((b << 16) as i64) >> 16;
+        match b >> 48 {
+            0xFFF9 => VK::Undef,
+            0xFFFA => VK::Null,
+            0xFFFB => VK::Bool(x != 0),
+            0xFFFC => VK::Str((b as u32) as int),
+            0xFFFD => VK::Obj((b as u32) as int),
+            _ => VK::Big(x as double),
+        }
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+#[derive(Clone, Copy)]
+pub struct Val {
+    pub k: VK,
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+#[allow(non_snake_case)]
+impl Val {
+    #[inline(always)]
+    pub fn Undef() -> Val {
+        Val { k: VK::Undef }
+    }
+    #[inline(always)]
+    pub fn Null() -> Val {
+        Val { k: VK::Null }
+    }
+    #[inline(always)]
+    pub fn Bool(b: bool) -> Val {
+        Val { k: VK::Bool(b) }
+    }
+    #[inline(always)]
+    pub fn Num(x: double) -> Val {
+        Val { k: VK::Num(x) }
+    }
+    pub fn NumC(x: double) -> Val {
+        Val { k: VK::Num(x) }
+    }
+    #[inline(always)]
+    pub fn Str(h: int) -> Val {
+        Val { k: VK::Str(h) }
+    }
+    #[inline(always)]
+    pub fn Obj(o: int) -> Val {
+        Val { k: VK::Obj(o) }
+    }
+    #[inline(always)]
+    pub fn Big(n: double) -> Val {
+        Val { k: VK::Big(n) }
+    }
+    pub fn kind(&self) -> VK {
+        self.k
+    }
+    pub fn as_num(&self) -> Option<double> {
+        if let VK::Num(x) = self.k { Some(x) } else { None }
+    }
+    pub fn as_obj(&self) -> Option<int> {
+        if let VK::Obj(x) = self.k { Some(x) } else { None }
+    }
+    pub fn as_str(&self) -> Option<int> {
+        if let VK::Str(x) = self.k { Some(x) } else { None }
+    }
+    pub fn num(&self) -> double {
+        if let VK::Num(x) = self.k { x } else { 0.0 }
+    }
+    pub fn obj(&self) -> int {
+        if let VK::Obj(x) = self.k { x } else { -1 }
+    }
+    pub fn strh(&self) -> int {
+        if let VK::Str(x) = self.k { x } else { 0 }
+    }
+    pub fn boolv(&self) -> bool {
+        if let VK::Bool(x) = self.k { x } else { false }
+    }
+    pub fn is_num(&self) -> bool {
+        matches!(self.k, VK::Num(_))
+    }
+    pub fn is_obj(&self) -> bool {
+        matches!(self.k, VK::Obj(_))
+    }
+    pub fn is_str(&self) -> bool {
+        matches!(self.k, VK::Str(_))
+    }
+    pub fn is_bool(&self) -> bool {
+        matches!(self.k, VK::Bool(_))
+    }
+    pub fn is_big(&self) -> bool {
+        matches!(self.k, VK::Big(_))
+    }
+    pub fn is_heap(&self) -> bool {
+        matches!(self.k, VK::Obj(_) | VK::Str(_))
+    }
+    pub fn is_undef(&self) -> bool {
+        matches!(self.k, VK::Undef)
+    }
+    pub fn is_null(&self) -> bool {
+        matches!(self.k, VK::Null)
+    }
+    pub fn is_nullish(&self) -> bool {
+        matches!(self.k, VK::Undef | VK::Null)
+    }
+}
+
+/// `===` of two values as far as their bits tell: 1 or 0, 2 when both
+/// are strings with different handles (their text decides).
+#[ranger::target(rust)]
+#[inline(always)]
+pub fn seq_quick(a: &Val, b: &Val) -> int {
+    if a.b == b.b {
+        // the same bits: equal, unless NaN
+        if a.b < V_TAG {
+            let x = f64::from_bits(a.b);
+            return if x == x { 1 } else { 0 };
+        }
+        return 1;
+    }
+    if a.b < V_TAG && b.b < V_TAG {
+        // 0 and -0
+        return if f64::from_bits(a.b) == f64::from_bits(b.b) { 1 } else { 0 };
+    }
+    if a.is_str() && b.is_str() {
+        return 2;
+    }
+    0
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn seq_quick(a: &Val, b: &Val) -> int {
+    match (a.kind(), b.kind()) {
+        (VK::Num(x), VK::Num(y)) => if x == y { 1 } else { 0 },
+        (VK::Obj(x), VK::Obj(y)) => if x == y { 1 } else { 0 },
+        (VK::Big(x), VK::Big(y)) => if x == y { 1 } else { 0 },
+        (VK::Undef, VK::Undef) | (VK::Null, VK::Null) => 1,
+        (VK::Bool(x), VK::Bool(y)) => if x == y { 1 } else { 0 },
+        (VK::Str(x), VK::Str(y)) => if x == y { 1 } else { 2 },
+        _ => 0,
+    }
 }
 
 // object classes
@@ -129,7 +423,7 @@ impl Cold {
             marks: Vec::new(),
             nums: Vec::new(),
             elems2: Vec::new(),
-            prim: Val::Undef,
+            prim: Val::Undef(),
             home: -1,
         }
     }
@@ -347,8 +641,8 @@ impl JsObj {
             class: class,
             proto: proto,
             shape: 0,
-            inl0: Val::Undef,
-            inl1: Val::Undef,
+            inl0: Val::Undef(),
+            inl1: Val::Undef(),
             vals: slots_new(),
             nv: 0,
             cold: 0,
@@ -370,8 +664,8 @@ impl JsObj {
         // the shape and the Cold are the caller's (Vm::free_shape,
         // Vm::free_cold)
         self.shape = 0;
-        self.inl0 = Val::Undef;
-        self.inl1 = Val::Undef;
+        self.inl0 = Val::Undef();
+        self.inl1 = Val::Undef();
         self.nv = 0;
         if self.vals.v.len() as int <= INDEX_AT {
             self.vals.v.truncate(0);
@@ -431,8 +725,8 @@ impl JsObj {
     /// others hold nothing counted).
     pub fn retain_slots(&mut self, keep: &Vec<bool>) {
         let all = self.slots();
-        self.inl0 = Val::Undef;
-        self.inl1 = Val::Undef;
+        self.inl0 = Val::Undef();
+        self.inl1 = Val::Undef();
         self.vals.v.truncate(0);
         self.nv = 0;
         let mut i: usize = 0;
@@ -458,9 +752,9 @@ impl JsObj {
             if n > 2 {
                 self.inl1 = self.vals.v.remove(0);
             } else {
-                self.inl1 = Val::Undef;
+                self.inl1 = Val::Undef();
                 if n == 1 {
-                    self.inl0 = Val::Undef;
+                    self.inl0 = Val::Undef();
                 }
             }
         }
@@ -994,7 +1288,7 @@ impl Proto {
             generator: false,
             is_async: false,
             lexical_ctor: false,
-            src: Val::Undef,
+            src: Val::Undef(),
             src_start: 0,
             src_end: 0,
             rbase: 0,
