@@ -1803,7 +1803,11 @@ impl Vm {
                 self.sfreed.push(i as int);
             } else if self.strs[i].flag != 2 {
                 live += 1;
-                bytes += self.strs[i].s.as_bytes().len() as int;
+                // a buffer many handles share (a script's source, which
+                // each function made from it holds) counts once: counted
+                // per handle, React's 0.8 MB bundle made the limit 1.5 GB
+                // and strings never brought a collection
+                bytes += rc_own_bytes(&self.strs[i].s);
                 if self.strs[i].flag == 0 {
                     rc_trim(&mut self.strs[i].s);
                 }
@@ -9660,6 +9664,19 @@ pub fn rc_fill_str(rc: &mut Rc<String>, s: &str) {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn rc_fill_str(rc: &mut Rc<String>, s: &str) {
     *rc = Rc::new(String::from(s));
+}
+
+/// A handle's share of its buffer's bytes: the length divided among the
+/// handles that hold the same buffer (Rust; the other targets' strings
+/// are values of their own).
+#[ranger::target(rust)]
+pub fn rc_own_bytes(rc: &Rc<String>) -> int {
+    (rc.len() / Rc::strong_count(rc)) as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rc_own_bytes(rc: &Rc<String>) -> int {
+    rc.as_bytes().len() as int
 }
 
 /// Rust: a string's buffer to its size when a quarter or more is spare

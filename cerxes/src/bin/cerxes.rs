@@ -188,6 +188,23 @@ fn main() {
                     }
                     eprintln!("  big count {}", b.len());
                 }
+                if std::env::var("CERXES_MEM").map(|x| x == "uniq").unwrap_or(false) {
+                    let mut m: std::collections::HashMap<usize, (usize, usize, usize, usize)> = std::collections::HashMap::new();
+                    for (i, e) in v.strs.iter().enumerate() {
+                        if e.flag == 2 { continue; }
+                        let p = std::rc::Rc::as_ptr(&e.s) as usize;
+                        let x = m.entry(p).or_insert((e.s.capacity(), e.s.len(), 0, i));
+                        x.2 += 1;
+                    }
+                    let mut b: Vec<(usize, usize, usize, usize)> = m.values().cloned().collect();
+                    b.sort(); b.reverse();
+                    let tot: usize = b.iter().map(|x| x.0).sum();
+                    eprintln!("  uniq buffers {} cap {:.1} MB", b.len(), tot as f64 / 1e6);
+                    for (c, l, n, i) in b.iter().take(30) {
+                        let t: String = v.strs[*i].s.chars().take(40).collect();
+                        eprintln!("  uniq cap {} len {} handles {} up {} flag {} {:?}", c, l, n, v.strs[*i].up, v.strs[*i].flag, t);
+                    }
+                }
                 let pre = v.strs.iter().filter(|x| x.up >= 0).count();
                 eprintln!("strs: live cap {:.1} MB len {:.1} MB (>4k: {:.1} MB) free-handle cap {:.1} MB; duplicate bytes {:.1} MB; shared Rc {}; prefixes {}",
                     mb(lcap), mb(llen), mb(big), mb(fcap), mb(dup), shared, pre);
