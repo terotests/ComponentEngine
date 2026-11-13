@@ -307,7 +307,7 @@ impl Engine {
         self.vm.job_slices = true;
         self.vm.run_jobs();
         self.vm.job_slices = false;
-        self.vm.run_result = Val::Undef;
+        self.vm.run_result = Val::Undef();
         self.vm.temp_roots.pop();
         if self.vm.suspended {
             return String::new();
@@ -391,7 +391,7 @@ impl Engine {
             }
             match self.vm.stack.pop() {
                 Some(v) => v,
-                None => Val::Undef,
+                None => Val::Undef(),
             }
         };
         let out = self.finish_run(r);
@@ -429,27 +429,27 @@ impl Engine {
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
         self.vm.end_call(began);
-        match &r {
-            Val::Undef => String::from("u"),
-            Val::Null => String::from("l"),
-            Val::Bool(b) => format!("b:{}", b),
-            Val::Num(n) => {
-                if *n == 0.0 && 1.0 / *n < 0.0 {
+        match (&r).kind() {
+            VK::Undef => String::from("u"),
+            VK::Null => String::from("l"),
+            VK::Bool(b) => format!("b:{}", b),
+            VK::Num(n) => {
+                if n == 0.0 && 1.0 / n < 0.0 {
                     String::from("n:-0")
                 } else {
-                    format!("n:{}", num::number_to_string(*n))
+                    format!("n:{}", num::number_to_string(n))
                 }
             }
-            Val::Str(s) => format!("s:{}", self.vm.sref(*s)),
-            Val::Obj(o) => format!("o:{}", self.vm.objs[*o as usize].class),
-            Val::Big(_) => format!("o:{}", C_BIGINT),
+            VK::Str(s) => format!("s:{}", self.vm.sref(s)),
+            VK::Obj(o) => format!("o:{}", self.vm.objs[o as usize].class),
+            VK::Big(_) => format!("o:{}", C_BIGINT),
         }
     }
 
     fn uncaught(&mut self) -> String {
         if self.vm.terminated {
             // no script runs past the time limit, a toString neither
-            self.vm.exc = Val::Undef;
+            self.vm.exc = Val::Undef();
             self.vm.throwing = false;
             self.vm.stack.clear();
             self.vm.frames.clear();
@@ -460,7 +460,7 @@ impl Engine {
         }
         let e = self.vm.exc.clone();
         self.vm.throwing = false;
-        self.vm.exc = Val::Undef;
+        self.vm.exc = Val::Undef();
         self.vm.stack.clear();
         self.vm.frames.clear();
         self.vm.handlers.clear();
@@ -478,7 +478,7 @@ impl Engine {
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));
         let began = self.vm.begin_call(false);
-        let r = self.vm.call_top(f, Val::Undef, Vec::new());
+        let r = self.vm.call_top(f, Val::Undef(), Vec::new());
         if self.vm.throwing {
             self.vm.end_call(began);
             return self.uncaught();

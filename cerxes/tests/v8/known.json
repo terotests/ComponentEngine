@@ -145,7 +145,7 @@
  "03-ownKeys-nonstring": "same",
  "03-proxy-as-array-proto": "same",
  "03-proxy-deep-chain": "same",
- "03-proxy-deep-proto": "same",
+ "03-proxy-deep-proto": "regs:differs stack:differs tree:differs snap:differs",
  "03-proxy-isArray": "same",
  "03-proxy-isArray-revoked": "same",
  "03-proxy-json": "same",

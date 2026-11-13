@@ -152,11 +152,11 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
     // the frames' garbage has to go while they run
     // the call and its jobs share one time limit
     let began = engine.vm.begin_call(false);
-    let r = engine.vm.call_top(f, Val::Undef, vec![av]);
+    let r = engine.vm.call_top(f, Val::Undef(), vec![av]);
     let value = if engine.vm.throwing {
         let exc = engine.vm.exc.clone();
         engine.vm.throwing = false;
-        engine.vm.exc = Val::Undef;
+        engine.vm.exc = Val::Undef();
         engine.vm.stack.clear();
         engine.vm.frames.clear();
         engine.vm.handlers.clear();
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
         engine.vm.temp_roots.pop();
         if engine.vm.terminated {
             engine.vm.throwing = false;
-            engine.vm.exc = Val::Undef;
+            engine.vm.exc = Val::Undef();
             engine.vm.stack.clear();
             engine.vm.frames.clear();
             engine.vm.handlers.clear();
@@ -179,8 +179,8 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
             engine.error = format!("Uncaught Error: script time limit exceeded ({} ms)", engine.vm.time_limit);
             engine.error.clone()
         } else {
-            match &r {
-                Val::Str(s) => engine.vm.sref(*s).to_string(),
+            match (&r).kind() {
+                VK::Str(s) => engine.vm.sref(s).to_string(),
                 _ => engine.vm.display(&r),
             }
         }
@@ -368,10 +368,7 @@ pub unsafe extern "C" fn cx_get_global(e: *mut Engine, np: *const u8, nn: usize)
     let a = engine.vm.intern(name.as_str());
     let g = engine.vm.global;
     let v = engine.vm.get_obj(g, a, &Val::Obj(g));
-    let s = match &v {
-        Val::Str(s) => engine.vm.sref(*s).to_string(),
-        _ => engine.vm.display(&v),
-    };
+    let s = if let Some(s) = (&v).as_str() { engine.vm.sref(s).to_string() } else { engine.vm.display(&v) };
     RESULT.with(|b| *b.borrow_mut() = s.into_bytes());
 }
 

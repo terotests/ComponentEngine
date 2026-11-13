@@ -77,7 +77,7 @@ can mutate them: `cerxes-fuzz run --corpus cerxes/tests/v8/out/own`.
 |---|---|---|---|---|
 | 2026-11-13 first run (#153) | — | — | 220 | panics, aborts on deep recursion, OOM on string/BigInt limits, wasm traps |
 | 2026-11-13 #159 | 2606 | 347 | 22 | radix buffers, BigInt size limit, wasm32 index overflow, snapshot for-in, parser depth |
-| 2026-11-13 #160 | 2658 | 300 | 7 (hang) | see below |
+| 2026-11-13 #160 (on top of the 8-byte Val, #161) | 2654 | 304 | 7 (hang) | see below |
 
 No test panics, aborts, runs out of memory or traps in WebAssembly any more; the 7 hangs are 08-for-of-next-getter-once (all five configurations) and two snap cases, listed below.
 
@@ -89,6 +89,7 @@ No test panics, aborts, runs out of memory or traps in WebAssembly any more; the
   (`parse_stack_budget`); every deep case ends in a RangeError. Deep `!!!…`
   is checked in `unary()` of all three parsers.
 - Proxy `get` and call traps check the stack (deep proxy chains).
+- Array.prototype.flat walks with its own stack (10 000 levels, then RangeError).
 - `'a'+'a'+…` with 100k terms: string `+` appends in place when the left side
   is long (was quadratic, ran out of memory).
 - `for (var e = of(x); …)`: a name `of` in a for head was read as for-of
@@ -117,7 +118,7 @@ No test panics, aborts, runs out of memory or traps in WebAssembly any more; the
 | 03-structuredClone-getter, btoa cases | host APIs, not in the engine |
 | 04 exec-override, species, named-getter, deep-groups, backref-named-dup | RegExp builtins do not call a user `exec`; species; duplicate named groups |
 | 07-*-html-comment | Annex B HTML comments are not parsed |
-| 07-deep-parens/array/object-1k, deep funcs/arrows, 03-json-deep-parse | CErXes depth limits are lower than V8's; the answer is a RangeError, never a crash |
+| 07-deep-parens/array/object-1k, deep funcs/arrows, 03-json-deep-parse, 03-proxy-deep-proto | CErXes depth limits differ from V8's (lower for the parser; with 8-byte values a 5000-deep proxy chain fits where V8 throws); the answer is a RangeError or the value, never a crash |
 | 07-assign-to-call | SyntaxError where V8 throws ReferenceError at run time |
 | prepareStackTrace | Error.prepareStackTrace is not supported |
 | 08-for-of-next-getter-once (hang) | CErXes reads `next` on every step, V8 once; the fix touches every iterator path |

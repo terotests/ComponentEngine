@@ -6233,7 +6233,7 @@ impl PComp {
         self.next();
         let fi = self.fs.len() - 1;
         let slot = self.fs[fi].proto.consts.len() as int;
-        self.fs[fi].proto.consts.push(Val::Undef);
+        self.fs[fi].proto.consts.push(Val::Undef());
         let cnt = parts.len() as int;
         let site = self.emit(OP_TEMPLATE_OBJ, 0, slot);
         let mut i: usize = 0;

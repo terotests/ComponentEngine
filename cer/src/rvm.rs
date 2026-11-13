@@ -94,14 +94,14 @@ impl Vm {
     #[inline(always)]
     pub fn env_slot(&self, e: int, k: int) -> Val {
         if e < 0 {
-            return Val::Undef;
+            return Val::Undef();
         }
         let ev = self.ob(e).elems as usize;
         // a scope gets its slots when it is made (renter, PUSH_ENV) and
         // keeps them while a closure or frame refers to it
         let v = &evec_at(&self.evecs, ev).v;
         if (k as usize) >= v.len() {
-            return Val::Undef;
+            return Val::Undef();
         }
         *val_at(v, k as usize)
     }
@@ -251,10 +251,11 @@ impl Vm {
     #[inline(never)]
     pub fn r_add_env(&mut self, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
         let depth = (w0 >> 8) & 255;
-        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, w1), self.rget(bp, w2)) {
-            let r = *x + *y;
+        let va_ = *self.rget(bp, w1); let vb_ = *self.rget(bp, w2);
+        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
+            let r = x + y;
             let e = self.get_env(depth);
-            self.put_elem(e, w3, Val::Num(r));
+            self.put_elem(e, w3, Val::NumC(r));
             return;
         }
         self.frames[fi].pc = pc + 1;
@@ -269,18 +270,18 @@ impl Vm {
         self.frames[fi].pc = pc + 1;
         let v = self.rget(bp, w2).clone();
         let k = self.rget(bp, w3).clone();
-        let mut f = Val::Undef;
+        let mut f = Val::Undef();
         let mut done = false;
-        if let (Val::Obj(o), Val::Num(n)) = (&v, &k) {
-            let ob = &self.objs[*o as usize];
+        if let Some(o) = (&v).as_obj() { if let Some(n) = (&k).as_num() {
+            let ob = &self.objs[o as usize];
             if ob.class == C_ARRAY {
-                let i = *n as int;
-                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n {
+                let i = n as int;
+                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n {
                     f = self.evecs[ob.elems as usize].v[i as usize].clone();
                     done = true;
                 }
             }
-        }
+        }}
         if !done {
             f = self.get_elem(&v, &k);
         }
@@ -384,7 +385,7 @@ impl Vm {
             let mut want = (bp + self.protos[pi].fsize) as usize;
             let mut rb = self.protos[pi].rbase;
             while self.stack.len() < want {
-                self.stack.push(Val::Undef);
+                self.stack.push(Val::Undef());
             }
             if self.frames[fi].mv_to >= 0 {
                 let v = self.stack[self.frames[fi].mv_from as usize].clone();
@@ -420,10 +421,11 @@ impl Vm {
                         continue;
                     }
                     R_ADD => {
-                        let mut r = Val::Undef;
+                        let mut r = Val::Undef();
                         let mut done = false;
-                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
-                            r = Val::Num(*x + *y);
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
+                            r = Val::NumC(x + y);
                             done = true;
                         }
                         if done {
@@ -434,9 +436,10 @@ impl Vm {
                         self.r_add_slow(bp, fi, pc, (w1 as int), (w2 as int), (w3 as int));
                     }
                     R_SUB | R_MUL => {
-                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
-                            let r = if ((w0 & 255) as int) == R_SUB { *x - *y } else { *x * *y };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
+                            let r = if ((w0 & 255) as int) == R_SUB { x - y } else { x * y };
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -445,8 +448,9 @@ impl Vm {
                     }
                     R_ARITH => {
                         let code = ((w0 >> 8) & 255) as int;
-                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
-                            let (a, b) = (*x, *y);
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
+                            let (a, b) = (x, y);
                             let r = if code >= OP_BAND && code <= OP_USHR {
                                 bit_fast(code, a, b)
                             } else if code == OP_MOD && a >= 1.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
@@ -458,7 +462,7 @@ impl Vm {
                             } else {
                                 arith_num(code, a, b)
                             };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -475,15 +479,16 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, (w1 as int)), self.rget(bp, (w2 as int))) {
+                        let va_ = *self.rget(bp, (w1 as int)); let vb_ = *self.rget(bp, (w2 as int));
+                        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
                             num = true;
                             r = match (code as int) {
-                                OP_LT => *a < *b,
-                                OP_GT => *a > *b,
-                                OP_LE => *a <= *b,
-                                OP_GE => *a >= *b,
-                                OP_SEQ | OP_EQ => *a == *b,
-                                _ => *a != *b,
+                                OP_LT => a < b,
+                                OP_GT => a > b,
+                                OP_LE => a <= b,
+                                OP_GE => a >= b,
+                                OP_SEQ | OP_EQ => a == b,
+                                _ => a != b,
                             };
                         }
                         if !num {
@@ -506,15 +511,16 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, (w1 as int)), self.rget(bp, (w2 as int))) {
+                        let va_ = *self.rget(bp, (w1 as int)); let vb_ = *self.rget(bp, (w2 as int));
+                        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
                             num = true;
                             r = match (code as int) {
-                                OP_LT => *a < *b,
-                                OP_GT => *a > *b,
-                                OP_LE => *a <= *b,
-                                OP_GE => *a >= *b,
-                                OP_SEQ | OP_EQ => *a == *b,
-                                _ => *a != *b,
+                                OP_LT => a < b,
+                                OP_GT => a > b,
+                                OP_LE => a <= b,
+                                OP_GE => a >= b,
+                                OP_SEQ | OP_EQ => a == b,
+                                _ => a != b,
                             };
                         }
                         if !num {
@@ -572,7 +578,7 @@ impl Vm {
                         continue;
                     }
                     R_JNU => {
-                        if matches!(self.rget(bp, (w1 as int)), Val::Undef) {
+                        if (self.rget(bp, (w1 as int))).is_undef() {
                             pc = (pc + 1 + ((w0 >> 16) as int));
                         } else {
                             pc = (w2 as int);
@@ -610,15 +616,16 @@ impl Vm {
                         let code = (w0 >> 8) & 255;
                         let mut num = false;
                         let mut r = false;
-                        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
+                        let va_ = *self.rget(bp, (w2 as int)); let vb_ = *self.rget(bp, (w3 as int));
+                        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
                             num = true;
                             r = match (code as int) {
-                                OP_LT => *a < *b,
-                                OP_GT => *a > *b,
-                                OP_LE => *a <= *b,
-                                OP_GE => *a >= *b,
-                                OP_SEQ | OP_EQ => *a == *b,
-                                _ => *a != *b,
+                                OP_LT => a < b,
+                                OP_GT => a > b,
+                                OP_LE => a <= b,
+                                OP_GE => a >= b,
+                                OP_SEQ | OP_EQ => a == b,
+                                _ => a != b,
                             };
                         }
                         if !num {
@@ -657,8 +664,8 @@ impl Vm {
                         continue;
                     }
                     R_JNN_KEEP => {
-                        let nullish = match self.rget(bp, (w1 as int)) {
-                            Val::Undef | Val::Null => true,
+                        let nullish = match (self.rget(bp, (w1 as int))).kind() {
+                            VK::Undef | VK::Null => true,
                             _ => false,
                         };
                         if (w0 & 65280) != 0 {
@@ -679,11 +686,7 @@ impl Vm {
                     }
                     R_LOCAL_NULL_JF => {
                         let cmp = w2;
-                        let r = match self.stack[(bp + (w1 as int)) as usize] {
-                            Val::Null => (cmp as int) == OP_SEQ || (cmp as int) == OP_EQ,
-                            Val::Undef => (cmp as int) == OP_SNE || (cmp as int) == OP_EQ,
-                            _ => (cmp as int) == OP_SNE || (cmp as int) == OP_NE,
-                        };
+                        let r = if (self.stack[(bp + (w1 as int)) as usize]).is_null() { (cmp as int) == OP_SEQ || (cmp as int) == OP_EQ } else if (self.stack[(bp + (w1 as int)) as usize]).is_undef() { (cmp as int) == OP_SNE || (cmp as int) == OP_EQ } else { (cmp as int) == OP_SNE || (cmp as int) == OP_NE };
                         if !r {
                             if (w3 as int) <= pc {
                                 self.frames[fi].pc = (w3 as int);
@@ -702,8 +705,8 @@ impl Vm {
                     }
                     R_CASE_INT_JT => {
                         let mut hit = false;
-                        if let Val::Num(x) = self.rget(bp, (w1 as int)) {
-                            hit = *x == (w2 as double);
+                        if let Some(x) = (self.rget(bp, (w1 as int))).as_num() {
+                            hit = x == (w2 as double);
                         }
                         if hit {
                             pc = (w3 as int);
@@ -717,8 +720,8 @@ impl Vm {
                     }
                     R_SWITCH => {
                         let mut t = -1;
-                        if let Val::Num(x) = self.rget(bp, (w1 as int)) {
-                            let k = *x - (w3 as double);
+                        if let Some(x) = (self.rget(bp, (w1 as int))).as_num() {
+                            let k = x - (w3 as double);
                             let size = self.rtab[w2 as usize];
                             if k >= 0.0 && k < (size as double) && k == ((k as int) as double) {
                                 t = self.rtab[(w2 + 1 + (k as int)) as usize];
@@ -747,11 +750,11 @@ impl Vm {
                         let c = w3;
                         let mut o: int = -1;
                         if ((w0 & 255) as int) == R_GET_PROP {
-                            if let Val::Obj(x) = self.rget(bp, (w2 as int)) {
-                                o = *x;
+                            if let Some(x) = (self.rget(bp, (w2 as int))).as_obj() {
+                                o = x;
                             }
-                        } else if let Val::Obj(x) = &self.frames[fi].this_val {
-                            o = *x;
+                        } else if let Some(x) = (&self.frames[fi].this_val).as_obj() {
+                            o = x;
                         }
                         if o >= 0 && c >= 65536 && ((c >> 16) as int) == self.ob(o).shape as int {
                             // the cache's shape: the slot without a call
@@ -779,7 +782,7 @@ impl Vm {
                             // an unmodified arguments object's: a written or deleted
                             // length makes it C_SARGS)
                             let n = evec_at(&self.evecs, self.ob(o).elems as usize).v.len() as double;
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(n));
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(n));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -788,7 +791,7 @@ impl Vm {
                             // (-6) length (r_get_prop_slow)
                             let n = self.len_site(c, o, bp, (w2 as int));
                             if n >= 0 {
-                                self.rset((bp + (w1 as int)) as usize, Val::Num(n as double));
+                                self.rset((bp + (w1 as int)) as usize, Val::NumC(n as double));
                                 pc = (pc + 1 + ((w0 >> 16) as int));
                                 continue;
                             }
@@ -822,29 +825,29 @@ impl Vm {
                         }
                     }
                     R_GET_ELEM => {
-                        let mut r = Val::Undef;
+                        let mut r = Val::Undef();
                         let mut done = false;
-                        if let (Val::Obj(o), Val::Num(n)) = (self.rget(bp, (w2 as int)), self.rget(bp, (w3 as int))) {
-                            let ob = obj_at(&self.objs, *o as usize);
+                        if let Some(o) = (self.rget(bp, (w2 as int))).as_obj() { if let Some(n) = (self.rget(bp, (w3 as int))).as_num() {
+                            let ob = obj_at(&self.objs, o as usize);
                             if ob.class == C_ARRAY {
-                                let i = *n as int;
+                                let i = n as int;
                                 let ev = ob.elems as usize;
-                                if i >= 0 && i < (evec_at(&self.evecs, ev).v.len() as int) && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
+                                if i >= 0 && i < (evec_at(&self.evecs, ev).v.len() as int) && (i as double) == n && ob.pos != 3 && !self.idx_protos {
                                     r = val_at(&evec_at(&self.evecs, ev).v, i as usize).clone();
                                     done = true;
                                 }
                             } else if ob.class == C_TYPED {
                                 // a typed array's element (ta_slot: no detached, resizable or converted buffer)
-                                let i = index_int(*n);
+                                let i = index_int(n);
                                 if i >= 0 {
-                                    let s = self.ta_slot(*o, i);
+                                    let s = self.ta_slot(o, i);
                                     if s >= 0 {
                                         r = Val::Num(cold_at(&self.colds, obj_at(&self.objs, ob.env as usize).cold as usize).nums[s as usize]);
                                         done = true;
                                     }
                                 }
                             }
-                        }
+                        }}
                         if done {
                             self.rset((bp + (w1 as int)) as usize, r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -853,7 +856,7 @@ impl Vm {
                         let v = self.rget(bp, (w2 as int)).clone();
                         let kv = self.rget(bp, (w3 as int)).clone();
                         self.frames[fi].pc = pc + 1;
-                        if let (Val::Obj(po), Val::Str(kh)) = (v, kv) {
+                        if v.is_obj() && kv.is_str() { let po = v.obj(); let kh = kv.strh();
                             if self.objs[po as usize].class == C_PROXY && self.strs[kh as usize].atom >= 0 {
                                 let a = self.strs[kh as usize].atom as int;
                                 let fpos = bp + self.protos[pi].fsize;
@@ -872,13 +875,13 @@ impl Vm {
                         let o = obj_of(self.rget(bp, (w1 as int)));
                         let mut n: double = 0.0;
                         let mut num = false;
-                        if let Val::Num(x) = self.rget(bp, (w2 as int)) {
-                            n = *x;
+                        if let Some(x) = (self.rget(bp, (w2 as int))).as_num() {
+                            n = x;
                             num = true;
                         }
                         let mut done = false;
                         if o >= 0 && num && obj_at(&self.objs, o as usize).class == C_TYPED {
-                            if let Val::Num(x) = val {
+                            if let Some(x) = val.as_num() {
                                 let i = index_int(n);
                                 if i >= 0 && self.ta_put_num(o, i, x) {
                                     if ((w0 >> 8) & 255) == 1 {
@@ -936,7 +939,7 @@ impl Vm {
                         }
                     }
                     R_GET_METHOD => {
-                        if matches!(self.rget(bp, (w2 as int)), Val::Str(_)) {
+                        if (self.rget(bp, (w2 as int))).is_str() {
                             // a string's method, from String.prototype's slot
                             // the site learnt (r_str_method)
                             let to = self.r_str_method(bp, rb, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
@@ -955,7 +958,7 @@ impl Vm {
                         }
                         let fpos = bp + (w1 as int);
                         if ((w0 >> 8) & 255) == 1 {
-                            self.stack[(fpos + 1) as usize] = Val::Undef;
+                            self.stack[(fpos + 1) as usize] = Val::Undef();
                         }
                         let fo = obj_of(val_at(&self.stack, fpos as usize));
                         if fo >= 0 && self.ob(fo).class == C_FUNCTION {
@@ -1041,7 +1044,7 @@ impl Vm {
                             }
                             fi = self.frames.len() - 1;
                             self.frames[fi].construct = true;
-                            self.frames[fi].new_target = if m >= 0 { Val::Undef } else { f };
+                            self.frames[fi].new_target = if m >= 0 { Val::Undef() } else { f };
                             pi = self.frames[fi].proto as usize;
                             bp = fpos + 2;
                             pc = self.frames[fi].pc;
@@ -1066,7 +1069,7 @@ impl Vm {
                         npc = p2;
                     }
                     R_RET | R_RET_UNDEF => {
-                        let mut v = if ((w0 & 255) as int) == R_RET { self.rget(bp, (w1 as int)).clone() } else { Val::Undef };
+                        let mut v = if ((w0 & 255) as int) == R_RET { self.rget(bp, (w1 as int)).clone() } else { Val::Undef() };
                         if frame_at(&self.frames, fi).construct && !is_obj(&v) {
                             if self.r_ret_construct(&mut v, fi, pc) {
                                 if !self.unwind(base) {
@@ -1129,7 +1132,7 @@ impl Vm {
                         let v = self.env_slot(e, (w3 as int));
                         self.rset((bp + (w1 as int)) as usize, v);
                         if ((w0 >> 8) & 255) == 1 {
-                            self.rset((bp + (w1 as int) + 1) as usize, Val::Undef);
+                            self.rset((bp + (w1 as int) + 1) as usize, Val::Undef());
                         }
                         pc = (pc + 1 + ((w0 >> 16) as int));
                         continue;
@@ -1169,8 +1172,9 @@ impl Vm {
                         continue;
                     }
                     R_ADD_ENV => {
-                        if let (Val::Num(x), Val::Num(y)) = (self.rget(bp, (w1 as int)), self.rget(bp, (w2 as int))) {
-                            let r = Val::Num(*x + *y);
+                        let va_ = *self.rget(bp, (w1 as int)); let vb_ = *self.rget(bp, (w2 as int));
+                        if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
+                            let r = Val::NumC(x + y);
                             let e = self.env_of(fi, ((w0 >> 8) & 255) as int);
                             self.env_put(e, (w3 as int), r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
@@ -1184,9 +1188,9 @@ impl Vm {
                     R_CHECK => {
                         let v = *self.rget(bp, (w1 as int));
                         let bad = if ((w0 >> 8) & 255) == 0 {
-                            if let Val::Obj(o) = v { o == self.tdz_obj } else { false }
+                            if let Some(o) = v.as_obj() { o == self.tdz_obj } else { false }
                         } else {
-                            matches!(v, Val::Undef) || matches!(v, Val::Null)
+                            v.is_undef() || v.is_null()
                         };
                         if bad {
                             self.frames[fi].pc = pc + 1;
@@ -1195,18 +1199,18 @@ impl Vm {
                     }
                     R_TONUM => {
                         let neg = ((w0 >> 8) & 255) == 1;
-                        if let Val::Num(x) = self.rget(bp, (w2 as int)) {
-                            let r = if neg { -*x } else { *x };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                        if let Some(x) = (self.rget(bp, (w2 as int))).as_num() {
+                            let r = if neg { -x } else { x };
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                         } else {
                             self.r_unary_slow(bp, fi, pc, if neg { 1 } else if ((w0 >> 8) & 255) == 2 { 4 } else { 0 }, (w1 as int), (w2 as int));
                         }
                     }
                     R_INC => {
                         let dec = ((w0 >> 8) & 255) == 1;
-                        if let Val::Num(x) = self.rget(bp, (w2 as int)) {
-                            let r = if dec { *x - 1.0 } else { *x + 1.0 };
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(r));
+                        if let Some(x) = (self.rget(bp, (w2 as int))).as_num() {
+                            let r = if dec { x - 1.0 } else { x + 1.0 };
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(r));
                         } else {
                             self.r_unary_slow(bp, fi, pc, if dec { 3 } else { 2 }, (w1 as int), (w2 as int));
                         }
@@ -1263,8 +1267,8 @@ impl Vm {
                     }
                     R_INC_LOCAL => {
                         let i = (bp + (w1 as int)) as usize;
-                        if let Val::Num(n) = self.stack[i] {
-                            self.stack[i] = Val::Num(n + (w2 as double));
+                        if let Some(n) = self.stack[i].as_num() {
+                            self.stack[i] = Val::NumC(n + (w2 as double));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -1278,10 +1282,10 @@ impl Vm {
                     R_POSTINC => {
                         let i = (bp + (w2 as int)) as usize;
                         let pre = ((w0 >> 8) & 255) == 1;
-                        if let Val::Num(old) = self.stack[i] {
+                        if let Some(old) = self.stack[i].as_num() {
                             let nv = old + (w3 as double);
-                            self.stack[i] = Val::Num(nv);
-                            self.rset((bp + (w1 as int)) as usize, Val::Num(if pre { nv } else { old }));
+                            self.stack[i] = Val::NumC(nv);
+                            self.rset((bp + (w1 as int)) as usize, Val::NumC(if pre { nv } else { old }));
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
                         }
@@ -1297,8 +1301,8 @@ impl Vm {
                         let b = *self.rget(bp, (w2 as int));
                         let i = (bp + (w1 as int)) as usize;
                         // numbers first: the string append below is the rarer case
-                        if let (Val::Num(x), Val::Num(y)) = (val_at(&self.stack, i), &b) {
-                            let r = Val::Num(*x + *y);
+                        if (val_at(&self.stack, i)).is_num() && (&b).is_num() { let x = (val_at(&self.stack, i)).num(); let y = (&b).num();
+                            let r = Val::NumC(x + y);
                             self.rset(i, r);
                             pc = (pc + 1 + ((w0 >> 16) as int));
                             continue;
@@ -1308,10 +1312,10 @@ impl Vm {
                             self.stack[i] = Val::Str(h);
                         } else {
                             let a = self.stack[i].clone();
-                            let mut r = Val::Undef;
+                            let mut r = Val::Undef();
                             let mut quick = false;
-                            if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
-                                r = Val::Num(*x + *y);
+                            if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
+                                r = Val::NumC(x + y);
                                 quick = true;
                             }
                             if !quick {
@@ -1382,8 +1386,8 @@ impl Vm {
     #[inline(never)]
     pub fn r_jnull(&mut self, bp: int, w1: int, w2: int) -> int {
         let i = (bp + w1) as usize;
-        if matches!(self.stack[i], Val::Undef | Val::Null) {
-            self.stack[i] = Val::Undef;
+        if self.stack[i].is_nullish() {
+            self.stack[i] = Val::Undef();
             return w2;
         }
         -1
@@ -1398,9 +1402,9 @@ impl Vm {
         let b = self.rget(bp, w3).clone();
         // a longer string whose buffer nothing else holds grows in place
         // (str_append: a keeps its text as a prefix), as `s += x` does
-        let b_ok = matches!(b, Val::Str(_)) || matches!(b, Val::Num(_));
-        if let Val::Str(h) = &a {
-            if b_ok && self.strs[*h as usize].s.as_bytes().len() >= 32 {
+        let b_ok = b.is_str() || b.is_num();
+        if let Some(h) = (&a).as_str() {
+            if b_ok && self.strs[h as usize].s.as_bytes().len() >= 32 {
                 let r = self.append_val(a, b);
                 if r >= 0 {
                     self.stack[(bp + w1) as usize] = Val::Str(r);
@@ -1435,7 +1439,7 @@ impl Vm {
     #[inline(never)]
     pub fn len_site(&mut self, c: int, o: int, bp: int, w2: int) -> int {
         if c == -6 {
-            if let Val::Str(h) = *self.rget(bp, w2) {
+            if let Some(h) = (*self.rget(bp, w2)).as_str() {
                 return self.hlen(h);
             }
             return -1;
@@ -1466,16 +1470,16 @@ impl Vm {
                 -1
             };
             if n >= 0 {
-                self.stack[(bp + w1) as usize] = Val::Num(n as double);
+                self.stack[(bp + w1) as usize] = Val::NumC(n as double);
                 self.rcode[(rb + pc) as usize].c = -5;
                 return false;
             }
         }
         let atom = self.ratom(pi, pc);
         if o < 0 && atom == A_LENGTH && (w0 & 255) == R_GET_PROP {
-            if let Val::Str(h) = *self.rget(bp, w2) {
+            if let Some(h) = (*self.rget(bp, w2)).as_str() {
                 let n = self.hlen(h) as double;
-                self.stack[(bp + w1) as usize] = Val::Num(n);
+                self.stack[(bp + w1) as usize] = Val::NumC(n);
                 if self.rcode[(rb + pc) as usize].c < 0 {
                     // the site's next string goes through len_site
                     self.rcode[(rb + pc) as usize].c = -6;
@@ -1491,7 +1495,7 @@ impl Vm {
             if h0 != -1 {
                 let way = self.pic_way as usize;
                 if h0 < 0 || self.pic[way + 4] == 0 {
-                    let r = if h0 >= 0 { self.objs[h0 as usize].get_slot(self.pic[way + 3] as usize) } else { Val::Undef };
+                    let r = if h0 >= 0 { self.objs[h0 as usize].get_slot(self.pic[way + 3] as usize) } else { Val::Undef() };
                     self.stack[(bp + w1) as usize] = r;
                     return false;
                 }
@@ -1520,7 +1524,7 @@ impl Vm {
                 return false;
             }
             if atom == A_LENGTH && (self.objs[o as usize].class == C_ARRAY || self.objs[o as usize].class == C_ARGUMENTS) && self.find(o, atom) < 0 {
-                let r = Val::Num(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
+                let r = Val::NumC(self.evecs[self.objs[o as usize].elems as usize].v.len() as double);
                 self.stack[(bp + w1) as usize] = r;
                 // the next read here takes rrun's array-length path
                 self.rcode[(rb + pc) as usize].c = -4;
@@ -1531,7 +1535,7 @@ impl Vm {
             let h = if h0 != -1 { h0 } else { self.pic_get(rb + pc, o, atom) };
             if h != -1 {
                 let way = self.pic_way as usize;
-                let r = if h >= 0 { self.objs[h as usize].get_slot(self.pic[way + 3] as usize) } else { Val::Undef };
+                let r = if h >= 0 { self.objs[h as usize].get_slot(self.pic[way + 3] as usize) } else { Val::Undef() };
                 if h < 0 || self.pic[way + 4] == 0 {
                     self.stack[(bp + w1) as usize] = r;
                     self.rcode[(rb + pc) as usize].c = -3;
@@ -1546,7 +1550,7 @@ impl Vm {
                     let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
                     let ro = obj_of(&recv);
                     if ro >= 0 && self.objs[ro as usize].class == C_TYPED {
-                        self.stack[(bp + w1) as usize] = Val::Num(self.ta_length(ro) as double);
+                        self.stack[(bp + w1) as usize] = Val::NumC(self.ta_length(ro) as double);
                         return false;
                     }
                 }
@@ -1561,7 +1565,7 @@ impl Vm {
                         self.frames[fi].pc = pc + 1;
                         let fpos = bp + self.protos[pi].fsize;
                         while (self.stack.len() as int) < fpos + 2 {
-                            self.stack.push(Val::Undef);
+                            self.stack.push(Val::Undef());
                         }
                         self.stack[fpos as usize] = g;
                         self.stack[(fpos + 1) as usize] = recv;
@@ -1633,7 +1637,7 @@ impl Vm {
     #[inline]
     pub fn grow_stack(&mut self, want: usize) {
         while self.stack.len() < want {
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
         }
     }
 
@@ -1920,7 +1924,7 @@ impl Vm {
         }
         let fpos = bp + self.protos[pi].fsize;
         while (self.stack.len() as int) < fpos + 3 {
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
         }
         self.stack[fpos as usize] = f;
         self.stack[(fpos + 1) as usize] = Val::Obj(o);
@@ -1979,7 +1983,7 @@ impl Vm {
     pub fn r_get_method(&mut self, bp: int, w1: int, w2: int, w3: int, rb: int, fi: usize, pc: int, w0: int) {
         let v = *self.rget(bp, w2);
         if w3 <= MC_BASE {
-            if let Val::Obj(o) = v {
+            if let Some(o) = v.as_obj() {
                 // a method one prototype up: the site's entry in mcache
                 let k = ((MC_BASE - w3) * 5) as usize;
                 let (osh, p) = {
@@ -1990,7 +1994,7 @@ impl Vm {
                     let po = self.ob(p as int);
                     if po.shape == i32_at(&self.mcache, k + 3) {
                         let f = slot_at(po, i32_at(&self.mcache, k + 4) as usize);
-                        if let Val::Obj(fo) = f {
+                        if let Some(fo) = f.as_obj() {
                             let fc = self.ob(fo).class;
                             if fc == C_FUNCTION || fc == C_NATIVE {
                                 self.rset((bp + w1) as usize, f);
@@ -2076,16 +2080,16 @@ impl Vm {
             return -1;
         }
         let a = *self.rget(bp, m.b as int);
-        let mut r = Val::Undef;
-        if let (Val::Str(h), Val::Num(x)) = (t, a) {
+        let mut r = Val::Undef();
+        if let Some(h) = t.as_str() { if let Some(x) = a.as_num() {
             let u = self.char_unit(h, x);
             if u != -1.0 {
-                r = Val::Num(u);
+                r = Val::NumC(u);
             }
-        }
-        if matches!(r, Val::Undef) {
+        }}
+        if r.is_undef() {
             r = self.char_code_fast(&t, &a);
-            if matches!(r, Val::Undef) {
+            if r.is_undef() {
                 return -1;
             }
         }
@@ -2099,11 +2103,11 @@ impl Vm {
     #[inline(never)]
     fn r_get_method_more(&mut self, bp: int, rb: int, fi: usize, pc: int, w0: int, w1: int, v: Val, w3: int) {
         if w3 > MC_BASE && w3 <= -16 {
-            if matches!(v, Val::Str(_)) || matches!(v, Val::Num(_)) {
+            if v.is_str() || v.is_num() {
                 // a string's (number's) method: String.prototype's
                 // (Number.prototype's) slot -16 - w3, its key checked as an
                 // inline cache's
-                let sp = if matches!(v, Val::Num(_)) { self.number_proto } else { self.string_proto };
+                let sp = if v.is_num() { self.number_proto } else { self.string_proto };
                 let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
                 let slot = self.ic_slot(sp, atom, -16 - w3, false);
                 if slot >= 0 {
@@ -2114,7 +2118,7 @@ impl Vm {
                 }
             }
         }
-        if let Val::Obj(o) = v {
+        if let Some(o) = v.as_obj() {
             if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
                 // the cache's shape: o's own data property
                 let f = slot_at(self.ob(o), (w3 & 65535) as usize);
@@ -2130,8 +2134,8 @@ impl Vm {
                 // without the property of its own
                 let h = self.pic_probe(site, o);
                 if h != -1 && (h < 0 || i32_at(&self.pic, (self.pic_way + 4) as usize) == 0) {
-                    let f = if h >= 0 { slot_at(self.ob(h), i32_at(&self.pic, (self.pic_way + 3) as usize) as usize) } else { Val::Undef };
-                    let fun = if let Val::Obj(fo) = f { self.ob(fo).class == C_FUNCTION } else { false };
+                    let f = if h >= 0 { slot_at(self.ob(h), i32_at(&self.pic, (self.pic_way + 3) as usize) as usize) } else { Val::Undef() };
+                    let fun = if let Some(fo) = f.as_obj() { self.ob(fo).class == C_FUNCTION } else { false };
                     if fun || ((w0 >> 8) & 255) != 0 || self.is_callable(&f) {
                         self.rset((bp + w1) as usize, f);
                         self.rset((bp + w1 + 1) as usize, v);
@@ -2146,7 +2150,7 @@ impl Vm {
     /// Keeps a method found one prototype up (holder h, slot) in the
     /// site's mcache entry, taking a new entry the first time.
     fn mc_learn(&mut self, site: int, o: int, h: int, slot: i32, w3: int, f: &Val) {
-        let fun = if let Val::Obj(fo) = f { self.ob(*fo).class == C_FUNCTION || self.ob(*fo).class == C_NATIVE } else { false };
+        let fun = if let Some(fo) = f.as_obj() { self.ob(fo).class == C_FUNCTION || self.ob(fo).class == C_NATIVE } else { false };
         if !fun || slot < 0 {
             return;
         }
@@ -2170,10 +2174,10 @@ impl Vm {
         self.frames[fi].pc = pc + 1;
         let pi = self.frames[fi].proto as usize;
         let atom = self.protos[pi].code[pc as usize].a as int;
-        let mut f = Val::Undef;
+        let mut f = Val::Undef();
         let mut done = false;
-        if let Val::Obj(o) = &v {
-            let o = *o;
+        if let Some(o) = (&v).as_obj() {
+            let o = o;
             let slot = self.find(o, atom);
             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
                 f = self.objs[o as usize].get_slot(slot as usize).clone();
@@ -2185,7 +2189,7 @@ impl Vm {
             } else if slot < 0 {
                 let h = self.pic_get(rb + pc, o, atom);
                 if h != -1 && (h < 0 || self.pic[(self.pic_way + 4) as usize] == 0) {
-                    f = if h >= 0 { self.objs[h as usize].get_slot(self.pic[(self.pic_way + 3) as usize] as usize) } else { Val::Undef };
+                    f = if h >= 0 { self.objs[h as usize].get_slot(self.pic[(self.pic_way + 3) as usize] as usize) } else { Val::Undef() };
                     done = true;
                     if h >= 0 && (w3 == 0 || w3 <= MC_BASE) && self.ob(o).proto == h as i32 {
                         self.mc_learn(rb + pc, o, h, self.pic[(self.pic_way + 3) as usize], w3, &f);
@@ -2194,11 +2198,11 @@ impl Vm {
             }
         }
         if !done {
-            if matches!(v, Val::Str(_)) || (matches!(v, Val::Num(_)) && self.number_proto >= 0) {
+            if v.is_str() || (v.is_num() && self.number_proto >= 0) {
                 if atom != A_LENGTH {
                     // String.prototype's (Number.prototype's) own method:
                     // r_get_method's primitive path next time
-                    let sp = if matches!(v, Val::Num(_)) { self.number_proto } else { self.string_proto };
+                    let sp = if v.is_num() { self.number_proto } else { self.string_proto };
                     let slot = self.find(sp, atom);
                     if slot >= 0 && slot < 65536 && (self.attr_at(sp, slot) & P_ACCESSOR) == 0 && self.is_callable(&self.objs[sp as usize].get_slot(slot as usize)) {
                         self.rcode[(rb + pc) as usize].c = (-16 - slot) as i32;
@@ -2233,7 +2237,7 @@ impl Vm {
                 let v = self.stack[fpos as usize];
                 let mut i = fpos;
                 while i < fpos + argc + 2 {
-                    self.stack[i as usize] = Val::Undef;
+                    self.stack[i as usize] = Val::Undef();
                     i += 1;
                 }
                 self.stack[dst as usize] = v;
@@ -2265,10 +2269,10 @@ impl Vm {
                     k += 1;
                 }
                 let r = if direct {
-                    self.call_native2(id, fo, this, &args, false, Val::Undef)
+                    self.call_native2(id, fo, this, &args, false, Val::Undef())
                 } else {
                     self.nat_ff = ff;
-                    self.call_native(id, fo, this, &args, false, Val::Undef)
+                    self.call_native(id, fo, this, &args, false, Val::Undef())
                 };
                 self.native_depth -= 1;
                 give_args(&mut self.arg_pool, args);
@@ -2299,7 +2303,7 @@ impl Vm {
             // f.call(this, a…): [call, f, this, a…] is already [f, this, a…]
             // one slot on, so f is called there (its result still goes to dst)
             if argc == 0 {
-                self.stack.push(Val::Undef);
+                self.stack.push(Val::Undef());
                 argc = 1;
             }
             fo = obj_of(&self.stack[(fpos + 1) as usize]);
@@ -2311,9 +2315,9 @@ impl Vm {
             // [f, this, a…] one slot on, so f is entered in place below
             let g = obj_of(&self.stack[(fpos + 1) as usize]);
             if g >= 0 && self.ob(g).class == C_FUNCTION && fpos + 1 != dst {
-                let arr = if argc >= 2 { self.stack[(fpos + 3) as usize] } else { Val::Undef };
+                let arr = if argc >= 2 { self.stack[(fpos + 3) as usize] } else { Val::Undef() };
                 if argc < 1 {
-                    self.stack.push(Val::Undef);
+                    self.stack.push(Val::Undef());
                 }
                 let items = self.array_like_to_vec(&arr);
                 if self.throwing {
@@ -2341,7 +2345,7 @@ impl Vm {
             }
         }
         if fo >= 0 && self.ob(fo).class == C_FUNCTION {
-            self.enter_function(fo, argc, false, Val::Undef);
+            self.enter_function(fo, argc, false, Val::Undef());
             self.call_result(nf, fpos, dst, want);
             return true;
         }
@@ -2366,7 +2370,7 @@ impl Vm {
     /// threw (a derived constructor's).
     #[inline(never)]
     fn r_ret_construct(&mut self, v: &mut Val, fi: usize, pc: int) -> bool {
-        if !matches!(*v, Val::Undef) && self.protos[self.frames[fi].proto as usize].derived {
+        if !(*v).is_undef() && self.protos[self.frames[fi].proto as usize].derived {
             self.frames[fi].pc = pc + 1;
             self.throw_type("Derived constructors may only return object or undefined");
             return true;
@@ -2467,7 +2471,7 @@ impl Vm {
         let nf = self.frames.len() - 1;
         let fpos = self.frames[nf].bp + self.protos[self.frames[nf].proto as usize].fsize;
         while (self.stack.len() as int) < fpos + 2 {
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
         }
         self.stack[fpos as usize] = f;
         self.stack[(fpos + 1) as usize] = this;
@@ -2526,7 +2530,7 @@ impl Vm {
                 self.frames[fi].pc = pc + 1 + (w0 >> 16);
                 let fpos = bp + self.protos[pi].fsize;
                 while (self.stack.len() as int) < fpos + 2 {
-                    self.stack.push(Val::Undef);
+                    self.stack.push(Val::Undef());
                 }
                 self.stack[fpos as usize] = g;
                 self.stack[(fpos + 1) as usize] = recv;
@@ -2555,7 +2559,7 @@ impl Vm {
         if k == 1 && (self.protos[pi].code[pc as usize].code as int) == OP_TO_ARRAY {
             // destructuring a plain array: read in place (OP_TO_ARRAY's case)
             let v = *self.rget(bp, w2);
-            if let Val::Obj(o) = v {
+            if let Some(o) = v.as_obj() {
                 if self.array_iter_plain(o) {
                     self.stack[(bp + w1) as usize] = v;
                     return;
@@ -2575,8 +2579,8 @@ impl Vm {
             // `i in arr` for an element of a plain array: no stack trip
             let ov = self.rget(bp, w3).clone();
             let nv = self.rget(bp, w2).clone();
-            if let Val::Obj(o) = ov {
-                if let Val::Num(n) = nv {
+            if let Some(o) = ov.as_obj() {
+                if let Some(n) = nv.as_num() {
                     let i = n as int;
                     if (i as double) == n && i >= 0 && self.objs[o as usize].class == C_ARRAY && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                         self.stack[(bp + w1) as usize] = Val::Bool(true);
@@ -2679,7 +2683,7 @@ impl Vm {
         if code == OP_GET_PRIVATE && op.b != -2 && w1 > 0 {
             // obj.#x as an own data property (Vm::priv_get's first case)
             let top = (bp + w1 - 1) as usize;
-            if let Val::Obj(o) = self.stack[top] {
+            if let Some(o) = self.stack[top].as_obj() {
                 let s = self.find(o, op.a as int);
                 if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
                     self.stack[top] = self.objs[o as usize].get_slot(s as usize);
@@ -2689,7 +2693,7 @@ impl Vm {
         } else if code == OP_SET_PRIVATE && op.c != 1 && w1 > 1 {
             // obj.#x = v for an own data property (Vm::priv_set's case)
             let top = (bp + w1 - 1) as usize;
-            if let Val::Obj(o) = self.stack[top - 1] {
+            if let Some(o) = (self.stack[top - 1]).as_obj() {
                 let s = self.find(o, op.a as int);
                 if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
                     let val = self.stack[top];
@@ -2701,12 +2705,12 @@ impl Vm {
             }
         }
         if done {
-        } else if code == OP_TOSTR && w1 > 0 && !matches!(self.stack[(bp + w1 - 1) as usize], Val::Obj(_)) {
+        } else if code == OP_TOSTR && w1 > 0 && !(self.stack[(bp + w1 - 1) as usize]).is_obj() {
             // a template's primitive substitution: as is (Vm::quick_op)
             done = true;
         } else if code == OP_BIGINT && w1 > 0 {
             let top = (bp + w1 - 1) as usize;
-            if let Val::Str(h) = self.stack[top] {
+            if let Some(h) = self.stack[top].as_str() {
                 let n = crate::bigint::small_big_of(self.sref(h));
                 if n < crate::bigint::small_big_limit() {
                     self.stack[top] = self.bigint_small(n);
@@ -2724,7 +2728,7 @@ impl Vm {
             return -1;
         }
         while self.stack.len() < want {
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
         }
         if self.stack.len() > want {
             self.stack.truncate(want);
@@ -2759,7 +2763,7 @@ impl Vm {
         let have = self.stack.len() as int;
         let upto = if bp + nslots < have { bp + nslots } else { have };
         while i < upto {
-            self.rset(i as usize, Val::Undef);
+            self.rset(i as usize, Val::Undef());
             i += 1;
         }
         if self.stack.len() < end {
@@ -2770,7 +2774,7 @@ impl Vm {
             }
             grow_stack(&mut self.stack, end);
         }
-        let mut nt = Val::Undef;
+        let mut nt = Val::Undef();
         let this_val = if arrow {
             let c = self.ob(fo).cold as usize;
             if !self.colds[c].elems2.is_empty() {
@@ -2781,7 +2785,7 @@ impl Vm {
             let t = *val_at(&self.stack, (bp - 1) as usize);
             if strict || is_obj(&t) {
                 t
-            } else if matches!(t, Val::Undef) {
+            } else if t.is_undef() {
                 // a plain call f(): the global object, no call out
                 Val::Obj(self.global)
             } else {
@@ -2827,7 +2831,7 @@ impl Vm {
     /// undefined, a wrapper for a primitive.
     #[inline(never)]
     fn sloppy_this(&mut self, t: Val) -> Val {
-        if matches!(t, Val::Undef) || matches!(t, Val::Null) {
+        if t.is_undef() || t.is_null() {
             return Val::Obj(self.global);
         }
         let bo = self.to_object(&t);
@@ -2840,7 +2844,7 @@ impl Vm {
         let e = self.alloc(C_ENV, outer);
         let mut k = 0;
         while k < n {
-            self.push_elem(e, Val::Undef);
+            self.push_elem(e, Val::Undef());
             k += 1;
         }
         e
@@ -2866,7 +2870,7 @@ impl Vm {
             return;
         }
         while self.stack.len() < want {
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
         }
         let v = self.stack[fpos as usize].clone();
         self.stack[dst as usize] = v;
@@ -2888,24 +2892,28 @@ impl Vm {
     #[inline(always)]
     fn fast_cmp(&self, code: int, a: &Val, b: &Val) -> int {
         let eq: int = if code == OP_SEQ || code == OP_SNE {
-            match (a, b) {
-                (Val::Num(x), Val::Num(y)) => if *x == *y { 1 } else { 0 },
-                (Val::Obj(x), Val::Obj(y)) => if *x == *y { 1 } else { 0 },
-                (Val::Big(x), Val::Big(y)) => if *x == *y { 1 } else { 0 },
-                (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => 1,
-                (Val::Bool(x), Val::Bool(y)) => if *x == *y { 1 } else { 0 },
-                (Val::Str(x), Val::Str(y)) => if *x == *y || self.sref(*x) == self.sref(*y) { 1 } else { 0 },
-                _ => 0,
+            let q = crate::value::seq_quick(a, b);
+            if q != 2 {
+                q
+            } else {
+                match (a.kind(), b.kind()) {
+                    (VK::Str(x), VK::Str(y)) => if x == y || self.sref(x) == self.sref(y) { 1 } else { 0 },
+                    _ => 0,
+                }
             }
         } else if code == OP_EQ || code == OP_NE {
-            match (a, b) {
-                (Val::Undef, Val::Undef) | (Val::Null, Val::Null) | (Val::Undef, Val::Null) | (Val::Null, Val::Undef) => 1,
-                (Val::Undef, Val::Obj(_)) | (Val::Null, Val::Obj(_)) | (Val::Obj(_), Val::Undef) | (Val::Obj(_), Val::Null) => 0,
-                (Val::Undef, Val::Num(_)) | (Val::Null, Val::Num(_)) | (Val::Num(_), Val::Undef) | (Val::Num(_), Val::Null) => 0,
-                (Val::Undef, Val::Str(_)) | (Val::Null, Val::Str(_)) | (Val::Str(_), Val::Undef) | (Val::Str(_), Val::Null) => 0,
-                (Val::Undef, Val::Bool(_)) | (Val::Null, Val::Bool(_)) | (Val::Bool(_), Val::Undef) | (Val::Bool(_), Val::Null) => 0,
-                (Val::Str(x), Val::Str(y)) => if *x == *y || self.sref(*x) == self.sref(*y) { 1 } else { 0 },
-                _ => -1,
+            if a.is_nullish() || b.is_nullish() {
+                if a.is_nullish() && b.is_nullish() {
+                    1
+                } else if a.is_big() || b.is_big() {
+                    -1
+                } else {
+                    0
+                }
+            } else if a.is_str() && b.is_str() { let x = a.strh(); let y = b.strh();
+                if x == y || self.sref(x) == self.sref(y) { 1 } else { 0 }
+            } else {
+                -1
             }
         } else {
             -1
@@ -2936,15 +2944,16 @@ impl Vm {
     pub fn rcompare(&mut self, code: int, _pi: usize, bp: int, x: int, y: int, fi: usize, pc: int) -> bool {
         let mut num = false;
         let mut r = false;
-        if let (Val::Num(a), Val::Num(b)) = (self.rget(bp, x), self.rget(bp, y)) {
+        let va_ = *self.rget(bp, x); let vb_ = *self.rget(bp, y);
+        if va_.is_num() && vb_.is_num() { let a = va_.num(); let b = vb_.num();
             num = true;
             r = match code {
-                OP_LT => *a < *b,
-                OP_GT => *a > *b,
-                OP_LE => *a <= *b,
-                OP_GE => *a >= *b,
-                OP_SEQ | OP_EQ => *a == *b,
-                _ => *a != *b,
+                OP_LT => a < b,
+                OP_GT => a > b,
+                OP_LE => a <= b,
+                OP_GE => a >= b,
+                OP_SEQ | OP_EQ => a == b,
+                _ => a != b,
             };
         }
         if num {
