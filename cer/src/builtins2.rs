@@ -108,7 +108,7 @@ impl Vm {
             if i > 0 {
                 jsstr::push_js(&mut out, sep);
             }
-            if (i & 65535) == 65535 && self.poll(65536) {
+            if (i & 8191) == 8191 && self.poll(131072) {
                 return String::new();
             }
             if (out.as_bytes().len() as int) > MAX_STR_BYTES {
@@ -732,7 +732,7 @@ impl Vm {
                             self.put_elem2(o, i, Val::Bool(false));
                         }
                     }
-                    if (i & 65535) == 65535 && self.poll(65536) {
+                    if (i & 8191) == 8191 && self.poll(131072) {
                         return Val::Undef;
                     }
                     i += 1;

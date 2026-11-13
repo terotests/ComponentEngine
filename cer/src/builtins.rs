@@ -4550,19 +4550,18 @@ impl Vm {
                             return Val::Undef;
                         }
                         let len = n as int;
-                        let mut v: Vec<Val> = Vec::new();
+                        let mut v: Vec<Val> = Vec::with_capacity(len as usize);
+                        let mut h: Vec<Val> = Vec::with_capacity(len as usize);
                         let mut i = 0;
                         while i < len {
                             v.push(Val::Undef);
+                            h.push(Val::Bool(true));
+                            if (i & 65535) == 65535 && self.poll(262144) {
+                                return Val::Undef;
+                            }
                             i += 1;
                         }
                         self.put_elems(a, v);
-                        let mut h: Vec<Val> = Vec::new();
-                        let mut j = 0;
-                        while j < len {
-                            h.push(Val::Bool(true));
-                            j += 1;
-                        }
                         self.put_elems2(a, h);
                         return Val::Obj(a);
                     }

@@ -23,6 +23,7 @@ oom	*	no total heap limit (many arrays just under the 2^25 element cap)
 # checks and hit a value of the wrong type: a panic, never a SIGSEGV.
 # Keep units and snapshots in a store the host trusts.
 hostile-unit	index out of bounds	A1 opcode swap passes the checks, type confusion panics
+hostile-snapshot	index out of bounds	A2 an env shorter than the code that reads it passes the checks: a panic
 # A3: a slice cannot stop a loop under a native Rust frame (getter,
 # comparator, valueOf, ...): the frame cannot be suspended. The host time
 # limit (Engine::set_time_limit) stops them all; the oracle checks that
