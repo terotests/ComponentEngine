@@ -63,6 +63,12 @@ impl Vm {
 
     /// Calls hook `which` for proxy `p`: hook(target, handler, ...args).
     pub fn proxy_call(&mut self, p: int, which: int, args: Vec<Val>) -> Val {
+        // a chain of proxies (a proxy's target or prototype a proxy again)
+        // recurses natively
+        if self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+            return Val::Undef;
+        }
         let target = self.objs[p as usize].env as int;
         let handler = self.colds[self.objs[p as usize].cold as usize].home;
         if handler < 0 || target < 0 || self.proxy_hooks < 0 {
@@ -81,6 +87,12 @@ impl Vm {
     /// called and its invariants checked here, not in the prelude's hook
     /// (no descriptor object per get); other targets take the hook.
     pub fn proxy_get_atom(&mut self, p: int, atom: int, r: Val) -> Val {
+        // a chain of proxies (a proxy's target or prototype a proxy again)
+        // recurses natively
+        if self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+            return Val::Undef;
+        }
         let target = self.objs[p as usize].env as int;
         let handler = self.colds[self.objs[p as usize].cold as usize].home;
         if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT {

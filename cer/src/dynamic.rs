@@ -455,6 +455,13 @@ impl Vm {
         } else {
             "function"
         };
+        // the parameters and the body each parse on their own (the spec's
+        // separate parses): `new Function("/*", "*/){")` or a body of
+        // "}); (function(){" is a SyntaxError, not code outside the function
+        if !dyn_part_ok(params.as_str()) || !dyn_part_ok(body.as_str()) {
+            self.throw_syntax("Arg string terminates parameters early");
+            return Val::Undef;
+        }
         let src = format!("({} anonymous({}\n) {{\n{}\n}})", head, params, body);
         let f = self.eval_source(src.as_str(), false, false);
         if self.throwing {
@@ -469,4 +476,30 @@ impl Vm {
         }
         f
     }
+}
+
+/// Whether a Function constructor's parameter or body text stands alone:
+/// it lexes to its end (no comment or string left open) and its brackets
+/// balance without closing one it did not open.
+fn dyn_part_ok(src: &str) -> bool {
+    let mut lx = crate::lexer::Lexer::new(src);
+    let toks = lx.tokenize();
+    if !lx.error.is_empty() {
+        return false;
+    }
+    let mut depth: int = 0;
+    for t in toks.iter() {
+        if t.kind == crate::lexer::T_PUNCT {
+            let s = t.text.as_str();
+            if s == "(" || s == "[" || s == "{" {
+                depth += 1;
+            } else if s == ")" || s == "]" || s == "}" {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+        }
+    }
+    depth == 0
 }

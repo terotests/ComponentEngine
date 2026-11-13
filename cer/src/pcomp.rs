@@ -3471,7 +3471,7 @@ impl PComp {
 
     /// Whether the nesting has used the native stack up: a SyntaxError.
     fn too_nested(&mut self) -> bool {
-        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::parse_stack_budget()) {
             return false;
         }
         self.fail("Maximum call stack size exceeded");
@@ -3587,6 +3587,13 @@ impl PComp {
                 if bare {
                     // checked once the body is left: a finally may call super()
                     self.ctor_this_check();
+                } else if self.fs[self.fs.len() - 1].proto.derived && self.fs[self.fs.len() - 1].proto.class_ctor {
+                    // `return undefined` (or any expression that is): the
+                    // same check
+                    self.op(OP_DUP);
+                    let j = self.emit(OP_JNOT_UNDEF, 0, 0);
+                    self.ctor_this_check();
+                    self.patch(j);
                 }
                 self.op(OP_RETURN);
                 return;
@@ -4208,6 +4215,11 @@ impl PComp {
         // name `of`)
         let mut k = self.scan_to(head, ";", true);
         if self.tok_is(k, "of") && k == head + 1 && (self.tok_is(head, "var") || self.tok_is(head, "let") || self.tok_is(head, "const") || (self.tok_is(head, "async") && self.tok_is(k + 1, "=>"))) {
+            k = self.scan_to(k + 1, ";", true);
+        }
+        // `of` after a punctuator other than ) ] } is a name, as in
+        // `for (var e = of(x); …)` of minified code
+        while k < close && k > head && self.tok_is(k, "of") && self.toks[(k - 1) as usize].kind as int == T_PUNCT && !self.tok_is(k - 1, ")") && !self.tok_is(k - 1, "]") && !self.tok_is(k - 1, "}") {
             k = self.scan_to(k + 1, ";", true);
         }
         if k < close && (self.tok_is(k, "in") || self.tok_is(k, "of")) && !self.in_cond_middle(head, k) {
@@ -5680,6 +5692,10 @@ impl PComp {
     }
 
     fn unary(&mut self) -> Ex {
+        // `!!!!…x` recurses here without passing assign
+        if self.too_nested() {
+            return ex(E_OTHER);
+        }
         if self.ts && !self.jsx && self.is("<") {
             // TypeScript's `<T>x` (not in TSX, where it opens an element)
             let e = self.type_args_end(self.pos);

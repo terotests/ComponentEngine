@@ -317,7 +317,7 @@ impl Engine {
 
     /// Limits a script's depth: at most `frames` script frames at once
     /// (10 000 by default) and `stack_bytes` of native stack below the call
-    /// into the engine (1 MB, 512 KB in WebAssembly; keep it well under the
+    /// into the engine (1 MB, 128 KB in WebAssembly; keep it well under the
     /// thread's stack). Past either a call throws RangeError ("Maximum call
     /// stack size exceeded") instead of exhausting memory or overflowing
     /// the thread's stack.

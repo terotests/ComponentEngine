@@ -204,7 +204,7 @@ if (args.includes("--octane")) {
   const e = engine();
   e.setJit(opt("off", "") ? false : true, Number(opt("min", "0")), []);
   let r;
-  try { r = e.eval(src); } catch (err) { console.log("HOSTERR " + err.message); process.exit(4); }
+  try { r = e.eval(src); } catch (err) { console.log("HOSTERR " + err.message); if (process.env.WJ_STACK) console.error(err.stack); process.exit(4); }
   if (r.output) process.stdout.write(r.output.endsWith("\n") ? r.output : r.output + "\n");
   if (e.out.length) console.log(e.out.join("\n"));
   if (r.failed) { console.error("Uncaught " + r.value); process.exit(1); }
