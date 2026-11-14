@@ -19,6 +19,8 @@
 //   sandbox/           the sandbox demo: four CErXes engines (wasm/cerxes.wasm)
 //                      running endless programs in time slices on the page,
 //                      in Web Workers or in iframes
+//   travel/            the travelling-engine demo: snapshot speed, and one
+//                      query over hosts in Web Workers three ways
 //
 // A step whose toolchain is missing is skipped and its engine marked
 // unavailable, unless --strict (CI) makes that a failure.
@@ -39,11 +41,11 @@ const args = process.argv.slice(2);
 const strict = args.includes("--strict");
 const skip = new Set((args.find((a) => a.startsWith("--skip=")) || "--skip=").slice(7).split(",").filter(Boolean));
 
-const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "quickjs", "hermes", "spidermonkey", "cer-js"];
+const ENGINES = ["native", "cer-wasm", "cerxes-wasm", "cerxes-stack", "cerxes-small", "cerxes-jit", "cerxes-slices", "cerxes-moving", "quickjs", "hermes", "spidermonkey", "cer-js"];
 // the WebAssembly file each engine loads, for its size; the CErXes variants
 // stand on the step that builds their file
-const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm", hermes: "hermes.wasm", spidermonkey: "spidermonkey.wasm" };
-const STEP = { "cerxes-stack": "cerxes-wasm" };
+const WASM = { "cer-wasm": "cer.wasm", "cerxes-wasm": "cerxes.wasm", "cerxes-stack": "cerxes.wasm", "cerxes-small": "cerxes-small.wasm", "cerxes-jit": "cerxes-jit.wasm", "cerxes-slices": "cerxes.wasm", "cerxes-moving": "cerxes.wasm", hermes: "hermes.wasm", spidermonkey: "spidermonkey.wasm" };
+const STEP = { "cerxes-stack": "cerxes-wasm", "cerxes-slices": "cerxes-wasm", "cerxes-moving": "cerxes-wasm" };
 const status = {}; // id -> { available, reason, size }
 
 function log(s) {
@@ -293,6 +295,33 @@ if (!status["cerxes-wasm"]) {
   });
 } else {
   log("-- sandbox demo: not built (" + status["cerxes-wasm"].reason + ")");
+}
+
+// The travelling-engine demo (travel/): hosts in Web Workers passing CErXes
+// engines, or only their data, between them as text; it loads wasm/cerxes.wasm.
+if (!status["cerxes-wasm"]) {
+  step("bundle travel", () => {
+    const TR_SRC = path.join(SRC, "travel");
+    const TR_DIST = path.join(DIST, "travel");
+    fs.mkdirSync(TR_DIST, { recursive: true });
+    for (const entry of ["main.js", "host.js"]) {
+      const r = esbuild.buildSync({
+        entryPoints: [path.join(TR_SRC, entry)],
+        bundle: true,
+        format: "esm",
+        platform: "browser",
+        target: "es2022",
+        minify: true,
+        legalComments: "eof",
+        outfile: path.join(TR_DIST, entry),
+        logLevel: "silent",
+      });
+      if (r.errors.length) throw new Error(r.errors.map((e) => e.text).join("\n"));
+    }
+    for (const f of ["index.html", "travel.css"]) fs.copyFileSync(path.join(TR_SRC, f), path.join(TR_DIST, f));
+  });
+} else {
+  log("-- travel demo: not built (" + status["cerxes-wasm"].reason + ")");
 }
 
 // The zoo ranking's material (zoo/update.mjs refreshes it): Octane suites,
