@@ -110,7 +110,14 @@ fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
         }
         strs[i as usize].clone()
     } else if t == 6 {
-        Val::Obj(r.num())
+        // whether the object exists is checked once every object is back
+        // (in_objs); a number that is no index at all is refused here
+        let o = r.num();
+        if o < 0 || o > 0xFFFF_FFFF {
+            r.bad = true;
+            return Val::Undef();
+        }
+        Val::Obj(o)
     } else if t == 7 {
         Val::Num(r.num() as double)
     } else if t == 8 {
@@ -119,6 +126,34 @@ fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
         r.bad = true;
         Val::Undef()
     }
+}
+
+/// A map's keys in the order of their values (object or symbol handles:
+/// BigInts, the symbol registry), so that the same state gives the same
+/// text whatever order the hash map keeps.
+fn keys_by_value_str(m: &HashMap<String, int>) -> Vec<String> {
+    let mut by_v: HashMap<int, String> = HashMap::new();
+    let mut vs: Vec<int> = Vec::new();
+    for (k, v) in m.iter() {
+        by_v.insert(*v, k.clone());
+        vs.push(*v);
+    }
+    let mut out: Vec<String> = Vec::new();
+    if by_v.len() != m.len() {
+        // two keys with one value: keep the hash map's order
+        for (k, _v) in m.iter() {
+            out.push(k.clone());
+        }
+        return out;
+    }
+    vs.sort();
+    for v in vs.iter() {
+        match by_v.get(v) {
+            Some(k) => out.push(k.clone()),
+            None => {}
+        }
+    }
+    out
 }
 
 fn put_ints(out: &mut String, v: &Vec<int>) {
@@ -285,10 +320,28 @@ pub fn snapshot(vm: &Vm) -> String {
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
         if o.class == C_MAP || o.class == C_SET {
-            put_num(&mut b, cold.index.len() as int);
+            // in key order: a hash map's order changes from map to map,
+            // and the same state must give the same text
+            // by entry: each key has its own (value.rs Cold::index)
+            let mut ents: Vec<int> = Vec::new();
+            let mut by_ent: HashMap<int, int> = HashMap::new();
             for (k, v) in cold.index.iter() {
-                put_num(&mut b, *k);
-                put_num(&mut b, *v);
+                ents.push(*v);
+                by_ent.insert(*v, *k);
+            }
+            put_num(&mut b, ents.len() as int);
+            if by_ent.len() != ents.len() {
+                // two keys on one entry: the hash map's order
+                for (k, v) in cold.index.iter() {
+                    put_num(&mut b, *k);
+                    put_num(&mut b, *v);
+                }
+            } else {
+                ents.sort();
+                for v in ents.iter() {
+                    put_num(&mut b, *by_ent.get(v).unwrap_or(&0));
+                    put_num(&mut b, *v);
+                }
             }
             put_ints(&mut b, &cold.marks);
         }
@@ -343,10 +396,12 @@ pub fn snapshot(vm: &Vm) -> String {
     ];
     put_ints(&mut b, &ints);
     // the table of large BigInts (objects) by their text
-    put_num(&mut b, vm.bigints.len() as int);
-    for (k, v) in vm.bigints.iter() {
+    // (by handle, not in the hash map's order)
+    let big = keys_by_value_str(&vm.bigints);
+    put_num(&mut b, big.len() as int);
+    for k in big.iter() {
         put_num(&mut b, st.id(k.as_str()));
-        put_num(&mut b, *v);
+        put_num(&mut b, *vm.bigints.get(k).unwrap_or(&-1));
     }
     put_ints(&mut b, &vm.roots);
     put_num(&mut b, vm.out.len() as int);
@@ -354,10 +409,11 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, st.id(l.as_str()));
     }
     put_ints(&mut b, &vm.symbols);
-    put_num(&mut b, vm.symbol_registry.len() as int);
-    for (k, v) in vm.symbol_registry.iter() {
+    let reg = keys_by_value_str(&vm.symbol_registry);
+    put_num(&mut b, reg.len() as int);
+    for k in reg.iter() {
         put_num(&mut b, st.id(k.as_str()));
-        put_num(&mut b, *v);
+        put_num(&mut b, *vm.symbol_registry.get(k).unwrap_or(&-1));
     }
     put_vals(&mut b, &mut st, vm, &vm.pending_jobs());
     put_num(&mut b, vm.del_count);
@@ -616,7 +672,11 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
         }
         i += 1;
     }
-    vm.free_list = get_ints(&mut r);
+    // the free list is checked with the rest of the state: until then the
+    // key lists below are made at the end of the objects, never in a slot
+    // the text names
+    let free_list = get_ints(&mut r);
+    vm.free_list = Vec::new();
     // each shape-walking for-in iterator becomes one over a key list (as
     // OP_ITER_KEYS makes for any object): env the list, home the object,
     // every key checked against the object, since it may have changed
@@ -646,6 +706,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
             vm.objs[*it as usize].env = -1;
         }
     }
+    vm.free_list = free_list;
     let ints = get_ints(&mut r);
     if ints.len() != 45 {
         return false;
