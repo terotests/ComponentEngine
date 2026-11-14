@@ -273,6 +273,10 @@ fn install_panic_hook() {
         if let Ok(mut m) = PANIC_MSG.lock() {
             *m = format!("{} in {} at {}", msg, func, loc);
         }
+        if std::env::var("FUZZ_BACKTRACE").is_ok() {
+            // repro: the whole backtrace, to see how the engine got there
+            eprintln!("panic: {} at {}\n{}", msg, loc, bt.lines().filter(|l| l.contains("cerxes")).take(24).collect::<Vec<_>>().join("\n"));
+        }
     }));
 }
 
