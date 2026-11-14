@@ -11,6 +11,7 @@ MINUTES=60 cerxes/fuzz/run-local.sh --node     # an hour, also against Node
 cerxes/fuzz/run-local.sh --heavy               # resource limits
 cerxes/fuzz/run-local.sh --hostile 60 --preempt 30   # forged snapshots / units, preemption
 JIT=1 cerxes/fuzz/run-local.sh                 # also the wasm engine, JIT off / on (needs node)
+COV=1 cerxes/fuzz/run-local.sh                 # coverage-guided (see below)
 ```
 
 The workers run the **checked build** (`--profile checked`: release speed
@@ -34,7 +35,8 @@ minimised cases in `known/` still reproduce. When a fix is merged, remove
 its line from `known.txt`.
 
 `summary.txt` also gives the share of programs that compiled (`valid`):
-about 96 % of generated programs and 24 % of mutated ones.
+all generated programs and about 40 % of mutated ones (half the mutations
+change whole lines, operators, names or numbers; the other half bytes).
 
 ## What is checked
 
@@ -58,6 +60,8 @@ about 96 % of generated programs and 24 % of mutated ones.
 | `mismatch-compiler` | pcomp and the tree compiler differ. | correctness |
 | `mismatch-tsx` | The same JavaScript read as TSX gives another result (generated programs only). | correctness |
 | `mismatch-snapshot` | The program run in 0.02 ms slices, with a snapshot and a restore into a new engine at each one, differs from one plain run. This is the check that suspend/resume and moving an instance between machines keep its state. | correctness |
+| `snapshot-roundtrip` | A finished program's engine and the engine restored from its snapshot answer a probe differently (globals `v0`…`v8`, the functions `f0`… called, a `D0` instance made, the global names; twice, so changes the first probe makes are compared too), or the snapshot text is not a fixed point: taken twice, or after a second restore, it differs. | correctness |
+| `nondeterminism` | The same program run twice in one process printed different lines: state leaks between engines (statics, caches). | correctness |
 | `mismatch-node` | Node prints something else (`--node`). Conformance, so there is a lot of it. The groups found first: strings with lone surrogates, early errors CErXes lets through, error types. | conformance |
 | `slow` | The program did not finish in 3 s. Not a finding (an endless loop is allowed); only counted. | – |
 
@@ -65,7 +69,10 @@ The reference run is the register VM with pcomp, the product default. Each
 program also runs on the stack VM, and by chance on the tree compiler, as
 TSX and in slices with snapshots. 5 % of programs also have their final
 snapshot corrupted, 10 % (`--hostile P`) get a forged snapshot or unit,
-and 5 % of the programs (`--preempt P`) are preemption programs.
+and 5 % of the programs (`--preempt P`) are preemption programs. 10 % of
+generated programs (`--roundtrip P`) get the snapshot round trip and 5 %
+run twice (`nondeterminism`). `cerxes-fuzz snapfix FILE` (src/bin) shows
+where the snapshot texts of a program differ.
 
 ### What the generator writes
 
@@ -114,7 +121,20 @@ Generated programs are deterministic. They use no `Date.now`, no
 `__p` inside its own `try/catch`, so two engines can be compared line by
 line.
 
-## Coverage-guided fuzzing (libfuzzer/)
+## Coverage-guided mutation on stable Rust (COV=1)
+
+`COV=1 run-local.sh` builds the engine with LLVM SanitizerCoverage
+(`-C passes=sancov-module`, inline 8-bit counters, into `target/cov`;
+`--target` is given so that proc macros are built without it). The worker
+reads the counters after each program (`src/cov.rs`); a program that lit an
+edge, or an edge as many times (AFL buckets), that no worker had seen yet is
+kept and written to `out/…/corpus/`. Mutation then draws from these as well
+as from the seeds, and takes whole lines from a second program. A plain
+build has no counters and only mutates the seeds. The status line and
+`summary.txt` give the features seen and the programs kept. The CI default
+shard runs this build.
+
+## Coverage-guided fuzzing with ASan (libfuzzer/)
 
 `libfuzzer/` has cargo-fuzz targets that need nightly Rust:
 

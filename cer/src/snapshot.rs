@@ -285,8 +285,12 @@ pub fn snapshot(vm: &Vm) -> String {
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
         if o.class == C_MAP || o.class == C_SET {
-            put_num(&mut b, cold.index.len() as int);
-            for (k, v) in cold.index.iter() {
+            // in key order: a hash map's order changes from map to map,
+            // and the same state must give the same text
+            let mut pairs: Vec<(int, int)> = cold.index.iter().map(|(k, v)| (*k, *v)).collect();
+            pairs.sort();
+            put_num(&mut b, pairs.len() as int);
+            for (k, v) in pairs.iter() {
                 put_num(&mut b, *k);
                 put_num(&mut b, *v);
             }
@@ -343,8 +347,11 @@ pub fn snapshot(vm: &Vm) -> String {
     ];
     put_ints(&mut b, &ints);
     // the table of large BigInts (objects) by their text
-    put_num(&mut b, vm.bigints.len() as int);
-    for (k, v) in vm.bigints.iter() {
+    // (by handle, not in the hash map's order)
+    let mut big: Vec<(int, &String)> = vm.bigints.iter().map(|(k, v)| (*v, k)).collect();
+    big.sort();
+    put_num(&mut b, big.len() as int);
+    for (v, k) in big.iter() {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
     }
@@ -354,8 +361,10 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, st.id(l.as_str()));
     }
     put_ints(&mut b, &vm.symbols);
-    put_num(&mut b, vm.symbol_registry.len() as int);
-    for (k, v) in vm.symbol_registry.iter() {
+    let mut reg: Vec<(int, &String)> = vm.symbol_registry.iter().map(|(k, v)| (*v, k)).collect();
+    reg.sort();
+    put_num(&mut b, reg.len() as int);
+    for (v, k) in reg.iter() {
         put_num(&mut b, st.id(k.as_str()));
         put_num(&mut b, *v);
     }

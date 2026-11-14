@@ -552,6 +552,120 @@ impl Gen {
 /// A byte-level or token-level change to a program: what finds parser and
 /// compiler crashes that well-formed programs miss.
 pub fn mutate(rng: &mut Rng, src: &str) -> String {
+    mutate_with(rng, src, None)
+}
+
+/// Half the time a change that keeps the program well-formed as often as
+/// it can (whole lines from `donor`, line moves, swapped operators,
+/// names and numbers): byte-level changes alone leave nine programs in ten
+/// stopping at a SyntaxError, so the compiler and VM behind the parser
+/// see few of them.
+pub fn mutate_with(rng: &mut Rng, src: &str, donor: Option<&str>) -> String {
+    if rng.chance(50) {
+        return mutate_lines(rng, src, donor);
+    }
+    mutate_bytes(rng, src)
+}
+
+const OPS: &[&str] = &[" + ", " - ", " * ", " / ", " % ", " ** ", " & ", " | ", " ^ ", " << ", " >> ", " >>> ", " < ", " > ", " <= ", " >= ", " == ", " != ", " === ", " !== ", " && ", " || ", " ?? "];
+
+/// Line- and token-level changes (see `mutate_with`).
+pub fn mutate_lines(rng: &mut Rng, src: &str, donor: Option<&str>) -> String {
+    let mut lines: Vec<String> = src.lines().map(|l| l.to_string()).collect();
+    if lines.is_empty() {
+        return String::from(src);
+    }
+    let dl: Vec<&str> = donor.map(|d| d.lines().filter(|l| !l.trim().is_empty()).collect()).unwrap_or_default();
+    for _ in 0..1 + rng.below(3) {
+        let n = lines.len().max(1);
+        let i = rng.below(n);
+        match rng.below(8) {
+            0 | 1 if !dl.is_empty() => {
+                // a line from another program, in place of one or after it
+                let l = dl[rng.below(dl.len())].to_string();
+                if rng.chance(50) && i < lines.len() {
+                    lines[i] = l;
+                } else {
+                    lines.insert(i.min(lines.len()), l);
+                }
+            }
+            2 if lines.len() > 1 => {
+                lines.remove(i.min(lines.len() - 1));
+            }
+            3 if i < lines.len() => {
+                let l = lines[i].clone();
+                lines.insert(i, l);
+            }
+            4 if lines.len() > 1 => {
+                let (a, j) = (i.min(lines.len() - 1), rng.below(lines.len()));
+                lines.swap(a, j);
+            }
+            5 if i < lines.len() => {
+                // swap one binary operator for another
+                let l = &lines[i];
+                let hits: Vec<(usize, &str)> = OPS.iter().flat_map(|op| l.match_indices(op).map(|(k, _)| (k, *op)).collect::<Vec<_>>()).collect();
+                if !hits.is_empty() {
+                    let (k, op) = hits[rng.below(hits.len())];
+                    let to = rng.pick(OPS);
+                    lines[i] = format!("{}{}{}", &l[..k], to, &l[k + op.len()..]);
+                }
+            }
+            6 if i < lines.len() => {
+                // a name for another (v0 → v3, f0 → f1, a → b)
+                let l = &lines[i];
+                let names: Vec<(usize, usize)> = token_spans(l).into_iter().filter(|&(a, b)| {
+                    let t = &l[a..b];
+                    t.len() <= 3 && t.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false) && t[1..].chars().all(|c| c.is_ascii_digit())
+                }).collect();
+                if !names.is_empty() {
+                    let (a, b) = names[rng.below(names.len())];
+                    let first = l[a..b].chars().next().unwrap();
+                    let to = if l[a..b].len() == 1 { rng.pick(&["a", "b", "r", "x", "y"]).to_string() } else { format!("{}{}", first, rng.below(8)) };
+                    lines[i] = format!("{}{}{}", &l[..a], to, &l[b..]);
+                }
+            }
+            _ if i < lines.len() => {
+                // a number for a boundary one
+                let l = &lines[i];
+                let nums: Vec<(usize, usize)> = token_spans(l).into_iter().filter(|&(a, b)| l[a..b].chars().all(|c| c.is_ascii_digit())).collect();
+                if !nums.is_empty() {
+                    let (a, b) = nums[rng.below(nums.len())];
+                    let to = rng.pick(NUMS);
+                    lines[i] = format!("{}{}{}", &l[..a], to, &l[b..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Byte spans of the words (`[A-Za-z0-9_$]+`) of a line, outside strings
+/// only roughly: a word in a string literal is changed too.
+fn token_spans(l: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let b = l.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' {
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
+                i += 1;
+            }
+            // not the tail of a number like 1e3 or 0x1f
+            if s == 0 || !(b[s - 1] == b'.' || b[s - 1] == b'#') {
+                out.push((s, i));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn mutate_bytes(rng: &mut Rng, src: &str) -> String {
     let chars: Vec<char> = src.chars().collect();
     if chars.is_empty() {
         return String::from("(");

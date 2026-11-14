@@ -8,6 +8,7 @@
 #   MINUTES=60 JOBS=6 cerxes/fuzz/run-local.sh --heavy
 #   JIT=1 cerxes/fuzz/run-local.sh           also the wasm engine, JIT off / on (needs node)
 #   CHECKED=0 cerxes/fuzz/run-local.sh       the release build (no debug assertions)
+#   COV=1 cerxes/fuzz/run-local.sh           coverage-guided: keeps programs that reach new engine edges
 #
 # The checked build (debug assertions on) is the default: an unchecked
 # index out of range then panics with a source line instead of reading
@@ -17,7 +18,14 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here"
-if [ "${CHECKED:-1}" = 0 ]; then
+if [ "${COV:-0}" = 1 ]; then
+  # SanitizerCoverage counters (src/cov.rs); --target keeps the flags off
+  # proc macros and build scripts, which run inside the compiler
+  host=$(rustc -vV | sed -n 's/^host: //p')
+  RUSTFLAGS="-C passes=sancov-module -C llvm-args=-sanitizer-coverage-level=3 -C llvm-args=-sanitizer-coverage-inline-8bit-counters" \
+    cargo build --profile checked --quiet --bin cerxes-fuzz --target "$host" --target-dir target/cov
+  bin="$here/target/cov/$host/checked/cerxes-fuzz"
+elif [ "${CHECKED:-1}" = 0 ]; then
   cargo build --release --quiet
   bin="$here/target/release/cerxes-fuzz"
 else

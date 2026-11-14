@@ -7,7 +7,8 @@ name: Fuzz
 # findings (cerxes/fuzz/known/known.txt) with their hits.
 #
 # Shards, all on the checked build (debug assertions on):
-#   default  generated + mutated programs, every differential oracle, Node
+#   default  generated + mutated programs, every differential oracle, Node;
+#            coverage-guided (SanitizerCoverage build, cerxes/fuzz/src/cov.rs)
 #   heavy    resource limits (deep recursion, huge allocations)
 #   hostile  forged snapshots and code-cache units (60 %), preemption (30 %)
 #   jit      the wasm engine with the baseline JIT: native vs wasm, JIT off vs on
@@ -50,7 +51,16 @@ jobs:
             cerxes/fuzz/target
           key: fuzz-${{ matrix.mode }}-${{ hashFiles('cerxes/Cargo.lock', 'cerxes/fuzz/Cargo.toml') }}
       - name: Build
-        run: cd cerxes/fuzz && cargo build --profile checked
+        run: |
+          cd cerxes/fuzz
+          if [ "${{ matrix.mode }}" = default ]; then
+            RUSTFLAGS="-C passes=sancov-module -C llvm-args=-sanitizer-coverage-level=3 -C llvm-args=-sanitizer-coverage-inline-8bit-counters" \
+              cargo build --profile checked --bin cerxes-fuzz --target x86_64-unknown-linux-gnu --target-dir target/cov
+            echo "FUZZ=cerxes/fuzz/target/cov/x86_64-unknown-linux-gnu/checked/cerxes-fuzz" >> "$GITHUB_ENV"
+          else
+            cargo build --profile checked
+            echo "FUZZ=cerxes/fuzz/target/checked/cerxes-fuzz" >> "$GITHUB_ENV"
+          fi
       - name: Build the wasm engine with the JIT
         if: matrix.mode == 'jit'
         run: echo "WASM=$(cerxes/fuzz/jit/build.sh)" >> "$GITHUB_ENV"
@@ -65,7 +75,7 @@ jobs:
             hostile) flags="--hostile 60 --preempt 30" ;;
             jit) flags="--jit $WASM --jit-pct 60" ;;
           esac
-          cerxes/fuzz/target/checked/cerxes-fuzz run \
+          "$FUZZ" run \
             --time $((MINUTES * 60)) --jobs $(nproc) --seed ${{ github.run_id }} \
             --out fuzz-out --corpus cerxes/tests/cases.txt --corpus cer/tests/cases.txt \
             --corpus cerxes/tests/v8/own --corpus cerxes/fuzz/seeds $flags
