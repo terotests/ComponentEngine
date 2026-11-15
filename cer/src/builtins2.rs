@@ -192,9 +192,18 @@ impl Vm {
         }
         seen.push(o);
         let items = self.elems_of(o);
+        let n0 = items.len();
+        let ov = Val::Obj(o);
+        // after user code ran (an element's toString), the elements are
+        // read again as they are now: that code may have changed them
+        let mut dirty = false;
         let mut out = String::new();
         let mut i: usize = 0;
-        for it in items {
+        while i < n0 {
+            let it = if dirty { self.get_index(&ov, i as int) } else { items[i] };
+            if self.throwing {
+                return String::new();
+            }
             if i > 0 {
                 jsstr::push_js(&mut out, sep);
             }
@@ -213,12 +222,14 @@ impl Vm {
                         if self.throwing {
                             return String::new();
                         }
+                        dirty = true;
                         jsstr::push_js(&mut out, inner.as_str());
                     } else {
                         let s = self.to_str(&it);
                         if self.throwing {
                             return String::new();
                         }
+                        dirty = true;
                         jsstr::push_js(&mut out, s.as_str());
                     }
                 }
@@ -347,13 +358,44 @@ impl Vm {
             }
             NF_AP_SLICE => {
                 let o = self.this_array(&this);
+                if o >= 0 && self.objs[o as usize].class == C_ARRAY {
+                    // the length first, then the arguments (whose valueOf may
+                    // shrink the array), then the elements as they are now:
+                    // the ones gone are holes (JSC CVE-2016-4622 is this
+                    // order done wrong; here it gave back the removed ones)
+                    let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
+                    let s = self.rel_index(&a0, len, 0);
+                    let e = self.rel_index(&a1, len, len);
+                    if self.throwing {
+                        return Val::Undef();
+                    }
+                    let items = self.elems_of(o);
+                    let cur = items.len() as int;
+                    let mut out: Vec<Val> = Vec::new();
+                    let mut holes: Vec<int> = Vec::new();
+                    let mut i = s;
+                    while i < e {
+                        if i < cur {
+                            out.push(items[i as usize].clone());
+                        } else {
+                            out.push(Val::Undef());
+                            holes.push(i - s);
+                        }
+                        i += 1;
+                    }
+                    let a = self.new_array(out);
+                    for h in holes {
+                        self.mark_hole(a, h);
+                    }
+                    return Val::Obj(a);
+                }
                 let items = self.elems_of(o);
                 let len = items.len() as int;
                 let s = self.rel_index(&a0, len, 0);
                 let e = self.rel_index(&a1, len, len);
                 let mut out: Vec<Val> = Vec::new();
                 let mut i = s;
-                while i < e {
+                while i < e && i < (items.len() as int) {
                     out.push(items[i as usize].clone());
                     i += 1;
                 }
@@ -446,7 +488,34 @@ impl Vm {
             }
             NF_AP_JOIN => {
                 let o = self.this_array(&this);
+                let is_arr = o >= 0 && self.objs[o as usize].class == C_ARRAY;
+                let len0 = if is_arr { self.evecs[self.objs[o as usize].elems as usize].v.len() as int } else { -1 };
                 let sep = if a0.is_undef() { String::from(",") } else { self.to_string(&a0) };
+                if self.throwing {
+                    return Val::Undef();
+                }
+                if is_arr && (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) != len0 {
+                    // the separator's toString changed the length: the
+                    // length read first counts (missing elements are "")
+                    let mut out = String::new();
+                    let ov = Val::Obj(o);
+                    let mut k: int = 0;
+                    while k < len0 {
+                        if k > 0 {
+                            out.push_str(sep.as_str());
+                        }
+                        let v = self.get_index(&ov, k);
+                        if !v.is_undef() && !v.is_null() {
+                            let t = self.to_string(&v);
+                            out.push_str(t.as_str());
+                        }
+                        if self.throwing || self.str_too_long(out.as_bytes().len() as double) {
+                            return Val::Undef();
+                        }
+                        k += 1;
+                    }
+                    return self.string_val(out);
+                }
                 let mut seen: Vec<int> = Vec::new();
                 let s = self.array_join(o, sep.as_str(), &mut seen);
                 self.string_val(s)
@@ -786,7 +855,10 @@ impl Vm {
                 let r = if id == NF_AP_TOSORTED {
                     Val::Obj(self.new_array(items))
                 } else {
-                    if self.objs[o as usize].class == C_ARRAY {
+                    // a comparator that grew the array: only the sorted
+                    // items are written back, what it added stays (put_elems
+                    // cut the array to the items)
+                    if self.objs[o as usize].class == C_ARRAY && (self.evecs[self.objs[o as usize].elems as usize].v.len()) <= items.len() {
                         self.put_elems(o, items);
                     } else {
                         let mut i: int = 0;

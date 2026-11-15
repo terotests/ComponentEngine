@@ -1456,6 +1456,17 @@ impl Vm {
         h
     }
 
+    /// `n` bytes of a new ArrayBuffer's contents: counted with the strings'
+    /// bytes, so a loop that makes and drops big buffers brings a
+    /// collection (300 buffers of 10 MB ran out of memory before any:
+    /// ChakraCore test allocation.js, JSC regress-169941)
+    pub fn note_buf_bytes(&mut self, n: int) {
+        self.sbytes += n;
+        if self.sbytes >= self.sbytes_limit {
+            self.gc_flag = true;
+        }
+    }
+
     /// A string handle for `n` bytes of text, its slot holding the box it
     /// had (a reused one) or the empty string: the caller puts the text in.
     fn take_handle(&mut self, n: int, flag: int) -> int {
@@ -3245,8 +3256,11 @@ impl Vm {
                         let has_shape = ob.shape != 0;
                         let p = ob.proto as int;
                         if has_shape {
-                            let a = self.index_atom(i);
-                            if self.find(o, a) >= 0 {
+                            // looked up, not made: a read of a missing index
+                            // must not add an atom (a loop over 1e8 indexes
+                            // would fill memory with names)
+                            let a = self.index_atom_if(i);
+                            if a >= 0 && self.find(o, a) >= 0 {
                                 return self.get_obj(o, a, v);
                             }
                         }
@@ -3732,6 +3746,16 @@ impl Vm {
                 return;
             }
             if class == C_ARRAY && self.objs[o as usize].extensible && i < len + 50000000 {
+                if i >= MAX_ELEMS {
+                    // past the element limit: RangeError, not 800 MB of holes
+                    self.elems_too_many((i + 1) as double);
+                    return;
+                }
+                if i > len + 4096 {
+                    // the holes' memory brings a collection like a buffer's
+                    // (SpiderMonkey bug 1693328: 100 arrays of 16M holes)
+                    self.note_buf_bytes((i - len) * 32);
+                }
                 let mut k = len;
                 while k < i {
                     self.push_elem(o, Val::Undef());
@@ -3913,9 +3937,15 @@ impl Vm {
         self.put_elem(pair, which, f);
     }
 
-    pub fn has_property(&mut self, o: int, k: &Val) -> bool {
+    pub fn has_property(&mut self, o0: int, k: &Val) -> bool {
         let (i, a) = self.to_key(k);
-        if i >= 0 {
+        if i < 0 {
+            return self.has_atom(o0, a);
+        }
+        // up the prototype chain in a loop: recursion overflowed the native
+        // stack on a chain of 300 000 objects (`5 in p`)
+        let mut o = o0;
+        loop {
             let class = self.objs[o as usize].class;
             if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                 return true;
@@ -3931,21 +3961,24 @@ impl Vm {
                     }
                 }
             }
-            // an own index property, then the prototypes (their elements too)
-            let at = self.index_atom(i);
+            // an own index property, then the prototypes (their elements too);
+            // the atom only looked up unless a proxy needs the key: `k in o`
+            // for a million new k made a million atoms (memory that never
+            // comes back)
             if class == C_PROXY {
+                let at = self.index_atom(i);
                 return self.has_atom(o, at);
             }
-            if self.find(o, at) >= 0 {
+            let at = self.index_atom_if(i);
+            if at >= 0 && self.find(o, at) >= 0 {
                 return true;
             }
             let p = self.objs[o as usize].proto as int;
             if p < 0 {
                 return false;
             }
-            return self.has_property(p, k);
+            o = p;
         }
-        self.has_atom(o, a)
     }
 
     pub fn has_atom(&mut self, o: int, a: int) -> bool {
@@ -5230,7 +5263,8 @@ impl Vm {
     pub fn mapped_get(&mut self, o: int, atom: int, slot: int) -> Val {
         let e = self.mapped_slot(o, atom);
         let home = self.colds[self.objs[o as usize].cold as usize].home;
-        if e < 0 || home < 0 {
+        // (checked: a restored snapshot's map may name a slot past the env)
+        if e < 0 || home < 0 || e >= (self.evecs[self.objs[home as usize].elems as usize].v.len() as int) {
             return self.objs[o as usize].get_slot(slot as usize).clone();
         }
         self.evecs[self.objs[home as usize].elems as usize].v[e as usize].clone()
@@ -5240,7 +5274,7 @@ impl Vm {
     pub fn mapped_put(&mut self, o: int, atom: int, v: &Val) {
         let e = self.mapped_slot(o, atom);
         let home = self.colds[self.objs[o as usize].cold as usize].home;
-        if e >= 0 && home >= 0 {
+        if e >= 0 && home >= 0 && e < (self.evecs[self.objs[home as usize].elems as usize].v.len() as int) {
             self.put_elem(home, e, v.clone());
         }
     }
@@ -6316,7 +6350,7 @@ impl Vm {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i < MAX_ELEMS && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
@@ -8262,7 +8296,15 @@ impl Vm {
                 if let Some(so) = (&src).as_obj() {
                     if a >= 0 && self.array_iter_plain(so) {
                         // a plain array: its elements in one copy, as
-                        // iterable_to_vec would give them
+                        // iterable_to_vec would give them; past the
+                        // element limit RangeError (1024 spreads of a
+                        // 4M array asked for 64 GB: JSC
+                        // varargs-spread-fusion-checkpoint-length-overflow)
+                        let total = self.evecs[self.objs[a as usize].elems as usize].v.len() + self.evecs[self.objs[so as usize].elems as usize].v.len();
+                        if (total as int) > MAX_ELEMS {
+                            self.elems_too_many(total as double);
+                            return false;
+                        }
                         self.inc_elems(so);
                         let de = self.elems_id(a);
                         let se = self.objs[so as usize].elems as usize;
@@ -8798,8 +8840,17 @@ impl Vm {
 
     #[inline(always)]
     pub fn push_elem(&mut self, o: int, v: Val) {
-        self.inc(&v);
         let e = self.elems_id(o);
+        // the element limit (MAX_ELEMS): a push loop asked the allocator
+        // for 4 GB and the process aborted (JSC regress-157595: a match
+        // whose `global` getter lies never ends)
+        if (self.evecs[e].v.len() as int) >= MAX_ELEMS {
+            if !self.throwing {
+                self.elems_too_many((MAX_ELEMS + 1) as double);
+            }
+            return;
+        }
+        self.inc(&v);
         self.evecs[e].v.push(v);
     }
 
@@ -8891,8 +8942,14 @@ impl Vm {
     }
 
     pub fn insert_elem(&mut self, o: int, i: int, v: Val) {
-        self.inc(&v);
         let e = self.elems_id(o);
+        if (self.evecs[e].v.len() as int) >= MAX_ELEMS {
+            if !self.throwing {
+                self.elems_too_many((MAX_ELEMS + 1) as double);
+            }
+            return;
+        }
+        self.inc(&v);
         self.evecs[e].v.insert(i as usize, v);
     }
 

@@ -444,10 +444,16 @@ impl Vm {
             }
             let s = self.to_string(&args[i]);
             params.push_str(s.as_str());
+            // 16 parameters of 256 MB each: RangeError, not 4 GB asked of
+            // the allocator (Hermes long-string-function, JSC
+            // dont-reserve-huge-capacity-lexer)
+            if self.throwing || self.str_too_long(params.as_bytes().len() as double) {
+                return Val::Undef();
+            }
             i += 1;
         }
         let body = if n > 0 { self.to_string(&args[n - 1]) } else { String::new() };
-        if self.throwing {
+        if self.throwing || self.str_too_long((params.as_bytes().len() + body.as_bytes().len()) as double) {
             return Val::Undef();
         }
         let head = if id == NF_GENERATOR_FUNCTION {

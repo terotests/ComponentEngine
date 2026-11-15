@@ -914,7 +914,7 @@ impl Vm {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i < MAX_ELEMS && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();

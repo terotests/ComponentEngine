@@ -9,6 +9,8 @@
 #   JIT=1 cerxes/fuzz/run-local.sh           also the wasm engine, JIT off / on (needs node)
 #   CHECKED=0 cerxes/fuzz/run-local.sh       the release build (no debug assertions)
 #   COV=1 cerxes/fuzz/run-local.sh           coverage-guided: keeps programs that reach new engine edges
+#   cerxes/fuzz/seeds/fetch-engines.sh && cerxes/fuzz/run-local.sh --class 50
+#                                            fuzzer v3: other engines' regression tests + bug-class hooks
 #
 # The checked build (debug assertions on) is the default: an unchecked
 # index out of range then panics with a source line instead of reading
@@ -43,9 +45,15 @@ fi
 MINUTES=${MINUTES:-10}
 out="$here/out/$(date +%Y%m%d-%H%M%S)"
 # seeds: the engines' case files, the known V8 bug tests (cerxes/tests/v8,
-# when present) and seeds/ (extra .js files, e.g. V8 regression tests)
+# when present), seeds/ (extra .js files, e.g. V8 regression tests),
+# seeds/engines (bug-class seeds from other engines' CVEs, fuzzer v3) and
+# foreign/ (other engines' regression tests: seeds/fetch-engines.sh)
+foreign=""
+if [ -d "$here/foreign" ]; then
+  for d in "$here"/foreign/*/; do foreign="$foreign --corpus $d"; done
+fi
 exec "$bin" run \
   --time $((MINUTES * 60)) --jobs "$JOBS" --out "$out" \
   --corpus "$here/../tests/cases.txt" --corpus "$here/../../cer/tests/cases.txt" \
-  --corpus "$here/../tests/v8/own" --corpus "$here/seeds" \
-  $jit "$@"
+  --corpus "$here/../tests/v8/own" --corpus "$here/seeds" --corpus "$here/seeds/engines" \
+  $foreign $jit "$@"

@@ -345,6 +345,13 @@ pub fn snapshot(vm: &Vm) -> String {
             }
             put_ints(&mut b, &cold.marks);
         }
+        if o.class == C_SARGS {
+            // a sloppy function's arguments mapped to its parameters
+            // (map_arg / slow_args): which element reads which env slot.
+            // Left out, a restored `arguments[1]` no longer followed
+            // `b = …` (JSC parameter-scoping.js under the snapshot oracle)
+            put_ints(&mut b, &cold.marks);
+        }
     }
     put_ints(&mut b, &vm.free_list);
     let ints = vec![
@@ -650,6 +657,12 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
             }
             cold.marks = get_ints(&mut r);
             has_cold = true;
+        }
+        if class == C_SARGS as int {
+            cold.marks = get_ints(&mut r);
+            if !cold.marks.is_empty() {
+                has_cold = true;
+            }
         }
         if has_cold {
             o.cold = (vm.colds.len() as int) as i32;
