@@ -564,6 +564,49 @@ impl Vm {
         self.method(g, "__cerIntlTable", NF_INTL_TABLE, 1);
         self.method(g, "__cerIntlCollate", NF_INTL_COLLATE, 4);
         self.method(g, "__cerIntlSource", NF_INTL_SOURCE, 0);
+        self.method(g, "__cerTz", crate::builtins::NF_TZ, 3);
+    }
+
+    /// __cerTz(op, name, t): 0 the database's spelling of a zone name
+    /// (undefined: no such zone), 1 a zone's offset at t in ms ("" the local
+    /// zone), 2 the local zone's name, 3 every zone name, 4 the en-US
+    /// [long, short] names of a zone's offset at t
+    pub fn call_native_tz(&mut self, args: &Vec<Val>) -> Val {
+        let op = if args.is_empty() { 0 } else { self.to_number(&args[0]) as int };
+        if op == 2 {
+            let n = self.time_zone();
+            return self.string_val(n);
+        }
+        if op == 3 {
+            let names = self.tz.names();
+            let mut elems: Vec<Val> = Vec::new();
+            for n in names.iter() {
+                elems.push(self.str_val(n.as_str()));
+            }
+            let a = self.new_array(elems);
+            return Val::Obj(a);
+        }
+        let name = if args.len() > 1 && !args[1].is_undef() { self.to_string(&args[1]) } else { String::new() };
+        if self.throwing {
+            return Val::Undef();
+        }
+        let z = if name.is_empty() { self.tz.local } else { self.tz.find(name.as_str()) };
+        if z < 0 {
+            return Val::Undef();
+        }
+        if op == 0 {
+            let n = self.tz.name_of(z);
+            return self.string_val(n);
+        }
+        let t = if args.len() > 2 { self.to_number(&args[2]) } else { 0.0 };
+        if op == 1 {
+            return Val::Num(self.tz.offset(z, t));
+        }
+        let (long, short) = self.tz.names_at(z, t);
+        let lv = self.string_val(long);
+        let sv = self.string_val(short);
+        let a = self.new_array(vec![lv, sv]);
+        Val::Obj(a)
     }
 
     pub fn call_native_intl(&mut self, id: int, args: &Vec<Val>) -> Val {
@@ -609,7 +652,7 @@ impl Vm {
 /// Intl's JavaScript: NumberFormat, PluralRules, DateTimeFormat, Collator,
 /// RelativeTimeFormat, ListFormat and the toLocale… methods over the tables
 /// of `intl_data`, as one function of the prelude's helpers.
-pub const INTL: &str = r#"(function (hide, tag, isObject, create, defineProperty, toIntegerOrInfinity, DP, dateOk, intlTable, intlCollate) {
+pub const INTL: &str = r#"(function (hide, tag, isObject, create, defineProperty, toIntegerOrInfinity, DP, dateOk, intlTable, intlCollate, intlTz) {
 var LD = null;
 function ld() {
   if (LD) return LD;
@@ -1079,13 +1122,14 @@ function DateTimeFormat(locales, options) {
   var o = optionsObject(options);
   var loc = pickLocale(locales);
   var tz = o.timeZone === undefined ? undefined : String(o.timeZone);
+  // a zone of the database (tz.rs), as it spells it; none: the local zone
   if (tz !== undefined) {
-    var up = tz.toUpperCase();
-    if (up === 'UTC' || up === 'GMT' || up === 'ETC/UTC' || up === 'ETC/GMT') tz = 'UTC';
-    else if (!/^[A-Za-z_]+(\/[A-Za-z_+\-0-9]+)*$/.test(tz)) throw new RangeError('Invalid time zone specified: ' + tz);
-  }
+    var known = intlTz(0, tz);
+    if (known === undefined) throw new RangeError('Invalid time zone specified: ' + tz);
+    tz = known;
+  } else tz = intlTz(2);
   var li = localeIndex(loc) < 0 ? 0 : localeIndex(loc);
-  var r = { locale: loc, calendar: int5(li, 4) ? 'buddhist' : 'gregory', numberingSystem: 'latn', timeZone: tz || 'UTC' };
+  var r = { locale: loc, calendar: int5(li, 4) ? 'buddhist' : 'gregory', numberingSystem: 'latn', timeZone: tz };
   var vals = { weekday: ['narrow', 'short', 'long'], era: ['narrow', 'short', 'long'], year: ['2-digit', 'numeric'], month: ['2-digit', 'numeric', 'narrow', 'short', 'long'], day: ['2-digit', 'numeric'], hour: ['2-digit', 'numeric'], minute: ['2-digit', 'numeric'], second: ['2-digit', 'numeric'] };
   var hour12 = o.hour12 === undefined ? undefined : Boolean(o.hour12);
   var hc = option(o, 'hourCycle', ['h11', 'h12', 'h23', 'h24'], undefined);
@@ -1164,11 +1208,26 @@ function DateTimeFormat(locales, options) {
   hide(this, '__plan', plan);
   hide(this, '__dfltHour', !!ts || (!any && !ds && (dflt === 'time' || dflt === 'all')));
 }
+// a zone's name: en-US's from the database (tz.rs), else its offset
+// (GMT+2, GMT+02:00); UTC as ICU names it
+function zoneName(o, li, t, off) {
+  var st = o.timeZoneName, m = Math.round(off / 60000), a = m < 0 ? -m : m, sg = m < 0 ? '-' : '+';
+  var hm = Math.floor(a / 60), mm = a % 60;
+  var shortOff = 'GMT' + sg + hm + (mm ? ':' + padTo(mm, 2) : ''), longOff = 'GMT' + sg + padTo(hm, 2) + ':' + padTo(mm, 2);
+  if (st === 'shortOffset') return shortOff;
+  if (st === 'longOffset') return longOff;
+  var en = /^en(-|$)/.test(o.locale);
+  if (o.timeZone === 'UTC') return st === 'long' || st === 'longGeneric' ? (en ? 'Coordinated Universal Time' : longOff) : 'UTC';
+  var nm = en ? intlTz(4, o.timeZone, t) : null;
+  if (st === 'long' || st === 'longGeneric') return nm && nm[0] ? nm[0] : longOff;
+  return nm && nm[1] ? nm[1] : shortOff;
+}
 function padTo(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }
 function dateParts(dtf, date) {
   var t = date === undefined ? Date.now() : typeof date === 'number' ? date : DP.getTime.call(date instanceof Date ? date : new Date(date));
   if (t !== t) throw new RangeError('Invalid time value');
-  var d = new Date(t), o = dtf.__o, li = dtf.__loc, names = ld().names, base = li * 38;
+  // the fields of the time in the format's zone
+  var o = dtf.__o, off = intlTz(1, o.timeZone, t), d = new Date(t + off), li = dtf.__loc, names = ld().names, base = li * 38;
   var Y = d.getUTCFullYear() + int5(li, 4), M = d.getUTCMonth(), D = d.getUTCDate(), W = d.getUTCDay(), h = d.getUTCHours(), mi = d.getUTCMinutes(), s = d.getUTCSeconds();
   var P = [], plan = dtf.__plan;
   for (var i = 0; i < plan.length; i++) {
@@ -1200,7 +1259,7 @@ function dateParts(dtf, date) {
       case 'minute': v = padTo(mi, o.hour || o.minute === '2-digit' ? 2 : 1); break;
       case 'second': v = padTo(s, o.hour || o.minute || o.second === '2-digit' ? 2 : 1); break;
       case 'dayPeriod': v = sup(li, 2).split('|')[h < 12 ? 0 : 1]; break;
-      case 'timeZoneName': v = o.timeZoneName === 'long' ? 'Coordinated Universal Time' : 'UTC'; break;
+      case 'timeZoneName': v = zoneName(o, li, t, off); break;
       default: v = '';
     }
     P.push({ type: it.f, value: v });
@@ -1321,7 +1380,7 @@ hide(Intl, 'getCanonicalLocales', function getCanonicalLocales(l) { return local
 hide(Intl, 'supportedValuesOf', function supportedValuesOf(k) {
   k = String(k);
   if (k === 'currency') { var d = ld(), out = []; for (var i = 0; i < d.currency_count[0]; i++) out.push(d.currency_strings[i * 2]); return out.sort(); }
-  if (k === 'timeZone') return ['UTC'];
+  if (k === 'timeZone') return intlTz(3);
   if (k === 'calendar') return ['buddhist', 'gregory'];
   if (k === 'numberingSystem') return ['latn'];
   if (k === 'collation') return ['default'];

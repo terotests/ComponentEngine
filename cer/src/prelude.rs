@@ -2710,7 +2710,9 @@ if (!DP.toDateString || DP.toDateString.call(new Date(0)).length > 15) hide(DP, 
 });
 if (!DP.toTimeString) hide(DP, 'toTimeString', function toTimeString() {
   if (!dateOk(this)) return 'Invalid Date';
-  return pad2(this.getHours()) + ':' + pad2(this.getMinutes()) + ':' + pad2(this.getSeconds()) + ' GMT+0000 (Coordinated Universal Time)';
+  // the time, its zone's offset and name: toString's end
+  var s = DP.toString.call(this);
+  return s.slice(s.indexOf(':') - 2);
 });
 if (!DP.toLocaleDateString) hide(DP, 'toLocaleDateString', function toLocaleDateString() {
   if (!dateOk(this)) return 'Invalid Date';
@@ -2736,13 +2738,14 @@ if (!DP.toLocaleString) hide(DP, 'toLocaleString', function toLocaleString() {
 // The implementation is intl.rs's INTL, compiled the first time a script
 // reaches for Intl or a toLocale… method, so that a script that does not
 // pays nothing for it.
-var intlTable = globalThis.__cerIntlTable, intlCollate = globalThis.__cerIntlCollate, intlSource = globalThis.__cerIntlSource;
+var intlTable = globalThis.__cerIntlTable, intlCollate = globalThis.__cerIntlCollate, intlSource = globalThis.__cerIntlSource, intlTz = globalThis.__cerTz;
+delete globalThis.__cerTz;
 delete globalThis.__cerIntlTable;
 delete globalThis.__cerIntlCollate;
 delete globalThis.__cerIntlSource;
 var INTL = null;
 function intl() {
-  if (!INTL) INTL = intlSource()(hide, tag, isObject, create, defineProperty, toIntegerOrInfinity, DP, dateOk, intlTable, intlCollate);
+  if (!INTL) INTL = intlSource()(hide, tag, isObject, create, defineProperty, toIntegerOrInfinity, DP, dateOk, intlTable, intlCollate, intlTz);
   return INTL;
 }
 defineProperty(globalThis, 'Intl', { enumerable: false, configurable: true,

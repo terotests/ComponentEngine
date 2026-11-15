@@ -536,6 +536,19 @@ pub struct Vm {
     pub sc_ascii: bool,
     pub sc_len: int,
     pub sc_units: Vec<int>,
+    /// long non-ASCII texts' unit indexes (jsstr::unit_cps) for
+    /// hbyte_of, a few at a time (taken in turn): the buffer (held, so it
+    /// does not change), the byte offset and length of the text in it, the
+    /// index. Emptied by a collection and a string reclaim.
+    pub bi_s: Vec<Rc<String>>,
+    pub bi_off: Vec<int>,
+    pub bi_len: Vec<int>,
+    pub bi_cp: Vec<Vec<int>>,
+    pub bi_next: int,
+    pub bi_seen: Vec<Rc<String>>,
+    pub bi_seen_off: Vec<int>,
+    pub bi_seen_len: Vec<int>,
+    pub bi_seen_next: int,
     /// the string RegExp.prototype.exec matched last, as UTF-16 units: a
     /// loop of exec calls (matchAll, a global regexp's exec loop) over one
     /// string converts it once
@@ -550,6 +563,8 @@ pub struct Vm {
     pub norm: crate::normalize::Norm,
     /// Intl's collation tables, decoded on first use
     pub intl: crate::intl::Intl,
+    /// time zones: Date's local zone, the zones Intl was asked for
+    pub tz: crate::tz::Tz,
 }
 
 /// The same string: the same one first (Rust's Rc, Go's string compare
@@ -557,6 +572,17 @@ pub struct Vm {
 fn same_str(a: &Rc<String>, b: &Rc<String>) -> bool {
     let r: bool = ranger::native!(
         rust: { Rc::ptr_eq(a, b) || a.as_str() == b.as_str() },
+        es6: "({a} === {b})",
+        go: "({a} == {b})",
+        cpp: "({a} == {b})",
+    );
+    r
+}
+
+/// The same box (Rust's Rc); the other targets compare the strings.
+fn rc_same(a: &Rc<String>, b: &Rc<String>) -> bool {
+    let r: bool = ranger::native!(
+        rust: { Rc::ptr_eq(a, b) },
         es6: "({a} === {b})",
         go: "({a} == {b})",
         cpp: "({a} == {b})",
@@ -863,12 +889,22 @@ impl Vm {
             sc_ascii: true,
             sc_len: 0,
             sc_units: Vec::new(),
+            bi_s: Vec::new(),
+            bi_off: Vec::new(),
+            bi_len: Vec::new(),
+            bi_cp: Vec::new(),
+            bi_next: 0,
+            bi_seen: Vec::new(),
+            bi_seen_off: Vec::new(),
+            bi_seen_len: Vec::new(),
+            bi_seen_next: 0,
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
             rx_s2: Rc::new(String::new()),
             rx_units2: Vec::new(),
             norm: crate::normalize::Norm::new(),
             intl: crate::intl::Intl::new(),
+            tz: crate::tz::Tz::new(),
             host_sync: Box::new(NoHostSync {}),
             host_sync_set: false,
         };
@@ -948,6 +984,190 @@ impl Vm {
     pub fn rx_put(&mut self, s: &Rc<String>, units: Vec<int>) {
         self.rx_s = s.clone();
         self.rx_units = units;
+    }
+
+    /// Where unit `i` (0..=length) of handle h's text starts, in bytes of
+    /// that text (sref), without a copy of a view's text or a scan of all
+    /// of it for every call: -1 when unit i is the second of a pair (or the
+    /// target keeps no byte texts), the caller's general path then.
+    pub fn hbyte_of(&mut self, h: int, i: int) -> int {
+        let n = self.hlen(h);
+        if i < 0 || i > n {
+            return -1;
+        }
+        let nb = self.hbytes(h);
+        if n == nb {
+            return i;
+        }
+        if nb < 1024 {
+            let none: Vec<int> = Vec::new();
+            return jsstr::unit_byte(self.sref(h), &none, i);
+        }
+        let e = self.big_index(h, nb);
+        if e < 0 {
+            // a text seen once: walked to i (an index of it costs a walk of
+            // all of it)
+            let none: Vec<int> = Vec::new();
+            return jsstr::unit_byte(self.sref(h), &none, i);
+        }
+        jsstr::unit_byte(self.sref(h), &self.bi_cp[e as usize], i)
+    }
+
+    /// The bi_* entry for handle h's text (nb bytes, not ASCII), made when
+    /// none holds it and it was asked for before; -1 otherwise.
+    fn big_index(&mut self, h: int, nb: int) -> int {
+        let mut x = h;
+        let mut off: int = 0;
+        if self.strs[h as usize].up >= 0 {
+            if self.strs[h as usize].off != 0 {
+                x = self.strs[h as usize].up as int;
+                off = self.strs[h as usize].off as int;
+            } else {
+                while self.strs[x as usize].up >= 0 {
+                    x = self.strs[x as usize].up as int;
+                }
+            }
+        }
+        let mut k: usize = 0;
+        while k < self.bi_s.len() {
+            if self.bi_off[k] == off && self.bi_len[k] == nb && rc_same(&self.bi_s[k], &self.strs[x as usize].s) {
+                return k as int;
+            }
+            k += 1;
+        }
+        // indexed the second time it is asked for (bi_seen: the last texts
+        // asked for that had none); -1 the first
+        let mut q: usize = 0;
+        let mut seen = false;
+        while q < self.bi_seen.len() {
+            if self.bi_seen_off[q] == off && self.bi_seen_len[q] == nb && rc_same(&self.bi_seen[q], &self.strs[x as usize].s) {
+                seen = true;
+                break;
+            }
+            q += 1;
+        }
+        if !seen {
+            let rs = self.strs[x as usize].s.clone();
+            if self.bi_seen.len() < 8 {
+                self.bi_seen.push(rs);
+                self.bi_seen_off.push(off);
+                self.bi_seen_len.push(nb);
+            } else {
+                let e2 = self.bi_seen_next as usize;
+                self.bi_seen_next = (self.bi_seen_next + 1) % 8;
+                self.bi_seen[e2] = rs;
+                self.bi_seen_off[e2] = off;
+                self.bi_seen_len[e2] = nb;
+            }
+            return -1;
+        }
+        self.bi_seen_len[q] = -1;
+        let cp = jsstr::unit_cps(self.sref(h));
+        let rc = self.strs[x as usize].s.clone();
+        if self.bi_s.len() < 8 {
+            self.bi_s.push(rc);
+            self.bi_off.push(off);
+            self.bi_len.push(nb);
+            self.bi_cp.push(cp);
+            return (self.bi_s.len() - 1) as int;
+        }
+        let e = self.bi_next as usize;
+        self.bi_next = (self.bi_next + 1) % 8;
+        self.bi_s[e] = rc;
+        self.bi_off[e] = off;
+        self.bi_len[e] = nb;
+        self.bi_cp[e] = cp;
+        e as int
+    }
+
+    /// Lets the long texts bi_* holds go.
+    pub fn big_drop(&mut self) {
+        if !self.bi_s.is_empty() {
+            self.bi_s.clear();
+            self.bi_off.clear();
+            self.bi_len.clear();
+            self.bi_cp.clear();
+            self.bi_next = 0;
+        }
+        if !self.bi_seen.is_empty() {
+            self.bi_seen.clear();
+            self.bi_seen_off.clear();
+            self.bi_seen_len.clear();
+            self.bi_seen_next = 0;
+        }
+    }
+
+    /// The unit at `i` (in range) of a long view's text (str_append,
+    /// str_prepend), read where it is: sget would copy the whole text for
+    /// each unit. -1 for other strings and when not known this way (the
+    /// caller's str_at then).
+    pub fn hview_unit(&mut self, h: int, i: int) -> int {
+        if self.strs[h as usize].up < 0 || self.hbytes(h) < 1024 {
+            return -1;
+        }
+        let b = self.hbyte_of(h, i);
+        if b >= 0 {
+            return jsstr::unit_at_byte(self.sref(h), b, false);
+        }
+        let b2 = self.hbyte_of(h, i - 1);
+        if b2 < 0 {
+            return -1;
+        }
+        jsstr::unit_at_byte(self.sref(h), b2, true)
+    }
+
+    /// Units [a, b) of handle h's text (0 <= a <= b <= length) as a new
+    /// string; undefined when a or b splits a pair (str_slice then).
+    pub fn hslice(&mut self, h: int, a: int, b: int) -> Val {
+        if a >= b {
+            return Val::Str(0);
+        }
+        if self.strs[h as usize].up < 0 && !self.sc_ascii && rc_same(&self.sc_s, &self.strs[h as usize].s) {
+            // the text str_cache holds the units of (a tokenizer's loop)
+            let t0 = jsstr::from_units(&self.sc_units, a, b);
+            return self.string_val(t0);
+        }
+        let x = self.hbyte_of(h, a);
+        if x < 0 {
+            return Val::Undef();
+        }
+        let y = self.hbyte_of(h, b);
+        if y < 0 {
+            return Val::Undef();
+        }
+        let t = jsstr::byte_slice(self.sref(h), x, y);
+        self.string_val(t)
+    }
+
+    /// Whether `p` ends at unit `end` (0 <= end <= length) of handle h's
+    /// text: 1 yes, 0 no, -1 not known this way.
+    pub fn hends_at(&mut self, h: int, p: &str, end: int) -> int {
+        if jsstr::has_f4(p) {
+            return -1;
+        }
+        let y = self.hbyte_of(h, end);
+        if y < 0 {
+            return -1;
+        }
+        let pb = p.as_bytes().len() as int;
+        if pb > y {
+            return 0;
+        }
+        // (p's first byte starts a character: equal bytes start at one)
+        if jsstr::bytes_at(self.sref(h), p, y - pb) { 1 } else { 0 }
+    }
+
+    /// Whether `p` is in handle h's text at unit `at` (0 <= at <= length):
+    /// 1 yes, 0 no, -1 not known this way (str_slice then).
+    pub fn hstarts_at(&mut self, h: int, p: &str, at: int) -> int {
+        if jsstr::has_f4(p) {
+            return -1;
+        }
+        let x = self.hbyte_of(h, at);
+        if x < 0 {
+            return -1;
+        }
+        if jsstr::bytes_at(self.sref(h), p, x) { 1 } else { 0 }
     }
 
     /// The UTF-16 unit at `i`, -1 out of range.
@@ -2085,6 +2305,7 @@ impl Vm {
     /// reclaim(): frees the strings of szct that neither the heap nor a
     /// root holds, and what only they held (a prefix's next handle).
     fn reclaim_strs(&mut self) {
+        self.big_drop();
         // handles freed by the last reclaim may be reused now
         let nfr = self.sfreed.len();
         let mut i: usize = 0;
@@ -3366,6 +3587,10 @@ impl Vm {
                 }
                 if c0 == -1 {
                     return Val::Undef();
+                }
+                let c1 = self.hview_unit(h, i);
+                if c1 >= 0 {
+                    return self.unit_val(c1);
                 }
                 let s = self.sget(h);
                 let c = self.str_at(&s, i);
@@ -7120,8 +7345,7 @@ impl Vm {
                 let a0 = if argc >= 1 { self.stack[bp as usize] } else { Val::Undef() };
                 let a1 = if argc >= 2 { self.stack[(bp + 1) as usize] } else { Val::Undef() };
                 if slice_bound_ok(&a0) && slice_bound_ok(&a1) {
-                    let s = self.sget(h);
-                    let len = self.str_len(&s);
+                    let len = self.hlen(h);
                     let slice = id == crate::builtins::NF_SP_SLICE;
                     let mut a = slice_at(&a0, 0, len, slice);
                     let mut b = slice_at(&a1, len, len, slice);
@@ -7135,8 +7359,15 @@ impl Vm {
                     } else if a >= b {
                         Val::Str(0)
                     } else {
-                        let tw = self.str_slice(&s, a, b);
-                        self.string_val(tw)
+                        // (where the text is: a view's is not copied)
+                        let r0 = self.hslice(h, a, b);
+                        if r0.is_undef() {
+                            let s = self.sget(h);
+                            let tw = self.str_slice(&s, a, b);
+                            self.string_val(tw)
+                        } else {
+                            r0
+                        }
                     };
                     self.stack[fpos as usize] = r;
                     return true;
@@ -7276,6 +7507,10 @@ impl Vm {
             let c0 = if i < 0 { -1 } else { self.hunit(h, i) };
             if c0 != -2 {
                 return Val::Num(if c0 < 0 { nan() } else { c0 as double });
+            }
+            let c1 = if i < 0 { -1 } else { self.hview_unit(h, i) };
+            if c1 >= 0 {
+                return Val::Num(c1 as double);
             }
             let s = self.sget(h);
             let c = if i < 0 { -1 } else { self.str_at(&s, i) };
@@ -9312,6 +9547,7 @@ impl Vm {
     /// too) and counts every object's references again.
     pub fn collect(&mut self) {
         self.gc_runs += 1;
+        self.big_drop();
         let total = self.objs.len();
         let mut old: Vec<int> = Vec::new();
         let mut i2: usize = 0;

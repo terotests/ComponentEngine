@@ -41,6 +41,9 @@ pub mod regs;
 pub mod rvm;
 pub mod snapshot;
 pub mod typed;
+pub mod tz;
+#[cfg_attr(not(feature = "tzdata"), path = "tzdata_none.rs")]
+pub mod tzdata;
 pub mod uninorm;
 pub mod uniprops;
 pub mod unit;
@@ -130,6 +133,18 @@ impl Engine {
     /// Echo `print` / `console.log` lines to stdout as they come.
     pub fn set_echo(&mut self, on: bool) {
         self.vm.echo = on;
+    }
+
+    /// Date's local time zone, an IANA name ("Europe/Helsinki"): UTC until
+    /// set. False, and the zone kept, for a name the database does not have
+    /// (without the `tzdata` feature only UTC is known).
+    pub fn set_time_zone(&mut self, name: &str) -> bool {
+        self.vm.set_time_zone(name)
+    }
+
+    /// the local time zone's name
+    pub fn time_zone(&self) -> String {
+        self.vm.time_zone()
     }
 
     /// Runs a script; answers the value of its last expression statement
