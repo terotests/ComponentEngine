@@ -9056,9 +9056,16 @@ impl Vm {
     /// A collection when one is due, else a reclaim (the safe points call
     /// this when gc_due).
     pub fn gc(&mut self) {
-        if self.rc_on && self.alloc_count < self.gc_threshold && self.made < self.made_limit && self.snew < self.slimit && self.sbytes < self.sbytes_limit {
+        if self.rc_on && self.alloc_count < self.gc_threshold && self.made < self.made_limit {
+            // Strings count against their limits until a reclaim frees
+            // them, so strings alone make a collection due only when the
+            // reclaim leaves them near the limit: a page that makes a few
+            // MB of text again on each change (a DOM's render) collected
+            // the whole heap each time otherwise.
             self.reclaim();
-            return;
+            if self.snew < self.slimit - self.slimit / 4 && self.sbytes < self.sbytes_limit - self.sbytes_limit / 4 {
+                return;
+            }
         }
         self.collect();
     }
