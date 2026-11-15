@@ -899,7 +899,7 @@ impl Vm {
             self.rx_units2 = take_ints(&mut self.rx_units, &mut spare);
         }
         self.rx_s = s.clone();
-        self.rx_units = jsstr::units(s.as_str());
+        jsstr::units_into(s.as_str(), &mut self.rx_units);
     }
 
     /// `s`'s UTF-16 units out of the rx cache (computed when it holds
@@ -1701,7 +1701,7 @@ impl Vm {
         let yt = self.sget(y);
         let total = bl + (yt.as_bytes().len() as int);
         let room = if view { total } else if total / 8 > 64 { total / 8 } else { 64 };
-        let mut s = String::new();
+        let mut s = String::with_capacity((room + total) as usize);
         let mut k: int = 0;
         while k < room {
             s.push(' ');
