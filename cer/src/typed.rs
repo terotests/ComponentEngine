@@ -1079,7 +1079,11 @@ impl Vm {
             let b = self.alloc(C_ARRAYBUFFER, ab);
             // the buffer holds the elements as this kind from the start
             let home = if is_big(kind) { -1 } else { kind };
-            let z = zeros(if home >= 0 { n } else { n * kind_size(kind) });
+            let slots = if home >= 0 { n } else { n * kind_size(kind) };
+            if self.alloc_refused((slots as double) * 8.0) {
+                return Val::Undef();
+            }
+            let z = zeros(slots);
             self.note_buf_bytes((z.len() as int) * 8);
             { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
             let cid = self.cold_id(b) as usize;
@@ -1445,7 +1449,11 @@ impl Vm {
                     home = kind;
                 }
             }
-            let bytes = zeros(if home >= 0 { n / kind_size(home) } else { n });
+            let slots = if home >= 0 { n / kind_size(home) } else { n };
+            if self.alloc_refused((slots as double) * 8.0) {
+                return Val::Undef();
+            }
+            let bytes = zeros(slots);
             self.note_buf_bytes((bytes.len() as int) * 8);
             { let c = self.cold_id(b) as usize; self.colds[c].nums = bytes; }
             let cid = self.cold_id(b) as usize;
@@ -1634,6 +1642,9 @@ impl Vm {
                 let cid = self.cold_id(b) as usize;
                 self.colds[cid].home = kind;
             } else if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
+                if self.alloc_refused((len as double) * 8.0) {
+                    return Val::Undef();
+                }
                 let z = zeros(len);
                 self.note_buf_bytes((z.len() as int) * 8);
                 { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }

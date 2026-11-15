@@ -1123,7 +1123,7 @@ impl Compiler {
         for wb in list.iter() {
             self.push_str(name.as_str());
             self.load_bind(*wb);
-            self.op(OP_IN);
+            self.emit(OP_IN, 1, 0);
             let jf = self.emit(OP_JF, 0, 0);
             self.load_bind(*wb);
             if store {

@@ -921,6 +921,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
   };
   fns[7] = function join(sep) {
     var o = toObj(this), len = lenOf(o), s = sep === undefined ? ',' : str(sep), r = '';
+    // the separators alone past the string limit: RangeError now, not after
+    // half a billion reads (Hermes array-join-truncation, length 2 ** 32 + 1)
+    if (len > 1 && (len - 1) * s.length > 536870888) throw new RangeError('Invalid string length');
     for (var k = 0; k < len; k++) { if (k > 0) r += s; var e = o[k]; if (e !== undefined && e !== null) r += str(e); }
     return r;
   };

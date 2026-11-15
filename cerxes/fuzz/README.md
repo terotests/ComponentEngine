@@ -45,7 +45,7 @@ change whole lines, operators, names or numbers; the other half bytes).
 | `panic` | A Rust panic in the engine (index out of bounds, unwrap …). A host that embeds CErXes loses the instance, and a script can make that happen whenever it wants. | yes (DoS) |
 | `crash` | The worker died on a signal: abort, segfault. Under ASan (libfuzzer/) a memory error. | yes |
 | `stack-overflow` | Native recursion overflowed the Rust stack. This is an abort that cannot be caught. | yes (DoS) |
-| `oom` | An allocation failed under the worker's memory limit (`--mem-mb`, 4096 by default). The engine should throw a RangeError instead. | yes (DoS) |
+| `oom` | An allocation failed under the worker's memory limit (`--mem-mb`, 4096 by default). The engine should throw a RangeError instead. The oracle's engines run with `Engine::set_heap_limit` at half of `--mem-mb` (a counting allocator is the probe), so a script that only keeps taking memory stops as a host would stop it and is not compared; what is left as `oom` is one request the limit cannot see coming. | yes (DoS) |
 | `hang` | The worker gave no answer within `--timeout` s (15): the engine did not give control back. | yes (DoS) |
 | `slice-gap` | A 50 ms slice ran over 1 s before the engine yielded. The host could not have stopped it in time. | yes (DoS) |
 | `snapshot-corrupt` | `from_snapshot` panicked on a snapshot with a few bytes changed. | yes |
@@ -166,6 +166,44 @@ strings, 36 s for one JSC test: `hang`), and conformance diffs the seeds
 show (Symbol.unscopables, an index setter on Array.prototype for a store
 past the end, holes reading Object.prototype's prototype, case-insensitive
 lookbehind on astral characters, String object `length` redefinable).
+
+### Second round (2026-11-15)
+
+The items left open above, worked through:
+
+- allocation failures: none of the 19 aborts the fuzzer any more. The
+  oracle runs under the heap limit (#171), so the hogs (typed arrays made
+  inside their own source's getter, `new Array(a)` forever) stop cleanly;
+  single requests past what is left of the limit, or past 2 GB
+  (`Vm::alloc_refused`), are a RangeError "Out of memory": typed array and
+  ArrayBuffer contents, eval / new Function sources (~16 bytes of tokens a
+  byte). A regexp over a string past 128 M bytes is a RangeError (its
+  UTF-16 copy is 8 bytes a unit), a backtrack list past 16 M entries is the
+  backtracking RangeError (`/(){999999999}/` asked for 3 GB), JSON.stringify
+  stops at the string limit, `flat` at the element limit, a generic `join`
+  whose separators alone pass the string limit throws before reading.
+- conformance: `with` honours Symbol.unscopables (OP_IN a=1 for a `with`
+  object's binding), a store or push past the end of an array goes through
+  an accessor or read-only index on a prototype, a String object's
+  `length` and characters cannot be redefined, lookbehind under /u reads a
+  surrogate pair as one character, `replace` with a frozen global regexp
+  throws and a non-global one converts lastIndex (valueOf runs). Holes
+  already read Object.prototype.
+- BigInt on 2^20-bit numbers: Karatsuba multiplication, Knuth's division
+  and, for long divisors, a Newton reciprocal, 2^k by squaring, radix
+  conversion by halves. Before → after: `1n << 1048576n` 7.6 s → 0.7 s,
+  a 2^19-bit square 4.3 s → 0.3 s, 2^20 / 2^19 bits 115 s → 2.2 s, a
+  2^20-bit hex literal 57 s → 1.5 s, `toString(16)` 16 s → 7 s, `&` 19 s
+  → 9 s; JSC bigint-divide-burnikel-ziegler 30 s → 3.4 s,
+  bigint-to-string-divide-and-conquer-large 16 s → 3.8 s. Values are still
+  decimal text, so conversions to binary (hex, bit operations) stay the
+  slowest part.
+
+Still open: an array store far past the end (16 M) fills the gap with holes
+(0.5 s each; SpiderMonkey bug 1693328 is a `slice-gap`), as index
+properties past the elements do not count towards `length`; long native
+work (a 16 MB eval, many 128 MB typed arrays) shows as `slice-gap`; the
+wasm JIT's inlined push does not yet look at prototype index setters.
 
 ## Commands
 

@@ -2335,7 +2335,7 @@ impl PComp {
         for wb in list.iter() {
             self.xpush_str(name.as_str());
             self.xload_bind(*wb, scope);
-            self.xop(OP_IN);
+            self.xemit(OP_IN, 1, 0);
             let jf = self.xemit(OP_JF, 0, 0);
             self.xfixed[jf as usize] = true;
             self.xload_bind(*wb, scope);
@@ -2473,7 +2473,7 @@ impl PComp {
             for wb in list.iter() {
                 self.xpush_str(name.as_str());
                 self.xload_bind(*wb, scope);
-                self.xop(OP_IN);
+                self.xemit(OP_IN, 1, 0);
                 let jf = self.xemit(OP_JF, 0, 0);
                 self.xfixed[jf as usize] = true;
                 self.xload_bind(*wb, scope);
@@ -2584,7 +2584,7 @@ impl PComp {
                 for wb in list.iter() {
                     self.xpush_str(name.as_str());
                     self.xload_bind(*wb, scope);
-                    self.xop(OP_IN);
+                    self.xemit(OP_IN, 1, 0);
                     let jf = self.xemit(OP_JF, 0, 0);
                     self.xfixed[jf as usize] = true;
                     self.xload_bind(*wb, scope);

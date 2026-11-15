@@ -8,6 +8,13 @@ use ranger::prelude::*;
 
 const BASE: int = 10000;
 
+/// `cost` more units of work: true past the deadline, and every time after
+/// (time_up answers true once, at the poll that sees it; the halves of a
+/// Karatsuba product must all give up).
+fn stop(cost: int) -> bool {
+    crate::builtins::expired() || crate::builtins::time_up(cost)
+}
+
 /// (negative, limbs) of a canonical decimal string.
 pub fn parse(s: &str) -> (bool, Vec<int>) {
     let neg = s.starts_with("-");
@@ -122,10 +129,97 @@ fn sub_mag(a: &Vec<int>, b: &Vec<int>) -> Vec<int> {
     out
 }
 
+/// Operands this long (limbs) or longer multiply by Karatsuba.
+const KARA: usize = 40;
+
 fn mul_mag(a: &Vec<int>, b: &Vec<int>) -> Vec<int> {
     if a.is_empty() || b.is_empty() {
         return Vec::new();
     }
+    if a.len() < KARA || b.len() < KARA {
+        return mul_school(a, b);
+    }
+    let n = if a.len() > b.len() { a.len() } else { b.len() };
+    if stop(n as int) {
+        // past the deadline: the result is dropped (Vm::check_expired)
+        return Vec::new();
+    }
+    let m = n / 2;
+    if a.len() <= m {
+        // a short: a * b1 shifted plus a * b0
+        let mut lo = mul_mag(a, &low_limbs(b, m));
+        let hi = mul_mag(a, &high_limbs(b, m));
+        add_at(&mut lo, &hi, m);
+        return lo;
+    }
+    if b.len() <= m {
+        let mut lo = mul_mag(&low_limbs(a, m), b);
+        let hi = mul_mag(&high_limbs(a, m), b);
+        add_at(&mut lo, &hi, m);
+        return lo;
+    }
+    let a0 = low_limbs(a, m);
+    let a1 = high_limbs(a, m);
+    let b0 = low_limbs(b, m);
+    let b1 = high_limbs(b, m);
+    let z0 = mul_mag(&a0, &b0);
+    let z2 = mul_mag(&a1, &b1);
+    let mid = mul_mag(&add_mag(&a0, &a1), &add_mag(&b0, &b1));
+    let mut z1 = sub_mag(&mid, &z0);
+    z1 = sub_mag(&z1, &z2);
+    trim(&mut z1);
+    let mut out = z0;
+    add_at(&mut out, &z1, m);
+    add_at(&mut out, &z2, 2 * m);
+    out
+}
+
+/// Limbs 0..m of a (trimmed).
+fn low_limbs(a: &Vec<int>, m: usize) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    let mut i: usize = 0;
+    while i < m && i < a.len() {
+        out.push(a[i]);
+        i += 1;
+    }
+    trim(&mut out);
+    out
+}
+
+/// Limbs m.. of a.
+fn high_limbs(a: &Vec<int>, m: usize) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    let mut i: usize = m;
+    while i < a.len() {
+        out.push(a[i]);
+        i += 1;
+    }
+    out
+}
+
+/// acc += x * BASE^off, in place.
+fn add_at(acc: &mut Vec<int>, x: &Vec<int>, off: usize) {
+    while acc.len() < off + x.len() {
+        acc.push(0);
+    }
+    let mut carry: int = 0;
+    let mut i: usize = 0;
+    while i < x.len() || carry > 0 {
+        let k = off + i;
+        if k >= acc.len() {
+            acc.push(0);
+        }
+        let xi = if i < x.len() { x[i] } else { 0 };
+        let t = acc[k] + xi + carry;
+        acc[k] = t % BASE;
+        carry = t / BASE;
+        i += 1;
+    }
+    trim(acc);
+}
+
+/// Schoolbook multiplication (short operands).
+fn mul_school(a: &Vec<int>, b: &Vec<int>) -> Vec<int> {
     let mut out: Vec<int> = Vec::new();
     let mut k: usize = 0;
     while k < a.len() + b.len() {
@@ -134,7 +228,7 @@ fn mul_mag(a: &Vec<int>, b: &Vec<int>) -> Vec<int> {
     }
     let mut i: usize = 0;
     while i < a.len() {
-        if crate::builtins::time_up(b.len() as int) {
+        if stop(b.len() as int) {
             // past the deadline: the result is dropped (Vm::check_expired)
             return Vec::new();
         }
@@ -202,44 +296,310 @@ fn radix_chunk(radix: int) -> (int, int) {
     (m, k)
 }
 
-/// (quotient, remainder) of magnitudes; b not zero.
+/// (quotient, remainder) of magnitudes; b not zero. Knuth's algorithm D
+/// in base BASE: a quotient limb estimated from the top limbs, at most two
+/// corrections (was a bisection of 14 trial products a limb: 115 s for a
+/// 2^20-bit by 2^19-bit division).
 fn divmod_mag(a: &Vec<int>, b: &Vec<int>) -> (Vec<int>, Vec<int>) {
+    if b.len() >= NEWTON && a.len() >= b.len() + NEWTON {
+        return divmod_newton(a, b);
+    }
+    divmod_knuth(a, b)
+}
+
+/// Divisors this long (limbs) divide by a reciprocal (Newton) when the
+/// quotient is as long: two Karatsuba products a block of n limbs.
+const NEWTON: usize = 200;
+
+/// BASE^k as limbs.
+fn base_pow(k: usize) -> Vec<int> {
+    let mut v: Vec<int> = vec![0; k];
+    v.push(1);
+    v
+}
+
+/// About BASE^(2n) / b for b of n limbs (a few units off), by Newton's
+/// iteration from the reciprocal of b's top half.
+fn recip(b: &Vec<int>) -> Vec<int> {
+    let n = b.len();
+    if n <= 40 {
+        let (q, _) = divmod_knuth(&base_pow(2 * n), b);
+        return q;
+    }
+    let h = n / 2 + 1;
+    let top = high_limbs(b, n - h);
+    let rt = recip(&top);
+    // X ~ BASE^(n+h) / top ~ BASE^(2n) / b
+    let mut x: Vec<int> = vec![0; n - h];
+    for v in rt.iter() {
+        x.push(*v);
+    }
+    trim(&mut x);
+    let p = mul_mag(b, &x);
+    let t = base_pow(2 * n);
+    if cmp_mag(&p, &t) <= 0 {
+        let e = sub_mag(&t, &p);
+        let mut e2 = e.clone();
+        trim(&mut e2);
+        let c = high_limbs(&mul_mag(&x, &e2), 2 * n);
+        let mut r = x.clone();
+        add_at(&mut r, &c, 0);
+        r
+    } else {
+        let mut e = sub_mag(&p, &t);
+        trim(&mut e);
+        let mut c = high_limbs(&mul_mag(&x, &e), 2 * n);
+        c = add_mag(&c, &vec![1]);
+        let mut r = sub_mag(&x, &c);
+        trim(&mut r);
+        r
+    }
+}
+
+/// Division by a long divisor with its reciprocal, a block of n limbs at
+/// a time from the top; each block's quotient corrected to exact.
+fn divmod_newton(a: &Vec<int>, b: &Vec<int>) -> (Vec<int>, Vec<int>) {
+    let n = b.len();
+    let r = recip(b);
+    let blocks = (a.len() + n - 1) / n;
+    let mut q_all: Vec<int> = vec![0; blocks * n];
+    let mut rem: Vec<int> = Vec::new();
+    let mut bi = blocks as int - 1;
+    while bi >= 0 {
+        if stop(n as int) {
+            return (Vec::new(), Vec::new());
+        }
+        let off = (bi as usize) * n;
+        // cur = rem * BASE^n + a[off .. off + n]
+        let mut cur: Vec<int> = Vec::new();
+        let mut k: usize = 0;
+        while k < n {
+            cur.push(if off + k < a.len() { a[off + k] } else { 0 });
+            k += 1;
+        }
+        for v in rem.iter() {
+            cur.push(*v);
+        }
+        trim(&mut cur);
+        let mut q = high_limbs(&mul_mag(&cur, &r), 2 * n);
+        trim(&mut q);
+        let mut qb = mul_mag(&q, b);
+        let mut steps = 0;
+        while cmp_mag(&qb, &cur) > 0 && steps < 8 {
+            qb = sub_mag(&qb, b);
+            trim(&mut qb);
+            q = sub_mag(&q, &vec![1]);
+            trim(&mut q);
+            steps += 1;
+        }
+        let mut rr = sub_mag(&cur, &qb);
+        trim(&mut rr);
+        while cmp_mag(&rr, b) >= 0 && steps < 16 {
+            rr = sub_mag(&rr, b);
+            trim(&mut rr);
+            q = add_mag(&q, &vec![1]);
+            steps += 1;
+        }
+        if steps >= 16 || cmp_mag(&qb, &cur) > 0 {
+            // the reciprocal was too far off: the block by Knuth
+            let (q2, r2) = divmod_knuth(&cur, b);
+            q = q2;
+            rr = r2;
+        }
+        let mut j: usize = 0;
+        while j < q.len() && j < n {
+            q_all[off + j] = q[j];
+            j += 1;
+        }
+        rem = rr;
+        bi -= 1;
+    }
+    trim(&mut q_all);
+    (q_all, rem)
+}
+
+/// Knuth's algorithm D (see divmod_mag).
+fn divmod_knuth(a: &Vec<int>, b: &Vec<int>) -> (Vec<int>, Vec<int>) {
     if cmp_mag(a, b) < 0 {
         return (Vec::new(), a.clone());
     }
-    let mut q: Vec<int> = Vec::new();
-    let mut k: usize = 0;
-    while k < a.len() {
-        q.push(0);
-        k += 1;
+    if b.len() == 1 {
+        let (q, r) = div_small(a, b[0]);
+        let mut rv: Vec<int> = Vec::new();
+        if r != 0 {
+            rv.push(r);
+        }
+        return (q, rv);
     }
-    let mut r: Vec<int> = Vec::new();
-    let mut i = (a.len() as int) - 1;
-    while i >= 0 {
-        if crate::builtins::time_up(14 * (b.len() as int + 1)) {
+    // normalise: the divisor's top limb at least BASE / 2
+    let d = BASE / (b[b.len() - 1] + 1);
+    let mut u = mul_small(a, d);
+    while u.len() < a.len() + 1 {
+        u.push(0);
+    }
+    let v = mul_small(b, d);
+    let n = v.len();
+    let m = u.len() - n - 1;
+    let mut q: Vec<int> = vec![0; m + 1];
+    let vtop = v[n - 1];
+    let vnext = v[n - 2];
+    let mut j = m as int;
+    while j >= 0 {
+        if stop(n as int + 1) {
             return (Vec::new(), Vec::new());
         }
-        // r = r * BASE + a[i]
-        r.insert(0, a[i as usize]);
-        trim(&mut r);
-        // the largest d with b * d <= r, by bisection
-        let (mut lo, mut hi) = (0, BASE - 1);
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2;
-            if cmp_mag(&mul_small(b, mid), &r) <= 0 {
-                lo = mid;
-            } else {
-                hi = mid - 1;
+        let ju = j as usize;
+        let num = u[ju + n] * BASE + u[ju + n - 1];
+        let mut qhat = num / vtop;
+        let mut rhat = num % vtop;
+        while qhat >= BASE || qhat * vnext > rhat * BASE + u[ju + n - 2] {
+            qhat -= 1;
+            rhat += vtop;
+            if rhat >= BASE {
+                break;
             }
         }
-        if lo > 0 {
-            r = sub_mag(&r, &mul_small(b, lo));
+        // u[j..j+n] -= qhat * v
+        let mut carry: int = 0;
+        let mut borrow: int = 0;
+        let mut i: usize = 0;
+        while i < n {
+            let p = qhat * v[i] + carry;
+            carry = p / BASE;
+            let mut t = u[ju + i] - (p % BASE) - borrow;
+            if t < 0 {
+                t += BASE;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            u[ju + i] = t;
+            i += 1;
         }
-        q[i as usize] = lo;
-        i -= 1;
+        let t = u[ju + n] - carry - borrow;
+        if t < 0 {
+            // qhat was one too big: add v back
+            qhat -= 1;
+            let mut c: int = 0;
+            let mut k: usize = 0;
+            while k < n {
+                let s2 = u[ju + k] + v[k] + c;
+                u[ju + k] = s2 % BASE;
+                c = s2 / BASE;
+                k += 1;
+            }
+            u[ju + n] = t + BASE + c - BASE;
+            if u[ju + n] >= BASE {
+                u[ju + n] -= BASE;
+            }
+        } else {
+            u[ju + n] = t;
+        }
+        q[ju] = qhat;
+        j -= 1;
     }
     trim(&mut q);
-    (q, r)
+    let mut r: Vec<int> = Vec::new();
+    let mut k: usize = 0;
+    while k < n {
+        r.push(u[k]);
+        k += 1;
+    }
+    trim(&mut r);
+    let (r2, _) = div_small(&r, d);
+    (q, r2)
+}
+
+/// base^e (e >= 0) by squaring.
+fn pow_mag(base: &Vec<int>, e: int) -> Vec<int> {
+    let mut acc: Vec<int> = vec![1];
+    let mut b = base.clone();
+    let mut k = e;
+    while k > 0 {
+        if (k & 1) == 1 {
+            acc = mul_mag(&acc, &b);
+        }
+        k = k / 2;
+        if k > 0 {
+            b = mul_mag(&b, &b);
+        }
+    }
+    acc
+}
+
+/// The magnitude of digits d[lo..hi] (most significant first) in `radix`
+/// (up to 65536), halves joined by a power of radix: O(M(n) log n)
+/// instead of a multiply-and-add per digit.
+fn digits_mag(d: &Vec<int>, lo: usize, hi: usize, radix: int) -> Vec<int> {
+    if hi - lo <= 48 {
+        let mut acc: Vec<int> = Vec::new();
+        let mut i = lo;
+        while i < hi {
+            acc = mul_small(&acc, radix);
+            if d[i] != 0 {
+                acc = add_mag(&acc, &vec![d[i]]);
+                trim(&mut acc);
+            }
+            i += 1;
+        }
+        return acc;
+    }
+    if stop((hi - lo) as int) {
+        return Vec::new();
+    }
+    let mid = lo + (hi - lo) / 2;
+    let top = digits_mag(d, lo, mid, radix);
+    let low = digits_mag(d, mid, hi, radix);
+    let p = pow_mag(&mul_small(&vec![1], radix), (hi - mid) as int);
+    let mut out = mul_mag(&top, &p);
+    add_at(&mut out, &low, 0);
+    out
+}
+
+/// A magnitude in base `chunk` (2..100000), least significant first:
+/// halves split by a division by chunk^k, each side converted on its own
+/// (short division a chunk at a time was O(n^2) with a division a pass).
+fn mag_chunks(a: &Vec<int>, chunk: int) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    if a.len() <= 64 {
+        let mut m = a.clone();
+        while !m.is_empty() {
+            let (q, r) = div_small(&m, chunk);
+            out.push(r);
+            m = q;
+        }
+        return out;
+    }
+    if stop(a.len() as int) {
+        return out;
+    }
+    // chunks in a: about limbs * log(BASE) / log(chunk)
+    let per = (4.0 * 3.3219280949) / log2_of(chunk);
+    let k = (((a.len() as double) * per) / 2.0) as int;
+    let p = pow_mag(&mul_small(&vec![1], chunk), k);
+    let (q, r) = divmod_mag(a, &p);
+    let mut low = mag_chunks(&r, chunk);
+    while (low.len() as int) < k {
+        low.push(0);
+    }
+    let high = mag_chunks(&q, chunk);
+    for h in high.iter() {
+        low.push(*h);
+    }
+    while !low.is_empty() && low[low.len() - 1] == 0 {
+        low.pop();
+    }
+    low
+}
+
+fn log2_of(x: int) -> double {
+    let mut v = x as double;
+    let mut n = 0.0;
+    while v >= 2.0 {
+        v = v / 2.0;
+        n += 1.0;
+    }
+    n + (v - 1.0)
 }
 
 fn signed_add(an: bool, a: &Vec<int>, bn: bool, b: &Vec<int>) -> (bool, Vec<int>) {
@@ -393,8 +753,7 @@ pub fn from_double(v: double) -> String {
 /// Digits in `radix` (no sign, no prefix) as a canonical decimal; "" when
 /// a digit is out of range or there is none.
 pub fn from_radix(digits: &str, radix: int) -> String {
-    let mut acc: Vec<int> = Vec::new();
-    let mut any = false;
+    let mut ds: Vec<int> = Vec::new();
     for c in digits.chars() {
         if c == '_' {
             continue;
@@ -411,16 +770,14 @@ pub fn from_radix(digits: &str, radix: int) -> String {
         if d >= radix {
             return String::new();
         }
-        if crate::builtins::time_up(acc.len() as int) {
-            return String::from("0");
-        }
-        acc = add_mag(&mul_small(&acc, radix), &vec![d]);
-        trim(&mut acc);
-        any = true;
+        ds.push(d);
     }
-    if !any {
+    if ds.is_empty() {
         return String::new();
     }
+    let n = ds.len();
+    let mut acc = digits_mag(&ds, 0, n, radix);
+    trim(&mut acc);
     result(false, acc)
 }
 
@@ -429,27 +786,26 @@ pub fn to_radix(x: &str, radix: int) -> String {
     if radix == 10 {
         return String::from(x);
     }
-    let (n, mut a) = parse(x);
+    let (n, a) = parse(x);
     if a.is_empty() {
         return String::from("0");
     }
     let mut digits: Vec<char> = Vec::new();
     let chars = "0123456789abcdefghijklmnopqrstuvwxyz".chars().collect::<Vec<char>>();
-    // k digits a pass, by short division with radix^k
+    // k digits a chunk of radix^k
     let (m, k) = radix_chunk(radix);
-    while !a.is_empty() {
-        if crate::builtins::time_up(a.len() as int) {
-            return String::from("0");
-        }
-        let (q, r) = div_small(&a, m);
-        a = q;
-        let mut v = r;
+    let cs = mag_chunks(&a, m);
+    let mut ci: usize = 0;
+    while ci < cs.len() {
+        let mut v = cs[ci];
+        let last = ci + 1 == cs.len();
         let mut j = 0;
-        while j < k && (v > 0 || !a.is_empty()) {
+        while j < k && (v > 0 || !last) {
             digits.push(chars[(v % radix) as usize]);
             v = v / radix;
             j += 1;
         }
+        ci += 1;
     }
     let mut s = String::new();
     if n {
@@ -466,15 +822,9 @@ pub fn to_radix(x: &str, radix: int) -> String {
 /// A magnitude's bytes, least significant first.
 fn mag_bytes(a: &Vec<int>) -> Vec<int> {
     let mut out: Vec<int> = Vec::new();
-    let mut m = a.clone();
-    while !m.is_empty() {
-        if crate::builtins::time_up(m.len() as int) {
-            return out;
-        }
-        let (q, r) = div_small(&m, 65536);
-        out.push(r % 256);
-        out.push(r / 256);
-        m = q;
+    for c in mag_chunks(a, 65536).iter() {
+        out.push(*c % 256);
+        out.push(*c / 256);
     }
     while !out.is_empty() && out[out.len() - 1] == 0 {
         out.pop();
@@ -483,28 +833,41 @@ fn mag_bytes(a: &Vec<int>) -> Vec<int> {
 }
 
 fn bytes_mag(b: &Vec<int>) -> Vec<int> {
-    let mut acc: Vec<int> = Vec::new();
+    // two bytes a digit, most significant first
+    let mut ds: Vec<int> = Vec::new();
     let mut i = (b.len() as int) - 1;
-    // two bytes a pass when there are two left
     if (b.len() & 1) == 1 {
-        if b[i as usize] != 0 {
-            acc = vec![b[i as usize]];
-        }
+        ds.push(b[i as usize]);
         i -= 1;
     }
     while i >= 1 {
-        if crate::builtins::time_up(acc.len() as int) {
-            return Vec::new();
-        }
-        acc = mul_small(&acc, 65536);
-        let v = b[i as usize] * 256 + b[(i - 1) as usize];
-        if v != 0 {
-            acc = add_mag(&acc, &vec![v]);
-        }
+        ds.push(b[i as usize] * 256 + b[(i - 1) as usize]);
         i -= 2;
     }
+    if ds.is_empty() {
+        return Vec::new();
+    }
+    let n = ds.len();
+    let mut acc = digits_mag(&ds, 0, n, 65536);
     trim(&mut acc);
     acc
+}
+
+/// Two's complement bytes, `n` of them, from the bytes of |x| (or of
+/// |x| - 1 for a negative x).
+fn twos_of(neg: bool, bytes: Vec<int>, n: usize) -> Vec<int> {
+    let mut b = bytes;
+    while b.len() < n {
+        b.push(0);
+    }
+    if neg {
+        let mut i: usize = 0;
+        while i < b.len() {
+            b[i] = 255 - b[i];
+            i += 1;
+        }
+    }
+    b
 }
 
 /// The two's complement bytes of a value, `n` of them.
@@ -528,11 +891,13 @@ fn twos(neg: bool, a: &Vec<int>, n: usize) -> Vec<int> {
 pub fn bitop(op: int, x: &str, y: &str) -> String {
     let (an, a) = parse(x);
     let (bn, b) = parse(y);
-    let la = mag_bytes(&a).len();
-    let lb = mag_bytes(&b).len();
-    let n = (if la > lb { la } else { lb }) + 1;
-    let xa = twos(an, &a, n);
-    let xb = twos(bn, &b, n);
+    let ma = if an { sub_mag(&a, &vec![1]) } else { a.clone() };
+    let mb = if bn { sub_mag(&b, &vec![1]) } else { b.clone() };
+    let ba = mag_bytes(&ma);
+    let bb = mag_bytes(&mb);
+    let n = (if ba.len() > bb.len() { ba.len() } else { bb.len() }) + 1;
+    let xa = twos_of(an, ba, n);
+    let xb = twos_of(bn, bb, n);
     let mut r: Vec<int> = Vec::new();
     let mut i: usize = 0;
     while i < n {
@@ -558,16 +923,11 @@ pub fn bitop(op: int, x: &str, y: &str) -> String {
 /// wrong value, which the caller's check_expired turns into the time
 /// limit's Error.
 pub fn pow2(bits: int) -> String {
-    let mut acc: Vec<int> = vec![1];
-    let mut i = 0;
-    while i < bits {
-        if crate::builtins::time_up(acc.len() as int) {
-            return String::from("0");
-        }
-        let k = if bits - i >= 13 { 13 } else { bits - i };
-        acc = mul_small(&acc, 1 << k);
-        i += k;
-    }
+    // (2^13)^q by squaring, then the rest by a small multiplication
+    let q = bits / 13;
+    let r = bits - q * 13;
+    let mut acc = pow_mag(&vec![8192], q);
+    acc = mul_small(&acc, 1 << r);
     result(false, acc)
 }
 
