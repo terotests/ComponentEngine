@@ -1169,27 +1169,28 @@ impl Vm {
                 }
                 if hl >= 0 {
                     let len = self.hlen(hl);
-                    let pl = jsstr::len(p.as_str());
-                    let at = if id == NF_SP_STARTSWITH {
-                        let from = self.rel_index_pos(&a1, len, 0);
-                        if from + pl > len {
-                            return Val::Bool(false);
-                        }
-                        from
-                    } else {
-                        let end = self.rel_index_pos(&a1, len, len);
-                        if end - pl < 0 {
-                            return Val::Bool(false);
-                        }
-                        end - pl
-                    };
+                    let pos = self.rel_index_pos(&a1, len, if id == NF_SP_STARTSWITH { 0 } else { len });
                     if self.throwing {
                         return Val::Undef();
                     }
-                    let q = self.hstarts_at(hl, p.as_str(), at);
+                    // compared as bytes where pos is (p's length in units
+                    // is not needed: a scan of p)
+                    let q = if id == NF_SP_STARTSWITH { self.hstarts_at(hl, p.as_str(), pos) } else { self.hends_at(hl, p.as_str(), pos) };
                     if q >= 0 {
                         return Val::Bool(q == 1);
                     }
+                    let pl = jsstr::len(p.as_str());
+                    let at = if id == NF_SP_STARTSWITH {
+                        if pos + pl > len {
+                            return Val::Bool(false);
+                        }
+                        pos
+                    } else {
+                        if pos - pl < 0 {
+                            return Val::Bool(false);
+                        }
+                        pos - pl
+                    };
                     let s2 = self.sget(hl);
                     return Val::Bool(self.str_slice(&s2, at, at + pl).as_str() == p.as_str());
                 }

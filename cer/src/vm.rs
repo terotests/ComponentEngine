@@ -545,6 +545,10 @@ pub struct Vm {
     pub bi_len: Vec<int>,
     pub bi_cp: Vec<Vec<int>>,
     pub bi_next: int,
+    pub bi_seen: Vec<Rc<String>>,
+    pub bi_seen_off: Vec<int>,
+    pub bi_seen_len: Vec<int>,
+    pub bi_seen_next: int,
     /// the string RegExp.prototype.exec matched last, as UTF-16 units: a
     /// loop of exec calls (matchAll, a global regexp's exec loop) over one
     /// string converts it once
@@ -888,6 +892,10 @@ impl Vm {
             bi_len: Vec::new(),
             bi_cp: Vec::new(),
             bi_next: 0,
+            bi_seen: Vec::new(),
+            bi_seen_off: Vec::new(),
+            bi_seen_len: Vec::new(),
+            bi_seen_next: 0,
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
             rx_s2: Rc::new(String::new()),
@@ -985,12 +993,18 @@ impl Vm {
             let none: Vec<int> = Vec::new();
             return jsstr::unit_byte(self.sref(h), &none, i);
         }
-        let e = self.big_index(h, nb) as usize;
-        jsstr::unit_byte(self.sref(h), &self.bi_cp[e], i)
+        let e = self.big_index(h, nb);
+        if e < 0 {
+            // a text seen once: walked to i (an index of it costs a walk of
+            // all of it)
+            let none: Vec<int> = Vec::new();
+            return jsstr::unit_byte(self.sref(h), &none, i);
+        }
+        jsstr::unit_byte(self.sref(h), &self.bi_cp[e as usize], i)
     }
 
     /// The bi_* entry for handle h's text (nb bytes, not ASCII), made when
-    /// none holds it.
+    /// none holds it and it was asked for before; -1 otherwise.
     fn big_index(&mut self, h: int, nb: int) -> int {
         let mut x = h;
         let mut off: int = 0;
@@ -1011,6 +1025,33 @@ impl Vm {
             }
             k += 1;
         }
+        // indexed the second time it is asked for (bi_seen: the last texts
+        // asked for that had none); -1 the first
+        let mut q: usize = 0;
+        let mut seen = false;
+        while q < self.bi_seen.len() {
+            if self.bi_seen_off[q] == off && self.bi_seen_len[q] == nb && rc_same(&self.bi_seen[q], &self.strs[x as usize].s) {
+                seen = true;
+                break;
+            }
+            q += 1;
+        }
+        if !seen {
+            let rs = self.strs[x as usize].s.clone();
+            if self.bi_seen.len() < 8 {
+                self.bi_seen.push(rs);
+                self.bi_seen_off.push(off);
+                self.bi_seen_len.push(nb);
+            } else {
+                let e2 = self.bi_seen_next as usize;
+                self.bi_seen_next = (self.bi_seen_next + 1) % 8;
+                self.bi_seen[e2] = rs;
+                self.bi_seen_off[e2] = off;
+                self.bi_seen_len[e2] = nb;
+            }
+            return -1;
+        }
+        self.bi_seen_len[q] = -1;
         let cp = jsstr::unit_cps(self.sref(h));
         let rc = self.strs[x as usize].s.clone();
         if self.bi_s.len() < 8 {
@@ -1037,6 +1078,12 @@ impl Vm {
             self.bi_len.clear();
             self.bi_cp.clear();
             self.bi_next = 0;
+        }
+        if !self.bi_seen.is_empty() {
+            self.bi_seen.clear();
+            self.bi_seen_off.clear();
+            self.bi_seen_len.clear();
+            self.bi_seen_next = 0;
         }
     }
 
@@ -1080,6 +1127,24 @@ impl Vm {
         }
         let t = jsstr::byte_slice(self.sref(h), x, y);
         self.string_val(t)
+    }
+
+    /// Whether `p` ends at unit `end` (0 <= end <= length) of handle h's
+    /// text: 1 yes, 0 no, -1 not known this way.
+    pub fn hends_at(&mut self, h: int, p: &str, end: int) -> int {
+        if jsstr::has_f4(p) {
+            return -1;
+        }
+        let y = self.hbyte_of(h, end);
+        if y < 0 {
+            return -1;
+        }
+        let pb = p.as_bytes().len() as int;
+        if pb > y {
+            return 0;
+        }
+        // (p's first byte starts a character: equal bytes start at one)
+        if jsstr::bytes_at(self.sref(h), p, y - pb) { 1 } else { 0 }
     }
 
     /// Whether `p` is in handle h's text at unit `at` (0 <= at <= length):

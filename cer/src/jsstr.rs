@@ -623,6 +623,15 @@ pub fn unit_byte(s: &str, cps: &Vec<int>, i: int) -> int {
     }
     let x = s.as_bytes();
     while u < i {
+        // eight ASCII bytes at a time while they fit before unit i
+        if i - u >= 8 && b + 8 <= x.len() {
+            let w8 = u64::from_le_bytes([x[b], x[b + 1], x[b + 2], x[b + 3], x[b + 4], x[b + 5], x[b + 6], x[b + 7]]);
+            if w8 & 0x8080808080808080 == 0 {
+                u += 8;
+                b += 8;
+                continue;
+            }
+        }
         if b >= x.len() {
             return -1;
         }
@@ -688,12 +697,8 @@ pub fn bytes_at(s: &str, p: &str, b: int) -> bool {
 /// Whether `p` has a lone surrogate's stand-in (or other text in plane 16)
 /// that a byte compare would not match against half of a pair.
 pub fn has_f4(p: &str) -> bool {
-    for b in p.bytes() {
-        if b == 0xf4 {
-            return true;
-        }
-    }
-    false
+    let r: bool = ranger::native!(rust: { p.as_bytes().contains(&0xf4u8) }, es6: "false");
+    r
 }
 
 /// Byte `i` of an ASCII string, i in range.
