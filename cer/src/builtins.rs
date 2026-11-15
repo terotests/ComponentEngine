@@ -200,6 +200,12 @@ pub const NF_DP_TOISO: int = 320;
 pub const NF_DP_TOSTRING: int = 321;
 pub const NF_DP_VALUEOF: int = 322;
 pub const NF_DP_TOJSON: int = 323;
+/// the local-time getters and setters (the UTC ones are NF_DP_GET / SET)
+pub const NF_DP_LGET: int = 380; // + field
+pub const NF_DP_LSET: int = 392; // + field
+pub const NF_DP_TOUTC: int = 404;
+/// __cerTz(op, a, b): the time zones for Intl (tz.rs)
+pub const NF_TZ: int = 405;
 // Map / Set
 pub const NF_MP_GET: int = 330;
 pub const NF_MP_SET: int = 331;
@@ -928,14 +934,14 @@ impl Vm {
         let mut fi: int = 0;
         for f in date_fields() {
             let gname = format!("get{}", f);
-            self.method(dp, gname.as_str(), NF_DP_GET + fi, 0);
+            self.method(dp, gname.as_str(), NF_DP_LGET + fi, 0);
             let uname = format!("getUTC{}", f);
             self.method(dp, uname.as_str(), NF_DP_GET + fi, 0);
             if f.as_str() != "Day" && f.as_str() != "TimezoneOffset" {
                 // the setters' lengths: how many fields each takes
                 let arity: int = if fi == 0 || fi == 5 { 3 } else if fi == 1 || fi == 6 { 2 } else if fi == 4 { 4 } else { 1 };
                 let sname = format!("set{}", f);
-                self.method(dp, sname.as_str(), NF_DP_SET + fi, arity);
+                self.method(dp, sname.as_str(), NF_DP_LSET + fi, arity);
                 if f.as_str() != "Year" && f.as_str() != "Time" {
                     let suname = format!("setUTC{}", f);
                     self.method(dp, suname.as_str(), NF_DP_SET + fi, arity);
@@ -946,7 +952,7 @@ impl Vm {
         self.method(dp, "toISOString", NF_DP_TOISO, 0);
         self.method(dp, "toJSON", NF_DP_TOJSON, 1);
         self.method(dp, "toString", NF_DP_TOSTRING, 0);
-        let utcs = self.method(dp, "toUTCString", NF_DP_TOSTRING, 0);
+        let utcs = self.method(dp, "toUTCString", NF_DP_TOUTC, 0);
         let a_gmt = self.intern("toGMTString");
         self.add_own(dp, a_gmt, Val::Obj(utcs), P_HIDDEN);
         self.method(dp, "toDateString", NF_DP_TOSTRING, 0);
@@ -3437,6 +3443,71 @@ impl Vm {
         t
     }
 
+    /// TimeClip: NaN past 8.64e15 ms either way
+    pub fn time_clip(t: double) -> double {
+        if is_finite(t) && t.abs() <= 8.64e15 {
+            t + 0.0
+        } else {
+            nan()
+        }
+    }
+
+    /// UTC of a local time (ms) in the local zone
+    pub fn local_to_utc(&self, t: double) -> double {
+        Vm::time_clip(self.tz.to_utc(self.tz.local, t))
+    }
+
+    /// Date.parse: a date-time without an offset is local time, a date
+    /// alone UTC (ECMA-262 21.4.3.2)
+    pub fn parse_date_local(&self, s: &str) -> double {
+        let t = Vm::parse_date(s);
+        if is_nan(t) || !Vm::date_is_local(s) {
+            return t;
+        }
+        self.local_to_utc(t)
+    }
+
+    /// an ISO date-time with a time and no Z or offset
+    pub fn date_is_local(s: &str) -> bool {
+        let cs: Vec<char> = s.trim().chars().collect();
+        let mut tpos: usize = 0;
+        let mut i: usize = 0;
+        while i < cs.len() {
+            if (cs[i] == 'T' || cs[i] == ' ') && i >= 4 {
+                tpos = i;
+                break;
+            }
+            i += 1;
+        }
+        if tpos == 0 {
+            return false;
+        }
+        let mut j = tpos + 1;
+        while j < cs.len() {
+            if cs[j] == 'Z' || cs[j] == '+' || cs[j] == '-' {
+                return false;
+            }
+            j += 1;
+        }
+        true
+    }
+
+    /// Vm::set_time_zone: Date's local zone, an IANA name ("Europe/Helsinki");
+    /// false (and the zone kept) for a name the database does not have
+    pub fn set_time_zone(&mut self, name: &str) -> bool {
+        let z = self.tz.find(name);
+        if z < 0 {
+            return false;
+        }
+        self.tz.local = z;
+        true
+    }
+
+    /// the local zone's name
+    pub fn time_zone(&self) -> String {
+        self.tz.name_of(self.tz.local)
+    }
+
     pub fn time_fields(t: double) -> Vec<double> {
         // days and the time of day in doubles: ms since 1970 do not fit a
         // 32-bit int
@@ -4239,6 +4310,9 @@ impl Vm {
         if id >= 960 && id < 970 {
             return self.call_native_intl(id, args);
         }
+        if id == NF_TZ {
+            return self.call_native_tz(&args);
+        }
         if id == crate::dynamic::NF_ESM_COMPILE {
             return self.call_native_esm(args);
         }
@@ -4331,22 +4405,26 @@ impl Vm {
             self.add_stack(e);
             return Val::Obj(e);
         }
-        if id >= NF_DP_GET && id < NF_DP_GET + 20 {
+        if (id >= NF_DP_GET && id < NF_DP_GET + 20) || (id >= NF_DP_LGET && id < NF_DP_LGET + 11) {
             let t = self.date_value(&this);
             if self.throwing {
                 return Val::Undef();
             }
-            let field = id - NF_DP_GET;
+            let local = id >= NF_DP_LGET;
+            let field = if local { id - NF_DP_LGET } else { id - NF_DP_GET };
             if field == 8 {
                 return Val::Num(t);
-            }
-            if field == 9 {
-                return Val::Num(0.0);
             }
             if is_nan(t) {
                 return Val::Num(nan());
             }
-            let f = Vm::time_fields(t);
+            // local time: the time plus the local zone's offset then
+            let off = if local { self.tz.offset(self.tz.local, t) } else { 0.0 };
+            if field == 9 {
+                // (whole minutes: a local mean time's seconds are dropped)
+                return Val::Num(if off == 0.0 { 0.0 } else { to_integer(-off / 60000.0) + 0.0 });
+            }
+            let f = Vm::time_fields(t + off);
             let v = match field {
                 0 => f[0],
                 1 => f[1],
@@ -4361,12 +4439,13 @@ impl Vm {
             };
             return Val::Num(v);
         }
-        if id >= NF_DP_SET && id < NF_DP_SET + 20 {
+        if (id >= NF_DP_SET && id < NF_DP_SET + 20) || (id >= NF_DP_LSET && id < NF_DP_LSET + 11) {
             let t = self.date_value(&this);
             if self.throwing {
                 return Val::Undef();
             }
-            let field = id - NF_DP_SET;
+            let local = id >= NF_DP_LSET;
+            let field = if local { id - NF_DP_LSET } else { id - NF_DP_SET };
             let o = obj_of(&this);
             if field == 8 {
                 let n = self.to_number(&arg(&args, 0));
@@ -4375,7 +4454,9 @@ impl Vm {
                 self.put_prim(o, Val::Num(v));
                 return Val::Num(v);
             }
-            let f = if is_nan(t) { Vm::time_fields(0.0) } else { Vm::time_fields(t) };
+            let lz = self.tz.local;
+            let off = if local && !is_nan(t) { self.tz.offset(lz, t) } else { 0.0 };
+            let f = if is_nan(t) { Vm::time_fields(0.0) } else { Vm::time_fields(t + off) };
             let mut parts = vec![f[0], f[1], f[2], f[4], f[5], f[6], f[7]];
             // which slot the first argument sets, and how many follow
             let (start, count) = match field {
@@ -4405,7 +4486,10 @@ impl Vm {
                 // an invalid date stays invalid, except through the year
                 return Val::Num(nan());
             }
-            let v = Vm::make_time(&parts);
+            let mut v = Vm::make_time(&parts);
+            if local {
+                v = Vm::time_clip(self.tz.to_utc(lz, v));
+            }
             self.put_prim(o, Val::Num(v));
             return Val::Num(v);
         }

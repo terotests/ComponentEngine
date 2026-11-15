@@ -1877,19 +1877,20 @@ impl Vm {
             NF_DATE => {
                 if !construct {
                     let t = now_ms();
-                    return self.string_val(date_string(t));
+                    let ds = self.date_text(t);
+                    return self.string_val(ds);
                 }
                 let t = if args.is_empty() {
                     now_ms().floor()
                 } else if args.len() == 1 {
                     match (&a0).kind() {
-                        VK::Str(s) => Vm::parse_date(self.sref(s)),
+                        VK::Str(s) => self.parse_date_local(self.sref(s)),
                         VK::Obj(o) if self.objs[o as usize].class == C_DATE => if let Some(n) = (self.colds[self.objs[o as usize].cold as usize].prim).as_num() { n } else { nan() },
                         _ => {
                             let p = self.to_primitive(&a0, "default");
                             if let Some(s) = (&p).as_str() {
                                 let s = self.sget(s.clone());
-                                Vm::parse_date(s.as_str())
+                                self.parse_date_local(s.as_str())
                             } else {
                                 let n = self.to_number(&p);
                                 if is_finite(n) && n.abs() <= 8.64e15 {
@@ -1910,7 +1911,9 @@ impl Vm {
                     if f[0] >= 0.0 && f[0] <= 99.0 && f[0] == to_integer(f[0]) {
                         f[0] += 1900.0;
                     }
-                    Vm::make_time(&f)
+                    // the fields are local time
+                    let lt = Vm::make_time(&f);
+                    self.local_to_utc(lt)
                 };
                 let proto = self.proto_from(&new_target, self.date_proto);
                 let d = self.alloc(C_DATE, proto);
@@ -1932,7 +1935,7 @@ impl Vm {
             }
             NF_DATE_PARSE => {
                 let s = self.to_string(&a0);
-                Val::Num(Vm::parse_date(s.as_str()))
+                Val::Num(self.parse_date_local(s.as_str()))
             }
             NF_DP_VALUEOF => {
                 let t = self.date_value(&this);
@@ -1952,12 +1955,19 @@ impl Vm {
                 }
                 self.string_val(Vm::iso_string(t))
             }
-            NF_DP_TOSTRING => {
+            NF_DP_TOSTRING | NF_DP_TOUTC => {
                 let t = self.date_value(&this);
+                if self.throwing {
+                    return Val::Undef();
+                }
                 if is_nan(t) {
                     return self.str_val("Invalid Date");
                 }
-                self.string_val(date_string(t))
+                if id == NF_DP_TOUTC {
+                    return self.string_val(utc_string(t));
+                }
+                let ds = self.date_text(t);
+                self.string_val(ds)
             }
             // ---- Map / Set
             NF_MAP | NF_SET | NF_WEAKMAP | NF_WEAKSET => {
@@ -2248,6 +2258,37 @@ impl Vm {
 fn pow10(n: i32) -> double {
     let ten: double = 10.0;
     ten.powf(n as double)
+}
+
+impl Vm {
+    /// Date.prototype.toString: local time, its offset and the zone's name
+    /// for it ("GMT+0200 (Eastern European Standard Time)")
+    pub fn date_text(&self, t: double) -> String {
+        let z = self.tz.local;
+        let off = self.tz.offset(z, t);
+        let (long, _short) = self.tz.names_at(z, t);
+        let mins = (off / 60000.0) as int;
+        let a = if mins < 0 { -mins } else { mins };
+        let gmt = format!("GMT{}{:02}{:02}", if mins < 0 { "-" } else { "+" }, a / 60, a % 60);
+        let name = if long.is_empty() { format!("GMT{}{:02}:{:02}", if mins < 0 { "-" } else { "+" }, a / 60, a % 60) } else { long };
+        let full = date_string(t + off);
+        // date_string writes UTC's: the zone replaces it
+        let s = match full.find(" GMT") {
+            Some(i) => String::from(&full[0..i]),
+            None => full.clone(),
+        };
+        format!("{} {} ({})", s, gmt, name)
+    }
+}
+
+/// Date.prototype.toUTCString: "Sun, 15 Nov 2026 20:32:40 GMT"
+pub fn utc_string(t: double) -> String {
+    let days = vec!["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let months = vec!["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let f = Vm::time_fields(t);
+    let y = f[0] as int;
+    let ys = if y < 0 { format!("-{:04}", -y) } else { format!("{:04}", y) };
+    format!("{}, {:02} {} {} {:02}:{:02}:{:02} GMT", days[f[3] as usize], f[2] as int, months[f[1] as usize], ys, f[4] as int, f[5] as int, f[6] as int)
 }
 
 pub fn date_string(t: double) -> String {

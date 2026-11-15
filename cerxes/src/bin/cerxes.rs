@@ -41,6 +41,13 @@ fn main() {
     // CER_PCOMP=0: JavaScript through the parser and the tree compiler,
     // not the single-pass compiler (pcomp.rs)
     let mut e = Engine::new_with(std::env::var("CER_PCOMP").map(|v| v != "0").unwrap_or(true));
+    // TZ=Europe/Helsinki: Date's local zone, as Node takes it
+    if let Ok(z) = std::env::var("TZ") {
+        let name = z.trim_start_matches(':');
+        if !name.is_empty() {
+            e.set_time_zone(name);
+        }
+    }
     // CERXES_RC=0: the collector alone frees objects; CERXES_RC_CHECK=1
     // checks the reference counts (slow); CERXES_STATS=1 prints the heap
     if std::env::var("CERXES_RC").map(|v| v == "0").unwrap_or(false) {
