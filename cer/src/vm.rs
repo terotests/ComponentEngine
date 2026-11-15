@@ -902,6 +902,13 @@ impl Vm {
     }
 
     /// Fills `rx_units` with `s`'s UTF-16 units, unless it holds them.
+    /// Whether `s` is too long for the regexp engine's UTF-16 copy (8 bytes
+    /// a unit); if so, RangeError "Out of memory" thrown (JSC's answer to
+    /// a regexp over a 1.5 G-character rope) instead of an aborting alloc.
+    pub fn rx_too_long(&mut self, s: &Rc<String>) -> bool {
+        (s.as_bytes().len() as double) > (RX_MAX_UNITS as double) && self.length_refused("Out of memory")
+    }
+
     pub fn rx_cache(&mut self, s: &Rc<String>) {
         if self.rx_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s, s) {
             self.rx_s = s.clone();
@@ -1465,6 +1472,34 @@ impl Vm {
         if self.sbytes >= self.sbytes_limit {
             self.gc_flag = true;
         }
+    }
+
+    /// Whether `with` object `o`'s @@unscopables names `name` (an object
+    /// whose property of that name is truthy).
+    pub fn unscopable(&mut self, o: int, name: &Val) -> bool {
+        let us = self.intern("@@unscopables");
+        let u = self.get_obj(o, us, &Val::Obj(o));
+        if self.throwing {
+            return false;
+        }
+        if let Some(uo) = u.as_obj() {
+            let v = self.get_elem(&Val::Obj(uo), name);
+            return !self.throwing && self.truthy_v(&v);
+        }
+        false
+    }
+
+    /// Whether one allocation of `bytes` is refused: past BIG_ALLOC, or
+    /// past what the heap limit (set_heap_limit) leaves; if so, RangeError
+    /// "Out of memory" thrown (catchable, as JSC's), not the process
+    /// aborting on a failed allocation. The heap limit alone checks after
+    /// the fact, at the next poll, which one 2 GB request never reaches.
+    pub fn alloc_refused(&mut self, bytes: double) -> bool {
+        if bytes <= 1048576.0 {
+            return false;
+        }
+        let over = bytes > (BIG_ALLOC as double) || (self.heap_limit > 0.0 && self.in_call && self.heap_used() + bytes > self.heap_limit);
+        over && self.length_refused("Out of memory")
     }
 
     /// A string handle for `n` bytes of text, its slot holding the box it
@@ -3686,6 +3721,28 @@ impl Vm {
         n.as_str() == "-0" || number_to_string(string_to_number(n.as_str())) == n
     }
 
+    /// Whether a prototype of `o` has index `i` as an accessor or a
+    /// read-only property, or is a proxy: a store past the end must then
+    /// go through the ordinary [[Set]] (only after idx_protos).
+    pub fn proto_index_trap(&mut self, o: int, i: int) -> bool {
+        let a = self.index_atom(i);
+        let mut p = self.objs[o as usize].proto as int;
+        let mut hops = 0;
+        while p >= 0 && hops < 10000 {
+            if self.objs[p as usize].class == C_PROXY {
+                return true;
+            }
+            let sl = self.find(p, a);
+            if sl >= 0 {
+                let at = self.attr_at(p, sl);
+                return (at & (P_ACCESSOR | P_READONLY)) != 0;
+            }
+            p = self.objs[p as usize].proto as int;
+            hops += 1;
+        }
+        false
+    }
+
     /// An array whose length was made read-only (defineProperty): it keeps
     /// an own `length` property then.
     pub fn len_readonly(&self, o: int) -> bool {
@@ -3743,6 +3800,13 @@ impl Vm {
                 if self.strict_now() {
                     self.throw_type(format!("Cannot add property {}, object length is read-only", i).as_str());
                 }
+                return;
+            }
+            if class == C_ARRAY && self.idx_protos && self.proto_index_trap(o, i) {
+                // a setter or read-only index up the prototype chain
+                // (Array.prototype[3] = accessor): the ordinary [[Set]]
+                let a = self.index_atom(i);
+                self.set_obj(o, a, v);
                 return;
             }
             if class == C_ARRAY && self.objs[o as usize].extensible && i < len + 50000000 {
@@ -6350,7 +6414,7 @@ impl Vm {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && i < MAX_ELEMS && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i < MAX_ELEMS && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 && !self.idx_protos {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
@@ -7116,7 +7180,7 @@ impl Vm {
                         return true;
                     }
                     hit = true;
-                } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.objs[tobj as usize].pos != 3 && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
+                } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && !self.idx_protos && self.objs[tobj as usize].extensible && self.objs[tobj as usize].pos != 3 && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
                     let a = self.stack[bp as usize].clone();
                     self.push_elem(tobj, a);
                     r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
@@ -7884,7 +7948,12 @@ impl Vm {
                 let b = self.pop();
                 let a = self.pop();
                 if let Some(o) = b.as_obj() {
-                        let r = self.has_property(o, &a);
+                        let mut r = self.has_property(o, &a);
+                        if r && op.a == 1 && !self.throwing {
+                            // a `with` object's binding (HasBinding):
+                            // not one its @@unscopables names
+                            r = !self.unscopable(o, &a);
+                        }
                         self.stack.push(Val::Bool(r));
                     } else { self.throw_type("Cannot use 'in' operator to search for a key in a primitive") }
             }
@@ -10822,6 +10891,12 @@ pub const MAX_STR_BYTES: int = 536870888;
 /// The most elements an array stores (they are stored densely, 16 bytes
 /// each and a hole flag more): a longer array is a RangeError.
 pub const MAX_ELEMS: int = 33554432;
+
+/// The most one allocation of the engine may ask for (alloc_refused).
+pub const BIG_ALLOC: double = 2147483648.0;
+
+/// The longest string (in bytes) the regexp engine copies to UTF-16 units.
+pub const RX_MAX_UNITS: int = 134217728;
 
 /// The address of a local: where the native stack is now (Rust; it grows
 /// down). 0 on the other targets.

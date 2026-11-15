@@ -86,6 +86,12 @@ impl Vm {
     /// Compiles `src` as a script and runs it in the global scope; its
     /// completion value, or a thrown SyntaxError.
     pub fn eval_source(&mut self, src: &str, strict: bool, is_eval: bool) -> Val {
+        // the tokens take ~15 bytes a source byte: a 178 MB source is a
+        // RangeError, not 2.6 GB asked of the allocator (JSC
+        // unlinked-metadata-table-finalize-overflow)
+        if self.alloc_refused((src.as_bytes().len() as double) * 16.0) {
+            return Val::Undef();
+        }
         let code = if strict { format!("'use strict';\n{}", src) } else { String::from(src) };
         // a module's text (cerxes module.rs) goes to the parser, which
         // wraps it
@@ -213,6 +219,9 @@ impl Vm {
     /// caller's bindings (`desc`, pcomp `x_eval_desc`), `this`, and
     /// strictness.
     pub fn direct_eval(&mut self, src: &str, desc: &str) -> Val {
+        if self.alloc_refused((src.as_bytes().len() as double) * 16.0) {
+            return Val::Undef();
+        }
         let strict = self.caller_strict();
         if !self.pcomp || src.starts_with("/*@cerxesModule ") {
             return self.eval_source(src, strict, true);
@@ -453,7 +462,7 @@ impl Vm {
             i += 1;
         }
         let body = if n > 0 { self.to_string(&args[n - 1]) } else { String::new() };
-        if self.throwing || self.str_too_long((params.as_bytes().len() + body.as_bytes().len()) as double) {
+        if self.throwing || self.str_too_long((params.as_bytes().len() + body.as_bytes().len()) as double) || self.alloc_refused(((params.as_bytes().len() + body.as_bytes().len()) as double) * 16.0) {
             return Val::Undef();
         }
         let head = if id == NF_GENERATOR_FUNCTION {

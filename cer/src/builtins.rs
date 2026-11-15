@@ -1298,6 +1298,9 @@ impl Vm {
             let re = &self.regexes[idx as usize];
             (re.global, re.sticky, re.ngroups, re.has_indices)
         };
+        if self.rx_too_long(s) {
+            return Val::Null();
+        }
         self.rx_cache(s);
         let ulen = self.rx_units.len() as int;
         let mut start: int = 0;
@@ -1544,6 +1547,9 @@ impl Vm {
                 return self.string_val(out);
             }
         }
+        if self.rx_too_long(s) {
+            return Val::Undef();
+        }
         let units = self.rx_take(s);
         let r = self.string_replace_units(s, &units, pattern, repl, all);
         self.rx_put(s, units);
@@ -1570,8 +1576,19 @@ impl Vm {
             let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
             let mut start: int = 0;
             if !global {
+                // RegExpBuiltinExec's ToLength(lastIndex): its valueOf runs
                 let li = self.get_obj(ro, A_LASTINDEX, pattern);
-                let _ = li;
+                self.to_number(&li);
+                if self.throwing {
+                    return Val::Undef();
+                }
+            } else {
+                // @@replace's Set(rx, "lastIndex", 0, true): a frozen one
+                // throws (Hermes regexp-exec-fast-path)
+                self.set_last_index(ro, 0.0);
+                if self.throwing {
+                    return Val::Undef();
+                }
             }
             loop {
                 if start > units.len() as int {
@@ -1707,6 +1724,9 @@ impl Vm {
             out.push(self.rc_val(s.clone()));
             let a = self.new_array(out);
             return Val::Obj(a);
+        }
+        if self.rx_too_long(s) {
+            return Val::Undef();
         }
         let units = self.rx_take(s);
         let r = self.split_units(s, &units, sep, lim);
@@ -2261,6 +2281,47 @@ impl Vm {
         if i < 0 && self.objs[o as usize].class == C_TYPED && self.canon_numeric(atom) {
             self.throw_type("Cannot redefine property: not a typed array index");
             return;
+        }
+        if self.objs[o as usize].class == C_STRING && self.find(o, atom) < 0 {
+            // a String object's length and characters: non-writable,
+            // non-configurable, not kept as properties; a definition that
+            // would change one throws (String exotic [[DefineOwnProperty]])
+            let mut virt: Option<(Val, bool)> = None;
+            if let Some(ps) = (self.colds[self.objs[o as usize].cold as usize].prim.clone()).as_str() {
+                let ps = self.sget(ps.clone());
+                if atom == A_LENGTH {
+                    virt = Some((Val::Num(jsstr::len(ps.as_str()) as double), false));
+                } else if i >= 0 {
+                    let c = jsstr::at(ps.as_str(), i);
+                    if c >= 0 {
+                        let cv = self.string_val(jsstr::from_unit(c));
+                        virt = Some((cv, true));
+                    }
+                }
+            }
+            if let Some((vv, venum)) = virt {
+                let mut bad = has_get || has_set;
+                if self.has_atom(d, A_CONFIGURABLE) {
+                    let f = self.get_obj(d, A_CONFIGURABLE, desc);
+                    bad = bad || self.truthy_v(&f);
+                }
+                if self.has_atom(d, A_ENUMERABLE) {
+                    let f = self.get_obj(d, A_ENUMERABLE, desc);
+                    bad = bad || self.truthy_v(&f) != venum;
+                }
+                if has_writable {
+                    let f = self.get_obj(d, A_WRITABLE, desc);
+                    bad = bad || self.truthy_v(&f);
+                }
+                if has_value && !self.same_value(&value, &vv) {
+                    bad = true;
+                }
+                if bad {
+                    let kn = self.atom_names[atom as usize].clone();
+                    self.throw_type(format!("Cannot redefine property: {}", kn).as_str());
+                }
+                return;
+            }
         }
         if i >= 0 && self.objs[o as usize].class == C_TYPED {
             // a typed array's element (TypedArray [[DefineOwnProperty]])
@@ -2866,6 +2927,11 @@ impl Vm {
     /// writes a value json_skip does not leave out; false only when throwing
     pub fn json_write(&mut self, v: Val, replacer: &Val, allow: &Vec<String>, gap: &str, indent: &str, stack: &mut Vec<int>, out: &mut String) -> bool {
         if self.poll(16) {
+            return false;
+        }
+        // past the string limit: RangeError (SpiderMonkey bug 2017678: 2000
+        // keys of 2 MB, a 4 GB text)
+        if self.str_too_long(out.as_bytes().len() as double) {
             return false;
         }
         match (&v).kind() {

@@ -25,6 +25,8 @@ mod preempt;
 mod stage;
 
 use cerxes::Engine;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::AtomicIsize;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -64,12 +66,57 @@ const BUDGET_MS: f64 = 3000.0;
 /// the host could not have stopped the engine in time.
 const SLICE_GAP_MS: f64 = 1000.0;
 
+// A counting allocator, the probe for Engine::set_heap_limit: an engine of
+// the oracle stops at half of --mem-mb (an uncatchable Error, as a host's
+// limit would) instead of the process dying at the ulimit.
+struct Counting;
+static HELD: AtomicIsize = AtomicIsize::new(0);
+static HEAP_LIMIT: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        HELD.fetch_add(l.size() as isize, Ordering::Relaxed);
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        HELD.fetch_sub(l.size() as isize, Ordering::Relaxed);
+        unsafe { System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        HELD.fetch_add(n as isize - l.size() as isize, Ordering::Relaxed);
+        unsafe { System.realloc(p, l, n) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+fn held() -> f64 {
+    HELD.load(Ordering::Relaxed) as f64
+}
+
+/// The oracle's heap limit on `e` (half of --mem-mb; none without one).
+fn limit_heap(e: &mut Engine) {
+    let n = HEAP_LIMIT.load(Ordering::Relaxed);
+    if n > 0 {
+        cerxes::builtins::set_mem_probe(held);
+        e.set_heap_limit(n as f64);
+    }
+}
+
+/// A run the heap limit stopped: its output is not compared (another
+/// configuration may hold a little less and finish).
+fn heap_stopped(lines: &[String]) -> bool {
+    lines.iter().any(|l| l.contains("script heap limit exceeded"))
+}
+
 fn now_ms(t0: Instant) -> f64 {
     t0.elapsed().as_secs_f64() * 1000.0
 }
 
 fn run_once(src: &str, c: Config) -> Run {
     let mut e = Engine::new_with(c.pcomp);
+    limit_heap(&mut e);
     e.vm.regs = c.regs;
     e.vm.rc_check = c.rc_check;
     if c.tsx {
@@ -105,6 +152,7 @@ fn run_once(src: &str, c: Config) -> Run {
             let snap = e.snapshot();
             if !snap.is_empty() {
                 let mut e2 = Engine::from_snapshot(&snap);
+                limit_heap(&mut e2);
                 if !e2.error.is_empty() {
                     lines.push(format!("!! from_snapshot: {}", e2.error));
                     return Run { lines, slow: false, max_slice_ms: max_slice };
@@ -301,7 +349,7 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
     if a.max_slice_ms > SLICE_GAP_MS + base.slice_ms {
         return (format!("slice-gap\tslice\tone 50 ms slice ran {:.0} ms before the engine yielded", a.max_slice_ms), a.lines);
     }
-    if a.slow {
+    if a.slow || heap_stopped(&a.lines) {
         return (String::from("slow"), a.lines);
     }
     // the same program on other configurations must print the same lines
@@ -325,7 +373,7 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
                 return (format!("panic\t{}\t{}: {}", panic_sig(&p), name, p), a.lines);
             }
         };
-        if b.slow {
+        if b.slow || heap_stopped(&b.lines) {
             continue;
         }
         if let Some((d, sig)) = first_diff(&a.lines, &b.lines) {
@@ -540,6 +588,7 @@ fn spawn_worker(opts: &Opts, id: usize) -> Worker {
     if opts.rc_check {
         cmd.arg("--rc-check");
     }
+    cmd.arg("--mem-mb").arg(opts.mem_mb.to_string());
     cmd.arg("--hostile").arg(opts.hostile_pct.to_string()).arg("--roundtrip").arg(opts.roundtrip_pct.to_string()).arg("--stage").arg(&stage_path);
     let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(err)).spawn().expect("worker");
     let stdin = child.stdin.take().unwrap();
@@ -1402,6 +1451,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
     let (opts, rest) = Opts::parse(&args[1.min(args.len())..]);
+    // the oracle's heap limit: half the worker's address-space limit
+    HEAP_LIMIT.store(opts.mem_mb * 1048576 / 2, Ordering::Relaxed);
     match cmd.as_str() {
         "worker" => worker(&opts),
         "run" => run(opts),

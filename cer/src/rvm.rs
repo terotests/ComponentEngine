@@ -914,7 +914,7 @@ impl Vm {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && i < MAX_ELEMS && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i < MAX_ELEMS && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 && !self.idx_protos {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
@@ -2655,7 +2655,7 @@ impl Vm {
                 return;
             }
         }
-        if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_IN {
+        if k == 2 && (self.protos[pi].code[pc as usize].code as int) == OP_IN && self.protos[pi].code[pc as usize].a == 0 {
             // `i in arr` for an element of a plain array: no stack trip
             let ov = self.rget(bp, w3).clone();
             let nv = self.rget(bp, w2).clone();

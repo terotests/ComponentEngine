@@ -176,6 +176,11 @@ impl Vm {
                     }
                 }
             }
+            if (out.len() as int) >= MAX_ELEMS {
+                // past the element limit (JSC array-prototype-flat-reentrant-mutation)
+                self.elems_too_many((out.len() + 1) as double);
+                return;
+            }
             out.push(it);
         }
     }
@@ -300,7 +305,8 @@ impl Vm {
             }
             NF_AP_PUSH => {
                 let o = self.this_array(&this);
-                if self.is_array_obj(o) {
+                // an index setter on a prototype: each store is a [[Set]]
+                if self.is_array_obj(o) && !self.idx_protos {
                     if !self.objs[o as usize].extensible {
                         let n = self.evecs[self.objs[o as usize].elems as usize].v.len();
                         self.throw_type(format!("Cannot add property {}, object is not extensible", n).as_str());
@@ -976,6 +982,9 @@ impl Vm {
                 let items = self.elems_of(o);
                 let mut out: Vec<Val> = Vec::new();
                 self.flatten_into(&mut out, items, depth);
+                if self.throwing {
+                    return Val::Undef();
+                }
                 let a = self.new_array(out);
                 Val::Obj(a)
             }
@@ -1321,7 +1330,7 @@ impl Vm {
             }
             NF_SP_MATCH | NF_SP_MATCHALL | NF_SP_SEARCH => {
                 let s = self.this_str(&this);
-                if self.throwing {
+                if self.throwing || self.rx_too_long(&s) {
                     return Val::Undef();
                 }
                 let re = if self.class_of(&a0) == C_REGEXP {
