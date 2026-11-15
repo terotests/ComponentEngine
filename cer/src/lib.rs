@@ -221,9 +221,30 @@ impl Engine {
         self.vm.set_time_limit(ms);
     }
 
-    /// The last call was stopped by the time limit.
+    /// The last call was stopped by the time limit (or the heap limit:
+    /// heap_exceeded).
     pub fn timed_out(&self) -> bool {
         self.vm.terminated
+    }
+
+    /// The most memory this engine may hold, in bytes; 0: no limit (the
+    /// default). Measured with the host's probe (builtins::set_mem_probe,
+    /// a counting allocator): what the probe grew by during this engine's
+    /// calls. Past it the script stops as at the time limit: `Uncaught
+    /// Error: script heap limit exceeded`, no catch or finally runs. Without
+    /// a probe nothing is measured.
+    pub fn set_heap_limit(&mut self, bytes: double) {
+        self.vm.set_heap_limit(bytes);
+    }
+
+    /// The last call was stopped by the heap limit.
+    pub fn heap_exceeded(&self) -> bool {
+        self.vm.terminated && self.vm.heap_over
+    }
+
+    /// The memory this engine's calls took and kept, by the probe.
+    pub fn heap_used(&self) -> double {
+        self.vm.heap_used()
     }
 
     fn run_val(&mut self, u: unit::Unit) -> Val {

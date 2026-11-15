@@ -335,9 +335,33 @@ impl Engine {
         self.vm.set_time_limit(ms);
     }
 
-    /// The last call was stopped by the time limit (`set_time_limit`).
+    /// The last call was stopped by the time limit (`set_time_limit`), or
+    /// by the heap limit (`heap_exceeded` tells which).
     pub fn timed_out(&self) -> bool {
         self.vm.terminated
+    }
+
+    /// The most memory this engine may hold, in bytes; 0: no limit (the
+    /// default). Measured with the host's probe (`builtins::set_mem_probe`,
+    /// a counting `#[global_allocator]`): what the probe grew by during
+    /// this engine's calls and was not given back. Past it the script stops
+    /// as at the time limit: `Uncaught Error: script heap limit exceeded
+    /// (… bytes)`, no catch or finally runs. Without a probe nothing is
+    /// measured. Garbage only a collection frees (cycles) counts until it
+    /// runs, so leave room above the live heap. One allocation is not
+    /// refused: a script stops at the first check after it.
+    pub fn set_heap_limit(&mut self, bytes: double) {
+        self.vm.set_heap_limit(bytes);
+    }
+
+    /// The last call was stopped by the heap limit.
+    pub fn heap_exceeded(&self) -> bool {
+        self.vm.terminated && self.vm.heap_over
+    }
+
+    /// The memory this engine's calls took and kept, by the probe.
+    pub fn heap_used(&self) -> double {
+        self.vm.heap_used()
     }
 
     /// Scripts run in slices of `ms` milliseconds: when one runs out at a
@@ -455,7 +479,11 @@ impl Engine {
             self.vm.frames.clear();
             self.vm.handlers.clear();
             self.vm.native_depth = 0;
-            self.error = format!("Uncaught Error: script time limit exceeded ({} ms)", self.vm.time_limit);
+            self.error = if self.vm.heap_over {
+                format!("Uncaught Error: script heap limit exceeded ({} bytes)", self.vm.heap_limit)
+            } else {
+                format!("Uncaught Error: script time limit exceeded ({} ms)", self.vm.time_limit)
+            };
             return self.error.clone();
         }
         let e = self.vm.exc.clone();
