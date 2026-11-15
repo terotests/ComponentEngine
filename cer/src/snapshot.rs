@@ -533,6 +533,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     vm.ic2 = Vec::new();
     vm.mcache = Vec::new();
     vm.pic = Vec::new();
+    vm.pic_mega = -1;
     vm.shape_epoch += 1;
     vm.chain_epoch += 1;
     let np = r.num();

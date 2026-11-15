@@ -25,6 +25,11 @@ pub const PIC_DEPTH: int = 12;
 pub const PIC_W: int = 5 + 2 * PIC_DEPTH + 1;
 /// entries per site, filled in turn
 pub const PIC_WAYS: int = 4;
+/// entries of the shared chain cache (Vm.pic_mega, a power of two): what a
+/// site whose ways all miss (more receiver shapes than PIC_WAYS, such as
+/// `node.nodeType` over many kinds of element) finds by receiver shape and
+/// property; an entry is a way's ints with the property in its last int
+pub const PIC_MEGA: int = 2048;
 
 /// R_GET_METHOD's c at or below this: an mcache entry (MC_BASE - c)
 pub const MC_BASE: int = -100000;
@@ -1491,7 +1496,7 @@ impl Vm {
         if o >= 0 && self.rcode[(rb + pc) as usize].c == -3 {
             // the site last read through the chain: its cache first (a hit
             // means o's shape has no such own property)
-            h0 = self.pic_probe(rb + pc, o);
+            h0 = self.pic_probe_any(rb + pc, o, atom);
             if h0 != -1 {
                 let way = self.pic_way as usize;
                 if h0 < 0 || self.pic[way + 4] == 0 {
@@ -1658,7 +1663,7 @@ impl Vm {
                 self.rpic.push(-1);
             }
         }
-        let h = self.pic_probe(site, o);
+        let h = self.pic_probe_any(site, o, atom);
         if h != -1 {
             return h;
         }
@@ -1682,32 +1687,67 @@ impl Vm {
             if i32_at(&self.pic, b) != osh || i32_at(&self.pic, b + 1) != epoch {
                 continue;
             }
-            let depth = i32_at(&self.pic, b + 2) as usize;
-            let mut cur = o;
-            let mut k: usize = 0;
-            let mut ok = true;
-            while k < depth {
-                let pk = i32_at(&self.pic, b + 5 + 2 * k);
-                // pk is alive when cur's prototype is pk
-                if self.ob(cur).proto != pk || self.ob(pk as int).shape != i32_at(&self.pic, b + 6 + 2 * k) {
-                    ok = false;
-                    break;
-                }
-                cur = pk as int;
-                k += 1;
-            }
-            if !ok {
-                continue;
-            }
-            if i32_at(&self.pic, b + 3) >= 0 {
-                self.pic_way = b as int;
-                return cur;
-            }
-            if self.ob(cur).proto < 0 {
-                return -2;
+            let h = self.pic_follow(b, o);
+            if h != -1 {
+                return h;
             }
         }
         -1
+    }
+
+    /// pic_probe, then the shared cache (pic_mega) when no way fits.
+    #[inline(always)]
+    fn pic_probe_any(&mut self, site: int, o: int, atom: int) -> int {
+        let h = self.pic_probe(site, o);
+        if h != -1 || self.pic_mega < 0 || self.rpic[site as usize] < 0 {
+            return h;
+        }
+        let osh = self.ob(o).shape;
+        self.pic_mega_probe(o, osh, atom)
+    }
+
+    /// The way at `b` (its shape and epoch fit o) followed up o's chain:
+    /// the holder (pic_way set), -2 for a chain that ends without the
+    /// property, -1 when a prototype on the way changed.
+    #[inline(always)]
+    fn pic_follow(&mut self, b: usize, o: int) -> int {
+        let depth = i32_at(&self.pic, b + 2) as usize;
+        let mut cur = o;
+        let mut k: usize = 0;
+        while k < depth {
+            let pk = i32_at(&self.pic, b + 5 + 2 * k);
+            // pk is alive when cur's prototype is pk
+            if self.ob(cur).proto != pk || self.ob(pk as int).shape != i32_at(&self.pic, b + 6 + 2 * k) {
+                return -1;
+            }
+            cur = pk as int;
+            k += 1;
+        }
+        if i32_at(&self.pic, b + 3) >= 0 {
+            self.pic_way = b as int;
+            return cur;
+        }
+        if self.ob(cur).proto < 0 {
+            return -2;
+        }
+        -1
+    }
+
+    /// The shared cache's entry for (shape, atom), PIC_W ints in pic.
+    #[inline(always)]
+    fn pic_mega_at(&self, osh: i32, atom: int) -> usize {
+        let hsh = (osh as int) * 40503 + atom * 9973;
+        ((self.pic_mega + (hsh & (PIC_MEGA - 1))) * PIC_W) as usize
+    }
+
+    /// pic_probe past a site's ways: the shared cache (pic_mega).
+    #[inline(never)]
+    fn pic_mega_probe(&mut self, o: int, osh: i32, atom: int) -> int {
+        let b = self.pic_mega_at(osh, atom);
+        if i32_at(&self.pic, b) != osh || i32_at(&self.pic, b + (PIC_W as usize) - 1) != atom as i32 || i32_at(&self.pic, b + 1) != self.chain_epoch as i32 {
+            return -1;
+        }
+        self.pic_follow(b, o)
     }
 
     /// pic_get's miss: the chain read and kept in a way of site si.
@@ -1764,6 +1804,33 @@ impl Vm {
         let turn = self.pic[ti];
         self.pic[ti] = (turn + 1) % PIC_WAYS as i32;
         let b = ((base + turn) * PIC_W as i32) as usize;
+        self.pic_fill(b, o, &chain, slot, acc);
+        // a site that has seen more shapes than its ways also fills the
+        // shared cache (made at the first such site)
+        if e0 >= 0 && i32_at(&self.pic, b) != -1 && self.pic_seen_all(base) {
+            if self.pic_mega < 0 {
+                self.pic_mega = self.pic.len() as int / PIC_W;
+                let mut k: int = 0;
+                while k < PIC_W * PIC_MEGA {
+                    self.pic.push(-1);
+                    k += 1;
+                }
+            }
+            let m = self.pic_mega_at(self.objs[o as usize].shape as i32, atom);
+            self.pic_fill(m, o, &chain, slot, acc);
+            self.pic[m + (PIC_W as usize) - 1] = atom as i32;
+        }
+        self.pic_way = b as int;
+        if slot < 0 {
+            -2
+        } else {
+            cur
+        }
+    }
+
+    /// One way's ints at `b`: o's shape, the epoch, the chain (each
+    /// prototype and its shape), the slot (-1: absent) and the accessor bit.
+    fn pic_fill(&mut self, b: usize, o: int, chain: &Vec<int>, slot: int, acc: bool) {
         self.pic[b] = self.objs[o as usize].shape as i32;
         self.pic[b + 1] = self.chain_epoch as i32;
         self.pic[b + 2] = chain.len() as i32;
@@ -1776,12 +1843,20 @@ impl Vm {
             self.pic[b + 6 + 2 * k] = self.objs[x as usize].shape as i32;
             k += 1;
         }
-        self.pic_way = b as int;
-        if slot < 0 {
-            -2
-        } else {
-            cur
+    }
+
+    /// Whether every way of the site at `base` holds an entry of this
+    /// epoch (the site is past what its ways keep).
+    fn pic_seen_all(&self, base: i32) -> bool {
+        let mut w: i32 = 0;
+        while w < PIC_WAYS as i32 {
+            let b = ((base + w) * PIC_W as i32) as usize;
+            if self.pic[b] == -1 || self.pic[b + 1] != self.chain_epoch as i32 {
+                return false;
+            }
+            w += 1;
         }
+        true
     }
 
     /// Whether a miss of `atom` on `x` just goes on to its prototype
@@ -2132,7 +2207,12 @@ impl Vm {
             if (site as usize) < self.rpic.len() {
                 // a way that fits o's shape was learnt on that shape
                 // without the property of its own
-                let h = self.pic_probe(site, o);
+                let mut h = self.pic_probe(site, o);
+                if h == -1 && self.pic_mega >= 0 && self.rpic[site as usize] >= 0 {
+                    let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
+                    let osh = self.ob(o).shape;
+                    h = self.pic_mega_probe(o, osh, atom);
+                }
                 if h != -1 && (h < 0 || i32_at(&self.pic, (self.pic_way + 4) as usize) == 0) {
                     let f = if h >= 0 { slot_at(self.ob(h), i32_at(&self.pic, (self.pic_way + 3) as usize) as usize) } else { Val::Undef() };
                     let fun = if let Some(fo) = f.as_obj() { self.ob(fo).class == C_FUNCTION } else { false };
