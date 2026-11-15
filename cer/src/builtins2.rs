@@ -1135,7 +1135,17 @@ impl Vm {
                 }
             }
             NF_SP_INDEXOF | NF_SP_LASTINDEXOF | NF_SP_INCLUDES | NF_SP_STARTSWITH | NF_SP_ENDSWITH => {
-                let s = self.this_str(&this);
+                // a long text's startsWith/endsWith: compared where it is,
+                // not copied (a view's text) or indexed whole (str_len)
+                let mut hl: int = -1;
+                if id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH {
+                    if let Some(h) = this.as_str() {
+                        if self.hbytes(h) >= 256 {
+                            hl = h;
+                        }
+                    }
+                }
+                let s = if hl >= 0 { self.sempty.clone() } else { self.this_str(&this) };
                 if self.throwing {
                     return Val::Undef();
                 }
@@ -1154,6 +1164,36 @@ impl Vm {
                     }
                 }
                 let p = self.to_str(&a0);
+                if self.throwing {
+                    return Val::Undef();
+                }
+                if hl >= 0 {
+                    let len = self.hlen(hl);
+                    let pos = self.rel_index_pos(&a1, len, if id == NF_SP_STARTSWITH { 0 } else { len });
+                    if self.throwing {
+                        return Val::Undef();
+                    }
+                    // compared as bytes where pos is (p's length in units
+                    // is not needed: a scan of p)
+                    let q = if id == NF_SP_STARTSWITH { self.hstarts_at(hl, p.as_str(), pos) } else { self.hends_at(hl, p.as_str(), pos) };
+                    if q >= 0 {
+                        return Val::Bool(q == 1);
+                    }
+                    let pl = jsstr::len(p.as_str());
+                    let at = if id == NF_SP_STARTSWITH {
+                        if pos + pl > len {
+                            return Val::Bool(false);
+                        }
+                        pos
+                    } else {
+                        if pos - pl < 0 {
+                            return Val::Bool(false);
+                        }
+                        pos - pl
+                    };
+                    let s2 = self.sget(hl);
+                    return Val::Bool(self.str_slice(&s2, at, at + pl).as_str() == p.as_str());
+                }
                 if (id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH) && a1.is_undef() {
                     // no position: an ASCII text compared as bytes
                     let q = ascii_affix(s.as_str(), p.as_str(), id == NF_SP_ENDSWITH);
@@ -1198,6 +1238,27 @@ impl Vm {
                 }
             }
             NF_SP_SLICE => {
+                if let Some(h) = this.as_str() {
+                    // a long text (or a view of one) is not copied for its piece
+                    if self.hbytes(h) >= 256 {
+                        let len = self.hlen(h);
+                        let a = self.rel_index(&a0, len, 0);
+                        let b = self.rel_index(&a1, len, len);
+                        if self.throwing {
+                            return Val::Undef();
+                        }
+                        if a <= 0 && b >= len {
+                            return this.clone();
+                        }
+                        let r = self.hslice(h, a, b);
+                        if !r.is_undef() {
+                            return r;
+                        }
+                        let s = self.sget(h);
+                        let tw = self.str_slice(&s, a, b);
+                        return self.string_val(tw);
+                    }
+                }
                 let s = self.this_str(&this);
                 if self.throwing {
                     return Val::Undef();
@@ -1211,6 +1272,28 @@ impl Vm {
                 { let tw2 = self.str_slice(&s, a, b); self.string_val(tw2) }
             }
             NF_SP_SUBSTRING => {
+                if let Some(h) = this.as_str() {
+                    if self.hbytes(h) >= 256 {
+                        let len = self.hlen(h);
+                        let a = self.rel_index_pos(&a0, len, 0);
+                        let b = self.rel_index_pos(&a1, len, len);
+                        if self.throwing {
+                            return Val::Undef();
+                        }
+                        let x = if a < b { a } else { b };
+                        let y = if a < b { b } else { a };
+                        if x <= 0 && y >= len {
+                            return this.clone();
+                        }
+                        let r = self.hslice(h, x, y);
+                        if !r.is_undef() {
+                            return r;
+                        }
+                        let s = self.sget(h);
+                        let tw = self.str_slice(&s, x, y);
+                        return self.string_val(tw);
+                    }
+                }
                 let s = self.this_str(&this);
                 if self.throwing {
                     return Val::Undef();
@@ -1228,6 +1311,27 @@ impl Vm {
                 }
             }
             NF_SP_SUBSTR => {
+                if let Some(h) = this.as_str() {
+                    if self.hbytes(h) >= 256 {
+                        let len = self.hlen(h);
+                        let a = self.rel_index(&a0, len, 0);
+                        let n = if a1.is_undef() { len - a } else { to_integer(self.to_number(&a1)) as int };
+                        if self.throwing {
+                            return Val::Undef();
+                        }
+                        if n <= 0 {
+                            return self.str_val("");
+                        }
+                        let b = if n > len - a { len } else { a + n };
+                        let r = self.hslice(h, a, b);
+                        if !r.is_undef() {
+                            return r;
+                        }
+                        let s = self.sget(h);
+                        let tw = self.str_slice(&s, a, b);
+                        return self.string_val(tw);
+                    }
+                }
                 let s = self.this_str(&this);
                 if self.throwing {
                     return Val::Undef();
