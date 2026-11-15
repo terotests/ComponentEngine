@@ -166,6 +166,22 @@ impl Engine {
         Engine { vm: vm, error: String::new(), through_text: false, syntax: Syntax::tsx() }
     }
 
+    /// `from_snapshot` into the object and cold-part tables of an engine
+    /// that was dropped (emptied here and filled again in their room), so
+    /// a host that starts realms one after another from snapshots reuses
+    /// that room instead of growing new tables beside the kept ones.
+    pub fn from_snapshot_with(text: &str, objs: Vec<JsObj>, colds: Vec<Cold>) -> Engine {
+        let mut vm = Vm::new();
+        vm.objs = objs;
+        vm.colds = colds;
+        if !snapshot::restore_with(&mut vm, text, true) {
+            let mut e = Engine::new();
+            e.error = String::from("not a snapshot");
+            return e;
+        }
+        Engine { vm: vm, error: String::new(), through_text: false, syntax: Syntax::tsx() }
+    }
+
     /// Reads scripts as TypeScript (`typescript`) and / or JSX (`jsx`).
     pub fn set_syntax(&mut self, typescript: bool, jsx: bool) {
         self.syntax = Syntax::new(typescript, jsx);
