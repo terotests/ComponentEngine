@@ -114,7 +114,9 @@ fn mutate_vm(e: &mut Engine, rng: &mut Rng) -> String {
         }
         3 if !vm.stack.is_empty() => {
             let i = rng.below(vm.stack.len());
-            vm.stack[i] = cerxes::value::Val::Obj(v as _);
+            // the 32-bit index a Val holds (-1 is 0xFFFFFFFF): an index out
+            // of range, not the constructor's debug assertion
+            vm.stack[i] = cerxes::value::Val::Obj(((v as i64) & 0xFFFF_FFFF) as _);
             format!("stack {} = Obj({})", i, v)
         }
         4 | 5 if no > 0 => {

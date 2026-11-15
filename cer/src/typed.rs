@@ -547,6 +547,12 @@ impl Vm {
     #[inline]
     pub fn ta_len_hit(&self, o: int) -> int {
         let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        // a dictionary's shape stays the same when it gains a key (no
+        // epoch moves for an object that is no prototype): an own `length`
+        // defined later would not be seen (JSC typedarray-length-dictionary)
+        if self.shapes[ob.shape as usize].owned {
+            return -2;
+        }
         let m = &self.ta_memo;
         let ep = self.shape_epoch as i32;
         // the way for o's shape and prototype (two ways, 7 ints each)
@@ -622,6 +628,11 @@ impl Vm {
         }
         let slot = self.find(p2 as int, A_LENGTH);
         if slot < 0 || (self.attr_at(p2 as int, slot) & P_ACCESSOR) == 0 {
+            return -1;
+        }
+        if self.shapes[osh as usize].owned {
+            // a dictionary is not remembered (ta_len_hit): the generic
+            // lookup answers at every read
             return -1;
         }
         // a new way: the first two fill, then each replaces the older one
@@ -1069,6 +1080,7 @@ impl Vm {
             // the buffer holds the elements as this kind from the start
             let home = if is_big(kind) { -1 } else { kind };
             let z = zeros(if home >= 0 { n } else { n * kind_size(kind) });
+            self.note_buf_bytes((z.len() as int) * 8);
             { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
             let cid = self.cold_id(b) as usize;
             self.colds[cid].home = home;
@@ -1434,6 +1446,7 @@ impl Vm {
                 }
             }
             let bytes = zeros(if home >= 0 { n / kind_size(home) } else { n });
+            self.note_buf_bytes((bytes.len() as int) * 8);
             { let c = self.cold_id(b) as usize; self.colds[c].nums = bytes; }
             let cid = self.cold_id(b) as usize;
             self.colds[cid].home = home;
@@ -1557,6 +1570,7 @@ impl Vm {
                 let size = kind_size(ms);
                 if md < 0 && ts == 0 && n == self.buf_size(d) && n % size == 0 {
                     let z = zeros(n / size);
+                    self.note_buf_bytes((z.len() as int) * 8);
                     { let c = self.cold_id(d) as usize; self.colds[c].nums = z; }
                     let cid = self.cold_id(d) as usize;
                     self.colds[cid].home = ms;
@@ -1621,6 +1635,7 @@ impl Vm {
                 self.colds[cid].home = kind;
             } else if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
                 let z = zeros(len);
+                self.note_buf_bytes((z.len() as int) * 8);
                 { let c = self.cold_id(b) as usize; self.colds[c].nums = z; }
                 let cid = self.cold_id(b) as usize;
                 self.colds[cid].home = kind;

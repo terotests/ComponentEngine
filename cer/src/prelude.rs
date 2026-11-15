@@ -908,6 +908,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
       if (spreadable(e)) {
         var len = lenOf(e);
         if (n + len > MAX) throw new TypeError('Invalid array length');
+        // an array result could never hold it: RangeError now, not after
+        // 2 ** 53 element checks (JSC concat-length tests)
+        if (n + len > 4294967295 && isArray(a)) throw new RangeError('Invalid array length');
         for (var k = 0; k < len; k++, n++) if (k in e) createDataPropertyOrThrow(a, n, e[k]);
       } else {
         if (n >= MAX) throw new TypeError('Invalid array length');

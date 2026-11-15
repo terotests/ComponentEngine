@@ -1384,6 +1384,12 @@ impl Vm {
         let n = r.len();
         let mut i: usize = 0;
         while i < n {
+            // past the longest string: the caller throws RangeError (a
+            // 64 KB "$1$1…" over a 1 MB match was 32 GB of text, JSC
+            // regress-191563)
+            if (out.as_bytes().len() as double) > (MAX_STR_BYTES as double) {
+                break;
+            }
             let c = r[i];
             if c != '$' || i + 1 >= n {
                 out.push(c);
@@ -1584,6 +1590,12 @@ impl Vm {
                     let e = self.expand_replacement(repl_str.as_str(), matched.as_str(), ms, units, &capv, &groups);
                     jsstr::push_js(&mut out, e.as_str());
                 }
+                // the result grows with every match: RangeError at the
+                // limit, not an allocation failure (JSC
+                // regexp-accumulatedResult-overflow)
+                if self.str_too_long(out.as_bytes().len() as double) {
+                    return Val::Undef();
+                }
                 last = me;
                 if !global {
                     break;
@@ -1618,6 +1630,9 @@ impl Vm {
                 let sv6 = self.string_val(pat.clone());
                 let e = self.expand_replacement(repl_str.as_str(), pat.as_str(), p, units, &vec![sv6], &Vec::new());
                 jsstr::push_js(&mut out, e.as_str());
+            }
+            if self.str_too_long(out.as_bytes().len() as double) {
+                return Val::Undef();
             }
             last = p + plen;
             if !all {
@@ -3324,7 +3339,17 @@ impl Vm {
     }
 
     pub fn json_revive(&mut self, holder: &Val, key: &Val, reviver: &Val) -> Val {
+        // a reviver that makes the value cyclic (`this[1] = o`) walks it
+        // forever: RangeError before the native stack overflows
+        // (ChakraCore #3900)
+        if self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+            return Val::Undef();
+        }
         let v = self.get_elem(holder, key);
+        if self.throwing {
+            return Val::Undef();
+        }
         if let Some(o) = (&v).as_obj() {
             let keys = self.own_keys(o, false, false);
             for k in keys {
@@ -4045,6 +4070,14 @@ impl Vm {
     }
 
     pub fn call_native(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
+        // natives that call natives with no script frame between (a getter
+        // that is Object.prototype.toLocaleString, toString that is
+        // String.prototype.lastIndexOf) recurse in Rust only: the budget
+        // check of script calls never ran and the thread's stack overflowed
+        if self.stack_exhausted() {
+            self.throw_range("Maximum call stack size exceeded");
+            return Val::Undef();
+        }
         self.nat_top = self.nat_ff && self.native_depth == self.gc_free_depth + 1;
         self.nat_ff = false;
         if id >= NF_AP_PUSH && id <= NF_AP_WITH && (this.is_undef() || this.is_null()) {
@@ -4057,6 +4090,25 @@ impl Vm {
             if k < self.evecs[self.objs[g as usize].elems as usize].v.len() {
                 let f = self.evecs[self.objs[g as usize].elems as usize].v[k].clone();
                 if !f.is_undef() {
+                    if self.nat_top {
+                        // the generic method is script: with this, the
+                        // arguments and itself rooted, its garbage is
+                        // collected as it runs (join over an array-like
+                        // of length 2 ** 32 made 5 GB of strings that no
+                        // collection could reach: Hermes
+                        // array-join-truncation)
+                        let nr = self.temp_roots.len();
+                        self.temp_roots.push(this.clone());
+                        self.temp_roots.push(f.clone());
+                        for a in args.iter() {
+                            self.temp_roots.push(*a);
+                        }
+                        let gd = self.gc_open(true);
+                        let r = self.call_value(f, this, args.clone());
+                        self.gc_close(gd);
+                        self.temp_roots.truncate(nr);
+                        return r;
+                    }
                     return self.call_value(f, this, args.clone());
                 }
             }

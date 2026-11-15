@@ -89,6 +89,84 @@ walks.
 
 `known/` holds the minimised findings of the first runs.
 
+## Fuzzer v3: other engines' bugs
+
+The bugs other engines have already had are the likeliest bugs of a new
+one. v3 seeds the fuzzer with them and mutates in their shape:
+
+- **Regression tests of other engines** (`seeds/fetch-engines.sh`, then
+  `cerxes-fuzz import`, src/import.rs): JavaScriptCore `JSTests/stress`,
+  SpiderMonkey `jit-test` and `non262/regress`, ChakraCore `test/`, Hermes
+  `test/hermes`, QuickJS `tests/`: about 13 000 tests. A shim in plain
+  JavaScript goes in front of each (`shouldBe`, `assertEq`, `noInline`,
+  `WScript.Echo`, `%OptimizeFunctionOnNextCall` …): assertions print
+  `FAIL …` and go on, JIT hints are no-ops, `detachArrayBuffer` really
+  detaches, `Math.random` and `Date.now` are fixed. Loop bounds of 1000 or
+  more in loop heads become 300 (still past the JIT threshold). Tests that
+  need wasm, workers, new globals, modules or files are left out. They are
+  fetched, not committed (their licenses), into `foreign/`, which
+  run-local.sh reads when it is there.
+- **CVE seeds** (`seeds/engines`, README there): 36 programs, each the shape
+  of a published bug of JSC, SpiderMonkey, QuickJS, Hermes, ChakraCore or
+  V8 (CVE-2016-4622 slice, CVE-2019-11707 pop, CVE-2019-9810 slice species,
+  CVE-2019-17026 StoreElementHole, CVE-2020-9802 ArithNegate, CVE-2019-0567
+  InitProto, CVE-2023-31922 Proxy isArray, CVE-2024-29943 range analysis …),
+  plus the classes that matter for reference counting and snapshots.
+- **Bug-class hooks** (src/hooks.rs): `--class P` (30 %) of the programs are
+  a seed of those two kinds, as it is (15 %) or with one to three hooks:
+  `arg` (a number argument of a builtin becomes a valueOf / toString /
+  toPrimitive that changes the receiver), `species`, `proto` (index accessor
+  on a prototype), `warm` (a call run past the JIT threshold, then once
+  with an edge value), `proxy`, `detach`, `then` (Object.prototype.then),
+  `drop` (a callback drops the last reference and collects), `getter`,
+  `regexp`. The first line of such a program names its hooks
+  (`// v3 hooks: arg+warm`). `cerxes-fuzz hook FILE.js --seed N` shows what
+  the hooks do to a file. These programs also go to the JIT oracle.
+
+```sh
+cerxes/fuzz/seeds/fetch-engines.sh             # ~5 min: clone, import into foreign/
+MINUTES=30 cerxes/fuzz/run-local.sh --class 60
+```
+
+The nightly CI has a `foreign` shard that does the same.
+
+### What v3 found first (2026-11-15)
+
+The 13 221 imported tests, run once each as they are, aborted CErXes 44
+times (no panics): 8 native stack overflows and 36 allocation failures. The
+first 15-minute v3 run (20 100 programs, 3 workers) added a register-VM
+cache bug and a snapshot bug. Fixed in the same pull request:
+
+- stack overflow: Array.isArray through 200 000 proxies (QuickJS
+  CVE-2023-31922), `k in o` up a 300 000-deep prototype chain, native-to-
+  native recursion without a script frame (a getter that is
+  Object.prototype.toLocaleString, toString that is
+  String.prototype.lastIndexOf), a JSON.parse reviver that makes the value
+  cyclic (ChakraCore #3900);
+- allocation failure: ArrayBuffer contents and long runs of holes did not
+  count towards a collection (300 dropped 10 MB buffers), `k in o` made an
+  atom for every new index (3 M checks: 355 MB that never came back),
+  replace / `$1` expansion / new Function parameters / array spread grew
+  past the string or element limit, push and `a[a.length] = x` had no
+  element limit (the process asked for 4 GB), the generic Array methods
+  (prelude) ran with the collector off, so `join` over an array-like of
+  length 2 ** 32 kept every string;
+- register VM: a typed array's `length` cache ignored an own `length`
+  defined on a dictionary-mode typed array (JSC typedarray-length-dictionary);
+- snapshot: a mapped `arguments` object lost its link to the parameters on
+  restore (JSC parameter-scoping under the snapshot oracle);
+- conformance: slice, join and sort read the array before the arguments'
+  valueOf / the comparator changed it (the CVE-2016-4622 order), concat of a
+  spreadable with length 2 ** 53 - 1 checked 2 ** 53 indexes.
+
+Left open: about ten allocation failures that only a total heap limit fixes
+(regexp over a 512 MB string, a 178 MB function source, 8 M-element array
+literals; `known oom`), BigInt arithmetic on 2 ** 20-bit numbers (decimal
+strings, 36 s for one JSC test: `hang`), and conformance diffs the seeds
+show (Symbol.unscopables, an index setter on Array.prototype for a store
+past the end, holes reading Object.prototype's prototype, case-insensitive
+lookbehind on astral characters, String object `length` redefinable).
+
 ## Commands
 
 ```sh
@@ -100,6 +178,8 @@ $B min   out/…/panic/<id>.js          # shrinks it while the class and signatu
 $B gen --seed 7                       # one generated program, e.g. to run in node
 $B gen --seed 7 --preempt 100         # one preemption program
 $B known                              # which known/ cases still reproduce
+$B import DIR --out foreign [--engine jsc] [--max N]   # another engine's tests as seeds
+$B hook FILE.js --seed 3              # FILE with bug-class hooks, printed
 ```
 (`B=cerxes/fuzz/target/checked/cerxes-fuzz` for the checked build.)
 

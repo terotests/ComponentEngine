@@ -12,6 +12,9 @@ name: Fuzz
 #   heavy    resource limits (deep recursion, huge allocations)
 #   hostile  forged snapshots and code-cache units (60 %), preemption (30 %)
 #   jit      the wasm engine with the baseline JIT: native vs wasm, JIT off vs on
+#   foreign  fuzzer v3: other engines' regression tests (JSC, SpiderMonkey,
+#            ChakraCore, Hermes, QuickJS; seeds/fetch-engines.sh) and the
+#            CVE seeds (seeds/engines), with bug-class hooks (src/hooks.rs)
 
 on:
   schedule:
@@ -36,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [default, heavy, hostile, jit]
+        mode: [default, heavy, hostile, jit, foreign]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,6 +67,9 @@ jobs:
       - name: Build the wasm engine with the JIT
         if: matrix.mode == 'jit'
         run: echo "WASM=$(cerxes/fuzz/jit/build.sh)" >> "$GITHUB_ENV"
+      - name: Fetch other engines' regression tests
+        if: matrix.mode == 'foreign'
+        run: FUZZ="$FUZZ" cerxes/fuzz/seeds/fetch-engines.sh
       - name: Fuzz
         env:
           MINUTES: ${{ github.event.inputs.minutes || '30' }}
@@ -74,11 +80,12 @@ jobs:
             heavy) flags="--heavy" ;;
             hostile) flags="--hostile 60 --preempt 30" ;;
             jit) flags="--jit $WASM --jit-pct 60" ;;
+            foreign) flags="--class 60"; for d in cerxes/fuzz/foreign/*/; do flags="$flags --corpus $d"; done ;;
           esac
           "$FUZZ" run \
             --time $((MINUTES * 60)) --jobs $(nproc) --seed ${{ github.run_id }} \
             --out fuzz-out --corpus cerxes/tests/cases.txt --corpus cer/tests/cases.txt \
-            --corpus cerxes/tests/v8/own --corpus cerxes/fuzz/seeds $flags
+            --corpus cerxes/tests/v8/own --corpus cerxes/fuzz/seeds --corpus cerxes/fuzz/seeds/engines $flags
       - name: Summary
         if: always()
         run: |

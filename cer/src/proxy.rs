@@ -231,17 +231,19 @@ impl Vm {
 
     /// Array.isArray through proxies.
     pub fn is_array_val(&mut self, v: &Val) -> bool {
-        let o = obj_of(v);
+        let mut o = obj_of(v);
         if o < 0 {
             return false;
         }
-        if self.objs[o as usize].class == C_PROXY {
+        // a loop, not recursion: a chain of 200 000 proxies overflowed the
+        // native stack (QuickJS CVE-2023-31922 is the same bug)
+        while self.objs[o as usize].class == C_PROXY {
             let t = self.objs[o as usize].env as int;
             if t < 0 {
                 self.throw_type("Cannot perform 'IsArray' on a proxy that has been revoked");
                 return false;
             }
-            return self.is_array_val(&Val::Obj(t));
+            o = t;
         }
         self.objs[o as usize].class == C_ARRAY
     }

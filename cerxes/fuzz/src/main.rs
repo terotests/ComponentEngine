@@ -5,16 +5,20 @@
 //   cerxes-fuzz run   [--time S] [--jobs N] [--seed N] [--out DIR] [--node]
 //                     [--heavy] [--rc-check] [--mutate P] [--corpus PATH]...
 //                     [--hostile P] [--preempt P] [--jit WASM] [--jit-pct P]
-//                     [--known FILE]
+//                     [--known FILE] [--class P]
 //   cerxes-fuzz repro FILE.js           run the oracles in this process
 //   cerxes-fuzz min   FILE.js [--out F] shrink a finding, keeping its class
 //   cerxes-fuzz gen   [--seed N] [--preempt 100]  print one generated program
 //   cerxes-fuzz known [DIR]             which known/ findings still reproduce
+//   cerxes-fuzz import DIR --out D [--max N] [--engine E]  other engines' tests → seeds
+//   cerxes-fuzz hook  FILE.js [--seed N]  print FILE with bug-class hooks (v3)
 //   cerxes-fuzz worker                  (internal) programs on stdin
 
 mod cov;
 mod gen;
+mod hooks;
 mod hostile;
+mod import;
 mod jit;
 mod known;
 mod preempt;
@@ -683,6 +687,12 @@ struct Opts {
     /// share of well-formed generated programs whose engine is snapshotted,
     /// restored and probed after they finish (`roundtrip`)
     roundtrip_pct: usize,
+    /// share of programs made from a bug-class seed (another engine's
+    /// regression test or seeds/engines) with class hooks (hooks.rs)
+    class_pct: usize,
+    /// import: how many tests at most, and the engine name
+    max_import: usize,
+    engine: Option<String>,
 }
 
 impl Opts {
@@ -708,6 +718,9 @@ impl Opts {
             known: Path::new(env!("CARGO_MANIFEST_DIR")).join("known/known.txt"),
             stage: String::new(),
             roundtrip_pct: 10,
+            class_pct: 30,
+            max_import: 0,
+            engine: None,
         };
         let mut rest = Vec::new();
         let mut i = 0;
@@ -731,6 +744,9 @@ impl Opts {
                 "--known" => { o.known = PathBuf::from(v); i += 1; }
                 "--stage" => { o.stage = v; i += 1; }
                 "--roundtrip" => { o.roundtrip_pct = v.parse().unwrap_or(10); i += 1; }
+                "--class" => { o.class_pct = v.parse().unwrap_or(30); i += 1; }
+                "--max" => { o.max_import = v.parse().unwrap_or(0); i += 1; }
+                "--engine" => { o.engine = Some(v); i += 1; }
                 "--node" => o.node = true,
                 "--heavy" => o.heavy = true,
                 "--rc-check" => o.rc_check = true,
@@ -741,6 +757,16 @@ impl Opts {
         }
         (o, rest)
     }
+}
+
+/// A seed from another engine's tests (`/* foreign: … */`, import.rs) or
+/// from seeds/engines (`// jsc: CVE-… class`).
+fn is_class_seed(s: &str) -> bool {
+    let l = s.lines().next().unwrap_or("");
+    if l.starts_with("/* foreign: ") {
+        return true;
+    }
+    ["// jsc: ", "// sm: ", "// qjs: ", "// hermes: ", "// chakra: ", "// v8: ", "// cerxes: "].iter().any(|p| l.starts_with(p))
 }
 
 /// The seeds mutation starts from: the scripts of the engines' case files
@@ -899,6 +925,8 @@ fn node_lines(src: &str, dir: &Path, id: usize) -> Option<Vec<String>> {
 fn run(opts: Opts) {
     std::fs::create_dir_all(&opts.out).expect("out dir");
     let corpus = Arc::new(load_corpus(&opts.corpus));
+    // the bug-class seeds: other engines' tests (import.rs) and seeds/engines
+    let class_seeds: Arc<Vec<String>> = Arc::new(corpus.iter().filter(|s| is_class_seed(s)).cloned().collect());
     let kn = known::Known::load(&opts.known);
     let (ne, ns) = (kn.entries.len(), kn.skips.len());
     let sh = Arc::new(Shared {
@@ -915,11 +943,13 @@ fn run(opts: Opts) {
         grown_total: AtomicU64::new(0),
     });
     eprintln!(
-        "cerxes-fuzz: {} jobs, {} s, seed {}, corpus {} scripts, out {}{}{}, hostile {} %, preempt {} %{}, known {} + {} skip ({})",
+        "cerxes-fuzz: {} jobs, {} s, seed {}, corpus {} scripts ({} bug-class seeds, class {} %), out {}{}{}, hostile {} %, preempt {} %{}, known {} + {} skip ({})",
         opts.jobs,
         opts.time_s,
         opts.seed,
         corpus.len(),
+        class_seeds.len(),
+        if class_seeds.is_empty() { 0 } else { opts.class_pct },
         opts.out.display(),
         if opts.node { ", vs node" } else { "" },
         if opts.heavy { ", heavy" } else { "" },
@@ -936,6 +966,7 @@ fn run(opts: Opts) {
         let opts = opts.clone();
         let sh = sh.clone();
         let corpus = corpus.clone();
+        let class_seeds = class_seeds.clone();
         handles.push(std::thread::spawn(move || {
             let mut w = spawn_worker(&opts, id);
             let mut rng = gen::Rng::new(opts.seed.wrapping_add(id as u64 * 7919));
@@ -994,8 +1025,24 @@ fn run(opts: Opts) {
                     }
                 };
                 let grown_any = !sh.grown.lock().unwrap().is_empty();
-                let mut mutated = (!corpus.is_empty() || grown_any) && rng.chance(opts.mutate_pct);
-                let src = if mutated {
+                // v3: a bug-class seed, as it is or with class hooks
+                let classy = !class_seeds.is_empty() && rng.chance(opts.class_pct);
+                let mut mutated = classy || ((!corpus.is_empty() || grown_any) && rng.chance(opts.mutate_pct));
+                let src = if classy {
+                    let mut r2 = gen::Rng::new(seed);
+                    let base = class_seeds[r2.below(class_seeds.len())].clone();
+                    *sh.counts.lock().unwrap().entry(String::from("bug-class programs")).or_insert(0) += 1;
+                    if r2.chance(15) {
+                        base
+                    } else {
+                        let (mut s, names) = hooks::inject(&mut r2, &base);
+                        if r2.chance(20) {
+                            let donor = class_seeds[r2.below(class_seeds.len())].clone();
+                            s = gen::mutate_lines(&mut r2, &s, Some(&donor));
+                        }
+                        format!("// v3 hooks: {}\n{}", names, s)
+                    }
+                } else if mutated {
                     let base = pick(&mut rng).unwrap_or_default();
                     let donor = pick(&mut rng);
                     let mut r2 = gen::Rng::new(seed);
@@ -1048,7 +1095,7 @@ fn run(opts: Opts) {
                         // the wasm build reads scripts as TSX (cx_new has no syntax
                         // switch): a script the JavaScript reader refuses is skipped
                         let syntax_error = printed.last().map(|l| l.starts_with("=> SyntaxError")).unwrap_or(false);
-                        if verdict == "ok" && !mutated && !opts.heavy && !syntax_error && opts.jit.is_some() && rng.chance(opts.jit_pct) {
+                        if verdict == "ok" && (!mutated || classy) && !opts.heavy && !syntax_error && opts.jit.is_some() && rng.chance(opts.jit_pct) {
                             if jw.is_none() {
                                 jw = jit::spawn(opts.jit.as_ref().unwrap());
                             }
@@ -1388,6 +1435,22 @@ fn main() {
             eprintln!("{} of {} files", hit, n);
         }
         "known" => known_check(rest.first().map(|s| s.as_str()), &opts),
+        "import" => {
+            let from = PathBuf::from(rest.first().expect("import DIR --out DIR"));
+            match import::import(&from, &opts.out, opts.max_import, opts.engine.as_deref()) {
+                Ok(st) => eprintln!("{}: {} tests read, {} written to {}, {} need what CErXes has not got, {} too big or small", from.display(), st.read, st.written, opts.out.display(), st.skipped_needs, st.skipped_size),
+                Err(e) => {
+                    eprintln!("import: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "hook" => {
+            let src = std::fs::read_to_string(rest.first().expect("hook FILE.js")).expect("read");
+            let mut rng = gen::Rng::new(opts.seed);
+            let (s, names) = hooks::inject(&mut rng, &src);
+            print!("// v3 hooks: {}\n{}", names, s);
+        }
         _ => {
             eprintln!("usage: cerxes-fuzz run|repro|min|gen … (see cerxes/fuzz/README.md)");
             std::process::exit(2);
