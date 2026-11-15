@@ -1701,7 +1701,7 @@ impl Vm {
         let yt = self.sget(y);
         let total = bl + (yt.as_bytes().len() as int);
         let room = if view { total } else if total / 8 > 64 { total / 8 } else { 64 };
-        let mut s = String::with_capacity((room + total) as usize);
+        let mut s = String::new();
         let mut k: int = 0;
         while k < room {
             s.push(' ');
