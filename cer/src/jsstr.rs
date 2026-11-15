@@ -696,9 +696,14 @@ pub fn bytes_at(s: &str, p: &str, b: int) -> bool {
 
 /// Whether `p` has a lone surrogate's stand-in (or other text in plane 16)
 /// that a byte compare would not match against half of a pair.
+#[ranger::target(rust)]
 pub fn has_f4(p: &str) -> bool {
-    let r: bool = ranger::native!(rust: { p.as_bytes().contains(&0xf4u8) }, es6: "false");
-    r
+    p.as_bytes().contains(&0xf4u8)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn has_f4(_p: &str) -> bool {
+    false
 }
 
 /// Byte `i` of an ASCII string, i in range.
