@@ -573,6 +573,129 @@ pub fn char_range(s: &str, a: int, b: int) -> String {
     text
 }
 
+/// A long non-ASCII text's unit index (Vm::hbyte_of): for every 32nd unit
+/// k*32 (up to the length), the byte offset of the character holding it,
+/// times 2, plus 1 when that character starts one unit before (the unit is
+/// the second of a pair). Rust only: the other targets index their own
+/// strings (unit_byte answers -1 there).
+#[ranger::target(rust)]
+pub fn unit_cps(s: &str) -> Vec<int> {
+    let mut out: Vec<int> = Vec::with_capacity(s.len() / 24 + 2);
+    let mut next: int = 0;
+    let mut u: int = 0;
+    for (b, c) in s.char_indices() {
+        let w: int = if (c as u32) >= 0x10000 && (c as u32) < 0x10f800 { 2 } else { 1 };
+        while next < u + w {
+            out.push((b as int) * 2 + (next - u));
+            next += 32;
+        }
+        u += w;
+    }
+    while next <= u {
+        out.push((s.len() as int) * 2);
+        next += 32;
+    }
+    out
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn unit_cps(_s: &str) -> Vec<int> {
+    Vec::new()
+}
+
+/// The byte offset where unit `i` (0..=length) of `s` starts, from its
+/// index (unit_cps; empty: counted from the start); -1 when unit i is the
+/// second of a pair or past the end.
+#[ranger::target(rust)]
+pub fn unit_byte(s: &str, cps: &Vec<int>, i: int) -> int {
+    if i < 0 {
+        return -1;
+    }
+    let mut b: usize = 0;
+    let mut u: int = 0;
+    if !cps.is_empty() {
+        let k = (i / 32) as usize;
+        if k >= cps.len() {
+            return -1;
+        }
+        b = (cps[k] / 2) as usize;
+        u = (k as int) * 32 - (cps[k] & 1);
+    }
+    let x = s.as_bytes();
+    while u < i {
+        if b >= x.len() {
+            return -1;
+        }
+        let c = x[b];
+        let n: usize = if c < 0x80 { 1 } else if c < 0xe0 { 2 } else if c < 0xf0 { 3 } else { 4 };
+        // a 4-byte character is two units, but a lone surrogate's stand-in
+        // (F4 8F A0..BF) one
+        let w: int = if n == 4 && !(c == 0xf4 && x[b + 1] == 0x8f && x[b + 2] >= 0xa0) { 2 } else { 1 };
+        if u + w > i {
+            return -1;
+        }
+        u += w;
+        b += n;
+    }
+    if b > x.len() {
+        return -1;
+    }
+    b as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn unit_byte(_s: &str, _cps: &Vec<int>, _i: int) -> int {
+    -1
+}
+
+/// The UTF-16 unit of the character at byte `b` of `s` (the second of
+/// its pair when `second`); -1 when not known (the other targets).
+#[ranger::target(rust)]
+pub fn unit_at_byte(s: &str, b: int, second: bool) -> int {
+    let c = match s[(b as usize)..].chars().next() {
+        Some(c) => c as int,
+        None => return -1,
+    };
+    if c >= 0x10f800 {
+        return if second { -1 } else { 0xd800 + (c - 0x10f800) };
+    }
+    if c >= 0x10000 {
+        let v = c - 0x10000;
+        return if second { 0xdc00 + (v & 0x3ff) } else { 0xd800 + (v >> 10) };
+    }
+    if second { -1 } else { c }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn unit_at_byte(_s: &str, _b: int, _second: bool) -> int {
+    -1
+}
+
+/// Whether `p` lies in `s` at byte `b` (b a character boundary).
+#[ranger::target(rust)]
+pub fn bytes_at(s: &str, p: &str, b: int) -> bool {
+    let x = s.as_bytes();
+    let y = p.as_bytes();
+    let a = b as usize;
+    a + y.len() <= x.len() && &x[a..(a + y.len())] == y
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn bytes_at(s: &str, p: &str, b: int) -> bool {
+    s.as_bytes().len() >= (b as usize) + p.as_bytes().len() && byte_slice(s, b, b + (p.as_bytes().len() as int)).as_str() == p
+}
+
+/// Whether `p` has a lone surrogate's stand-in (or other text in plane 16)
+/// that a byte compare would not match against half of a pair.
+pub fn has_f4(p: &str) -> bool {
+    for b in p.bytes() {
+        if b == 0xf4 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Byte `i` of an ASCII string, i in range.
 pub fn byte_at(s: &str, i: int) -> int {
     let r: int = ranger::native!(rust: { s.as_bytes()[i as usize] as int }, es6: "{s}.charCodeAt({i})");
