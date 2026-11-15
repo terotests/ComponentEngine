@@ -21,5 +21,9 @@ debug = false
 [workspace]
 
 [features]
+# the IANA time zone database (src/tzdata.rs, about 270 KB): Date's local
+# time and Intl's timeZone in any zone. Without it the only zone is UTC.
+default = ["tzdata"]
+tzdata = []
 # the baseline JIT's host calls (src/wjit.rs), wasm32 only
 wjit = []
