@@ -107,3 +107,23 @@ fn cases_txt_tree() {
     }
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
 }
+
+/// Text made again and again over a large live heap: the strings that
+/// reference counting let go are freed by a reclaim, so they bring no
+/// collection of the whole heap; strings held by cycles still do.
+#[test]
+fn strings_alone_reclaim_before_collecting() {
+    for regs in [false, true] {
+        let mut e = Engine::new();
+        e.vm.regs = regs;
+        e.eval("var keep = []; for (var i = 0; i < 200000; i++) keep.push({ i: i }); 0");
+        let before = e.gc_runs();
+        let got = e.eval("var base = new Array(100001).join('x'), big = ''; for (var r = 0; r < 3000; r++) big = base + r; big.length");
+        assert_eq!(got, "100004");
+        let runs = e.gc_runs() - before;
+        assert!(runs <= 1, "{} collections for text that reference counting frees (regs {})", runs, regs);
+        let before = e.gc_runs();
+        e.eval("for (var r = 0; r < 800; r++) { var a = {}; a.self = a; a.s = new Array(20001).join('x') + r; } 0");
+        assert!(e.gc_runs() > before, "strings held by cycles brought no collection (regs {})", regs);
+    }
+}
