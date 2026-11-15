@@ -386,6 +386,9 @@ pub struct Vm {
     pub gc_flag: bool,
     /// where in pic the last pic_get hit or filled
     pub pic_way: int,
+    /// the shared chain cache (rvm.rs PIC_MEGA ways in pic from this way;
+    /// -1 until a site needs it)
+    pub pic_mega: int,
     pub alloc_count: int,
     pub gc_threshold: int,
     /// objects made since the last collection, freed or not, and how many
@@ -771,6 +774,7 @@ impl Vm {
             a_apply: -1,
             gc_flag: false,
             pic_way: 0,
+            pic_mega: -1,
             alloc_count: 0,
             gc_threshold: GC_MIN,
             made: 0,
