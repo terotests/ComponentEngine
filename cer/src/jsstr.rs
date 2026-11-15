@@ -41,6 +41,34 @@ pub fn units(s: &str) -> Vec<int> {
     r
 }
 
+/// `s`'s UTF-16 units into `out` (its buffer reused in Rust: a regex test
+/// on many short strings does not allocate for each)
+#[ranger::target(rust)]
+pub fn units_into(s: &str, out: &mut Vec<int>) {
+    out.clear();
+    if is_ascii(s) {
+        out.extend(s.bytes().map(|b| b as int));
+        return;
+    }
+    for c in s.chars() {
+        let cp = c as int;
+        if cp >= LONE {
+            out.push(cp - LONE + 0xd800);
+        } else if cp >= 0x10000 {
+            let v = cp - 0x10000;
+            out.push(0xd800 + (v >> 10));
+            out.push(0xdc00 + (v & 0x3ff));
+        } else {
+            out.push(cp);
+        }
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn units_into(s: &str, out: &mut Vec<int>) {
+    *out = units(s);
+}
+
 /// Rust: an ASCII string's bytes in one go (vectorised)
 #[ranger::target(rust)]
 fn ascii_units(s: &str) -> Vec<int> {

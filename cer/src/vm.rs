@@ -899,7 +899,7 @@ impl Vm {
             self.rx_units2 = take_ints(&mut self.rx_units, &mut spare);
         }
         self.rx_s = s.clone();
-        self.rx_units = jsstr::units(s.as_str());
+        jsstr::units_into(s.as_str(), &mut self.rx_units);
     }
 
     /// `s`'s UTF-16 units out of the rx cache (computed when it holds
