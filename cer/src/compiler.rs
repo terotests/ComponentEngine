@@ -200,7 +200,7 @@ impl Compiler {
         if !self.error.is_empty() {
             return true;
         }
-        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::parse_stack_budget()) {
             return false;
         }
         self.fail("SyntaxError: Maximum call stack size exceeded");
@@ -1123,7 +1123,7 @@ impl Compiler {
         for wb in list.iter() {
             self.push_str(name.as_str());
             self.load_bind(*wb);
-            self.op(OP_IN);
+            self.emit(OP_IN, 1, 0);
             let jf = self.emit(OP_JF, 0, 0);
             self.load_bind(*wb);
             if store {
@@ -1834,11 +1834,18 @@ impl Compiler {
                 if fin >= 0 {
                     // the finally block runs with the entries below it
                     let saved: Vec<Ctl> = self.split_ctl(i);
-                    if ret {
-                        // keep the return value under the finally block
-                        self.block(fin);
-                    } else {
-                        self.block(fin);
+                    // a return's value (and what lies above it) stays on
+                    // the stack through the finally block: a break or
+                    // continue there pops them on its way out
+                    let mut k: int = 0;
+                    while ret && k < above {
+                        self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
+                        k += 1;
+                    }
+                    self.block(fin);
+                    while k > 0 {
+                        self.f().ctl.pop();
+                        k -= 1;
                     }
                     self.join_ctl(saved);
                 }
@@ -2238,8 +2245,11 @@ impl Compiler {
         if c >= 0 {
             let mut t2: int = -1;
             if d >= 0 {
+                // the caught value stays under the catch block (its
+                // handler's depth includes it); a copy is bound
                 t2 = self.emit(OP_TRY, 0, 0);
                 self.f().ctl.push(Ctl { kind: CT_TRY, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: d, installed: true });
+                self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
             }
             let scope = match self.node_scope.get(&c) {
                 Some(s) => *s,
@@ -2249,8 +2259,11 @@ impl Compiler {
             self.cur_scope = scope;
             let pushed = self.enter_scope(scope, false);
             if b >= 0 {
+                if d >= 0 {
+                    self.op(OP_DUP);
+                }
                 self.assign_pattern(b, true);
-            } else {
+            } else if d < 0 {
                 self.op(OP_POP);
             }
             let list = self.ast.nodes[c as usize].list.clone();
@@ -2262,11 +2275,16 @@ impl Compiler {
             self.cur_scope = saved;
             if d >= 0 {
                 self.f().ctl.pop();
+                self.f().ctl.pop();
                 self.op(OP_END_TRY);
+                self.op(OP_POP);
                 self.block(d);
                 let j2 = self.emit(OP_JUMP, 0, 0);
                 self.patch(t2);
+                // under the new exception lies the caught value
+                self.f().ctl.push(Ctl { kind: CT_ITEM, labels: Vec::new(), breaks: Vec::new(), conts: Vec::new(), finally_node: -1, installed: false });
                 self.finally_on_exception(d);
+                self.f().ctl.pop();
                 self.patch(j2);
             }
         } else {
@@ -2842,7 +2860,7 @@ impl Compiler {
         // the site's template object is made once: a constant slot keeps it
         let fi = self.fs.len() - 1;
         let slot = self.fs[fi].proto.consts.len() as int;
-        self.fs[fi].proto.consts.push(Val::Undef);
+        self.fs[fi].proto.consts.push(Val::Undef());
         let cnt = strs.len() as int;
         let site = self.emit(OP_TEMPLATE_OBJ, 0, slot);
         for s in strs.iter() {

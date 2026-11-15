@@ -70,3 +70,60 @@ is one test, run as a script of its own with the rest of its file as setup.
 
 After a run, `out/own/` holds every test as a script of its own; the fuzzer
 can mutate them: `cerxes-fuzz run --corpus cerxes/tests/v8/out/own`.
+
+## Results
+
+| date | same | differs | crash classes | change |
+|---|---|---|---|---|
+| 2026-11-13 first run (#153) | — | — | 220 | panics, aborts on deep recursion, OOM on string/BigInt limits, wasm traps |
+| 2026-11-13 #159 | 2606 | 347 | 22 | radix buffers, BigInt size limit, wasm32 index overflow, snapshot for-in, parser depth |
+| 2026-11-13 #160 (on top of the 8-byte Val, #161) | 2654 | 304 | 7 (hang) | see below |
+
+No test panics, aborts, runs out of memory or traps in WebAssembly any more; the 7 hangs are 08-for-of-next-getter-once (all five configurations) and two snap cases, listed below.
+
+### Fixed in this round
+
+- WebAssembly stack: `native_sp()` sees only the shadow stack, and V8's
+  machine stack ran out first on deep JSON.parse / flat / join / proxy chains.
+  The VM budget in wasm32 is now 128 KB and the parser's 256 KB
+  (`parse_stack_budget`); every deep case ends in a RangeError. Deep `!!!…`
+  is checked in `unary()` of all three parsers.
+- Proxy `get` and call traps check the stack (deep proxy chains).
+- Array.prototype.flat walks with its own stack (10 000 levels, then RangeError).
+- `'a'+'a'+…` with 100k terms: string `+` appends in place when the left side
+  is long (was quadratic, ran out of memory).
+- `for (var e = of(x); …)`: a name `of` in a for head was read as for-of
+  (minified Tailwind/Radix).
+- toPrecision is exact (rust target), lastIndexOf clamps its start,
+  Date.parse rejects year -000000, global match/matchAll/replace/split step
+  over a surrogate pair after an empty match in u/v mode.
+- Object.entries/values skip keys an earlier getter deleted or made
+  non-enumerable.
+- `arguments[i] = v` reaches a lazily mapped parameter.
+- Private fields can be added to a frozen object; isFrozen/isSealed ignore them.
+- A derived constructor returning `undefined` explicitly checks `this`.
+- Function constructor: parameters or body that close a bracket they did not
+  open (`new Function("/*", "*/){")`) are a SyntaxError.
+- Error.captureStackTrace exists.
+
+### Open, on purpose or for later
+
+| tests | why |
+|---|---|
+| 01-proto-setter-push, 01-reverse-holes-proto, 01-join/with/flat-*-shrink, keyed-store-proto-setter | prototype elements seen through holes and arrays shrinking under valueOf: CErXes arrays are dense and do not look up the prototype for holes; a fix touches every array builtin |
+| 01-index-2_32-2 | array index 2^32-2 is kept as a property, length stays 0 |
+| 01-apply-big-arraylike, 01-spread-big, join-sparse-huge, replace-growth, string-raw limits | CErXes has higher size limits than V8 and gives the result where V8 throws RangeError |
+| 02-ctor-offset-valueOf-detach, 02-slice-detach | detaching inside the constructor/slice is not checked again after valueOf |
+| 03-defineProperties-getter, 03-Object.groupBy-getter | descriptor/group order when a getter changes the object |
+| 03-structuredClone-getter, btoa cases | host APIs, not in the engine |
+| 04 exec-override, species, named-getter, deep-groups, backref-named-dup | RegExp builtins do not call a user `exec`; species; duplicate named groups |
+| 07-*-html-comment | Annex B HTML comments are not parsed |
+| 07-deep-parens/array/object-1k, deep funcs/arrows, 03-json-deep-parse, 03-proxy-deep-proto | CErXes depth limits differ from V8's (lower for the parser; with 8-byte values a 5000-deep proxy chain fits where V8 throws); the answer is a RangeError or the value, never a crash |
+| 07-assign-to-call | SyntaxError where V8 throws ReferenceError at run time |
+| prepareStackTrace | Error.prepareStackTrace is not supported |
+| 08-for-of-next-getter-once (hang) | CErXes reads `next` on every step, V8 once; the fix touches every iterator path |
+| 08 async-iter-close, array-iterator-proto-next-override, deep yield*, deep await | iterator close in async loops, overridden %ArrayIteratorPrototype%.next, deep generator chains |
+| global-function-over-nonconfig | global function declaration over a non-configurable property |
+| 09 Intl validation, toLocaleString-reenter | Intl option validation order |
+| 04-ReDoS-nested, 04-ReDoS-alt | the regex step budget from #158 stops catastrophic backtracking with a RangeError; V8 runs it to the end |
+| snap many-vars-100k, many-object-keys (hang) | the harness snapshots every 0.05 ms; 100k-entry states are slow to copy that often, not a fault |

@@ -64,21 +64,21 @@ impl Vm {
         self.add_prop(gf, A_PROTOTYPE, Val::Obj(gfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(gfp, A_CONSTRUCTOR, Val::Obj(gf), P_HIDDEN | P_READONLY);
         let fc = self.get_obj(self.global, self.atom_lookup("Function"), &Val::Obj(self.global));
-        if let Val::Obj(f) = fc {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(gf, f);
         }
         let agfp = self.async_generator_function_proto;
         let agf = self.native_fn("AsyncGeneratorFunction", NF_ASYNC_GENERATOR_FUNCTION, 1);
         self.add_prop(agf, A_PROTOTYPE, Val::Obj(agfp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(agfp, A_CONSTRUCTOR, Val::Obj(agf), P_HIDDEN | P_READONLY);
-        if let Val::Obj(f) = fc {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(agf, f);
         }
         let afp = self.async_function_proto;
         let af = self.native_fn("AsyncFunction", NF_ASYNC_FUNCTION, 1);
         self.add_prop(af, A_PROTOTYPE, Val::Obj(afp), P_HIDDEN | P_READONLY | P_FIXED);
         self.add_prop(afp, A_CONSTRUCTOR, Val::Obj(af), P_HIDDEN | P_READONLY);
-        if let Val::Obj(f) = fc {
+        if let Some(f) = fc.as_obj() {
             self.put_proto(af, f);
         }
     }
@@ -86,6 +86,12 @@ impl Vm {
     /// Compiles `src` as a script and runs it in the global scope; its
     /// completion value, or a thrown SyntaxError.
     pub fn eval_source(&mut self, src: &str, strict: bool, is_eval: bool) -> Val {
+        // the tokens take ~15 bytes a source byte: a 178 MB source is a
+        // RangeError, not 2.6 GB asked of the allocator (JSC
+        // unlinked-metadata-table-finalize-overflow)
+        if self.alloc_refused((src.as_bytes().len() as double) * 16.0) {
+            return Val::Undef();
+        }
         let code = if strict { format!("'use strict';\n{}", src) } else { String::from(src) };
         // a module's text (cerxes module.rs) goes to the parser, which
         // wraps it
@@ -122,13 +128,13 @@ impl Vm {
             if !err.is_empty() {
                 let msg = err.replace("SyntaxError: ", "");
                 self.throw_syntax(msg.as_str());
-                return Val::Undef;
+                return Val::Undef();
             }
             let (entry, error) = self.pcomp_program(js.as_str(), strict, is_eval);
             if entry < 0 {
                 let msg = error.replace("SyntaxError: ", "");
                 self.throw_syntax(msg.as_str());
-                return Val::Undef;
+                return Val::Undef();
             }
             let fp = self.function_proto;
             let f = self.alloc(C_FUNCTION, fp);
@@ -145,7 +151,7 @@ impl Vm {
         if !p.error.is_empty() {
             let msg = p.error.replace("SyntaxError: ", "");
             self.throw_syntax(msg.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.atoms_sync();
         let atoms = self.atoms.clone();
@@ -160,7 +166,7 @@ impl Vm {
         if !c.error.is_empty() || entry < 0 {
             let msg = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
             self.throw_syntax(msg.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.atoms = c.atoms;
         self.atom_names = c.atom_names;
@@ -170,6 +176,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         let fp = self.function_proto;
         let f = self.alloc(C_FUNCTION, fp);
         self.objs[f as usize].func = entry as i32;
@@ -204,6 +211,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         (entry, String::new())
     }
 
@@ -211,6 +219,9 @@ impl Vm {
     /// caller's bindings (`desc`, pcomp `x_eval_desc`), `this`, and
     /// strictness.
     pub fn direct_eval(&mut self, src: &str, desc: &str) -> Val {
+        if self.alloc_refused((src.as_bytes().len() as double) * 16.0) {
+            return Val::Undef();
+        }
         let strict = self.caller_strict();
         if !self.pcomp || src.starts_with("/*@cerxesModule ") {
             return self.eval_source(src, strict, true);
@@ -229,7 +240,7 @@ impl Vm {
         if !c.error.is_empty() || entry < 0 {
             let e = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
             self.throw_syntax(e.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.atoms = c.atoms;
         self.atom_names = c.atom_names;
@@ -239,11 +250,12 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         // an arrow over the caller's environment: its `this` and new.target
         self.protos[entry as usize].arrow = true;
         self.protos[entry as usize].lexical_ctor = true;
         let f = self.closure(entry);
-        self.call_value(Val::Obj(f), Val::Undef, Vec::new())
+        self.call_value(Val::Obj(f), Val::Undef(), Vec::new())
     }
 
     /// A module's function (`parser::module_source`) compiled with pcomp
@@ -268,6 +280,7 @@ impl Vm {
             pack_code(&mut p2);
             self.protos.push(p2);
         }
+        self.link_done();
         entry
     }
 
@@ -289,17 +302,17 @@ impl Vm {
             return self.colds[self.objs[o as usize].cold as usize].prim.clone();
         }
         self.throw_type("Symbol.prototype method called on incompatible receiver");
-        Val::Undef
+        Val::Undef()
     }
 
     pub fn call_native_dynamic_this(&mut self, id: int, this: Val, args: &Vec<Val>) -> Val {
-        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
+        let a0 = if args.is_empty() { Val::Undef() } else { args[0].clone() };
         if id == NF_SYMP_VALUEOF {
             return self.this_symbol(&this);
         }
         if id == NF_THROWER {
             self.throw_type("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_FN_CALLER {
             // a sloppy function's caller / arguments: null here; a strict,
@@ -310,27 +323,27 @@ impl Vm {
                 let p = &self.protos[pi];
                 if p.strict || p.arrow || p.method || p.class_ctor || p.generator || p.is_async {
                     self.throw_type("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
-                    return Val::Undef;
+                    return Val::Undef();
                 }
             }
-            return Val::Null;
+            return Val::Null();
         }
         if id == NF_PROTO_GET {
             let o = self.to_object(&this);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             let p = self.proto_of(o);
-            return if p >= 0 { Val::Obj(p) } else { Val::Null };
+            return if p >= 0 { Val::Obj(p) } else { Val::Null() };
         }
         if id == NF_PROTO_SET {
-            if matches!(this, Val::Undef) || matches!(this, Val::Null) {
+            if this.is_undef() || this.is_null() {
                 self.throw_type("Object.prototype.__proto__ called on null or undefined");
-                return Val::Undef;
+                return Val::Undef();
             }
             let o = obj_of(&this);
-            if o < 0 || !(is_obj(&a0) || matches!(a0, Val::Null)) {
-                return Val::Undef;
+            if o < 0 || !(is_obj(&a0) || a0.is_null()) {
+                return Val::Undef();
             }
             let p = obj_of(&a0);
             // no cycles
@@ -338,35 +351,35 @@ impl Vm {
             while c >= 0 {
                 if c == o {
                     self.throw_type("Cyclic __proto__ value");
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 c = self.objs[c as usize].proto as int;
             }
             if !self.objs[o as usize].extensible && self.objs[o as usize].proto != p as i32 {
                 self.throw_type("#<Object> is not extensible");
-                return Val::Undef;
+                return Val::Undef();
             }
             self.put_proto(o, p);
-            return Val::Undef;
+            return Val::Undef();
         }
         if id == NF_RE_COMPILE {
             // Annex B: the regexp takes a new pattern and flags
             let o = obj_of(&this);
             if o < 0 || self.objs[o as usize].class != C_REGEXP {
                 self.throw_type("RegExp.prototype.compile called on incompatible receiver");
-                return Val::Undef;
+                return Val::Undef();
             }
-            let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
+            let a1 = if args.len() < 2 { Val::Undef() } else { args[1].clone() };
             let (src, fl) = if self.class_of(&a0) == C_REGEXP {
                 let s = self.get(&a0, self.atom_lookup("source"));
                 let f = self.get(&a0, self.atom_lookup("flags"));
                 (s, f)
             } else {
-                (if matches!(a0, Val::Undef) { self.str_val("") } else { a0.clone() }, a1)
+                (if a0.is_undef() { self.str_val("") } else { a0.clone() }, a1)
             };
             let fresh = self.new_regexp(&src, &fl);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             let n = obj_of(&fresh);
             let func = self.objs[n as usize].func as int;
@@ -395,12 +408,12 @@ impl Vm {
             }
             return this;
         }
-        Val::Undef
+        Val::Undef()
     }
 
     pub fn call_native_esm(&mut self, args: &Vec<Val>) -> Val {
-        let a0 = if args.is_empty() { Val::Undef } else { args[0].clone() };
-        let a1 = if args.len() < 2 { Val::Undef } else { args[1].clone() };
+        let a0 = if args.is_empty() { Val::Undef() } else { args[0].clone() };
+        let a1 = if args.len() < 2 { Val::Undef() } else { args[1].clone() };
         let src = self.to_str(&a0);
         let path = self.to_str(&a1);
         let is_async = args.len() > 2 && self.truthy_v(&args[2]);
@@ -409,7 +422,7 @@ impl Vm {
             let msg = m.error.clone();
             let t = if msg.starts_with("SyntaxError: ") { String::from(&msg[13..]) } else { msg };
             self.throw_syntax(t.as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         self.str_val(m.json.as_str())
     }
@@ -417,9 +430,9 @@ impl Vm {
     pub fn call_native_dynamic(&mut self, id: int, args: &Vec<Val>, new_target: Val) -> Val {
         if id == NF_EVAL {
             if args.is_empty() {
-                return Val::Undef;
+                return Val::Undef();
             }
-            if let Val::Str(s) = &args[0] {
+            if let Some(s) = (&args[0]).as_str() {
                 let s = self.sget(s.clone());
                 let src = s.as_ref().clone();
                 // an indirect eval is sloppy global code (pcomp calls a
@@ -440,11 +453,17 @@ impl Vm {
             }
             let s = self.to_string(&args[i]);
             params.push_str(s.as_str());
+            // 16 parameters of 256 MB each: RangeError, not 4 GB asked of
+            // the allocator (Hermes long-string-function, JSC
+            // dont-reserve-huge-capacity-lexer)
+            if self.throwing || self.str_too_long(params.as_bytes().len() as double) {
+                return Val::Undef();
+            }
             i += 1;
         }
         let body = if n > 0 { self.to_string(&args[n - 1]) } else { String::new() };
-        if self.throwing {
-            return Val::Undef;
+        if self.throwing || self.str_too_long((params.as_bytes().len() + body.as_bytes().len()) as double) || self.alloc_refused(((params.as_bytes().len() + body.as_bytes().len()) as double) * 16.0) {
+            return Val::Undef();
         }
         let head = if id == NF_GENERATOR_FUNCTION {
             "function*"
@@ -455,10 +474,17 @@ impl Vm {
         } else {
             "function"
         };
+        // the parameters and the body each parse on their own (the spec's
+        // separate parses): `new Function("/*", "*/){")` or a body of
+        // "}); (function(){" is a SyntaxError, not code outside the function
+        if !dyn_part_ok(params.as_str()) || !dyn_part_ok(body.as_str()) {
+            self.throw_syntax("Arg string terminates parameters early");
+            return Val::Undef();
+        }
         let src = format!("({} anonymous({}\n) {{\n{}\n}})", head, params, body);
         let f = self.eval_source(src.as_str(), false, false);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         // a subclass's instance
         let fo = obj_of(&f);
@@ -469,4 +495,30 @@ impl Vm {
         }
         f
     }
+}
+
+/// Whether a Function constructor's parameter or body text stands alone:
+/// it lexes to its end (no comment or string left open) and its brackets
+/// balance without closing one it did not open.
+fn dyn_part_ok(src: &str) -> bool {
+    let mut lx = crate::lexer::Lexer::new(src);
+    let toks = lx.tokenize();
+    if !lx.error.is_empty() {
+        return false;
+    }
+    let mut depth: int = 0;
+    for t in toks.iter() {
+        if t.kind == crate::lexer::T_PUNCT {
+            let s = t.text.as_str();
+            if s == "(" || s == "[" || s == "{" {
+                depth += 1;
+            } else if s == ")" || s == "]" || s == "}" {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+        }
+    }
+    depth == 0
 }

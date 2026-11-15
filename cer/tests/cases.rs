@@ -107,3 +107,55 @@ fn cases_txt_tree() {
     }
     assert!(failed.is_empty(), "{} of {} cases failed:\n{}", failed.len(), 2 * all.len(), failed.join("\n"));
 }
+
+/// Text made again and again over a large live heap: the strings that
+/// reference counting let go are freed by a reclaim, so they bring no
+/// collection of the whole heap; strings held by cycles still do.
+#[test]
+fn strings_alone_reclaim_before_collecting() {
+    for regs in [false, true] {
+        let mut e = Engine::new();
+        e.vm.regs = regs;
+        e.eval("var keep = []; for (var i = 0; i < 200000; i++) keep.push({ i: i }); 0");
+        let before = e.gc_runs();
+        let got = e.eval("var base = new Array(100001).join('x'), big = ''; for (var r = 0; r < 3000; r++) big = base + r; big.length");
+        assert_eq!(got, "100004");
+        let runs = e.gc_runs() - before;
+        assert!(runs <= 1, "{} collections for text that reference counting frees (regs {})", runs, regs);
+        let before = e.gc_runs();
+        e.eval("for (var r = 0; r < 800; r++) { var a = {}; a.self = a; a.s = new Array(20001).join('x') + r; } 0");
+        assert!(e.gc_runs() > before, "strings held by cycles brought no collection (regs {})", regs);
+    }
+}
+
+/// Date's local time and Intl's default zone in four zones, with a daylight
+/// saving change each way (src/tz.rs, src/tzdata.rs); the answers are Node's.
+#[cfg(feature = "tzdata")]
+#[test]
+fn time_zones() {
+    let src = "var d = new Date(2026, 2, 29, 3, 30), s = new Date(2026, 9, 25, 3, 30), o = [];\no.push(d.toString(), s.toString(), d.getTimezoneOffset(), s.getTimezoneOffset(), d.toISOString(), s.toISOString());\no.push(new Date(\"2026-07-01T12:00\").getHours(), new Date(1e12).getDate(), new Date(-3e12).getTimezoneOffset());\nvar u = new Date(2026, 0, 31, 12); u.setMonth(1); o.push(u.getMonth(), u.getDate());\no.push(new Intl.DateTimeFormat(\"en-US\", { timeZone: \"America/New_York\", timeZoneName: \"short\", hour: \"numeric\" }).format(d));\no.push(new Intl.DateTimeFormat(\"en-US\", { timeZoneName: \"long\", month: \"short\", day: \"numeric\", hour: \"numeric\", minute: \"2-digit\" }).format(s));\no.join(\" | \")";
+    let want = [
+        ("Europe/Helsinki", "Sun Mar 29 2026 04:30:00 GMT+0300 (Eastern European Summer Time) | Sun Oct 25 2026 03:30:00 GMT+0300 (Eastern European Summer Time) | -180 | -180 | 2026-03-29T01:30:00.000Z | 2026-10-25T00:30:00.000Z | 12 | 9 | -99 | 2 | 3 | 9 PM EDT | Oct 25, 3:30 AM Eastern European Summer Time"),
+        ("America/New_York", "Sun Mar 29 2026 03:30:00 GMT-0400 (Eastern Daylight Time) | Sun Oct 25 2026 03:30:00 GMT-0400 (Eastern Daylight Time) | 240 | 240 | 2026-03-29T07:30:00.000Z | 2026-10-25T07:30:00.000Z | 12 | 8 | 296 | 2 | 3 | 3 AM EDT | Oct 25, 3:30 AM Eastern Daylight Time"),
+        ("Australia/Sydney", "Sun Mar 29 2026 03:30:00 GMT+1100 (Australian Eastern Daylight Time) | Sun Oct 25 2026 03:30:00 GMT+1100 (Australian Eastern Daylight Time) | -660 | -660 | 2026-03-28T16:30:00.000Z | 2026-10-24T16:30:00.000Z | 12 | 9 | -604 | 2 | 3 | 12 PM EDT | Oct 25, 3:30 AM Australian Eastern Daylight Time"),
+        ("Asia/Kolkata", "Sun Mar 29 2026 03:30:00 GMT+0530 (India Standard Time) | Sun Oct 25 2026 03:30:00 GMT+0530 (India Standard Time) | -330 | -330 | 2026-03-28T22:00:00.000Z | 2026-10-24T22:00:00.000Z | 12 | 9 | -321 | 2 | 3 | 6 PM EDT | Oct 25, 3:30 AM India Standard Time"),
+    ];
+    for (zone, answer) in want.iter() {
+        let mut e = Engine::new();
+        assert!(e.set_time_zone(zone), "{} unknown", zone);
+        assert_eq!(&e.eval(src), answer, "in {}", zone);
+    }
+    let mut e = Engine::new();
+    assert!(!e.set_time_zone("Mars/Olympus"));
+    assert_eq!(e.time_zone(), "UTC");
+}
+
+/// Without the `tzdata` feature the only zone is UTC.
+#[cfg(not(feature = "tzdata"))]
+#[test]
+fn time_zones_left_out() {
+    let mut e = Engine::new();
+    assert!(!e.set_time_zone("Europe/Helsinki"));
+    assert!(e.set_time_zone("UTC"));
+    assert_eq!(e.eval("new Date(2026, 6, 1).getTimezoneOffset()"), "0");
+}

@@ -150,11 +150,13 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
     // with safe points (no native code under a host's call): a page calls a
     // frame function many times a second and never evals in between, so
     // the frames' garbage has to go while they run
-    let r = engine.vm.call_top(f, Val::Undef, vec![av]);
+    // the call and its jobs share one time limit
+    let began = engine.vm.begin_call(false);
+    let r = engine.vm.call_top(f, Val::Undef(), vec![av]);
     let value = if engine.vm.throwing {
         let exc = engine.vm.exc.clone();
         engine.vm.throwing = false;
-        engine.vm.exc = Val::Undef;
+        engine.vm.exc = Val::Undef();
         engine.vm.stack.clear();
         engine.vm.frames.clear();
         engine.vm.handlers.clear();
@@ -167,11 +169,23 @@ pub unsafe extern "C" fn cx_call(e: *mut Engine, np: *const u8, nn: usize, ap: *
         engine.vm.temp_roots.push(r.clone());
         engine.vm.run_jobs();
         engine.vm.temp_roots.pop();
-        match &r {
-            Val::Str(s) => engine.vm.sref(*s).to_string(),
-            _ => engine.vm.display(&r),
+        if engine.vm.terminated {
+            engine.vm.throwing = false;
+            engine.vm.exc = Val::Undef();
+            engine.vm.stack.clear();
+            engine.vm.frames.clear();
+            engine.vm.handlers.clear();
+            engine.vm.native_depth = 0;
+            engine.error = format!("Uncaught Error: script time limit exceeded ({} ms)", engine.vm.time_limit);
+            engine.error.clone()
+        } else {
+            match (&r).kind() {
+                VK::Str(s) => engine.vm.sref(s).to_string(),
+                _ => engine.vm.display(&r),
+            }
         }
     };
+    engine.vm.end_call(began);
     finish(engine, value)
 }
 
@@ -314,6 +328,13 @@ pub unsafe extern "C" fn cx_set_slice(e: *mut Engine, ms: f64) {
     (*e).set_slice(ms);
 }
 
+/// The longest one call into the engine may run (Engine::set_time_limit);
+/// 0: none.
+#[no_mangle]
+pub unsafe extern "C" fn cx_set_time_limit(e: *mut Engine, ms: f64) {
+    (*e).set_time_limit(ms);
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn cx_start(e: *mut Engine, p: *const u8, n: usize) -> i32 {
     let engine = &mut *e;
@@ -347,10 +368,7 @@ pub unsafe extern "C" fn cx_get_global(e: *mut Engine, np: *const u8, nn: usize)
     let a = engine.vm.intern(name.as_str());
     let g = engine.vm.global;
     let v = engine.vm.get_obj(g, a, &Val::Obj(g));
-    let s = match &v {
-        Val::Str(s) => engine.vm.sref(*s).to_string(),
-        _ => engine.vm.display(&v),
-    };
+    let s = if let Some(s) = (&v).as_str() { engine.vm.sref(s).to_string() } else { engine.vm.display(&v) };
     RESULT.with(|b| *b.borrow_mut() = s.into_bytes());
 }
 

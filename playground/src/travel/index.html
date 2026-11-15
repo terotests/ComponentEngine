@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Travelling CErXes engine</title>
+  <meta name="description" content="A CErXes engine written out as text and made again from it: how fast that is in this browser, and one query over several hosts done three ways (the whole engine moves, only its data moves, map-reduce).">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='3' cy='8' r='2.5' fill='%232a78d6'/%3E%3Ccircle cx='13' cy='8' r='2.5' fill='%230a7a2f'/%3E%3Cpath d='M6 8h4' stroke='%239a6400' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="travel.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <p class="crumbs"><a href="../">← ComponentEngine Playground</a></p>
+      <h1>Travelling CErXes engine</h1>
+      <p class="lede">A CErXes engine's whole state (objects, compiled code, a suspended script's frames) can be
+        written out as text and a new engine made from that text, here or somewhere else. Each <b>host</b> below is a
+        Web Worker with its own CErXes WebAssembly instance; the page carries the text between them as a network
+        would, and estimates what a real network would add from the gzip size of every transfer.</p>
+      <p class="lede">The Zoo ranking has the run-time cost: <b>CErXes · detachable</b> runs in 4 ms slices (it can be
+        stopped and moved at any branch, call or return) and <b>CErXes · moving</b> also moves itself every 100 ms.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <h2>1. Snapshot speed</h2>
+    <p class="note">Take: the engine as text. Restore: a new engine from the text. Median of 5, one host.
+      gzip: this browser's CompressionStream.</p>
+    <div class="controls"><button id="run-bench" class="primary">Measure snapshots</button></div>
+    <div class="table-wrap">
+      <table class="results">
+        <thead><tr><th>Engine holds</th><th>Text</th><th>gzip</th><th>Take</th><th>Restore</th><th>gzip time</th></tr></thead>
+        <tbody id="bench-body"></tbody>
+      </table>
+    </div>
+    <p class="note"><code>gc()</code> only asks for a collection; it runs at the next safe point (a call or a
+      backward jump). An engine snapshotted before that carries the dropped data with it.</p>
+
+    <h2>2. One query over every shard, three ways</h2>
+    <p class="note">Each host holds one shard of generated sales rows. The query: count, sum and max per group of the
+      rows from 2023 on.</p>
+    <ul class="note">
+      <li><b>A</b>: the whole engine travels host to host, reads each shard and leaves as a snapshot.</li>
+      <li><b>B</b>: only its data root (<code>__carry</code>, JSON) travels; every host was given the code once, as a
+        code-only template snapshot, and makes a fresh engine from it.</li>
+      <li><b>C</b>: map-reduce. The query code goes to every shard at once; the partial results come back and are merged.</li>
+    </ul>
+    <div class="controls">
+      <label>Hosts <input id="shards" type="number" min="2" max="8" value="4"></label>
+      <label>Rows per shard <input id="rows" type="number" min="1000" max="200000" step="1000" value="50000"></label>
+      <label>Group by <select id="key"><option value="region">region (5 groups)</option><option value="customer">customer (10 000 groups)</option></select></label>
+      <label><input id="collect" type="checkbox" checked> collect before each move</label>
+      <button id="run-query" class="primary">Run the query</button>
+    </div>
+    <div class="controls">
+      <label>Network round trip <input id="rtt" type="number" min="0" value="5"> ms</label>
+      <label>Bandwidth <input id="mbit" type="number" min="1" value="100"> Mbit/s</label>
+    </div>
+    <div class="table-wrap">
+      <table class="results">
+        <thead><tr><th>Way</th><th>Moved</th><th>gzip</th><th>Work on hosts</th><th>Wall time here</th><th>Network (estimate)</th><th>Work + network</th></tr></thead>
+        <tbody id="query-body"></tbody>
+      </table>
+    </div>
+    <p id="query-check" class="note"></p>
+    <pre id="hops" class="hops"></pre>
+    <p class="note">Network estimate: half a round trip plus the gzip'd bytes at the bandwidth for every transfer
+      (A and B one after another, C in parallel: one round trip and its largest shard). Work: restore, query and take
+      (A); engine from template, JSON in and out, and query (B); the slowest shard and the merge (C).</p>
+    <p id="status" class="note"></p>
+  </main>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

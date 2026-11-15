@@ -41,6 +41,9 @@ pub mod regs;
 pub mod rvm;
 pub mod snapshot;
 pub mod typed;
+pub mod tz;
+#[cfg_attr(not(feature = "tzdata"), path = "tzdata_none.rs")]
+pub mod tzdata;
 pub mod uninorm;
 pub mod uniprops;
 pub mod unit;
@@ -132,6 +135,18 @@ impl Engine {
         self.vm.echo = on;
     }
 
+    /// Date's local time zone, an IANA name ("Europe/Helsinki"): UTC until
+    /// set. False, and the zone kept, for a name the database does not have
+    /// (without the `tzdata` feature only UTC is known).
+    pub fn set_time_zone(&mut self, name: &str) -> bool {
+        self.vm.set_time_zone(name)
+    }
+
+    /// the local time zone's name
+    pub fn time_zone(&self) -> String {
+        self.vm.time_zone()
+    }
+
     /// Runs a script; answers the value of its last expression statement
     /// as a string, or the uncaught exception (`Uncaught TypeError: …`).
     pub fn eval(&mut self, src: &str) -> String {
@@ -192,8 +207,10 @@ impl Engine {
             self.error = String::from("SyntaxError");
             return self.error.clone();
         }
+        let began = self.vm.begin_call(false);
         let r = self.run_val(u);
         if self.vm.throwing {
+            self.vm.end_call(began);
             return self.uncaught();
         }
         // the completion value lives through the jobs: a reclaim there
@@ -201,10 +218,48 @@ impl Engine {
         self.vm.temp_roots.push(r);
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        self.vm.end_call(began);
+        if self.vm.terminated && !self.vm.throwing {
+            self.vm.terminate();
+        }
         if self.vm.throwing {
             return self.uncaught();
         }
         self.vm.display(&r)
+    }
+
+    /// The longest one call into the engine (`run`, `eval`, `call`) may
+    /// run, in ms; 0: no limit (the default). Past it the script stops
+    /// wherever it is: `Uncaught Error: script time limit exceeded`, no
+    /// catch or finally runs (Vm::set_time_limit).
+    pub fn set_time_limit(&mut self, ms: double) {
+        self.vm.set_time_limit(ms);
+    }
+
+    /// The last call was stopped by the time limit (or the heap limit:
+    /// heap_exceeded).
+    pub fn timed_out(&self) -> bool {
+        self.vm.terminated
+    }
+
+    /// The most memory this engine may hold, in bytes; 0: no limit (the
+    /// default). Measured with the host's probe (builtins::set_mem_probe,
+    /// a counting allocator): what the probe grew by during this engine's
+    /// calls. Past it the script stops as at the time limit: `Uncaught
+    /// Error: script heap limit exceeded`, no catch or finally runs. Without
+    /// a probe nothing is measured.
+    pub fn set_heap_limit(&mut self, bytes: double) {
+        self.vm.set_heap_limit(bytes);
+    }
+
+    /// The last call was stopped by the heap limit.
+    pub fn heap_exceeded(&self) -> bool {
+        self.vm.terminated && self.vm.heap_over
+    }
+
+    /// The memory this engine's calls took and kept, by the probe.
+    pub fn heap_used(&self) -> double {
+        self.vm.heap_used()
     }
 
     fn run_val(&mut self, u: unit::Unit) -> Val {
@@ -225,35 +280,38 @@ impl Engine {
         if !self.error.is_empty() {
             return format!("t:{}", self.error);
         }
+        let began = self.vm.begin_call(false);
         let r = self.run_val(u);
         if self.vm.throwing {
+            self.vm.end_call(began);
             let u = self.uncaught();
             return format!("t:{}", u);
         }
         self.vm.temp_roots.push(r);
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
-        match &r {
-            Val::Undef => String::from("u"),
-            Val::Null => String::from("l"),
-            Val::Bool(b) => format!("b:{}", b),
-            Val::Num(n) => {
-                if *n == 0.0 && 1.0 / *n < 0.0 {
+        self.vm.end_call(began);
+        match (&r).kind() {
+            VK::Undef => String::from("u"),
+            VK::Null => String::from("l"),
+            VK::Bool(b) => format!("b:{}", b),
+            VK::Num(n) => {
+                if n == 0.0 && 1.0 / n < 0.0 {
                     String::from("n:-0")
                 } else {
-                    format!("n:{}", num::number_to_string(*n))
+                    format!("n:{}", num::number_to_string(n))
                 }
             }
-            Val::Str(s) => format!("s:{}", self.vm.sref(*s)),
-            Val::Obj(o) => format!("o:{}", self.vm.objs[*o as usize].class),
-            Val::Big(_) => format!("o:{}", C_BIGINT),
+            VK::Str(s) => format!("s:{}", self.vm.sref(s)),
+            VK::Obj(o) => format!("o:{}", self.vm.objs[o as usize].class),
+            VK::Big(_) => format!("o:{}", C_BIGINT),
         }
     }
 
     fn uncaught(&mut self) -> String {
         let e = self.vm.exc.clone();
         self.vm.throwing = false;
-        self.vm.exc = Val::Undef;
+        self.vm.exc = Val::Undef();
         self.vm.stack.clear();
         self.vm.frames.clear();
         self.vm.handlers.clear();
@@ -269,14 +327,23 @@ impl Engine {
         let a = self.vm.intern(name);
         let g = self.vm.global;
         let f = self.vm.get_obj(g, a, &Val::Obj(g));
-        let r = self.vm.call_top(f, Val::Undef, Vec::new());
+        let began = self.vm.begin_call(false);
+        let r = self.vm.call_top(f, Val::Undef(), Vec::new());
         if self.vm.throwing {
+            self.vm.end_call(began);
             return self.uncaught();
         }
         // the jobs' frames are safe points: the result is held through them
         self.vm.temp_roots.push(r.clone());
         self.vm.run_jobs();
         self.vm.temp_roots.pop();
+        self.vm.end_call(began);
+        if self.vm.terminated {
+            if !self.vm.throwing {
+                self.vm.terminate();
+            }
+            return self.uncaught();
+        }
         self.vm.display(&r)
     }
 

@@ -2485,6 +2485,19 @@ impl Regex {
         (c, 1)
     }
 
+    /// The character ending at `pos` (going right to left) and its width:
+    /// under /u a surrogate pair is one code point, as unit_at reads it.
+    fn unit_before(&self, input: &Vec<int>, pos: int) -> (int, int) {
+        let d = input[(pos - 1) as usize];
+        if self.unicode && d >= 0xdc00 && d <= 0xdfff && pos >= 2 {
+            let c = input[(pos - 2) as usize];
+            if c >= 0xd800 && c <= 0xdbff {
+                return (0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00), 2);
+            }
+        }
+        (d, 1)
+    }
+
     /// Runs the program from `pc` at `start`; answers the end position or
     /// -1. `back` runs it right to left (lookbehind).
     fn run(&self, input: &Vec<int>, start: int, pc0: int, caps: &mut Vec<int>, regs: &mut Vec<int>, back: bool, stack: &mut Vec<(int, int, int)>) -> int {
@@ -2495,14 +2508,17 @@ impl Regex {
         let mut pc = pc0;
         let mut pos = start;
         let mut steps: int = 0;
+        let mut backs: int = 0;
+        let limit = crate::builtins::regex_limit();
         loop {
             let ins = self.code[pc as usize];
             let mut ok = true;
             match ins.op {
                 I_CHAR => {
                     if back {
-                        if pos > 0 && self.eq(input[(pos - 1) as usize], ins.a, ins.b != 0) {
-                            pos -= 1;
+                        let (c, w) = if pos > 0 { self.unit_before(input, pos) } else { (-1, 0) };
+                        if pos > 0 && self.eq(c, ins.a, ins.b != 0) {
+                            pos -= w;
                             pc += 1;
                         } else {
                             ok = false;
@@ -2521,8 +2537,9 @@ impl Regex {
                 }
                 I_ANY | I_ANYNL => {
                     if back {
-                        if pos > 0 && (ins.op == I_ANYNL || !is_line_term(input[(pos - 1) as usize])) {
-                            pos -= 1;
+                        let (c, w) = if pos > 0 { self.unit_before(input, pos) } else { (-1, 0) };
+                        if pos > 0 && (ins.op == I_ANYNL || !is_line_term(c)) {
+                            pos -= w;
                             pc += 1;
                         } else {
                             ok = false;
@@ -2541,8 +2558,9 @@ impl Regex {
                 }
                 I_CLASS => {
                     if back {
-                        if pos > 0 && self.class_has(ins.a, input[(pos - 1) as usize], ins.b != 0) {
-                            pos -= 1;
+                        let (c, w) = if pos > 0 { self.unit_before(input, pos) } else { (-1, 0) };
+                        if pos > 0 && self.class_has(ins.a, c, ins.b != 0) {
+                            pos -= w;
                             pc += 1;
                         } else {
                             ok = false;
@@ -2561,7 +2579,7 @@ impl Regex {
                 }
                 I_STAR => {
                     steps += 1;
-                    if steps > 50000000 {
+                    if rx_stop(steps, stack.len() as int) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2586,9 +2604,9 @@ impl Regex {
                 }
                 I_SPLIT => {
                     // a run without splits ends (no loop goes back without
-                    // one): the step budget is counted here
+                    // one): the clock is looked at from here
                     steps += 1;
-                    if steps > 50000000 {
+                    if rx_stop(steps, stack.len() as int) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2626,7 +2644,7 @@ impl Regex {
                 }
                 I_CNTBR | I_CNTBR_LAZY => {
                     steps += 1;
-                    if steps > 50000000 {
+                    if rx_stop(steps, stack.len() as int) {
                         stack.truncate(base);
                         return -1;
                     }
@@ -2773,7 +2791,14 @@ impl Regex {
                 }
             }
             if !ok {
-                // backtrack
+                // backtrack: the budget counts these (a match that never
+                // goes back, however long, does not use it up)
+                backs += 1;
+                if (backs as double) > limit {
+                    crate::builtins::regex_over();
+                    stack.truncate(base);
+                    return -1;
+                }
                 loop {
                     if stack.len() == base {
                         return -1;
@@ -2841,6 +2866,11 @@ impl Regex {
     }
 
     pub fn exec(&self, input: &Vec<int>, start: int) -> Vec<int> {
+        if crate::builtins::regex_stopped() {
+            // an attempt ran out of steps or time: no more tries until
+            // Vm::rx_after has thrown
+            return Vec::new();
+        }
         let n = input.len() as int;
         let mut s = start;
         let ncap = ((self.ngroups + 1) * 2) as usize;
@@ -3215,4 +3245,22 @@ pub fn id_wide(c: char, start: bool) -> bool {
     } else {
         (c.is_alphanumeric() && c != '\u{2e2f}') || c == '\u{200c}' || c == '\u{200d}'
     }
+}
+
+/// The most backtrack entries one match keeps (24 bytes each: 384 MB).
+const RX_STACK_MAX: int = 16000000;
+
+/// A match attempt is to stop: every 16384 steps, past the deadline, or
+/// with a backtrack list past RX_STACK_MAX (`/(){999999999}/` asked for
+/// 3 GB; a RangeError now, as the backtracking budget gives: Hermes
+/// regexp-exec-fast-path).
+fn rx_stop(steps: int, depth: int) -> bool {
+    if (steps & 16383) != 0 {
+        return false;
+    }
+    if depth > RX_STACK_MAX {
+        crate::builtins::regex_over();
+        return true;
+    }
+    crate::builtins::regex_time(steps)
 }

@@ -1036,7 +1036,7 @@ impl Lexer {
         let mut x = TokX::new();
         self.pos += 1;
         let n = self.src.len() as int;
-        if crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+        if crate::vm::stack_deeper_than(self.sp0, crate::vm::parse_stack_budget()) {
             // templates nested in substitutions, read recursively
             self.fail("Maximum call stack size exceeded");
             self.pos = n;

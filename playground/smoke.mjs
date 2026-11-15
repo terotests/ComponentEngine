@@ -22,6 +22,11 @@
 // to an iframe (freeze there, thaw here), start a new picture on a zoom (click,
 // wheel, + button) and a drag, go on
 // after a freeze and a thaw, and answer "Fetch results".
+//
+// --travel opens the travelling-engine demo (travel/): every snapshot case
+// has to restore, a collected engine has to be smaller than one that only
+// asked for gc(), and the three ways of the query (engine moves, data moves,
+// map-reduce) have to give the same answer.
 
 import fs from "node:fs";
 import http from "node:http";
@@ -34,6 +39,7 @@ const EXPECTED_GAPS = {};
 const zoo = (process.argv.find((a) => a.startsWith("--zoo=")) || "").slice(6);
 const evgDemo = process.argv.includes("--evg");
 const sandboxDemo = process.argv.includes("--sandbox");
+const travelDemo = process.argv.includes("--travel");
 
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
 const server = http.createServer((req, res) => {
@@ -61,6 +67,7 @@ page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
 
 if (evgDemo) await runEvg();
 if (sandboxDemo) await runSandbox();
+if (travelDemo) await runTravel();
 await page.goto(url);
 await page.waitForSelector(".engine");
 if (zoo) await runZoo();
@@ -282,6 +289,29 @@ async function runSandbox() {
   if (!(views[0].scale < views[0].home[2]) || views[0].cx === views[0].home[0]) problems.push("the drag / + button did not pan and zoom card 0: " + JSON.stringify(views[0]));
   if (+after[0].split(" ")[0] !== gens[0] || +after[1].split(" ")[0] !== gens[1]) problems.push("cards 0 and 1 are not drawing their new view: " + after.slice(0, 2) + " gens " + gens.slice(0, 2));
   if (results.some((r) => !r.result || !r.result.program)) problems.push("a card answered no result");
+  const bad = [...errors, ...problems];
+  if (bad.length) console.log("errors:\n" + bad.join("\n"));
+  await browser.close();
+  server.close();
+  process.exit(bad.length ? 1 : 0);
+}
+
+async function runTravel() {
+  await page.goto(url + "travel/");
+  await page.waitForFunction(() => window.travelDemo);
+  const problems = [];
+  const bench = await page.evaluate(() => window.travelDemo.runBench());
+  for (const r of bench) console.log(`${r.name.padEnd(40)} ${(r.text / 1024).toFixed(0).padStart(7)} KB ${(r.gz / 1024).toFixed(0).padStart(6)} KB gz  take ${r.take.toFixed(1).padStart(6)} ms  restore ${r.restore.toFixed(1).padStart(6)} ms`);
+  const by = Object.fromEntries(bench.map((r) => [r.id, r]));
+  if (!(by.collected.text < by.dropped.text / 2)) problems.push(`collecting did not drop the rows: ${by.collected.text} vs ${by.dropped.text} bytes`);
+  if (!(by.rows200.text > by.rows50.text)) problems.push("more rows did not make a larger snapshot");
+  for (const key of ["region", "customer"]) {
+    const q = await page.evaluate((key) => window.travelDemo.runQuery({ shards: 3, rows: 20000, key }), key);
+    for (const w of ["A", "B", "C"]) console.log(`${key.padEnd(9)} ${w}: moved ${(q[w].gz / 1024).toFixed(1)} KB gz, work ${q[w].work.toFixed(0)} ms, wall ${q[w].wall.toFixed(0)} ms -> ${q[w].summary}`);
+    if (!(q.A.summary === q.B.summary && q.B.summary === q.C.summary)) problems.push(`${key}: the three ways disagree`);
+    if (!/ n=[1-9]/.test(q.A.summary)) problems.push(`${key}: no rows counted: ${q.A.summary}`);
+  }
+  if (shot) await page.screenshot({ path: shot, fullPage: true });
   const bad = [...errors, ...problems];
   if (bad.length) console.log("errors:\n" + bad.join("\n"));
   await browser.close();

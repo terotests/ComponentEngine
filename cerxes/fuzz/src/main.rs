@@ -5,21 +5,28 @@
 //   cerxes-fuzz run   [--time S] [--jobs N] [--seed N] [--out DIR] [--node]
 //                     [--heavy] [--rc-check] [--mutate P] [--corpus PATH]...
 //                     [--hostile P] [--preempt P] [--jit WASM] [--jit-pct P]
-//                     [--known FILE]
+//                     [--known FILE] [--class P]
 //   cerxes-fuzz repro FILE.js           run the oracles in this process
 //   cerxes-fuzz min   FILE.js [--out F] shrink a finding, keeping its class
 //   cerxes-fuzz gen   [--seed N] [--preempt 100]  print one generated program
 //   cerxes-fuzz known [DIR]             which known/ findings still reproduce
+//   cerxes-fuzz import DIR --out D [--max N] [--engine E]  other engines' tests → seeds
+//   cerxes-fuzz hook  FILE.js [--seed N]  print FILE with bug-class hooks (v3)
 //   cerxes-fuzz worker                  (internal) programs on stdin
 
+mod cov;
 mod gen;
+mod hooks;
 mod hostile;
+mod import;
 mod jit;
 mod known;
 mod preempt;
 mod stage;
 
 use cerxes::Engine;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::AtomicIsize;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -59,12 +66,57 @@ const BUDGET_MS: f64 = 3000.0;
 /// the host could not have stopped the engine in time.
 const SLICE_GAP_MS: f64 = 1000.0;
 
+// A counting allocator, the probe for Engine::set_heap_limit: an engine of
+// the oracle stops at half of --mem-mb (an uncatchable Error, as a host's
+// limit would) instead of the process dying at the ulimit.
+struct Counting;
+static HELD: AtomicIsize = AtomicIsize::new(0);
+static HEAP_LIMIT: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        HELD.fetch_add(l.size() as isize, Ordering::Relaxed);
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        HELD.fetch_sub(l.size() as isize, Ordering::Relaxed);
+        unsafe { System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        HELD.fetch_add(n as isize - l.size() as isize, Ordering::Relaxed);
+        unsafe { System.realloc(p, l, n) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+fn held() -> f64 {
+    HELD.load(Ordering::Relaxed) as f64
+}
+
+/// The oracle's heap limit on `e` (half of --mem-mb; none without one).
+fn limit_heap(e: &mut Engine) {
+    let n = HEAP_LIMIT.load(Ordering::Relaxed);
+    if n > 0 {
+        cerxes::builtins::set_mem_probe(held);
+        e.set_heap_limit(n as f64);
+    }
+}
+
+/// A run the heap limit stopped: its output is not compared (another
+/// configuration may hold a little less and finish).
+fn heap_stopped(lines: &[String]) -> bool {
+    lines.iter().any(|l| l.contains("script heap limit exceeded"))
+}
+
 fn now_ms(t0: Instant) -> f64 {
     t0.elapsed().as_secs_f64() * 1000.0
 }
 
 fn run_once(src: &str, c: Config) -> Run {
     let mut e = Engine::new_with(c.pcomp);
+    limit_heap(&mut e);
     e.vm.regs = c.regs;
     e.vm.rc_check = c.rc_check;
     if c.tsx {
@@ -100,6 +152,7 @@ fn run_once(src: &str, c: Config) -> Run {
             let snap = e.snapshot();
             if !snap.is_empty() {
                 let mut e2 = Engine::from_snapshot(&snap);
+                limit_heap(&mut e2);
                 if !e2.error.is_empty() {
                     lines.push(format!("!! from_snapshot: {}", e2.error));
                     return Run { lines, slow: false, max_slice_ms: max_slice };
@@ -163,6 +216,86 @@ fn corrupt_snapshot(src: &str, seed: u64) -> Option<String> {
     }
 }
 
+/// What a probe reads from a finished program's globals: values, closures
+/// called, class instances made. Run in the engine and in its restored
+/// snapshot, it must read the same; each engine runs it twice, so state the
+/// first probe changes is compared too.
+const PROBE: &str = r#"(function () {
+  var o = [];
+  function t(f) { try { return __s(f(), 0); } catch (e) { return '!' + (e && e.name); } }
+  for (var i = 0; i < 9; i++) { var n = 'v' + i; o.push(n in globalThis ? t(function () { return globalThis[n]; }) : '-'); }
+  for (var j = 0; j < 3; j++) { var g = globalThis['f' + j]; if (typeof g === 'function') o.push(t(function () { return g(1, 2, 3); })); }
+  if (typeof D0 === 'function') o.push(t(function () { var d = new D0(); d.g = 5; return [d.m(2), d.g, C0.s, C0.t]; }));
+  o.push(Object.getOwnPropertyNames(globalThis).length);
+  return o.join('|');
+})()"#;
+
+/// Snapshot round trip: a finished program's engine and the engine restored
+/// from its snapshot must answer the probe alike, and the snapshot text must
+/// be a fixed point (the same state gives the same text).
+fn roundtrip(src: &str, c: Config) -> Option<String> {
+    let mut e = Engine::new_with(c.pcomp);
+    e.vm.regs = c.regs;
+    e.set_syntax(false, false);
+    e.set_slice(50.0);
+    e.eval(src);
+    let t0 = Instant::now();
+    while e.is_suspended() && now_ms(t0) < BUDGET_MS {
+        e.resume();
+    }
+    if e.is_suspended() || !src.contains("function __s(") {
+        return None;
+    }
+    let snap = e.snapshot();
+    if snap.is_empty() {
+        return None;
+    }
+    let mut e2 = Engine::from_snapshot(&snap);
+    if !e2.error.is_empty() {
+        return Some(format!("from_snapshot refused a fresh snapshot: {}", e2.error));
+    }
+    e2.vm.regs = c.regs;
+    e2.set_slice(50.0);
+    e2.syntax = e.syntax.clone();
+    // the first restore may change the text once (a shape-walking for-in
+    // becomes one over a key list); from then on a restore and a snapshot
+    // must give the same text back
+    let snap2 = e2.snapshot();
+    let mut e3 = Engine::from_snapshot(&snap2);
+    if !e3.error.is_empty() {
+        return Some(format!("from_snapshot refused the snapshot of a restored engine: {}", e3.error));
+    }
+    e3.syntax = e.syntax.clone();
+    let snap3 = e3.snapshot();
+    for (what, x, y) in [("snapshot taken twice", &snap, &e.snapshot()), ("snapshot of a twice restored engine", &snap2, &snap3)] {
+        if x != y {
+            let at = x.chars().zip(y.chars()).take_while(|(a, b)| a == b).count();
+            let ctx = |t: &str| t.chars().skip(at.saturating_sub(20)).take(60).collect::<String>();
+            return Some(format!("{} differs at char {} of {}/{}: {:?} vs {:?}", what, at, x.len(), y.len(), ctx(x), ctx(y)));
+        }
+    }
+    for round in 0..2 {
+        let mut a = e.eval(PROBE);
+        let mut b = e2.eval(PROBE);
+        let t0 = Instant::now();
+        while (e.is_suspended() || e2.is_suspended()) && now_ms(t0) < BUDGET_MS {
+            if e.is_suspended() {
+                a = e.resume();
+            }
+            if e2.is_suspended() {
+                b = e2.resume();
+            }
+        }
+        if e.is_suspended() || e2.is_suspended() {
+            return None;
+        }
+        if a != b {
+            return Some(format!("probe {} after restore: {} vs {}", round + 1, clip(&a), clip(&b)));
+        }
+    }
+    None
+}
+
 static PANIC_MSG: Mutex<String> = Mutex::new(String::new());
 
 fn last_panic() -> String {
@@ -192,6 +325,10 @@ fn install_panic_hook() {
         if let Ok(mut m) = PANIC_MSG.lock() {
             *m = format!("{} in {} at {}", msg, func, loc);
         }
+        if std::env::var("FUZZ_BACKTRACE").is_ok() {
+            // repro: the whole backtrace, to see how the engine got there
+            eprintln!("panic: {} at {}\n{}", msg, loc, bt.lines().filter(|l| l.contains("cerxes")).take(24).collect::<Vec<_>>().join("\n"));
+        }
     }));
 }
 
@@ -212,7 +349,7 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
     if a.max_slice_ms > SLICE_GAP_MS + base.slice_ms {
         return (format!("slice-gap\tslice\tone 50 ms slice ran {:.0} ms before the engine yielded", a.max_slice_ms), a.lines);
     }
-    if a.slow {
+    if a.slow || heap_stopped(&a.lines) {
         return (String::from("slow"), a.lines);
     }
     // the same program on other configurations must print the same lines
@@ -236,7 +373,7 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
                 return (format!("panic\t{}\t{}: {}", panic_sig(&p), name, p), a.lines);
             }
         };
-        if b.slow {
+        if b.slow || heap_stopped(&b.lines) {
             continue;
         }
         if let Some((d, sig)) = first_diff(&a.lines, &b.lines) {
@@ -266,6 +403,32 @@ fn judge(src: &str, seed: u64, generated: bool, opts: &Opts) -> (String, Vec<Str
         if r.is_err() {
             let p = last_panic();
             return (format!("{}\t{}\t{}{}: {}", class, panic_sig(&p), class, if class == "hostile-unit" && !regs { " (stack VM)" } else { "" }, p), a.lines);
+        }
+    }
+    if generated && rng.chance(opts.roundtrip_pct) {
+        stage::set("snapshot round trip");
+        match catch_unwind(AssertUnwindSafe(|| roundtrip(src, base))) {
+            Ok(Some(d)) => {
+                let sig: String = d.chars().filter(|c| !c.is_ascii_digit()).take(60).collect();
+                return (format!("snapshot-roundtrip\t{}\t{}", sig, d), a.lines);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let p = last_panic();
+                return (format!("panic\t{}\tsnapshot round trip: {}", panic_sig(&p), p), a.lines);
+            }
+        }
+    }
+    if rng.chance(5) {
+        // the same program twice in one process: a difference is state
+        // that leaks between engines (statics, caches) or a random value
+        stage::set("determinism");
+        if let Ok(b) = catch_unwind(AssertUnwindSafe(|| run_once(src, base))) {
+            if !b.slow {
+                if let Some((d, sig)) = first_diff(&a.lines, &b.lines) {
+                    return (format!("nondeterminism\t{}\tfirst vs second run: {}", sig, d), a.lines);
+                }
+            }
         }
     }
     (String::from("ok"), a.lines)
@@ -345,6 +508,8 @@ fn worker(opts: &Opts) {
     let stdin = std::io::stdin();
     let mut inp = BufReader::new(stdin.lock());
     let stdout = std::io::stdout();
+    let cov_on = cov::enabled();
+    let mut cov_seen: HashSet<u32> = HashSet::new();
     loop {
         let mut head = String::new();
         if inp.read_line(&mut head).unwrap_or(0) == 0 {
@@ -361,6 +526,7 @@ fn worker(opts: &Opts) {
             return;
         }
         let src = String::from_utf8_lossy(&buf).to_string();
+        cov::reset();
         let (verdict, lines) = if kind == "p" {
             match catch_unwind(AssertUnwindSafe(|| preempt::judge(&src, &sig, seed))) {
                 Ok(v) => (v, Vec::new()),
@@ -372,7 +538,17 @@ fn worker(opts: &Opts) {
         } else {
             judge(&src, seed, generated, opts)
         };
-        let mut body = verdict.replace('\n', " ");
+        let mut body = String::new();
+        if kind != "p" && cov_on {
+            // new coverage features, as `#cov <hex>,<hex>…` (cov.rs)
+            let f = cov::new_features(&mut cov_seen);
+            if !f.is_empty() {
+                body.push_str("#cov ");
+                body.push_str(&f.iter().map(|x| format!("{:x}", x)).collect::<Vec<_>>().join(","));
+                body.push('\n');
+            }
+        }
+        body.push_str(&verdict.replace('\n', " "));
         body.push('\n');
         for l in lines {
             body.push_str(&l.replace('\\', "\\\\").replace('\n', "\\n"));
@@ -390,6 +566,8 @@ struct Worker {
     rx: mpsc::Receiver<Option<String>>,
     stderr_path: PathBuf,
     stage_path: PathBuf,
+    /// the coverage features the last answer brought (cov.rs)
+    last_cov: Vec<u32>,
 }
 
 fn spawn_worker(opts: &Opts, id: usize) -> Worker {
@@ -410,7 +588,8 @@ fn spawn_worker(opts: &Opts, id: usize) -> Worker {
     if opts.rc_check {
         cmd.arg("--rc-check");
     }
-    cmd.arg("--hostile").arg(opts.hostile_pct.to_string()).arg("--stage").arg(&stage_path);
+    cmd.arg("--mem-mb").arg(opts.mem_mb.to_string());
+    cmd.arg("--hostile").arg(opts.hostile_pct.to_string()).arg("--roundtrip").arg(opts.roundtrip_pct.to_string()).arg("--stage").arg(&stage_path);
     let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(err)).spawn().expect("worker");
     let stdin = child.stdin.take().unwrap();
     let stdout: ChildStdout = child.stdout.take().unwrap();
@@ -434,7 +613,7 @@ fn spawn_worker(opts: &Opts, id: usize) -> Worker {
             }
         }
     });
-    Worker { child, stdin, rx, stderr_path, stage_path }
+    Worker { child, stdin, rx, stderr_path, stage_path, last_cov: Vec::new() }
 }
 
 enum Outcome {
@@ -483,8 +662,16 @@ fn exec_kind(w: &mut Worker, src: &str, seed: u64, kind: &str, sig: &str, timeou
     if w.stdin.write_all(head.as_bytes()).and_then(|_| w.stdin.write_all(src.as_bytes())).and_then(|_| w.stdin.flush()).is_err() {
         return Outcome::Died(death_note(w));
     }
+    w.last_cov.clear();
     match w.rx.recv_timeout(timeout) {
-        Ok(Some(s)) => Outcome::Answer(s),
+        Ok(Some(s)) => {
+            if let Some(rest) = s.strip_prefix("#cov ") {
+                let (feat, ans) = rest.split_once('\n').unwrap_or((rest, ""));
+                w.last_cov = feat.split(',').filter_map(|x| u32::from_str_radix(x, 16).ok()).collect();
+                return Outcome::Answer(ans.to_string());
+            }
+            Outcome::Answer(s)
+        }
         Ok(None) => Outcome::Died(death_note(w)),
         Err(_) => Outcome::Hang,
     }
@@ -546,6 +733,15 @@ struct Opts {
     known: PathBuf,
     /// worker: where to write its stage
     stage: String,
+    /// share of well-formed generated programs whose engine is snapshotted,
+    /// restored and probed after they finish (`roundtrip`)
+    roundtrip_pct: usize,
+    /// share of programs made from a bug-class seed (another engine's
+    /// regression test or seeds/engines) with class hooks (hooks.rs)
+    class_pct: usize,
+    /// import: how many tests at most, and the engine name
+    max_import: usize,
+    engine: Option<String>,
 }
 
 impl Opts {
@@ -570,6 +766,10 @@ impl Opts {
             jit_pct: 30,
             known: Path::new(env!("CARGO_MANIFEST_DIR")).join("known/known.txt"),
             stage: String::new(),
+            roundtrip_pct: 10,
+            class_pct: 30,
+            max_import: 0,
+            engine: None,
         };
         let mut rest = Vec::new();
         let mut i = 0;
@@ -592,6 +792,10 @@ impl Opts {
                 "--jit-pct" => { o.jit_pct = v.parse().unwrap_or(30); i += 1; }
                 "--known" => { o.known = PathBuf::from(v); i += 1; }
                 "--stage" => { o.stage = v; i += 1; }
+                "--roundtrip" => { o.roundtrip_pct = v.parse().unwrap_or(10); i += 1; }
+                "--class" => { o.class_pct = v.parse().unwrap_or(30); i += 1; }
+                "--max" => { o.max_import = v.parse().unwrap_or(0); i += 1; }
+                "--engine" => { o.engine = Some(v); i += 1; }
                 "--node" => o.node = true,
                 "--heavy" => o.heavy = true,
                 "--rc-check" => o.rc_check = true,
@@ -602,6 +806,16 @@ impl Opts {
         }
         (o, rest)
     }
+}
+
+/// A seed from another engine's tests (`/* foreign: … */`, import.rs) or
+/// from seeds/engines (`// jsc: CVE-… class`).
+fn is_class_seed(s: &str) -> bool {
+    let l = s.lines().next().unwrap_or("");
+    if l.starts_with("/* foreign: ") {
+        return true;
+    }
+    ["// jsc: ", "// sm: ", "// qjs: ", "// hermes: ", "// chakra: ", "// v8: ", "// cerxes: "].iter().any(|p| l.starts_with(p))
 }
 
 /// The seeds mutation starts from: the scripts of the engines' case files
@@ -659,6 +873,44 @@ struct Shared {
     skip_hits: Mutex<Vec<u64>>,
     /// programs that compiled / all, generated and mutated (validity)
     valid: Mutex<[u64; 4]>,
+    /// coverage features seen by any worker (cov.rs)
+    features: Mutex<HashSet<u32>>,
+    /// programs that brought new features: mutation draws from them too
+    grown: Mutex<Vec<String>>,
+    grown_total: AtomicU64,
+}
+
+/// Most programs kept for bringing new coverage; past it a new one
+/// replaces a random old one.
+const GROWN_MAX: usize = 4000;
+
+/// Keeps a program whose run lit features no worker had seen.
+fn keep_if_new(opts: &Opts, sh: &Shared, feats: &[u32], src: &str, rng: &mut gen::Rng) {
+    if feats.is_empty() || src.len() > 20_000 {
+        return;
+    }
+    let fresh = {
+        let mut f = sh.features.lock().unwrap();
+        feats.iter().fold(false, |acc, x| f.insert(*x) || acc)
+    };
+    if !fresh {
+        return;
+    }
+    sh.grown_total.fetch_add(1, Ordering::Relaxed);
+    let dir = opts.out.join("corpus");
+    let file = |t: &str| dir.join(format!("{:016x}.js", fnv(t.as_bytes())));
+    {
+        let mut g = sh.grown.lock().unwrap();
+        if g.len() < GROWN_MAX {
+            g.push(src.to_string());
+        } else {
+            let i = rng.below(g.len());
+            let _ = std::fs::remove_file(file(&g[i]));
+            g[i] = src.to_string();
+        }
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(file(src), src);
 }
 
 fn save_finding(opts: &Opts, sh: &Shared, class: &str, sig: &str, detail: &str, src: &str, seed: u64, generated: bool) {
@@ -722,6 +974,8 @@ fn node_lines(src: &str, dir: &Path, id: usize) -> Option<Vec<String>> {
 fn run(opts: Opts) {
     std::fs::create_dir_all(&opts.out).expect("out dir");
     let corpus = Arc::new(load_corpus(&opts.corpus));
+    // the bug-class seeds: other engines' tests (import.rs) and seeds/engines
+    let class_seeds: Arc<Vec<String>> = Arc::new(corpus.iter().filter(|s| is_class_seed(s)).cloned().collect());
     let kn = known::Known::load(&opts.known);
     let (ne, ns) = (kn.entries.len(), kn.skips.len());
     let sh = Arc::new(Shared {
@@ -733,13 +987,18 @@ fn run(opts: Opts) {
         known_hits: Mutex::new(vec![0; ne]),
         skip_hits: Mutex::new(vec![0; ns]),
         valid: Mutex::new([0; 4]),
+        features: Mutex::new(HashSet::new()),
+        grown: Mutex::new(Vec::new()),
+        grown_total: AtomicU64::new(0),
     });
     eprintln!(
-        "cerxes-fuzz: {} jobs, {} s, seed {}, corpus {} scripts, out {}{}{}, hostile {} %, preempt {} %{}, known {} + {} skip ({})",
+        "cerxes-fuzz: {} jobs, {} s, seed {}, corpus {} scripts ({} bug-class seeds, class {} %), out {}{}{}, hostile {} %, preempt {} %{}, known {} + {} skip ({})",
         opts.jobs,
         opts.time_s,
         opts.seed,
         corpus.len(),
+        class_seeds.len(),
+        if class_seeds.is_empty() { 0 } else { opts.class_pct },
         opts.out.display(),
         if opts.node { ", vs node" } else { "" },
         if opts.heavy { ", heavy" } else { "" },
@@ -756,6 +1015,7 @@ fn run(opts: Opts) {
         let opts = opts.clone();
         let sh = sh.clone();
         let corpus = corpus.clone();
+        let class_seeds = class_seeds.clone();
         handles.push(std::thread::spawn(move || {
             let mut w = spawn_worker(&opts, id);
             let mut rng = gen::Rng::new(opts.seed.wrapping_add(id as u64 * 7919));
@@ -801,11 +1061,41 @@ fn run(opts: Opts) {
                     sh.execs.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                let mut mutated = !corpus.is_empty() && rng.chance(opts.mutate_pct);
-                let src = if mutated {
-                    let base = &corpus[rng.below(corpus.len())];
+                // a seed or a program that brought new coverage, and another
+                // one to take whole lines from
+                let pick = |rng: &mut gen::Rng| -> Option<String> {
+                    let g = sh.grown.lock().unwrap();
+                    if !g.is_empty() && (corpus.is_empty() || rng.chance(50)) {
+                        Some(g[rng.below(g.len())].clone())
+                    } else if !corpus.is_empty() {
+                        Some(corpus[rng.below(corpus.len())].clone())
+                    } else {
+                        None
+                    }
+                };
+                let grown_any = !sh.grown.lock().unwrap().is_empty();
+                // v3: a bug-class seed, as it is or with class hooks
+                let classy = !class_seeds.is_empty() && rng.chance(opts.class_pct);
+                let mut mutated = classy || ((!corpus.is_empty() || grown_any) && rng.chance(opts.mutate_pct));
+                let src = if classy {
                     let mut r2 = gen::Rng::new(seed);
-                    gen::mutate(&mut r2, base)
+                    let base = class_seeds[r2.below(class_seeds.len())].clone();
+                    *sh.counts.lock().unwrap().entry(String::from("bug-class programs")).or_insert(0) += 1;
+                    if r2.chance(15) {
+                        base
+                    } else {
+                        let (mut s, names) = hooks::inject(&mut r2, &base);
+                        if r2.chance(20) {
+                            let donor = class_seeds[r2.below(class_seeds.len())].clone();
+                            s = gen::mutate_lines(&mut r2, &s, Some(&donor));
+                        }
+                        format!("// v3 hooks: {}\n{}", names, s)
+                    }
+                } else if mutated {
+                    let base = pick(&mut rng).unwrap_or_default();
+                    let donor = pick(&mut rng);
+                    let mut r2 = gen::Rng::new(seed);
+                    gen::mutate_with(&mut r2, &base, donor.as_deref())
                 } else {
                     let mut g = gen::Gen::new(seed);
                     g.heavy = opts.heavy;
@@ -830,6 +1120,10 @@ fn run(opts: Opts) {
                     Outcome::Answer(a) => {
                         answered = true;
                         fresh_deaths = 0;
+                        if !w.last_cov.is_empty() && !a.starts_with("slow") {
+                            let f = std::mem::take(&mut w.last_cov);
+                            keep_if_new(&opts, &sh, &f, &src, &mut rng);
+                        }
                         let mut parts = a.splitn(2, '\n');
                         let verdict = parts.next().unwrap_or("").to_string();
                         // the printed lines as the engine printed them (a line
@@ -850,7 +1144,7 @@ fn run(opts: Opts) {
                         // the wasm build reads scripts as TSX (cx_new has no syntax
                         // switch): a script the JavaScript reader refuses is skipped
                         let syntax_error = printed.last().map(|l| l.starts_with("=> SyntaxError")).unwrap_or(false);
-                        if verdict == "ok" && !mutated && !opts.heavy && !syntax_error && opts.jit.is_some() && rng.chance(opts.jit_pct) {
+                        if verdict == "ok" && (!mutated || classy) && !opts.heavy && !syntax_error && opts.jit.is_some() && rng.chance(opts.jit_pct) {
                             if jw.is_none() {
                                 jw = jit::spawn(opts.jit.as_ref().unwrap());
                             }
@@ -963,7 +1257,8 @@ fn status(sh: &Shared, t0: Instant) {
     let c = sh.counts.lock().unwrap();
     let mut parts: Vec<String> = c.iter().map(|(k, v)| format!("{} {}", k, v)).collect();
     parts.sort();
-    eprintln!("[{:>5.0} s] {} execs ({:.1}/s) unique {} | {}", s, n, n as f64 / s.max(0.001), sh.seen.lock().unwrap().len(), parts.join(", "));
+    let cov = if cov::enabled() { format!(" cov {} kept {}", sh.features.lock().unwrap().len(), sh.grown_total.load(Ordering::Relaxed)) } else { String::new() };
+    eprintln!("[{:>5.0} s] {} execs ({:.1}/s){} unique {} | {}", s, n, n as f64 / s.max(0.001), cov, sh.seen.lock().unwrap().len(), parts.join(", "));
 }
 
 fn summary_text(sh: &Shared, t0: Instant, opts: &Opts) -> String {
@@ -983,6 +1278,11 @@ fn summary_text(sh: &Shared, t0: Instant, opts: &Opts) -> String {
     let v = sh.valid.lock().unwrap();
     let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { a as f64 * 100.0 / b as f64 };
     s.push_str(&format!("valid (no SyntaxError): generated {:.1} % of {}, mutated {:.1} % of {}\n", pct(v[0], v[1]), v[1], pct(v[2], v[3]), v[3]));
+    if cov::enabled() {
+        s.push_str(&format!("coverage: {} features over {} edges, {} programs kept for new coverage (out/corpus)\n", sh.features.lock().unwrap().len(), cov::edges(), sh.grown_total.load(Ordering::Relaxed)));
+    } else {
+        s.push_str("coverage: off (build with COV=1 for coverage-guided mutation)\n");
+    }
     s.push_str(if cfg!(debug_assertions) { "build: checked (debug assertions)\n" } else { "build: release (unchecked indexes not asserted)\n" });
     let kh = sh.known_hits.lock().unwrap();
     if !kh.is_empty() {
@@ -1151,6 +1451,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().cloned().unwrap_or_default();
     let (opts, rest) = Opts::parse(&args[1.min(args.len())..]);
+    // the oracle's heap limit: half the worker's address-space limit
+    HEAP_LIMIT.store(opts.mem_mb * 1048576 / 2, Ordering::Relaxed);
     match cmd.as_str() {
         "worker" => worker(&opts),
         "run" => run(opts),
@@ -1184,6 +1486,22 @@ fn main() {
             eprintln!("{} of {} files", hit, n);
         }
         "known" => known_check(rest.first().map(|s| s.as_str()), &opts),
+        "import" => {
+            let from = PathBuf::from(rest.first().expect("import DIR --out DIR"));
+            match import::import(&from, &opts.out, opts.max_import, opts.engine.as_deref()) {
+                Ok(st) => eprintln!("{}: {} tests read, {} written to {}, {} need what CErXes has not got, {} too big or small", from.display(), st.read, st.written, opts.out.display(), st.skipped_needs, st.skipped_size),
+                Err(e) => {
+                    eprintln!("import: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "hook" => {
+            let src = std::fs::read_to_string(rest.first().expect("hook FILE.js")).expect("read");
+            let mut rng = gen::Rng::new(opts.seed);
+            let (s, names) = hooks::inject(&mut rng, &src);
+            print!("// v3 hooks: {}\n{}", names, s);
+        }
         _ => {
             eprintln!("usage: cerxes-fuzz run|repro|min|gen … (see cerxes/fuzz/README.md)");
             std::process::exit(2);

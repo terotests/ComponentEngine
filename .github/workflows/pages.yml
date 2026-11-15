@@ -97,9 +97,10 @@ jobs:
           # every engine but cer-js: CEr as Ranger-made JS takes ~2 s a case,
           # about 50 min for the 1370 conformance cases, past the job's limit
           # (its own CI job checks it, and the benchmark above runs it)
-          ENGINES=native,cer-wasm,cerxes-wasm,cerxes-stack,cerxes-small,cerxes-jit,quickjs,hermes,spidermonkey node playground/smoke.mjs --zoo=conf --shot=playground-zoo.png
+          ENGINES=native,cer-wasm,cerxes-wasm,cerxes-stack,cerxes-small,cerxes-jit,cerxes-slices,cerxes-moving,quickjs,hermes,spidermonkey node playground/smoke.mjs --zoo=conf --shot=playground-zoo.png
           node playground/smoke.mjs --evg --shot=playground-evg.png
           node playground/smoke.mjs --sandbox --shot=playground-sandbox.png
+          node playground/smoke.mjs --travel --shot=playground-travel.png
 
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('playground/hermes/dist/hermes.wasm') != ''

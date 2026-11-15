@@ -15,6 +15,8 @@ your own script in all of them.
 | CErXes · register VM | `cerxes/` (CEr's VM with a TypeScript + JSX front end) by cargo for `wasm32-wasip1` (`cerxes-wasm/`), on the register machine |
 | CErXes · stack VM | the same `cerxes.wasm` on the older stack machine, to compare the two interpreters |
 | CErXes · small build | `cerxes-wasm/` at `opt-level = "s"`: a smaller download for some speed |
+| CErXes · detachable | `cerxes.wasm` on the register VM in 4 ms time slices (`cx_set_slice`): the running engine can be stopped and written out as a snapshot at any branch, call or return. Its score against the register VM's is what being movable costs |
+| CErXes · moving | as detachable, and every 100 ms of a run the engine is written out (`cx_snapshot`) and replaced by a new engine made from that text (`cx_from_snapshot`), mid-script: what moving costs |
 | CErXes · JIT | `cerxes-wasm/` with the `wjit` feature: hot register code (64 runs) is compiled to WebAssembly modules the page instantiates; the engine falls back to the interpreter wherever the JIT exits |
 | QuickJS · C → WASM | Fabrice Bellard's QuickJS, from `quickjs-emscripten` (MIT) |
 | CEr · Rust → Ranger → JS | a curiosity: the same `cer/src/lib.rs` read by the Ranger compiler as a strict Rust module and written out as JavaScript |
@@ -163,3 +165,22 @@ An adapter in `src/engines/` exports `{ id, name, about, load(base) }`;
 `load` answers `{ run(src) → { out: [lines], error } }`. Add its id to
 `ENGINES` in `build.mjs`. The worker bundle, the manifest entry and the
 page's checkbox follow from that.
+
+## Travelling engine
+
+**Live:** <https://terotests.github.io/ComponentEngine/travel/>
+
+A CErXes engine written out as text and made again from it. Each host is a
+Web Worker with its own `cerxes.wasm` instance and one shard of generated
+rows; the page carries text between the hosts as a network would and
+estimates the network's share from each transfer's gzip size, round trip and
+bandwidth.
+
+- **Snapshot speed**: take, restore and size (raw and gzip) of an empty
+  engine, the query code alone, 50 000 and 200 000 live rows, and 50 000
+  dropped rows before and after a collection (`gc()` only asks for one; it
+  runs at the next call or backward jump).
+- **One query, three ways**: A, the whole engine travels host to host; B, only
+  its data root (`__carry`, JSON) travels into engines each host makes from a
+  code-only template snapshot it was given once; C, map-reduce. The three
+  answers have to agree (`smoke.mjs --travel`).

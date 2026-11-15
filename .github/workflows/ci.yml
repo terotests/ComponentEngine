@@ -65,6 +65,36 @@ jobs:
       - name: The same cases on the rgrc builds (JavaScript, C++, Go)
         run: node cerxes/bench/cases.mjs --targets=js,cpp,go --build
 
+  wjit:
+    name: CErXes wasm JIT (cases and Octane, JIT off = on)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Every case with the JIT off and on (min 0)
+        run: node cerxes/bench/wjit.mjs --build --cases
+      - name: Octane with the JIT on gives a score in every suite
+        # the playground's own suites (playground/zoo/octane, prepared as
+        # the playground prepares them): no Ranger checkout needed
+        env:
+          OCTANE_DIR: /tmp/octane
+        run: |
+          mkdir -p "$OCTANE_DIR"
+          node --input-type=module -e '
+          import fs from "node:fs";
+          import { prepareOctane } from "./playground/src/zoo.js";
+          for (const f of fs.readdirSync("playground/zoo/octane"))
+            fs.writeFileSync(process.env.OCTANE_DIR + "/" + f, prepareOctane(fs.readFileSync("playground/zoo/octane/" + f, "utf8")));
+          '
+          node cerxes/bench/wjit.mjs --octane --runs=1
+
   conformance:
     name: Conformance (CEr and CErXes, no regressions)
     runs-on: ubuntu-latest
@@ -99,7 +129,7 @@ jobs:
   all-tests:
     name: All tests
     if: always()
-    needs: [engine, cer, cerxes, conformance]
+    needs: [engine, cer, cerxes, wjit, conformance]
     runs-on: ubuntu-latest
     steps:
       - name: Every test job passed

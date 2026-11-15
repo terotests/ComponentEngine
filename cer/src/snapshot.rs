@@ -26,11 +26,25 @@ use crate::vm::*;
 pub const SNAPSHOT_FORMAT: int = 3;
 
 struct Strings {
+    /// by handle: a text many values share (a program's source, which
+    /// every function of it holds) is hashed once
+    by_handle: HashMap<int, int>,
     index: HashMap<String, int>,
     list: Vec<String>,
 }
 
 impl Strings {
+    fn id_of(&mut self, vm: &Vm, h: int) -> int {
+        match self.by_handle.get(&h) {
+            Some(i) => *i,
+            None => {
+                let i = self.id(vm.sref(h));
+                self.by_handle.insert(h, i);
+                i
+            }
+        }
+    }
+
     fn id(&mut self, s: &str) -> int {
         match self.index.get(s) {
             Some(i) => *i,
@@ -45,22 +59,22 @@ impl Strings {
 }
 
 fn put_val(out: &mut String, st: &mut Strings, vm: &Vm, v: &Val) {
-    match v {
-        Val::Undef => put_num(out, 0),
-        Val::Null => put_num(out, 1),
-        Val::Bool(b) => put_num(out, if *b { 3 } else { 2 }),
-        Val::Num(x) => put_number(out, *x),
-        Val::Str(s) => {
+    match v.kind() {
+        VK::Undef => put_num(out, 0),
+        VK::Null => put_num(out, 1),
+        VK::Bool(b) => put_num(out, if b { 3 } else { 2 }),
+        VK::Num(x) => put_number(out, x),
+        VK::Str(s) => {
             put_num(out, 5);
-            put_num(out, st.id(vm.sref(*s)));
+            put_num(out, st.id_of(vm, s));
         }
-        Val::Obj(o) => {
+        VK::Obj(o) => {
             put_num(out, 6);
-            put_num(out, *o);
+            put_num(out, o);
         }
-        Val::Big(n) => {
+        VK::Big(n) => {
             put_num(out, 8);
-            put_num(out, *n as int);
+            put_num(out, n as int);
         }
     }
 }
@@ -79,9 +93,9 @@ fn put_number(out: &mut String, x: double) {
 fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
     let t = r.num();
     if t == 0 {
-        Val::Undef
+        Val::Undef()
     } else if t == 1 {
-        Val::Null
+        Val::Null()
     } else if t == 2 {
         Val::Bool(false)
     } else if t == 3 {
@@ -92,19 +106,54 @@ fn get_val(r: &mut Reader, strs: &Vec<Val>) -> Val {
         let i = r.num();
         if i < 0 || i >= strs.len() as int {
             r.bad = true;
-            return Val::Undef;
+            return Val::Undef();
         }
         strs[i as usize].clone()
     } else if t == 6 {
-        Val::Obj(r.num())
+        // whether the object exists is checked once every object is back
+        // (in_objs); a number that is no index at all is refused here
+        let o = r.num();
+        if o < 0 || o > 0xFFFF_FFFF {
+            r.bad = true;
+            return Val::Undef();
+        }
+        Val::Obj(o)
     } else if t == 7 {
         Val::Num(r.num() as double)
     } else if t == 8 {
         Val::Big((r.num() as double) + 0.0)
     } else {
         r.bad = true;
-        Val::Undef
+        Val::Undef()
     }
+}
+
+/// A map's keys in the order of their values (object or symbol handles:
+/// BigInts, the symbol registry), so that the same state gives the same
+/// text whatever order the hash map keeps.
+fn keys_by_value_str(m: &HashMap<String, int>) -> Vec<String> {
+    let mut by_v: HashMap<int, String> = HashMap::new();
+    let mut vs: Vec<int> = Vec::new();
+    for (k, v) in m.iter() {
+        by_v.insert(*v, k.clone());
+        vs.push(*v);
+    }
+    let mut out: Vec<String> = Vec::new();
+    if by_v.len() != m.len() {
+        // two keys with one value: keep the hash map's order
+        for (k, _v) in m.iter() {
+            out.push(k.clone());
+        }
+        return out;
+    }
+    vs.sort();
+    for v in vs.iter() {
+        match by_v.get(v) {
+            Some(k) => out.push(k.clone()),
+            None => {}
+        }
+    }
+    out
 }
 
 fn put_ints(out: &mut String, v: &Vec<int>) {
@@ -153,10 +202,7 @@ fn get_str(r: &mut Reader, texts: &Vec<Rc<String>>) -> String {
 }
 
 fn in_objs(v: &Val, no: int) -> bool {
-    match v {
-        Val::Obj(o) => *o >= 0 && *o < no,
-        _ => true,
-    }
+    if let Some(o) = v.as_obj() { o >= 0 && o < no } else { true }
 }
 
 /// The engine's state as text; "" when it is not idle (a script running,
@@ -168,7 +214,7 @@ pub fn snapshot(vm: &Vm) -> String {
     if !(idle || vm.suspended) || vm.throwing || vm.native_depth != 0 || !vm.temp_roots.is_empty() {
         return String::new();
     }
-    let mut st = Strings { index: HashMap::new(), list: Vec::new() };
+    let mut st = Strings { by_handle: HashMap::new(), index: HashMap::new(), list: Vec::new() };
     let mut b = String::new();
     put_num(&mut b, vm.atom_names.len() as int);
     for a in vm.atom_names.iter() {
@@ -274,11 +320,36 @@ pub fn snapshot(vm: &Vm) -> String {
         // a Map's or Set's index (by map_key) is kept; an object's is
         // made again from its keys
         if o.class == C_MAP || o.class == C_SET {
-            put_num(&mut b, cold.index.len() as int);
+            // in key order: a hash map's order changes from map to map,
+            // and the same state must give the same text
+            // by entry: each key has its own (value.rs Cold::index)
+            let mut ents: Vec<int> = Vec::new();
+            let mut by_ent: HashMap<int, int> = HashMap::new();
             for (k, v) in cold.index.iter() {
-                put_num(&mut b, *k);
-                put_num(&mut b, *v);
+                ents.push(*v);
+                by_ent.insert(*v, *k);
             }
+            put_num(&mut b, ents.len() as int);
+            if by_ent.len() != ents.len() {
+                // two keys on one entry: the hash map's order
+                for (k, v) in cold.index.iter() {
+                    put_num(&mut b, *k);
+                    put_num(&mut b, *v);
+                }
+            } else {
+                ents.sort();
+                for v in ents.iter() {
+                    put_num(&mut b, *by_ent.get(v).unwrap_or(&0));
+                    put_num(&mut b, *v);
+                }
+            }
+            put_ints(&mut b, &cold.marks);
+        }
+        if o.class == C_SARGS {
+            // a sloppy function's arguments mapped to its parameters
+            // (map_arg / slow_args): which element reads which env slot.
+            // Left out, a restored `arguments[1]` no longer followed
+            // `b = …` (JSC parameter-scoping.js under the snapshot oracle)
             put_ints(&mut b, &cold.marks);
         }
     }
@@ -332,10 +403,12 @@ pub fn snapshot(vm: &Vm) -> String {
     ];
     put_ints(&mut b, &ints);
     // the table of large BigInts (objects) by their text
-    put_num(&mut b, vm.bigints.len() as int);
-    for (k, v) in vm.bigints.iter() {
+    // (by handle, not in the hash map's order)
+    let big = keys_by_value_str(&vm.bigints);
+    put_num(&mut b, big.len() as int);
+    for k in big.iter() {
         put_num(&mut b, st.id(k.as_str()));
-        put_num(&mut b, *v);
+        put_num(&mut b, *vm.bigints.get(k).unwrap_or(&-1));
     }
     put_ints(&mut b, &vm.roots);
     put_num(&mut b, vm.out.len() as int);
@@ -343,10 +416,11 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, st.id(l.as_str()));
     }
     put_ints(&mut b, &vm.symbols);
-    put_num(&mut b, vm.symbol_registry.len() as int);
-    for (k, v) in vm.symbol_registry.iter() {
+    let reg = keys_by_value_str(&vm.symbol_registry);
+    put_num(&mut b, reg.len() as int);
+    for k in reg.iter() {
         put_num(&mut b, st.id(k.as_str()));
-        put_num(&mut b, *v);
+        put_num(&mut b, *vm.symbol_registry.get(k).unwrap_or(&-1));
     }
     put_vals(&mut b, &mut st, vm, &vm.pending_jobs());
     put_num(&mut b, vm.del_count);
@@ -395,7 +469,20 @@ pub fn snapshot(vm: &Vm) -> String {
 /// An engine's state from a snapshot's text, into `vm` (a new Vm); false
 /// when the text is not one, and `vm` is then not to be used.
 pub fn restore(vm: &mut Vm, text: &str) -> bool {
-    restore_with(vm, text, false)
+    restore_as(vm, text, true, false)
+}
+
+/// restore of a text the engine itself carries (the prelude's): its code
+/// is not checked again (unit::code_ok).
+pub fn restore_built_in(vm: &mut Vm, text: &str) -> bool {
+    restore_as(vm, text, false, false)
+}
+
+/// `restore` with `keep_tables`: `vm.objs` and `vm.colds` are emptied and
+/// filled again in the room they have, tables a host kept from a dropped
+/// engine (Engine::from_snapshot_with).
+pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
+    restore_as(vm, text, true, keep_tables)
 }
 
 /// A table's room for `n` items (a count read from the text).
@@ -407,12 +494,10 @@ fn room(n: int) -> usize {
     }
 }
 
-/// `restore`, the tables made to their size at once (the counts come
-/// first) so that a restore does not grow them step by step. With
-/// `keep_tables`, `vm.objs` and `vm.colds` are emptied and filled again in
-/// the room they have: tables a host kept from a dropped engine
-/// (Engine::from_snapshot_with).
-pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
+/// restore; `check`: every function's code passes unit::code_ok. The
+/// tables are made to their size at once (the counts come first), so a
+/// restore does not grow them step by step.
+fn restore_as(vm: &mut Vm, text: &str, check: bool, keep_tables: bool) -> bool {
     let mut r = Reader::new(text);
     if r.num() != SNAPSHOT_FORMAT {
         return false;
@@ -472,6 +557,7 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
     vm.ic2 = Vec::new();
     vm.mcache = Vec::new();
     vm.pic = Vec::new();
+    vm.pic_mega = -1;
     vm.shape_epoch += 1;
     vm.chain_epoch += 1;
     let np = r.num();
@@ -509,6 +595,9 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
             p.code.push(Op { code: (code as i32), a: (a as i32), b: (b as i32), c: -1 });
             k += 1;
         }
+        if check && !r.bad && !crate::unit::code_ok(&p, na, np) {
+            r.bad = true;
+        }
         pack_code(&mut p);
         vm.protos.push(p);
         i += 1;
@@ -529,6 +618,7 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
     vm.shapes = Vec::new();
     vm.shapes.push(Shape::new());
     vm.free_shapes = Vec::new();
+    vm.t_far = TFar::new();
     let no = r.num();
     if !keep_tables {
         vm.objs = Vec::with_capacity(room(no));
@@ -562,17 +652,14 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
         while k < nn && !r.bad {
             let x = get_val(&mut r, &strs);
             has_cold = true;
-            cold.nums.push(match x {
-                Val::Num(d) => d,
-                _ => 0.0,
-            });
+            cold.nums.push(if let Some(d) = x.as_num() { d } else { 0.0 });
             k += 1;
         }
         o.func = r.num() as i32;
         o.env = r.num() as i32;
         cold.prim = get_val(&mut r, &strs);
         cold.home = r.num();
-        if !matches!(cold.prim, Val::Undef) || cold.home != -1 {
+        if !cold.prim.is_undef() || cold.home != -1 {
             has_cold = true;
         }
         o.pos = r.num() as i32;
@@ -596,6 +683,12 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
             cold.marks = get_ints(&mut r);
             has_cold = true;
         }
+        if class == C_SARGS as int {
+            cold.marks = get_ints(&mut r);
+            if !cold.marks.is_empty() {
+                has_cold = true;
+            }
+        }
         if has_cold {
             o.cold = (vm.colds.len() as int) as i32;
             vm.colds.push(cold);
@@ -611,14 +704,18 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
             while j < keys.len() {
                 // the value straight in: the objects it names may come
                 // later, and recount() counts them at the end
-                let slot = vm.add_own(oi, keys[j], Val::Undef, attrs[j]);
+                let slot = vm.add_own(oi, keys[j], Val::Undef(), attrs[j]);
                 vm.objs[oi as usize].set_slot(slot as usize, vals[j].clone());
                 j += 1;
             }
         }
         i += 1;
     }
-    vm.free_list = get_ints(&mut r);
+    // the free list is checked with the rest of the state: until then the
+    // key lists below are made at the end of the objects, never in a slot
+    // the text names
+    let free_list = get_ints(&mut r);
+    vm.free_list = Vec::new();
     // each shape-walking for-in iterator becomes one over a key list (as
     // OP_ITER_KEYS makes for any object): env the list, home the object,
     // every key checked against the object, since it may have changed
@@ -643,11 +740,12 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
         ob.pos = 0;
         let c = vm.cold_id(*it) as usize;
         vm.colds[c].home = if src >= 0 { src } else { -1 };
-        vm.colds[c].prim = Val::Undef;
+        vm.colds[c].prim = Val::Undef();
         if src < 0 {
             vm.objs[*it as usize].env = -1;
         }
     }
+    vm.free_list = free_list;
     let ints = get_ints(&mut r);
     if ints.len() != 45 {
         return false;
@@ -811,8 +909,8 @@ pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
             let mut j: usize = 0;
             while j < vm.evecs[e].v.len() && j < vm.colds[c].marks.len() {
                 if vm.colds[c].marks[j] == 0 {
-                    if let Val::Str(h) = &vm.evecs[e].v[j] {
-                        let hash = jsstr::str_hash(vm.sref(*h));
+                    if let Some(h) = (&vm.evecs[e].v[j]).as_str() {
+                        let hash = jsstr::str_hash(vm.sref(h));
                         vm.stab_add(o as int, j as int, hash);
                     }
                 }
@@ -854,13 +952,35 @@ fn valid_frames(vm: &Vm) -> bool {
     let np = vm.protos.len() as int;
     let no = vm.objs.len() as int;
     let ns = vm.stack.len() as int;
+    if !vm.frames.is_empty() && !vm.suspended {
+        return false;
+    }
+    let mut lens: Vec<int> = Vec::new();
     for f in vm.frames.iter() {
-        if f.proto < 0 || f.proto >= np || f.fobj >= no || f.env >= no || f.args_obj >= no || f.bp < 0 || f.bp > ns || f.pc < 0 {
+        if f.proto < 0 || f.proto >= np || f.fobj < -1 || f.fobj >= no || f.env < -1 || f.env >= no || f.args_obj < -1 || f.args_obj >= no || f.gen < -1 || f.gen >= no || f.bp < 2 || f.bp > ns || f.pc < 0 {
+            return false;
+        }
+        // the pc on an op of the function, its locals on the stack
+        let p = &vm.protos[f.proto as usize];
+        let n = proto_ops(p).len() as int;
+        if f.pc >= n || f.bp + p.nslots > ns || f.ret < -1 || f.ret >= ns || f.mv_from < -1 || f.mv_from >= ns || f.mv_to < -1 || f.mv_to >= ns {
+            return false;
+        }
+        if !in_objs(&f.this_val, no) || !in_objs(&f.new_target, no) {
+            return false;
+        }
+        lens.push(n);
+    }
+    for h in vm.handlers.iter() {
+        if h.frame < 0 || h.frame >= vm.frames.len() as int || h.sp < 0 || h.sp > ns || h.env < -1 || h.env >= no {
+            return false;
+        }
+        if h.catch_pc < 0 || h.catch_pc >= lens[h.frame as usize] || h.sp < vm.frames[h.frame as usize].bp - 2 {
             return false;
         }
     }
-    for h in vm.handlers.iter() {
-        if h.frame < 0 || h.frame >= vm.frames.len() as int || h.sp < 0 || h.sp > ns || h.env >= no {
+    for v in vm.stack.iter() {
+        if !in_objs(v, no) {
             return false;
         }
     }
@@ -911,5 +1031,63 @@ fn valid_heap(vm: &Vm) -> bool {
             }
         }
     }
-    vm.global >= 0 && vm.global < no
+    // the free list names free objects; the roots, the built-in objects,
+    // the symbols and the pending jobs live ones
+    for f in vm.free_list.iter() {
+        if *f < 0 || *f >= no || !vm.objs[*f as usize].free {
+            return false;
+        }
+    }
+    let builtins = vec![
+        vm.object_proto, vm.function_proto, vm.array_proto, vm.string_proto, vm.number_proto, vm.boolean_proto, vm.symbol_proto,
+        vm.error_proto, vm.type_error_proto, vm.range_error_proto, vm.reference_error_proto, vm.syntax_error_proto, vm.regexp_proto,
+        vm.date_proto, vm.map_proto, vm.set_proto, vm.iter_proto, vm.promise_proto, vm.iterator_proto, vm.map_iter_proto,
+        vm.set_iter_proto, vm.string_iter_proto, vm.generator_proto, vm.generator_function_proto, vm.async_function_proto,
+        vm.async_generator_proto, vm.async_generator_function_proto, vm.async_from_sync, vm.proxy_hooks, vm.thrower, vm.tdz_obj,
+        vm.bigint_proto, vm.array_values_fn, vm.array_generic,
+    ];
+    for b in builtins.iter() {
+        if *b != -1 && !live_obj(vm, *b) {
+            return false;
+        }
+    }
+    if vm.prelude_protos < 0 || vm.prelude_protos > np {
+        return false;
+    }
+    for x in vm.roots.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for x in vm.symbols.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for (_, x) in vm.symbol_atoms.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for (_, x) in vm.symbol_registry.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for (_, x) in vm.bigints.iter() {
+        if !live_obj(vm, *x) {
+            return false;
+        }
+    }
+    for v in vm.jobs.iter() {
+        if !in_objs(v, no) {
+            return false;
+        }
+    }
+    live_obj(vm, vm.global)
+}
+
+/// `o` names an object that is not free.
+fn live_obj(vm: &Vm, o: int) -> bool {
+    o >= 0 && o < vm.objs.len() as int && !vm.objs[o as usize].free
 }

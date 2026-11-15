@@ -4,6 +4,11 @@
 // variants: which build (`wasm`), which machine (`flags`, cx_new_with) and
 // whether the baseline JIT (cerxes::wjit, a build with the `wjit` feature)
 // compiles hot register code to WebAssembly (`jit`: the hotness threshold).
+// `slice` (ms) runs scripts in time slices, so the engine can be stopped and
+// written out as text at any branch, call or return (cx_set_slice); with
+// `move` (ms) as well, the running engine is written out as a snapshot and
+// replaced by a new engine made from it every `move` ms of the run, as an
+// engine that travels between hosts would be (cx_snapshot, cx_from_snapshot).
 import { makeWasi } from "../wasi.js";
 
 const HELPERS = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow", "ret"];
@@ -47,7 +52,7 @@ function jitHost(getExports) {
   };
 }
 
-export function cerxes({ id, name, about, wasm, flags, jit, optional }) {
+export function cerxes({ id, name, about, wasm, flags, jit, slice, move, optional }) {
   return {
     id,
     name,
@@ -67,10 +72,24 @@ export function cerxes({ id, name, about, wasm, flags, jit, optional }) {
       const make = () => {
         const e = x.cx_new_with(flags);
         if (jit && !x.cx_jit(e, 1, jit)) throw new Error("this cerxes build has no JIT");
+        if (slice) x.cx_set_slice(e, slice);
         return e;
       };
       let engine = make();
       const read = (p, n) => dec.decode(new Uint8Array(x.memory.buffer, p, n));
+      // the engine as text, and a new engine from that text in its place
+      const relocate = () => {
+        if (x.cx_snapshot(engine)) return;
+        const n = x.cx_result_len();
+        const p = x.cx_alloc(n);
+        new Uint8Array(x.memory.buffer, p, n).set(new Uint8Array(x.memory.buffer, x.cx_result_ptr(), n));
+        const moved = x.cx_from_snapshot(p, n);
+        x.cx_free(p, n);
+        if (!moved) throw new Error("the snapshot did not restore");
+        x.cx_drop(engine);
+        engine = moved;
+        x.cx_set_slice(engine, slice);
+      };
       return {
         reset() {
           x.cx_drop(engine);
@@ -80,9 +99,30 @@ export function cerxes({ id, name, about, wasm, flags, jit, optional }) {
           const data = enc.encode(src);
           const p = x.cx_alloc(data.length);
           new Uint8Array(x.memory.buffer, p, data.length).set(data);
-          const failed = x.cx_eval(engine, p, data.length);
-          x.cx_free(p, data.length);
-          const printed = read(x.cx_output_ptr(), x.cx_output_len()).replace(/\n$/, "");
+          let printed = "";
+          let failed;
+          if (!slice) {
+            failed = x.cx_eval(engine, p, data.length);
+            x.cx_free(p, data.length);
+            printed = read(x.cx_output_ptr(), x.cx_output_len());
+          } else {
+            // 2: the slice ran out; what each slice printed is read before
+            // the next one (or a move) starts
+            let status = x.cx_start(engine, p, data.length);
+            x.cx_free(p, data.length);
+            let last = performance.now();
+            for (;;) {
+              printed += read(x.cx_output_ptr(), x.cx_output_len());
+              if (status !== 2) break;
+              if (move && performance.now() - last >= move) {
+                relocate();
+                last = performance.now();
+              }
+              status = x.cx_resume(engine);
+            }
+            failed = status;
+          }
+          printed = printed.replace(/\n$/, "");
           const out = printed ? printed.split("\n") : [];
           if (failed) out.push(read(x.cx_result_ptr(), x.cx_result_len()));
           return { out, error: failed !== 0 };

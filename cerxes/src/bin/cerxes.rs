@@ -41,6 +41,13 @@ fn main() {
     // CER_PCOMP=0: JavaScript through the parser and the tree compiler,
     // not the single-pass compiler (pcomp.rs)
     let mut e = Engine::new_with(std::env::var("CER_PCOMP").map(|v| v != "0").unwrap_or(true));
+    // TZ=Europe/Helsinki: Date's local zone, as Node takes it
+    if let Ok(z) = std::env::var("TZ") {
+        let name = z.trim_start_matches(':');
+        if !name.is_empty() {
+            e.set_time_zone(name);
+        }
+    }
     // CERXES_RC=0: the collector alone frees objects; CERXES_RC_CHECK=1
     // checks the reference counts (slow); CERXES_STATS=1 prints the heap
     if std::env::var("CERXES_RC").map(|v| v == "0").unwrap_or(false) {
@@ -71,6 +78,10 @@ fn main() {
     // it ends (what a host that detaches the engine pays for its checks)
     let slice = std::env::var("CERXES_SLICE_MS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
     e.set_slice(slice);
+    // CERXES_TIME_LIMIT_MS=n: each call into the engine stops after n ms
+    // (Engine::set_time_limit)
+    let limit = std::env::var("CERXES_TIME_LIMIT_MS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    e.set_time_limit(limit);
     // `--module m.js`: after the script, the module m.js runs (and the
     // modules it imports); `--base f.js`: the script's `import()` reads
     // relative to f.js. The files they name are handed to the loader first.
@@ -161,7 +172,7 @@ fn main() {
             }
             let objs = v.objs.capacity() * std::mem::size_of::<cerxes::value::JsObj>();
             let strs: usize = v.strs.iter().map(|s| 40 + s.s.capacity()).sum();
-            let shapes: usize = v.shapes.iter().map(|s| (s.keys.capacity() + s.attrs.capacity() + s.itab.capacity() + s.t_atom.capacity() + s.t_attr.capacity() + s.t_to.capacity()) * 8 + s.t_map.capacity() * 24 + std::mem::size_of::<cerxes::value::Shape>()).sum();
+            let shapes: usize = v.shapes.iter().map(|s| (s.keys.capacity() + s.attrs.capacity() + s.itab.capacity() + s.trans.capacity() / 2) * 8 + std::mem::size_of::<cerxes::value::Shape>()).sum();
             let colds: usize = v.colds.iter().map(|c| c.index.capacity() * 24 + c.marks.capacity() * 8 + c.nums.capacity() * 8).sum();
             let code: usize = v.protos.iter().map(|p| p.code.capacity() * std::mem::size_of::<cerxes::value::Op>() + p.consts.capacity() * vs).sum::<usize>() + v.rcode.capacity() * std::mem::size_of::<cerxes::value::Op>();
             let mb = |x: usize| x as f64 / 1048576.0;
@@ -213,7 +224,7 @@ fn main() {
                 let (mut e2, mut pr, mut hm, mut ps, mut fu, mut en, mut co, mut el) = (0, 0, 0, 0, 0, 0, 0, 0);
                 for o in v.objs.iter().filter(|o| !o.free) {
                     if !v.colds[o.cold as usize].elems2.is_empty() { e2 += 1; }
-                    if !matches!(v.colds[o.cold as usize].prim, cerxes::value::Val::Undef) { pr += 1; }
+                    if !matches!((v.colds[o.cold as usize].prim).kind(), cerxes::value::VK::Undef) { pr += 1; }
                     if v.colds[o.cold as usize].home >= 0 { hm += 1; }
                     if o.pos != 0 { ps += 1; }
                     if o.func >= 0 { fu += 1; }

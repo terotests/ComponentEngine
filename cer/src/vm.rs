@@ -156,6 +156,17 @@ pub struct Vm {
     pub shapes: Vec<Shape>,
     /// owned shapes of freed objects, for reuse
     pub free_shapes: Vec<int>,
+    /// the transitions of shapes past their T_LINEAR first (TFar)
+    pub t_far: TFar,
+    /// link_strs' handles by text while one program is linked (emptied
+    /// after it): its functions' equal constants share one
+    pub lpool: StrPool,
+    /// link_strs' longer texts while one program is linked, by length
+    /// (index into lbig_rc / lbig_h): the program's source, which every
+    /// function of it holds, gets one handle instead of one per function
+    pub lbig: HashMap<int, int>,
+    pub lbig_rc: Vec<Rc<String>>,
+    pub lbig_h: Vec<int>,
     pub protos: Vec<Proto>,
     pub atoms: HashMap<String, int>,
     pub atom_names: Vec<String>,
@@ -375,6 +386,9 @@ pub struct Vm {
     pub gc_flag: bool,
     /// where in pic the last pic_get hit or filled
     pub pic_way: int,
+    /// the shared chain cache (rvm.rs PIC_MEGA ways in pic from this way;
+    /// -1 until a site needs it)
+    pub pic_mega: int,
     pub alloc_count: int,
     pub gc_threshold: int,
     /// objects made since the last collection, freed or not, and how many
@@ -412,6 +426,45 @@ pub struct Vm {
     /// slices are on for this run: set by Engine::run / resume only, so a
     /// host call (call_top, jobs) never stops half way
     pub slicing: bool,
+    /// the time limit (Vm::set_time_limit): the longest one host call may
+    /// run, in ms, 0 for none; the clock time the running call ends at (0:
+    /// none is timed); set once the limit passed and the script was
+    /// stopped: no catch or finally runs then, and every later check stops
+    /// it again until the host call returns
+    pub time_limit: double,
+    /// The most memory one engine may hold, in bytes (set_heap_limit); 0:
+    /// no limit. Measured by the host's probe (builtins::set_mem_probe).
+    pub heap_limit: double,
+    /// The probe's reading when the running host call began, and what the
+    /// engine's calls have taken before it (memory they allocated and did
+    /// not free).
+    pub mem_start: double,
+    pub mem_own: double,
+    /// The last stop (terminate) was the heap limit's, not the clock's.
+    pub heap_over: bool,
+    /// Over the heap limit: the next collection is a whole one (over_heap,
+    /// gc); and a collection for the limit ran in this call already.
+    pub heap_pending: bool,
+    pub heap_collected: bool,
+    /// How many host calls a limit stopped (terminate), and how many of
+    /// them the heap limit: a host's count of a misbehaving script.
+    pub stops: int,
+    pub heap_stops: int,
+    pub deadline: double,
+    pub terminated: bool,
+    /// a host call is running (begin_call)
+    pub in_call: bool,
+    /// run_jobs may stop a job where its slice runs out (Engine::run /
+    /// resume set it), and the script's value it keeps then
+    pub job_slices: bool,
+    pub run_result: Val,
+    /// units of native work left before poll reads the clock
+    pub poll_left: int,
+    /// set_regex_step_limit (0: none)
+    pub regex_steps: double,
+    /// branches, calls and returns count ticks and read the clock now and
+    /// then: slices or a deadline are on
+    pub checking: bool,
     /// the sampling profiler (cerxes CERXES_PROF=1): with slicing on, every
     /// tick charges the time since the last one to the running function
     /// (prof_self) and once to each function on the stack (prof_incl), in
@@ -483,6 +536,19 @@ pub struct Vm {
     pub sc_ascii: bool,
     pub sc_len: int,
     pub sc_units: Vec<int>,
+    /// long non-ASCII texts' unit indexes (jsstr::unit_cps) for
+    /// hbyte_of, a few at a time (taken in turn): the buffer (held, so it
+    /// does not change), the byte offset and length of the text in it, the
+    /// index. Emptied by a collection and a string reclaim.
+    pub bi_s: Vec<Rc<String>>,
+    pub bi_off: Vec<int>,
+    pub bi_len: Vec<int>,
+    pub bi_cp: Vec<Vec<int>>,
+    pub bi_next: int,
+    pub bi_seen: Vec<Rc<String>>,
+    pub bi_seen_off: Vec<int>,
+    pub bi_seen_len: Vec<int>,
+    pub bi_seen_next: int,
     /// the string RegExp.prototype.exec matched last, as UTF-16 units: a
     /// loop of exec calls (matchAll, a global regexp's exec loop) over one
     /// string converts it once
@@ -497,6 +563,8 @@ pub struct Vm {
     pub norm: crate::normalize::Norm,
     /// Intl's collation tables, decoded on first use
     pub intl: crate::intl::Intl,
+    /// time zones: Date's local zone, the zones Intl was asked for
+    pub tz: crate::tz::Tz,
 }
 
 /// The same string: the same one first (Rust's Rc, Go's string compare
@@ -511,44 +579,42 @@ fn same_str(a: &Rc<String>, b: &Rc<String>) -> bool {
     r
 }
 
+/// The same box (Rust's Rc); the other targets compare the strings.
+fn rc_same(a: &Rc<String>, b: &Rc<String>) -> bool {
+    let r: bool = ranger::native!(
+        rust: { Rc::ptr_eq(a, b) },
+        es6: "({a} === {b})",
+        go: "({a} == {b})",
+        cpp: "({a} == {b})",
+    );
+    r
+}
+
 pub fn is_obj(v: &Val) -> bool {
-    match v {
-        Val::Obj(_) => true,
-        _ => false,
-    }
+    v.is_obj()
 }
 
 /// A value that reference counts track (an object or a string).
 #[inline]
 pub fn is_heap(v: &Val) -> bool {
-    match v {
-        Val::Obj(_) => true,
-        Val::Str(_) => true,
-        _ => false,
-    }
+    v.is_heap()
 }
 
 pub fn obj_of(v: &Val) -> int {
-    match v {
-        Val::Obj(o) => *o,
-        _ => -1,
-    }
+    if let Some(o) = v.as_obj() { o } else { -1 }
 }
 
 /// The string handle of `v`, 0 (the empty string, never counted) when it
 /// is no string.
 pub fn str_of(v: &Val) -> int {
-    match v {
-        Val::Str(h) => *h,
-        _ => 0,
-    }
+    if let Some(h) = v.as_str() { h } else { 0 }
 }
 
 /// `===` (strict) or `==` of two values that are objects, null or
 /// undefined: 1 or 0; -1 when either is anything else.
 pub fn quick_eq(a: &Val, b: &Val, strict: bool) -> int {
-    match (a, b) {
-        (Val::Obj(x), Val::Obj(y)) => {
+    match (a.kind(), b.kind()) {
+        (VK::Obj(x), VK::Obj(y)) => {
             if x == y {
                 1
             } else if strict {
@@ -558,28 +624,45 @@ pub fn quick_eq(a: &Val, b: &Val, strict: bool) -> int {
                 -1
             }
         }
-        (Val::Null, Val::Null) | (Val::Undef, Val::Undef) => 1,
-        (Val::Null, Val::Undef) | (Val::Undef, Val::Null) => {
+        (VK::Null, VK::Null) | (VK::Undef, VK::Undef) => 1,
+        (VK::Null, VK::Undef) | (VK::Undef, VK::Null) => {
             if strict {
                 0
             } else {
                 1
             }
         }
-        (Val::Obj(_), Val::Null) | (Val::Obj(_), Val::Undef) | (Val::Null, Val::Obj(_)) | (Val::Undef, Val::Obj(_)) => 0,
+        (VK::Obj(_), VK::Null) | (VK::Obj(_), VK::Undef) | (VK::Null, VK::Obj(_)) | (VK::Undef, VK::Obj(_)) => 0,
         _ => -1,
     }
 }
 
+#[ranger::target(rust)]
 pub fn truthy(v: &Val) -> bool {
-    match v {
-        Val::Undef => false,
-        Val::Null => false,
-        Val::Bool(b) => *b,
-        Val::Num(n) => *n != 0.0 && *n == *n,
-        Val::Str(h) => *h != 0,
-        Val::Obj(_) => true,
-        Val::Big(n) => *n != 0.0,
+    let b = v.b;
+    if b < V_TAG {
+        let n = f64::from_bits(b);
+        return n != 0.0 && n == n;
+    }
+    let t = b >> 48;
+    if t == 0xFFFD {
+        return true;
+    }
+    // undefined and null are false; a boolean, a string handle (0 is the
+    // empty string) and a small BigInt are true when not 0
+    t > 0xFFFA && (b & V_LOW) != 0
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn truthy(v: &Val) -> bool {
+    match v.kind() {
+        VK::Undef => false,
+        VK::Null => false,
+        VK::Bool(b) => b,
+        VK::Num(n) => n != 0.0 && n == n,
+        VK::Str(h) => h != 0,
+        VK::Obj(_) => true,
+        VK::Big(n) => n != 0.0,
     }
 }
 
@@ -612,6 +695,11 @@ impl Vm {
             reclaims: 0,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
+            t_far: TFar::new(),
+            lpool: StrPool::new(),
+            lbig: HashMap::new(),
+            lbig_rc: Vec::new(),
+            lbig_h: Vec::new(),
             protos: Vec::new(),
             atoms: HashMap::new(),
             atom_cache: Vec::new(),
@@ -682,7 +770,7 @@ impl Vm {
             array_values_fn: -1,
             roots: Vec::new(),
             throwing: false,
-            exc: Val::Undef,
+            exc: Val::Undef(),
             out: Vec::new(),
             echo: false,
             regs: false,
@@ -730,6 +818,7 @@ impl Vm {
             a_apply: -1,
             gc_flag: false,
             pic_way: 0,
+            pic_mega: -1,
             alloc_count: 0,
             gc_threshold: GC_MIN,
             made: 0,
@@ -746,6 +835,23 @@ impl Vm {
             ticks: SLICE_TICKS,
             suspended: false,
             slicing: false,
+            time_limit: 0.0,
+            heap_limit: 0.0,
+            mem_start: 0.0,
+            mem_own: 0.0,
+            heap_over: false,
+            heap_pending: false,
+            heap_collected: false,
+            stops: 0,
+            heap_stops: 0,
+            deadline: 0.0,
+            terminated: false,
+            in_call: false,
+            job_slices: false,
+            run_result: Val::Undef(),
+            poll_left: 1048576,
+            regex_steps: 10000000.0,
+            checking: false,
             prof_on: false,
             prof_t: 0.0,
             prof_self: Vec::new(),
@@ -783,12 +889,22 @@ impl Vm {
             sc_ascii: true,
             sc_len: 0,
             sc_units: Vec::new(),
+            bi_s: Vec::new(),
+            bi_off: Vec::new(),
+            bi_len: Vec::new(),
+            bi_cp: Vec::new(),
+            bi_next: 0,
+            bi_seen: Vec::new(),
+            bi_seen_off: Vec::new(),
+            bi_seen_len: Vec::new(),
+            bi_seen_next: 0,
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
             rx_s2: Rc::new(String::new()),
             rx_units2: Vec::new(),
             norm: crate::normalize::Norm::new(),
             intl: crate::intl::Intl::new(),
+            tz: crate::tz::Tz::new(),
             host_sync: Box::new(NoHostSync {}),
             host_sync_set: false,
         };
@@ -822,6 +938,13 @@ impl Vm {
     }
 
     /// Fills `rx_units` with `s`'s UTF-16 units, unless it holds them.
+    /// Whether `s` is too long for the regexp engine's UTF-16 copy (8 bytes
+    /// a unit); if so, RangeError "Out of memory" thrown (JSC's answer to
+    /// a regexp over a 1.5 G-character rope) instead of an aborting alloc.
+    pub fn rx_too_long(&mut self, s: &Rc<String>) -> bool {
+        (s.as_bytes().len() as double) > (RX_MAX_UNITS as double) && self.length_refused("Out of memory")
+    }
+
     pub fn rx_cache(&mut self, s: &Rc<String>) {
         if self.rx_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s, s) {
             self.rx_s = s.clone();
@@ -845,7 +968,7 @@ impl Vm {
             self.rx_units2 = take_ints(&mut self.rx_units, &mut spare);
         }
         self.rx_s = s.clone();
-        self.rx_units = jsstr::units(s.as_str());
+        jsstr::units_into(s.as_str(), &mut self.rx_units);
     }
 
     /// `s`'s UTF-16 units out of the rx cache (computed when it holds
@@ -861,6 +984,190 @@ impl Vm {
     pub fn rx_put(&mut self, s: &Rc<String>, units: Vec<int>) {
         self.rx_s = s.clone();
         self.rx_units = units;
+    }
+
+    /// Where unit `i` (0..=length) of handle h's text starts, in bytes of
+    /// that text (sref), without a copy of a view's text or a scan of all
+    /// of it for every call: -1 when unit i is the second of a pair (or the
+    /// target keeps no byte texts), the caller's general path then.
+    pub fn hbyte_of(&mut self, h: int, i: int) -> int {
+        let n = self.hlen(h);
+        if i < 0 || i > n {
+            return -1;
+        }
+        let nb = self.hbytes(h);
+        if n == nb {
+            return i;
+        }
+        if nb < 1024 {
+            let none: Vec<int> = Vec::new();
+            return jsstr::unit_byte(self.sref(h), &none, i);
+        }
+        let e = self.big_index(h, nb);
+        if e < 0 {
+            // a text seen once: walked to i (an index of it costs a walk of
+            // all of it)
+            let none: Vec<int> = Vec::new();
+            return jsstr::unit_byte(self.sref(h), &none, i);
+        }
+        jsstr::unit_byte(self.sref(h), &self.bi_cp[e as usize], i)
+    }
+
+    /// The bi_* entry for handle h's text (nb bytes, not ASCII), made when
+    /// none holds it and it was asked for before; -1 otherwise.
+    fn big_index(&mut self, h: int, nb: int) -> int {
+        let mut x = h;
+        let mut off: int = 0;
+        if self.strs[h as usize].up >= 0 {
+            if self.strs[h as usize].off != 0 {
+                x = self.strs[h as usize].up as int;
+                off = self.strs[h as usize].off as int;
+            } else {
+                while self.strs[x as usize].up >= 0 {
+                    x = self.strs[x as usize].up as int;
+                }
+            }
+        }
+        let mut k: usize = 0;
+        while k < self.bi_s.len() {
+            if self.bi_off[k] == off && self.bi_len[k] == nb && rc_same(&self.bi_s[k], &self.strs[x as usize].s) {
+                return k as int;
+            }
+            k += 1;
+        }
+        // indexed the second time it is asked for (bi_seen: the last texts
+        // asked for that had none); -1 the first
+        let mut q: usize = 0;
+        let mut seen = false;
+        while q < self.bi_seen.len() {
+            if self.bi_seen_off[q] == off && self.bi_seen_len[q] == nb && rc_same(&self.bi_seen[q], &self.strs[x as usize].s) {
+                seen = true;
+                break;
+            }
+            q += 1;
+        }
+        if !seen {
+            let rs = self.strs[x as usize].s.clone();
+            if self.bi_seen.len() < 8 {
+                self.bi_seen.push(rs);
+                self.bi_seen_off.push(off);
+                self.bi_seen_len.push(nb);
+            } else {
+                let e2 = self.bi_seen_next as usize;
+                self.bi_seen_next = (self.bi_seen_next + 1) % 8;
+                self.bi_seen[e2] = rs;
+                self.bi_seen_off[e2] = off;
+                self.bi_seen_len[e2] = nb;
+            }
+            return -1;
+        }
+        self.bi_seen_len[q] = -1;
+        let cp = jsstr::unit_cps(self.sref(h));
+        let rc = self.strs[x as usize].s.clone();
+        if self.bi_s.len() < 8 {
+            self.bi_s.push(rc);
+            self.bi_off.push(off);
+            self.bi_len.push(nb);
+            self.bi_cp.push(cp);
+            return (self.bi_s.len() - 1) as int;
+        }
+        let e = self.bi_next as usize;
+        self.bi_next = (self.bi_next + 1) % 8;
+        self.bi_s[e] = rc;
+        self.bi_off[e] = off;
+        self.bi_len[e] = nb;
+        self.bi_cp[e] = cp;
+        e as int
+    }
+
+    /// Lets the long texts bi_* holds go.
+    pub fn big_drop(&mut self) {
+        if !self.bi_s.is_empty() {
+            self.bi_s.clear();
+            self.bi_off.clear();
+            self.bi_len.clear();
+            self.bi_cp.clear();
+            self.bi_next = 0;
+        }
+        if !self.bi_seen.is_empty() {
+            self.bi_seen.clear();
+            self.bi_seen_off.clear();
+            self.bi_seen_len.clear();
+            self.bi_seen_next = 0;
+        }
+    }
+
+    /// The unit at `i` (in range) of a long view's text (str_append,
+    /// str_prepend), read where it is: sget would copy the whole text for
+    /// each unit. -1 for other strings and when not known this way (the
+    /// caller's str_at then).
+    pub fn hview_unit(&mut self, h: int, i: int) -> int {
+        if self.strs[h as usize].up < 0 || self.hbytes(h) < 1024 {
+            return -1;
+        }
+        let b = self.hbyte_of(h, i);
+        if b >= 0 {
+            return jsstr::unit_at_byte(self.sref(h), b, false);
+        }
+        let b2 = self.hbyte_of(h, i - 1);
+        if b2 < 0 {
+            return -1;
+        }
+        jsstr::unit_at_byte(self.sref(h), b2, true)
+    }
+
+    /// Units [a, b) of handle h's text (0 <= a <= b <= length) as a new
+    /// string; undefined when a or b splits a pair (str_slice then).
+    pub fn hslice(&mut self, h: int, a: int, b: int) -> Val {
+        if a >= b {
+            return Val::Str(0);
+        }
+        if self.strs[h as usize].up < 0 && !self.sc_ascii && rc_same(&self.sc_s, &self.strs[h as usize].s) {
+            // the text str_cache holds the units of (a tokenizer's loop)
+            let t0 = jsstr::from_units(&self.sc_units, a, b);
+            return self.string_val(t0);
+        }
+        let x = self.hbyte_of(h, a);
+        if x < 0 {
+            return Val::Undef();
+        }
+        let y = self.hbyte_of(h, b);
+        if y < 0 {
+            return Val::Undef();
+        }
+        let t = jsstr::byte_slice(self.sref(h), x, y);
+        self.string_val(t)
+    }
+
+    /// Whether `p` ends at unit `end` (0 <= end <= length) of handle h's
+    /// text: 1 yes, 0 no, -1 not known this way.
+    pub fn hends_at(&mut self, h: int, p: &str, end: int) -> int {
+        if jsstr::has_f4(p) {
+            return -1;
+        }
+        let y = self.hbyte_of(h, end);
+        if y < 0 {
+            return -1;
+        }
+        let pb = p.as_bytes().len() as int;
+        if pb > y {
+            return 0;
+        }
+        // (p's first byte starts a character: equal bytes start at one)
+        if jsstr::bytes_at(self.sref(h), p, y - pb) { 1 } else { 0 }
+    }
+
+    /// Whether `p` is in handle h's text at unit `at` (0 <= at <= length):
+    /// 1 yes, 0 no, -1 not known this way (str_slice then).
+    pub fn hstarts_at(&mut self, h: int, p: &str, at: int) -> int {
+        if jsstr::has_f4(p) {
+            return -1;
+        }
+        let x = self.hbyte_of(h, at);
+        if x < 0 {
+            return -1;
+        }
+        if jsstr::bytes_at(self.sref(h), p, x) { 1 } else { 0 }
     }
 
     /// The UTF-16 unit at `i`, -1 out of range.
@@ -1028,7 +1335,7 @@ impl Vm {
 
     /// ToNumeric of `v` (a BigInt stays).
     pub fn to_numeric(&mut self, v: Val) -> Val {
-        if let Val::Num(_) = v {
+        if let Some(_) = v.as_num() {
             return v;
         }
         if self.class_of(&v) == C_BIGINT {
@@ -1042,7 +1349,7 @@ impl Vm {
     pub fn neg_val(&mut self, v: Val) -> Val {
         let p = if is_obj(&v) { self.to_primitive(&v, "number") } else { v };
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if self.class_of(&p) == C_BIGINT {
             let t = self.big_text(&p);
@@ -1055,7 +1362,7 @@ impl Vm {
 
     /// `v` + d (d 1 or -1) for ++ / --, BigInts too.
     pub fn inc_val(&mut self, v: Val, d: double) -> Val {
-        if let Val::Big(n) = v {
+        if let VK::Big(n) = v.kind() {
             return self.big_step(n, d);
         }
         if self.class_of(&v) == C_BIGINT {
@@ -1063,10 +1370,7 @@ impl Vm {
             let r = if d > 0.0 { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
             return self.bigint_val(r.as_str());
         }
-        let n = match v {
-            Val::Num(x) => x,
-            _ => self.to_number(&v),
-        };
+        let n = if let Some(x) = v.as_num() { x } else { self.to_number(&v) };
         Val::Num(n + d)
     }
 
@@ -1164,18 +1468,15 @@ impl Vm {
         {
             let s = &self.shapes[sh as usize];
             let mut i: usize = 0;
-            while i < s.t_atom.len() {
-                if s.t_atom[i] == atom && s.t_attr[i] == attr {
-                    next = s.t_to[i];
+            while i < s.trans.len() {
+                if (s.trans[i] as int) == atom && (s.trans[i + 1] as int) == attr {
+                    next = s.trans[i + 2] as int;
                     break;
                 }
-                i += 1;
+                i += 3;
             }
-            if next < 0 && !s.t_map.is_empty() {
-                next = match s.t_map.get(&(atom * 32 + attr)) {
-                    Some(t) => *t,
-                    None => -1,
-                };
+            if next < 0 && s.tfar >= 0 {
+                next = self.t_far.get(s.tfar as int, atom * 32 + attr);
             }
         }
         if next < 0 {
@@ -1203,14 +1504,16 @@ impl Vm {
                 ns.kref = next;
             }
             ns.nkeys = slot + 1;
+            shape_room(&mut self.shapes);
             self.shapes.push(ns);
             let s = &mut self.shapes[sh as usize];
-            if (s.t_atom.len() as int) < T_LINEAR {
-                s.t_atom.push(atom);
-                s.t_attr.push(attr);
-                s.t_to.push(next);
+            if (s.trans.len() as int) < T_LINEAR * 3 {
+                s.trans.push(atom as i32);
+                s.trans.push(attr as i32);
+                s.trans.push(next as i32);
             } else {
-                s.t_map.insert(atom * 32 + attr, next);
+                let m = s.tfar as int;
+                s.tfar = self.t_far.put(m, atom * 32 + attr, next) as i32;
             }
         }
         self.objs[o as usize].shape = next as i32;
@@ -1234,6 +1537,7 @@ impl Vm {
             let i = self.shapes.len() as int;
             let mut ns = ns;
             ns.kref = i;
+            shape_room(&mut self.shapes);
             self.shapes.push(ns);
             i
         } else {
@@ -1267,8 +1571,8 @@ impl Vm {
             // value moved down; compacted once half are tombstones
             let tomb = self.intern(TOMB_NAME);
             self.shapes[sh as usize].bury(slot, tomb);
-            self.put_slot(o, slot, Val::Undef);
-            if self.shapes[sh as usize].ndead * 2 > self.shapes[sh as usize].nkeys {
+            self.put_slot(o, slot, Val::Undef());
+            if (self.shapes[sh as usize].ndead as int) * 2 > self.shapes[sh as usize].nkeys {
                 self.compact_dict(o);
             }
             return;
@@ -1379,6 +1683,45 @@ impl Vm {
         h
     }
 
+    /// `n` bytes of a new ArrayBuffer's contents: counted with the strings'
+    /// bytes, so a loop that makes and drops big buffers brings a
+    /// collection (300 buffers of 10 MB ran out of memory before any:
+    /// ChakraCore test allocation.js, JSC regress-169941)
+    pub fn note_buf_bytes(&mut self, n: int) {
+        self.sbytes += n;
+        if self.sbytes >= self.sbytes_limit {
+            self.gc_flag = true;
+        }
+    }
+
+    /// Whether `with` object `o`'s @@unscopables names `name` (an object
+    /// whose property of that name is truthy).
+    pub fn unscopable(&mut self, o: int, name: &Val) -> bool {
+        let us = self.intern("@@unscopables");
+        let u = self.get_obj(o, us, &Val::Obj(o));
+        if self.throwing {
+            return false;
+        }
+        if let Some(uo) = u.as_obj() {
+            let v = self.get_elem(&Val::Obj(uo), name);
+            return !self.throwing && self.truthy_v(&v);
+        }
+        false
+    }
+
+    /// Whether one allocation of `bytes` is refused: past BIG_ALLOC, or
+    /// past what the heap limit (set_heap_limit) leaves; if so, RangeError
+    /// "Out of memory" thrown (catchable, as JSC's), not the process
+    /// aborting on a failed allocation. The heap limit alone checks after
+    /// the fact, at the next poll, which one 2 GB request never reaches.
+    pub fn alloc_refused(&mut self, bytes: double) -> bool {
+        if bytes <= 1048576.0 {
+            return false;
+        }
+        let over = bytes > (BIG_ALLOC as double) || (self.heap_limit > 0.0 && self.in_call && self.heap_used() + bytes > self.heap_limit);
+        over && self.length_refused("Out of memory")
+    }
+
     /// A string handle for `n` bytes of text, its slot holding the box it
     /// had (a reused one) or the empty string: the caller puts the text in.
     fn take_handle(&mut self, n: int, flag: int) -> int {
@@ -1472,7 +1815,7 @@ impl Vm {
     /// A string method's unchanged result: `this` itself when it is a
     /// string value (no copy, no new handle), else a handle on `s`.
     pub fn same_str_val(&mut self, this: &Val, s: Rc<String>) -> Val {
-        if let Val::Str(_) = this {
+        if let Some(_) = this.as_str() {
             return this.clone();
         }
         self.rc_val(s)
@@ -1681,6 +2024,14 @@ impl Vm {
 
     /// Links the strings of protos from a compiler (Proto.cstrs): their
     /// constants and sources become pinned string values.
+    /// After a program's protos are linked: link_strs' pool goes.
+    pub fn link_done(&mut self) {
+        self.lpool = StrPool::new();
+        self.lbig = HashMap::new();
+        self.lbig_rc = Vec::new();
+        self.lbig_h = Vec::new();
+    }
+
     pub fn link_strs(&mut self, p: &mut Proto) {
         trim_proto(p);
         let n = p.cstrs.len();
@@ -1691,18 +2042,53 @@ impl Vm {
         let mut i: usize = 0;
         while i < n {
             let s = p.cstrs[i].clone();
-            map.push(self.pin_rc(s));
+            // a short text another function of the program has too: its
+            // handle (most constants are names and words many functions
+            // share; a pinned handle is never freed)
+            if s.as_bytes().len() <= LPOOL_MAX && !s.is_empty() {
+                let k = self.lpool.get(s.as_str());
+                if k >= 0 {
+                    map.push(Val::Str(k));
+                } else {
+                    let v = self.pin_rc(s.clone());
+                    self.lpool.put(s.as_str(), v.strh());
+                    map.push(v);
+                }
+            } else if s.is_empty() {
+                map.push(Val::Str(0));
+            } else {
+                // a longer text: the same one (most often the program's
+                // source) found by its length, then compared
+                let n = s.as_bytes().len() as int;
+                let mut h: int = -1;
+                let j: int = match self.lbig.get(&n) {
+                    Some(x) => *x,
+                    None => -1,
+                };
+                if j >= 0 && same_str(&s, &self.lbig_rc[j as usize]) {
+                    h = self.lbig_h[j as usize];
+                }
+                if h >= 0 {
+                    map.push(Val::Str(h));
+                } else {
+                    let v = self.pin_rc(s.clone());
+                    self.lbig.insert(n, self.lbig_rc.len() as int);
+                    self.lbig_rc.push(s);
+                    self.lbig_h.push(v.strh());
+                    map.push(v);
+                }
+            }
             i += 1;
         }
         let nc = p.consts.len();
         i = 0;
         while i < nc {
-            if let Val::Str(k) = p.consts[i] {
+            if let Some(k) = p.consts[i].as_str() {
                 p.consts[i] = map[k as usize];
             }
             i += 1;
         }
-        if let Val::Str(k) = p.src {
+        if let Some(k) = p.src.as_str() {
             p.src = map[k as usize];
         }
         p.cstrs = Vec::new();
@@ -1846,7 +2232,7 @@ impl Vm {
     /// mark_strs: a heap reference to a string, marked and counted.
     #[inline]
     fn smark_count(&mut self, v: Val) {
-        if let Val::Str(h) = v {
+        if let Some(h) = v.as_str() {
             self.strs[h as usize].mark = true;
             if h > 0 {
                 self.strs[h as usize].rc += 1;
@@ -1857,7 +2243,7 @@ impl Vm {
     /// A root's string marked; `list` gets each handle marked here.
     #[inline]
     fn smark_root(&mut self, v: Val, list: &mut Vec<int>) {
-        if let Val::Str(h) = v {
+        if let Some(h) = v.as_str() {
             if !self.strs[h as usize].mark {
                 self.strs[h as usize].mark = true;
                 list.push(h);
@@ -1919,6 +2305,7 @@ impl Vm {
     /// reclaim(): frees the strings of szct that neither the heap nor a
     /// root holds, and what only they held (a prefix's next handle).
     fn reclaim_strs(&mut self) {
+        self.big_drop();
         // handles freed by the last reclaim may be reused now
         let nfr = self.sfreed.len();
         let mut i: usize = 0;
@@ -2154,9 +2541,9 @@ impl Vm {
 
     pub fn atom_val(&mut self, a: int) -> Val {
         while self.atom_vals.len() <= a as usize {
-            self.atom_vals.push(Val::Undef);
+            self.atom_vals.push(Val::Undef());
         }
-        if let Val::Undef = self.atom_vals[a as usize] {
+        if self.atom_vals[a as usize].is_undef() {
             let rc = Rc::new(self.atom_names[a as usize].clone());
             self.atom_vals[a as usize] = self.pin_rc(rc);
         }
@@ -2288,14 +2675,8 @@ impl Vm {
         if self.throwing {
             return;
         }
-        let name = match &nv {
-            Val::Str(s) => self.sref(*s).to_string(),
-            _ => String::from("Error"),
-        };
-        let msg = match &mv {
-            Val::Str(s) => self.sref(*s).to_string(),
-            _ => String::new(),
-        };
+        let name = if let Some(s) = (&nv).as_str() { self.sref(s).to_string() } else { String::from("Error") };
+        let msg = if let Some(s) = (&mv).as_str() { self.sref(s).to_string() } else { String::new() };
         let mut text = if msg.is_empty() { name } else if name.is_empty() { msg } else { format!("{}: {}", name, msg) };
         let mut k = self.frames.len() as int - 1;
         let mut lines = 0;
@@ -2411,11 +2792,7 @@ impl Vm {
     // ---- conversions
 
     pub fn class_of(&self, v: &Val) -> i32 {
-        match v {
-            Val::Obj(o) => self.objs[*o as usize].class,
-            Val::Big(_) => C_BIGINT,
-            _ => -1,
-        }
+        if let Some(o) = v.as_obj() { self.objs[o as usize].class } else if v.is_big() { C_BIGINT } else { -1 }
     }
 
     pub fn is_callable(&self, v: &Val) -> bool {
@@ -2448,16 +2825,16 @@ impl Vm {
     /// typeof as 0 undefined, 1 object, 2 boolean, 3 number, 4 string,
     /// 5 function, 6 symbol, 7 bigint
     pub fn type_index(&self, v: &Val) -> usize {
-        match v {
-            Val::Undef => 0,
-            Val::Null => 1,
-            Val::Bool(_) => 2,
-            Val::Num(_) => 3,
-            Val::Str(_) => 4,
-            Val::Big(_) => 7,
-            Val::Obj(o) => {
-                let c = self.objs[*o as usize].class;
-                if c == C_FUNCTION || c == C_NATIVE || c == C_BOUND || (c == C_PROXY && (self.objs[*o as usize].pos & 1) != 0) {
+        match v.kind() {
+            VK::Undef => 0,
+            VK::Null => 1,
+            VK::Bool(_) => 2,
+            VK::Num(_) => 3,
+            VK::Str(_) => 4,
+            VK::Big(_) => 7,
+            VK::Obj(o) => {
+                let c = self.objs[o as usize].class;
+                if c == C_FUNCTION || c == C_NATIVE || c == C_BOUND || (c == C_PROXY && (self.objs[o as usize].pos & 1) != 0) {
                     5
                 } else if c == C_SYMBOL {
                     6
@@ -2472,10 +2849,7 @@ impl Vm {
 
     /// ToPrimitive: `hint` "number", "string" or "default"
     pub fn to_primitive(&mut self, v: &Val, hint: &str) -> Val {
-        let o = match v {
-            Val::Obj(o) => *o,
-            _ => return v.clone(),
-        };
+        let o = if let Some(o) = v.as_obj() { o } else { return v.clone() };
         let class = self.objs[o as usize].class;
         if class == C_SYMBOL || class == C_BIGINT {
             return v.clone();
@@ -2483,34 +2857,34 @@ impl Vm {
         // @@toPrimitive
         let tp = self.get_obj(o, A_TOPRIMITIVE, v);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if self.is_callable(&tp) {
             let sv18 = self.str_val(hint);
-            let r = self.call_fixed(tp, v.clone(), 1, sv18, Val::Undef, Val::Undef);
+            let r = self.call_fixed(tp, v.clone(), 1, sv18, Val::Undef(), Val::Undef());
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             if is_obj(&r) && self.class_of(&r) != C_SYMBOL && self.class_of(&r) != C_BIGINT {
                 self.throw_type("Cannot convert object to primitive value");
-                return Val::Undef;
+                return Val::Undef();
             }
             return r;
         }
-        if !matches!(tp, Val::Undef | Val::Null) {
+        if !tp.is_nullish() {
             self.throw_type("Symbol.toPrimitive is not a function");
-            return Val::Undef;
+            return Val::Undef();
         }
         let order = if hint == "string" { vec![A_TOSTRING, A_VALUEOF] } else { vec![A_VALUEOF, A_TOSTRING] };
         for a in order {
             let f = self.get_obj(o, a, v);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             if self.is_callable(&f) {
-                let r = self.call_fixed(f, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+                let r = self.call_fixed(f, v.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
                 if self.throwing {
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 if !(is_obj(&r) && self.class_of(&r) != C_SYMBOL && self.class_of(&r) != C_BIGINT) {
                     return r;
@@ -2518,32 +2892,35 @@ impl Vm {
             }
         }
         self.throw_type("Cannot convert object to primitive value");
-        Val::Undef
+        Val::Undef()
     }
 
     pub fn to_number(&mut self, v: &Val) -> double {
-        match v {
-            Val::Num(n) => *n,
-            Val::Undef => nan(),
-            Val::Null => 0.0,
-            Val::Bool(b) => {
-                if *b {
+        if let Some(n) = v.as_num() {
+            return n;
+        }
+        match v.kind() {
+            VK::Num(n) => n,
+            VK::Undef => nan(),
+            VK::Null => 0.0,
+            VK::Bool(b) => {
+                if b {
                     1.0
                 } else {
                     0.0
                 }
             }
-            Val::Str(s) => string_to_number(self.sref(*s)),
-            Val::Big(_) => {
+            VK::Str(s) => string_to_number(self.sref(s)),
+            VK::Big(_) => {
                 self.throw_type("Cannot convert a BigInt value to a number");
                 nan()
             }
-            Val::Obj(o) => {
-                if self.objs[*o as usize].class == C_SYMBOL {
+            VK::Obj(o) => {
+                if self.objs[o as usize].class == C_SYMBOL {
                     self.throw_type("Cannot convert a Symbol value to a number");
                     return nan();
                 }
-                if self.objs[*o as usize].class == C_BIGINT {
+                if self.objs[o as usize].class == C_BIGINT {
                     self.throw_type("Cannot convert a BigInt value to a number");
                     return nan();
                 }
@@ -2557,21 +2934,24 @@ impl Vm {
     }
 
     pub fn to_str(&mut self, v: &Val) -> Rc<String> {
-        match v {
-            Val::Str(s) => self.sget(*s),
-            Val::Num(n) => Rc::new(number_to_string(*n)),
-            Val::Undef => Rc::new(String::from("undefined")),
-            Val::Null => Rc::new(String::from("null")),
-            Val::Bool(b) => Rc::new(String::from(if *b { "true" } else { "false" })),
-            Val::Big(n) => Rc::new(crate::bigint::int_text(*n as int)),
-            Val::Obj(o) => {
-                if self.objs[*o as usize].class == C_SYMBOL {
+        if let Some(s) = v.as_str() {
+            return self.sget(s);
+        }
+        match v.kind() {
+            VK::Str(s) => self.sget(s),
+            VK::Num(n) => Rc::new(number_to_string(n)),
+            VK::Undef => Rc::new(String::from("undefined")),
+            VK::Null => Rc::new(String::from("null")),
+            VK::Bool(b) => Rc::new(String::from(if b { "true" } else { "false" })),
+            VK::Big(n) => Rc::new(crate::bigint::int_text(n as int)),
+            VK::Obj(o) => {
+                if self.objs[o as usize].class == C_SYMBOL {
                     self.throw_type("Cannot convert a Symbol value to a string");
                     return Rc::new(String::new());
                 }
-                if self.objs[*o as usize].class == C_BIGINT {
-                    let pv = self.colds[self.objs[*o as usize].cold as usize].prim;
-                    if let Val::Str(s) = pv {
+                if self.objs[o as usize].class == C_BIGINT {
+                    let pv = self.colds[self.objs[o as usize].cold as usize].prim;
+                    if let Some(s) = pv.as_str() {
                         return self.sget(s);
                     }
                 }
@@ -2590,46 +2970,46 @@ impl Vm {
     }
 
     pub fn to_object(&mut self, v: &Val) -> int {
-        match v {
-            Val::Obj(o) => {
-                if self.objs[*o as usize].class == C_BIGINT {
+        match v.kind() {
+            VK::Obj(o) => {
+                if self.objs[o as usize].class == C_BIGINT {
                     let p = self.bigint_proto;
                     let b = self.alloc(C_OBJECT, p);
                     self.put_prim(b, v.clone());
                     return b;
                 }
-                if self.objs[*o as usize].class == C_SYMBOL {
+                if self.objs[o as usize].class == C_SYMBOL {
                     // a Symbol object: the symbol in prim
                     let p = self.symbol_proto;
                     let b = self.alloc(C_OBJECT, p);
                     self.put_prim(b, v.clone());
                     return b;
                 }
-                *o
+                o
             }
-            Val::Undef | Val::Null => {
+            VK::Undef | VK::Null => {
                 self.throw_type("Cannot convert undefined or null to object");
                 -1
             }
-            Val::Big(_) => {
+            VK::Big(_) => {
                 let p = self.bigint_proto;
                 let b = self.alloc(C_OBJECT, p);
                 self.put_prim(b, v.clone());
                 b
             }
-            Val::Bool(_) => {
+            VK::Bool(_) => {
                 let p = self.boolean_proto;
                 let o = self.alloc(C_BOOLEAN, p);
                 self.put_prim(o, v.clone());
                 o
             }
-            Val::Num(_) => {
+            VK::Num(_) => {
                 let p = self.number_proto;
                 let o = self.alloc(C_NUMBER, p);
                 self.put_prim(o, v.clone());
                 o
             }
-            Val::Str(_) => {
+            VK::Str(_) => {
                 let p = self.string_proto;
                 let o = self.alloc(C_STRING, p);
                 self.put_prim(o, v.clone());
@@ -2639,33 +3019,33 @@ impl Vm {
     }
 
     pub fn strict_equals(&self, a: &Val, b: &Val) -> bool {
-        match (a, b) {
-            (Val::Num(x), Val::Num(y)) => x == y,
-            (Val::Str(x), Val::Str(y)) => x == y || self.sref(*x) == self.sref(*y),
-            (Val::Undef, Val::Undef) => true,
-            (Val::Null, Val::Null) => true,
-            (Val::Bool(x), Val::Bool(y)) => x == y,
-            (Val::Obj(x), Val::Obj(y)) => x == y,
-            (Val::Big(x), Val::Big(y)) => x == y,
+        match (a.kind(), b.kind()) {
+            (VK::Num(x), VK::Num(y)) => x == y,
+            (VK::Str(x), VK::Str(y)) => x == y || self.sref(x) == self.sref(y),
+            (VK::Undef, VK::Undef) => true,
+            (VK::Null, VK::Null) => true,
+            (VK::Bool(x), VK::Bool(y)) => x == y,
+            (VK::Obj(x), VK::Obj(y)) => x == y,
+            (VK::Big(x), VK::Big(y)) => x == y,
             _ => false,
         }
     }
 
     pub fn same_value_zero(&self, a: &Val, b: &Val) -> bool {
-        match (a, b) {
-            (Val::Num(x), Val::Num(y)) => x == y || (is_nan(*x) && is_nan(*y)),
+        match (a.kind(), b.kind()) {
+            (VK::Num(x), VK::Num(y)) => x == y || (is_nan(x) && is_nan(y)),
             _ => self.strict_equals(a, b),
         }
     }
 
     pub fn same_value(&self, a: &Val, b: &Val) -> bool {
-        match (a, b) {
-            (Val::Num(x), Val::Num(y)) => {
-                if is_nan(*x) && is_nan(*y) {
+        match (a.kind(), b.kind()) {
+            (VK::Num(x), VK::Num(y)) => {
+                if is_nan(x) && is_nan(y) {
                     return true;
                 }
-                if *x == 0.0 && *y == 0.0 {
-                    return (1.0 / *x) == (1.0 / *y);
+                if x == 0.0 && y == 0.0 {
+                    return (1.0 / x) == (1.0 / y);
                 }
                 x == y
             }
@@ -2674,20 +3054,20 @@ impl Vm {
     }
 
     pub fn loose_equals(&mut self, a: &Val, b: &Val) -> bool {
-        match (a, b) {
-            (Val::Undef, Val::Null) | (Val::Null, Val::Undef) => return true,
-            (Val::Undef, Val::Undef) | (Val::Null, Val::Null) => return true,
-            (Val::Undef, _) | (Val::Null, _) | (_, Val::Undef) | (_, Val::Null) => return false,
-            (Val::Num(x), Val::Num(y)) => return x == y,
-            (Val::Str(x), Val::Str(y)) => return x == y || self.sref(*x) == self.sref(*y),
-            (Val::Bool(x), Val::Bool(y)) => return x == y,
-            (Val::Big(x), Val::Big(y)) => return x == y,
-            (Val::Obj(x), Val::Obj(y)) => {
+        match (a.kind(), b.kind()) {
+            (VK::Undef, VK::Null) | (VK::Null, VK::Undef) => return true,
+            (VK::Undef, VK::Undef) | (VK::Null, VK::Null) => return true,
+            (VK::Undef, _) | (VK::Null, _) | (_, VK::Undef) | (_, VK::Null) => return false,
+            (VK::Num(x), VK::Num(y)) => return x == y,
+            (VK::Str(x), VK::Str(y)) => return x == y || self.sref(x) == self.sref(y),
+            (VK::Bool(x), VK::Bool(y)) => return x == y,
+            (VK::Big(x), VK::Big(y)) => return x == y,
+            (VK::Obj(x), VK::Obj(y)) => {
                 if x == y {
                     return true;
                 }
                 // a Symbol object and a symbol: the object's primitive
-                let (cx, cy) = (self.objs[*x as usize].class, self.objs[*y as usize].class);
+                let (cx, cy) = (self.objs[x as usize].class, self.objs[y as usize].class);
                 if (cx == C_SYMBOL) != (cy == C_SYMBOL) {
                     let obj = if cx == C_SYMBOL { b } else { a };
                     let sym = if cx == C_SYMBOL { a } else { b };
@@ -2701,17 +3081,19 @@ impl Vm {
             }
             _ => {}
         }
-        if let Val::Bool(x) = a {
-            let n = Val::Num(if *x { 1.0 } else { 0.0 });
+        if a.is_bool() {
+            let x = a.boolv();
+            let n = Val::Num(if x { 1.0 } else { 0.0 });
             return self.loose_equals(&n, b);
         }
-        if let Val::Bool(y) = b {
-            let n = Val::Num(if *y { 1.0 } else { 0.0 });
+        if b.is_bool() {
+            let y = b.boolv();
+            let n = Val::Num(if y { 1.0 } else { 0.0 });
             return self.loose_equals(a, &n);
         }
-        match (a, b) {
-            (Val::Num(x), Val::Str(s)) => return *x == string_to_number(self.sref(*s)),
-            (Val::Str(s), Val::Num(y)) => return string_to_number(self.sref(*s)) == *y,
+        match (a.kind(), b.kind()) {
+            (VK::Num(x), VK::Str(s)) => return x == string_to_number(self.sref(s)),
+            (VK::Str(s), VK::Num(y)) => return string_to_number(self.sref(s)) == y,
             _ => {}
         }
         if self.class_of(a) == C_BIGINT && self.class_of(b) == C_BIGINT {
@@ -2751,38 +3133,36 @@ impl Vm {
     pub fn to_key(&mut self, k: &Val) -> (int, int) {
         // a string first (the common key), outside the match: a match on
         // every Val kind compiles to a jump table here
-        if let Val::Str(s) = k {
-            let h = *s as usize;
+        if let Some(s) = k.as_str() {
+            let h = s as usize;
             let known = self.strs[h].atom;
             if known >= 0 {
                 return (-1, known as int);
             }
-            let i = jsstr::array_index(self.sref(*s));
+            let i = jsstr::array_index(self.sref(s));
             if i >= 0 {
                 return (i, -1);
             }
-            let t = self.sget(*s);
+            let t = self.sget(s);
             let a = self.intern(t.as_str());
             self.strs[h].atom = a as i32;
             return (-1, a);
         }
-        match k {
-            Val::Num(n) => {
-                if *n >= 0.0 && *n < 1000000000.0 {
-                    let i = *n as int;
-                    if (i as double) == *n {
+        if let Some(n) = k.as_num() {
+                if n >= 0.0 && n < 1000000000.0 {
+                    let i = n as int;
+                    if (i as double) == n {
                         return (i, -1);
                     }
                 }
-                let s = number_to_string(*n);
+                let s = number_to_string(n);
                 let a = self.intern(s.as_str());
                 (-1, a)
-            }
-            Val::Obj(o) => {
-                if self.objs[*o as usize].class == C_SYMBOL {
-                    return (-1, self.objs[*o as usize].pos as int);
+            } else if let Some(o) = k.as_obj() {
+                if self.objs[o as usize].class == C_SYMBOL {
+                    return (-1, self.objs[o as usize].pos as int);
                 }
-                if self.objs[*o as usize].class == C_BIGINT {
+                if self.objs[o as usize].class == C_BIGINT {
                     return self.big_key(k);
                 }
                 let p = self.to_primitive(k, "string");
@@ -2790,23 +3170,20 @@ impl Vm {
                     return (-1, A_LENGTH);
                 }
                 self.to_key(&p)
-            }
-            Val::Big(_) => self.big_key(k),
-            _ => {
+            } else if k.is_big() { self.big_key(k) } else {
                 let s = self.to_string(k);
                 let a = self.intern(s.as_str());
                 (-1, a)
             }
-        }
     }
 
     /// to_key of a BigInt: a small one below 10^9 an index, as a number
     /// would be; otherwise its text (a large one is never an index).
     #[inline(never)]
     fn big_key(&mut self, k: &Val) -> (int, int) {
-        if let Val::Big(n) = k {
-            if *n >= 0.0 && *n < 1000000000.0 {
-                return (*n as int, -1);
+        if let VK::Big(n) = k.kind() {
+            if n >= 0.0 && n < 1000000000.0 {
+                return (n as int, -1);
             }
         }
         let t = self.big_text(k);
@@ -2996,7 +3373,7 @@ impl Vm {
     pub fn function_own(&mut self, f: int, atom: int) -> Val {
         let class = self.objs[f as usize].class;
         if (atom == A_LENGTH || atom == A_NAME) && (class == C_FUNCTION || class == C_BOUND) && self.vgone(f, atom) {
-            return Val::Undef;
+            return Val::Undef();
         }
         if class == C_FUNCTION {
             let pi = self.objs[f as usize].func as int;
@@ -3027,7 +3404,7 @@ impl Vm {
                 return Val::Num(if n < 0.0 { 0.0 } else { n });
             }
         }
-        Val::Undef
+        Val::Undef()
     }
 
     /// `o[atom]` with `receiver` as `this` for getters.
@@ -3045,9 +3422,9 @@ impl Vm {
                     let pair = obj_of(&self.objs[cur as usize].get_slot(slot as usize));
                     let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
                     if self.is_callable(&g) {
-                        return self.call_fixed(g, receiver.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+                        return self.call_fixed(g, receiver.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
                     }
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 return self.objs[cur as usize].get_slot(slot as usize).clone();
             }
@@ -3060,18 +3437,18 @@ impl Vm {
                     return Val::Num(self.evecs[self.objs[cur as usize].elems as usize].v.len() as double);
                 }
                 if class == C_TYPED && self.canon_numeric(atom) {
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 if class == C_FUNCTION || class == C_BOUND {
                     if atom == A_LENGTH || atom == A_NAME || atom == A_PROTOTYPE {
                         let v = self.function_own(cur, atom);
-                        if !matches!(v, Val::Undef) {
+                        if !v.is_undef() {
                             return v;
                         }
                     }
                 }
                 if class == C_STRING && atom == A_LENGTH {
-                    if let Val::Str(s) = self.colds[self.objs[cur as usize].cold as usize].prim.clone() {
+                    if let Some(s) = (self.colds[self.objs[cur as usize].cold as usize].prim.clone()).as_str() {
                         let s = self.sget(s.clone());
                         return Val::Num(self.str_len(&s) as double);
                     }
@@ -3083,47 +3460,49 @@ impl Vm {
                 break;
             }
         }
-        Val::Undef
+        Val::Undef()
     }
 
     pub fn get(&mut self, v: &Val, atom: int) -> Val {
-        match v {
-            Val::Obj(o) => self.get_obj(*o, atom, v),
-            Val::Str(s) => {
+        if let Some(o) = v.as_obj() {
+            return self.get_obj(o, atom, v);
+        }
+        match v.kind() {
+            VK::Obj(o) => self.get_obj(o, atom, v),
+            VK::Str(s) => {
                 if atom == A_LENGTH {
-                    return Val::Num(self.hlen(*s) as double);
+                    return Val::Num(self.hlen(s) as double);
                 }
                 let p = self.string_proto;
                 self.get_obj(p, atom, v)
             }
-            Val::Num(_) => {
+            VK::Num(_) => {
                 let p = self.number_proto;
                 self.get_obj(p, atom, v)
             }
-            Val::Bool(_) => {
+            VK::Bool(_) => {
                 let p = self.boolean_proto;
                 self.get_obj(p, atom, v)
             }
-            Val::Big(_) => {
+            VK::Big(_) => {
                 let p = self.bigint_proto;
                 self.get_obj(p, atom, v)
             }
             _ => {
                 let name = self.atom_str(atom);
-                let what = if matches!(v, Val::Null) { "null" } else { "undefined" };
+                let what = if v.is_null() { "null" } else { "undefined" };
                 self.throw_type(format!("Cannot read properties of {} (reading '{}')", what, name).as_str());
-                Val::Undef
+                Val::Undef()
             }
         }
     }
 
     pub fn get_index(&mut self, v: &Val, i: int) -> Val {
-        match v {
-            Val::Obj(o) => {
-                let ob = &self.objs[*o as usize];
+        if let Some(o) = v.as_obj() {
+                let ob = &self.objs[o as usize];
                 if ob.class == C_ARRAY || ob.class == C_ARGUMENTS {
                     let n = self.evecs[ob.elems as usize].v.len() as int;
-                    if i < n && ((ob.pos != 3 && !self.idx_protos) || !self.is_hole(*o, i)) {
+                    if i < n && ((ob.pos != 3 && !self.idx_protos) || !self.is_hole(o, i)) {
                         return self.evecs[ob.elems as usize].v[i as usize].clone();
                     }
                     if ob.class == C_ARRAY {
@@ -3133,20 +3512,23 @@ impl Vm {
                         let has_shape = ob.shape != 0;
                         let p = ob.proto as int;
                         if has_shape {
-                            let a = self.index_atom(i);
-                            if self.find(*o, a) >= 0 {
-                                return self.get_obj(*o, a, v);
+                            // looked up, not made: a read of a missing index
+                            // must not add an atom (a loop over 1e8 indexes
+                            // would fill memory with names)
+                            let a = self.index_atom_if(i);
+                            if a >= 0 && self.find(o, a) >= 0 {
+                                return self.get_obj(o, a, v);
                             }
                         }
                         if p < 0 || (!self.idx_protos && (p == self.array_proto || p == self.object_proto)) {
-                            return Val::Undef;
+                            return Val::Undef();
                         }
                         return self.get_index(&Val::Obj(p), i);
                     }
                 }
                 let class = ob.class;
                 if class == C_STRING {
-                    if let Val::Str(s) = self.colds[ob.cold as usize].prim.clone() {
+                    if let Some(s) = (self.colds[ob.cold as usize].prim.clone()).as_str() {
                         let s = self.sget(s.clone());
                         let c = self.str_at(&s, i);
                         if c >= 0 {
@@ -3155,13 +3537,13 @@ impl Vm {
                     }
                 }
                 if class == C_TYPED {
-                    return self.ta_get_fast(*o, i);
+                    return self.ta_get_fast(o, i);
                 }
                 let a = self.index_atom_if(i);
                 if a < 0 {
                     // no key of that name anywhere: only an element up the
                     // chain or a proxy can answer
-                    let mut cur = *o;
+                    let mut cur = o;
                     loop {
                         let c = self.objs[cur as usize].class;
                         if c == C_PROXY {
@@ -3170,7 +3552,7 @@ impl Vm {
                         }
                         let p = self.objs[cur as usize].proto as int;
                         if p < 0 {
-                            return Val::Undef;
+                            return Val::Undef();
                         }
                         let pc = self.objs[p as usize].class;
                         if pc == C_ARRAY || pc == C_ARGUMENTS || pc == C_TYPED || pc == C_STRING {
@@ -3181,7 +3563,7 @@ impl Vm {
                 }
                 // an element up the chain (an array or string prototype) is
                 // not an atom property
-                let mut cur = *o;
+                let mut cur = o;
                 loop {
                     if self.objs[cur as usize].class == C_PROXY || self.find(cur, a) >= 0 {
                         break;
@@ -3196,47 +3578,48 @@ impl Vm {
                     }
                     cur = p;
                 }
-                self.get_obj(*o, a, v)
-            }
-            Val::Str(s) => {
-                let h = *s;
+                self.get_obj(o, a, v)
+            } else if let Some(s) = v.as_str() {
+                let h = s;
                 let c0 = self.hunit(h, i);
                 if c0 >= 0 {
                     return self.unit_val(c0);
                 }
                 if c0 == -1 {
-                    return Val::Undef;
+                    return Val::Undef();
+                }
+                let c1 = self.hview_unit(h, i);
+                if c1 >= 0 {
+                    return self.unit_val(c1);
                 }
                 let s = self.sget(h);
                 let c = self.str_at(&s, i);
                 if c >= 0 {
                     return self.unit_val(c);
                 }
-                Val::Undef
-            }
-            _ => {
+                Val::Undef()
+            } else {
                 let a = self.index_atom(i);
                 self.get(v, a)
             }
-        }
     }
 
     pub fn get_elem(&mut self, v: &Val, k: &Val) -> Val {
-        if let Val::Num(n) = k {
-            let i = *n as int;
-            if (i as double) == *n && i >= 0 {
+        if let Some(n) = k.as_num() {
+            let i = n as int;
+            if (i as double) == n && i >= 0 {
                 return self.get_index(v, i);
             }
         }
-        if matches!(v, Val::Undef) || matches!(v, Val::Null) {
+        if v.is_undef() || v.is_null() {
             let ks = self.to_string(k);
-            let what = if matches!(v, Val::Null) { "null" } else { "undefined" };
+            let what = if v.is_null() { "null" } else { "undefined" };
             self.throw_type(format!("Cannot read properties of {} (reading '{}')", what, ks).as_str());
-            return Val::Undef;
+            return Val::Undef();
         }
         let (i, a) = self.to_key(k);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if i >= 0 {
             return self.get_index(v, i);
@@ -3280,7 +3663,7 @@ impl Vm {
                     let pair = obj_of(&self.objs[cur as usize].get_slot(slot as usize));
                     let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                     if self.is_callable(&s) {
-                        self.call_fixed(s, receiver.clone(), 1, v.clone(), Val::Undef, Val::Undef);
+                        self.call_fixed(s, receiver.clone(), 1, v.clone(), Val::Undef(), Val::Undef());
                     } else if self.strict_now() {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("Cannot set property {} of #<Object> which has only a getter", n).as_str());
@@ -3326,7 +3709,7 @@ impl Vm {
                 let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
                 let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                 if self.is_callable(&s) {
-                    self.call_fixed(s, Val::Obj(o), 1, v, Val::Undef, Val::Undef);
+                    self.call_fixed(s, Val::Obj(o), 1, v, Val::Undef(), Val::Undef());
                 } else if self.strict_now() {
                     let n = self.atom_str(atom);
                     self.throw_type(format!("Cannot set property {} of #<Object> which has only a getter", n).as_str());
@@ -3411,7 +3794,7 @@ impl Vm {
                     let pair = obj_of(&self.objs[o as usize].get_slot(slot as usize));
                     let s = self.evecs[self.objs[pair as usize].elems as usize].v[1].clone();
                     if self.is_callable(&s) {
-                        self.call_fixed(s, this, 1, v, Val::Undef, Val::Undef);
+                        self.call_fixed(s, this, 1, v, Val::Undef(), Val::Undef());
                     } else {
                         let n = self.atom_str(atom);
                         self.throw_type(format!("Cannot set property {} which has only a getter", n).as_str());
@@ -3512,7 +3895,7 @@ impl Vm {
         } else {
             let mut i = cur;
             while i < len {
-                self.push_elem(o, Val::Undef);
+                self.push_elem(o, Val::Undef());
                 i += 1;
             }
             let mut h = cur;
@@ -3524,11 +3907,15 @@ impl Vm {
     }
 
     pub fn set(&mut self, target: &Val, atom: int, v: Val) {
-        match target {
-            Val::Obj(o) => self.set_obj(*o, atom, v),
-            Val::Undef | Val::Null => {
+        if let Some(o) = target.as_obj() {
+            self.set_obj(o, atom, v);
+            return;
+        }
+        match target.kind() {
+            VK::Obj(o) => self.set_obj(o, atom, v),
+            VK::Undef | VK::Null => {
                 let n = self.atom_str(atom);
-                let what = if matches!(target, Val::Null) { "null" } else { "undefined" };
+                let what = if target.is_null() { "null" } else { "undefined" };
                 self.throw_type(format!("Cannot set properties of {} (setting '{}')", what, n).as_str());
             }
             _ => {
@@ -3559,6 +3946,28 @@ impl Vm {
         n.as_str() == "-0" || number_to_string(string_to_number(n.as_str())) == n
     }
 
+    /// Whether a prototype of `o` has index `i` as an accessor or a
+    /// read-only property, or is a proxy: a store past the end must then
+    /// go through the ordinary [[Set]] (only after idx_protos).
+    pub fn proto_index_trap(&mut self, o: int, i: int) -> bool {
+        let a = self.index_atom(i);
+        let mut p = self.objs[o as usize].proto as int;
+        let mut hops = 0;
+        while p >= 0 && hops < 10000 {
+            if self.objs[p as usize].class == C_PROXY {
+                return true;
+            }
+            let sl = self.find(p, a);
+            if sl >= 0 {
+                let at = self.attr_at(p, sl);
+                return (at & (P_ACCESSOR | P_READONLY)) != 0;
+            }
+            p = self.objs[p as usize].proto as int;
+            hops += 1;
+        }
+        false
+    }
+
     /// An array whose length was made read-only (defineProperty): it keeps
     /// an own `length` property then.
     pub fn len_readonly(&self, o: int) -> bool {
@@ -3571,12 +3980,20 @@ impl Vm {
             self.idx_protos = true;
         }
         if class == C_TYPED {
-            if let Val::Num(x) = v {
+            if let Some(x) = v.as_num() {
                 if self.ta_put_num(o, i, x) {
                     return;
                 }
             }
             self.ta_set(o, i, &v);
+            return;
+        }
+        if class == C_ARGUMENTS && self.objs[o as usize].pos > 0 {
+            // a sloppy function's arguments with parameters mapped lazily
+            // (map_arg): the write maps them now and reaches the parameter
+            self.slow_args(o);
+            let a = self.index_atom(i);
+            self.set_obj(o, a, v);
             return;
         }
         if class == C_ARRAY || class == C_ARGUMENTS {
@@ -3610,10 +4027,27 @@ impl Vm {
                 }
                 return;
             }
+            if class == C_ARRAY && self.idx_protos && self.proto_index_trap(o, i) {
+                // a setter or read-only index up the prototype chain
+                // (Array.prototype[3] = accessor): the ordinary [[Set]]
+                let a = self.index_atom(i);
+                self.set_obj(o, a, v);
+                return;
+            }
             if class == C_ARRAY && self.objs[o as usize].extensible && i < len + 50000000 {
+                if i >= MAX_ELEMS {
+                    // past the element limit: RangeError, not 800 MB of holes
+                    self.elems_too_many((i + 1) as double);
+                    return;
+                }
+                if i > len + 4096 {
+                    // the holes' memory brings a collection like a buffer's
+                    // (SpiderMonkey bug 1693328: 100 arrays of 16M holes)
+                    self.note_buf_bytes((i - len) * 32);
+                }
                 let mut k = len;
                 while k < i {
-                    self.push_elem(o, Val::Undef);
+                    self.push_elem(o, Val::Undef());
                     k += 1;
                 }
                 self.push_elem(o, v);
@@ -3636,11 +4070,11 @@ impl Vm {
     }
 
     pub fn set_elem(&mut self, target: &Val, k: &Val, v: Val) {
-        if let Val::Obj(o) = target {
-            if let Val::Num(n) = k {
-                let i = *n as int;
-                if (i as double) == *n && i >= 0 {
-                    self.set_index(*o, i, v);
+        if let Some(o) = target.as_obj() {
+            if let Some(n) = k.as_num() {
+                let i = n as int;
+                if (i as double) == n && i >= 0 {
+                    self.set_index(o, i, v);
                     return;
                 }
             }
@@ -3649,15 +4083,15 @@ impl Vm {
                 return;
             }
             if i >= 0 {
-                self.set_index(*o, i, v);
+                self.set_index(o, i, v);
             } else {
-                self.set_obj(*o, a, v);
+                self.set_obj(o, a, v);
             }
             return;
         }
-        if matches!(target, Val::Undef) || matches!(target, Val::Null) {
+        if target.is_undef() || target.is_null() {
             let ks = self.to_string(k);
-            let what = if matches!(target, Val::Null) { "null" } else { "undefined" };
+            let what = if target.is_null() { "null" } else { "undefined" };
             self.throw_type(format!("Cannot set properties of {} (setting '{}')", what, ks).as_str());
         }
     }
@@ -3701,7 +4135,7 @@ impl Vm {
         let h = if o >= 0 { self.priv_holder(o, a, brand) } else { -1 };
         if h < 0 {
             self.throw_private(a, "read");
-            return Val::Undef;
+            return Val::Undef();
         }
         let slot = self.find(h, a);
         if (self.attr_at(h, slot) & P_ACCESSOR) != 0 {
@@ -3709,9 +4143,9 @@ impl Vm {
             let g = self.evecs[self.objs[pair as usize].elems as usize].v[0].clone();
             if !self.is_callable(&g) {
                 self.throw_private(a, "read (no getter)");
-                return Val::Undef;
+                return Val::Undef();
             }
-            return self.call_fixed(g, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+            return self.call_fixed(g, v.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
         }
         self.objs[h as usize].get_slot(slot as usize).clone()
     }
@@ -3732,7 +4166,7 @@ impl Vm {
                 self.throw_private(a, "write (no setter)");
                 return;
             }
-            self.call_fixed(f, v.clone(), 1, val, Val::Undef, Val::Undef);
+            self.call_fixed(f, v.clone(), 1, val, Val::Undef(), Val::Undef());
             return;
         }
         if kind == 1 || h != o {
@@ -3780,7 +4214,7 @@ impl Vm {
         }
         if pair < 0 {
             pair = self.alloc(C_ACCESSOR, -1);
-            self.put_elems(pair, vec![Val::Undef, Val::Undef]);
+            self.put_elems(pair, vec![Val::Undef(), Val::Undef()]);
             let attr = P_ACCESSOR | if hidden { P_HIDDEN } else { 0 };
             if slot >= 0 {
                 self.put_slot(o, slot, Val::Obj(pair));
@@ -3792,9 +4226,15 @@ impl Vm {
         self.put_elem(pair, which, f);
     }
 
-    pub fn has_property(&mut self, o: int, k: &Val) -> bool {
+    pub fn has_property(&mut self, o0: int, k: &Val) -> bool {
         let (i, a) = self.to_key(k);
-        if i >= 0 {
+        if i < 0 {
+            return self.has_atom(o0, a);
+        }
+        // up the prototype chain in a loop: recursion overflowed the native
+        // stack on a chain of 300 000 objects (`5 in p`)
+        let mut o = o0;
+        loop {
             let class = self.objs[o as usize].class;
             if (class == C_ARRAY || class == C_ARGUMENTS) && i < self.evecs[self.objs[o as usize].elems as usize].v.len() as int && !self.is_hole(o, i) {
                 return true;
@@ -3803,28 +4243,31 @@ impl Vm {
                 return i < self.ta_length(o);
             }
             if class == C_STRING {
-                if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
+                if let Some(s) = (&self.colds[self.objs[o as usize].cold as usize].prim).as_str() {
                     let s = self.sget(s.clone());
                     if i < jsstr::len(s.as_str()) {
                         return true;
                     }
                 }
             }
-            // an own index property, then the prototypes (their elements too)
-            let at = self.index_atom(i);
+            // an own index property, then the prototypes (their elements too);
+            // the atom only looked up unless a proxy needs the key: `k in o`
+            // for a million new k made a million atoms (memory that never
+            // comes back)
             if class == C_PROXY {
+                let at = self.index_atom(i);
                 return self.has_atom(o, at);
             }
-            if self.find(o, at) >= 0 {
+            let at = self.index_atom_if(i);
+            if at >= 0 && self.find(o, at) >= 0 {
                 return true;
             }
             let p = self.objs[o as usize].proto as int;
             if p < 0 {
                 return false;
             }
-            return self.has_property(p, k);
+            o = p;
         }
-        self.has_atom(o, a)
     }
 
     pub fn has_atom(&mut self, o: int, a: int) -> bool {
@@ -3849,7 +4292,7 @@ impl Vm {
             }
             if a == A_PROTOTYPE && class == C_FUNCTION {
                 let v = self.function_own(cur, a);
-                if !matches!(v, Val::Undef) {
+                if !v.is_undef() {
                     return true;
                 }
             }
@@ -3869,7 +4312,7 @@ impl Vm {
                 return i < self.ta_length(o);
             }
             if class == C_STRING {
-                if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
+                if let Some(s) = (&self.colds[self.objs[o as usize].cold as usize].prim).as_str() {
                     let s = self.sget(s.clone());
                     if i < jsstr::len(s.as_str()) {
                         return true;
@@ -3890,7 +4333,7 @@ impl Vm {
         }
         if a == A_PROTOTYPE && class == C_FUNCTION {
             let v = self.function_own(o, a);
-            return !matches!(v, Val::Undef);
+            return !v.is_undef();
         }
         false
     }
@@ -3936,7 +4379,7 @@ impl Vm {
                 if i == len - 1 && class == C_ARGUMENTS {
                     self.pop_elem(o);
                 } else {
-                    self.put_elem(o, i, Val::Undef);
+                    self.put_elem(o, i, Val::Undef());
                     if class == C_ARRAY {
                         self.mark_hole(o, i);
                     }
@@ -3964,7 +4407,7 @@ impl Vm {
         }
         if (atom == A_NAME || atom == A_LENGTH) && (class == C_FUNCTION || class == C_BOUND) && !self.vgone(o, atom) {
             let m = self.vgone_atom(atom);
-            self.add_own(o, m, Val::Undef, P_HIDDEN);
+            self.add_own(o, m, Val::Undef(), P_HIDDEN);
         }
         true
     }
@@ -3994,7 +4437,7 @@ impl Vm {
             }
         }
         if class == C_STRING {
-            if let Val::Str(s) = &self.colds[self.objs[o as usize].cold as usize].prim {
+            if let Some(s) = (&self.colds[self.objs[o as usize].cold as usize].prim).as_str() {
                 let s = self.sget(s.clone());
                 let n = jsstr::len(s.as_str());
                 let mut i: int = 0;
@@ -4140,10 +4583,7 @@ impl Vm {
     /// Whether for-in iterator `it` checks each key is still there: not
     /// while no own property was removed since it began (ITER_KEYS).
     pub fn for_in_recheck(&self, it: int) -> bool {
-        match &self.colds[self.objs[it as usize].cold as usize].prim {
-            Val::Num(d) => (*d as int) != self.del_count,
-            _ => true,
-        }
+        if let Some(d) = (&self.colds[self.objs[it as usize].cold as usize].prim).as_num() { (d as int) != self.del_count } else { true }
     }
 
     pub fn for_in_keys(&mut self, o: int) -> Vec<Val> {
@@ -4162,13 +4602,13 @@ impl Vm {
             let visible = self.own_keys(cur, false, false);
             let mut vis: HashMap<String, bool> = HashMap::new();
             for v in visible.iter() {
-                if let Val::Str(s) = v {
+                if let Some(s) = v.as_str() {
                     let s = self.sget(s.clone());
                     vis.insert(s.as_ref().clone(), true);
                 }
             }
             for v in all {
-                if let Val::Str(s) = &v {
+                if let Some(s) = (&v).as_str() {
                     let s = self.sget(s.clone());
                     let key = s.as_ref().clone();
                     if seen.contains_key(&key) {
@@ -4311,14 +4751,14 @@ impl Vm {
         let op = self.object_proto;
         let direct = fp >= 0 && op >= 0 && self.objs[fo as usize].proto as int == fp && self.objs[fp as usize].proto as int == op && self.find(fo, A_HASINSTANCE) < 0;
         let plain = direct && self.hi_epoch == self.shape_epoch && self.hi_fp == self.objs[fp as usize].shape as int && self.hi_op == self.objs[op as usize].shape as int;
-        let hi = if plain { Val::Undef } else { self.get_obj(fo, A_HASINSTANCE, f) };
-        if direct && !plain && matches!(hi, Val::Undef) && self.find(fp, A_HASINSTANCE) < 0 && self.find(op, A_HASINSTANCE) < 0 {
+        let hi = if plain { Val::Undef() } else { self.get_obj(fo, A_HASINSTANCE, f) };
+        if direct && !plain && hi.is_undef() && self.find(fp, A_HASINSTANCE) < 0 && self.find(op, A_HASINSTANCE) < 0 {
             self.hi_epoch = self.shape_epoch;
             self.hi_fp = self.objs[fp as usize].shape as int;
             self.hi_op = self.objs[op as usize].shape as int;
         }
         if self.is_callable(&hi) && self.objs[obj_of(&hi) as usize].class != C_NATIVE {
-            let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef, Val::Undef);
+            let r = self.call_fixed(hi, f.clone(), 1, v.clone(), Val::Undef(), Val::Undef());
             return self.truthy_v(&r);
         }
         if !self.is_callable(f) {
@@ -4329,10 +4769,7 @@ impl Vm {
         while self.objs[target as usize].class == C_BOUND {
             target = self.objs[target as usize].env as int;
         }
-        let o = match v {
-            Val::Obj(o) => *o,
-            _ => return false,
-        };
+        let o = if let Some(o) = v.as_obj() { o } else { return false };
         // a script function's own data `prototype` read from its slot
         let ps = if self.objs[target as usize].class == C_FUNCTION { self.find(target, A_PROTOTYPE) } else { -1 };
         let p = if ps >= 0 && (self.attr_at(target, ps) & (P_ACCESSOR | P_MAPPED)) == 0 {
@@ -4340,13 +4777,10 @@ impl Vm {
         } else {
             self.get_obj(target, A_PROTOTYPE, &Val::Obj(target))
         };
-        let proto = match p {
-            Val::Obj(p) => p,
-            _ => {
+        let proto = if let Some(p) = p.as_obj() { p } else {
                 self.throw_type("Function has non-object prototype in instanceof check");
                 return false;
-            }
-        };
+            };
         let mut cur = self.proto_of(o);
         while cur >= 0 {
             if cur == proto {
@@ -4363,10 +4797,7 @@ impl Vm {
     /// the function's shape saves the two key lookups.
     #[inline(always)]
     pub fn instanceof_fast(&mut self, v: &Val, f: &Val) -> int {
-        let fo = match f {
-            Val::Obj(o) => *o,
-            _ => return -1,
-        };
+        let fo = if let Some(o) = f.as_obj() { o } else { return -1 };
         if self.objs[fo as usize].class != C_FUNCTION {
             return -1;
         }
@@ -4387,14 +4818,8 @@ impl Vm {
         if self.io_slot < 0 {
             return -1;
         }
-        let o = match v {
-            Val::Obj(o) => *o,
-            _ => return 0,
-        };
-        let proto = match self.objs[fo as usize].get_slot(self.io_slot as usize) {
-            Val::Obj(p) => p,
-            _ => return -1,
-        };
+        let o = if let Some(o) = v.as_obj() { o } else { return 0 };
+        let proto = if let Some(p) = (self.objs[fo as usize].get_slot(self.io_slot as usize)).as_obj() { p } else { return -1 };
         let mut cur = o;
         loop {
             if self.objs[cur as usize].class == C_PROXY {
@@ -4422,66 +4847,79 @@ impl Vm {
     // ---- arithmetic helpers
 
     pub fn add_vals(&mut self, a: &Val, b: &Val) -> Val {
-        match (a, b) {
-            (Val::Num(x), Val::Num(y)) => return Val::Num(x + y),
-            (Val::Str(x), Val::Str(y)) => {
-                if *x == 0 {
-                    return Val::Str(*y);
+        if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
+            return Val::Num(x + y);
+        }
+        match (a.kind(), b.kind()) {
+            (VK::Num(x), VK::Num(y)) => return Val::Num(x + y),
+            (VK::Str(x), VK::Str(y)) => {
+                if x == 0 {
+                    return Val::Str(y);
                 }
-                if *y == 0 {
-                    return Val::Str(*x);
+                if y == 0 {
+                    return Val::Str(x);
+                }
+                // a long string on the left: appended in its own buffer when
+                // nothing else holds it (x stays its text, a prefix view), so
+                // 'a' + 'a' + ... in one expression copies nothing again
+                if self.hbytes(x) >= 1024 {
+                    let ys = self.sget(y);
+                    let h = self.str_append(x, ys.as_str());
+                    if h >= 0 {
+                        return Val::Str(h);
+                    }
                 }
                 // a short string before a long one: into the room before it
-                let yb = self.hbytes(*y);
-                if yb >= 32 && self.hbytes(*x) * 4 <= yb {
-                    let xt = self.sget(*x);
-                    let r = self.str_prepend(xt.as_str(), *y);
+                let yb = self.hbytes(y);
+                if yb >= 32 && self.hbytes(x) * 4 <= yb {
+                    let xt = self.sget(x);
+                    let r = self.str_prepend(xt.as_str(), y);
                     if r >= 0 {
                         return Val::Str(r);
                     }
                 }
-                let n = self.sref(*x).as_bytes().len() + self.sref(*y).as_bytes().len();
+                let n = self.sref(x).as_bytes().len() + self.sref(y).as_bytes().len();
                 if self.str_too_long(n as double) {
-                    return Val::Undef;
+                    return Val::Undef();
                 }
                 let h = self.take_handle(n as int, 0);
                 let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
-                s.push_str(self.sref(*x));
-                jsstr::push_js(&mut s, self.sref(*y));
+                s.push_str(self.sref(x));
+                jsstr::push_js(&mut s, self.sref(y));
                 rc_refill(&mut self.strs[h as usize].s, s);
                 return Val::Str(h);
             }
-            (Val::Str(x), Val::Num(y)) => {
+            (VK::Str(x), VK::Num(y)) => {
                 // "k" + i: a small whole number's digits straight onto the copy
-                if *y >= 0.0 && *y < 2147483647.0 && *y == ((*y as int) as double) {
-                    let n = self.sref(*x).as_bytes().len() + 10;
+                if y >= 0.0 && y < 2147483647.0 && y == ((y as int) as double) {
+                    let n = self.sref(x).as_bytes().len() + 10;
                     let h = self.take_handle(n as int, 0);
                     let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
-                    s.push_str(self.sref(*x));
-                    if push_small_int(&mut s, *y) >= 0 {
+                    s.push_str(self.sref(x));
+                    if push_small_int(&mut s, y) >= 0 {
                         rc_refill(&mut self.strs[h as usize].s, s);
                         return Val::Str(h);
                     }
-                    s.push_str(number_to_string(*y).as_str());
+                    s.push_str(number_to_string(y).as_str());
                     rc_refill(&mut self.strs[h as usize].s, s);
                     return Val::Str(h);
                 }
-                let t = number_to_string(*y);
-                let n = self.sref(*x).as_bytes().len() + t.as_bytes().len();
+                let t = number_to_string(y);
+                let n = self.sref(x).as_bytes().len() + t.as_bytes().len();
                 let h = self.take_handle(n as int, 0);
                 let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
-                s.push_str(self.sref(*x));
+                s.push_str(self.sref(x));
                 s.push_str(t.as_str());
                 rc_refill(&mut self.strs[h as usize].s, s);
                 return Val::Str(h);
             }
-            (Val::Num(x), Val::Str(y)) => {
-                let t = number_to_string(*x);
-                let n = t.as_bytes().len() + self.sref(*y).as_bytes().len();
+            (VK::Num(x), VK::Str(y)) => {
+                let t = number_to_string(x);
+                let n = t.as_bytes().len() + self.sref(y).as_bytes().len();
                 let h = self.take_handle(n as int, 0);
                 let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
                 s.push_str(t.as_str());
-                s.push_str(self.sref(*y));
+                s.push_str(self.sref(y));
                 rc_refill(&mut self.strs[h as usize].s, s);
                 return Val::Str(h);
             }
@@ -4492,20 +4930,20 @@ impl Vm {
         }
         let pa = self.to_primitive(a, "default");
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         let pb = self.to_primitive(b, "default");
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
-        if matches!(pa, Val::Str(_)) || matches!(pb, Val::Str(_)) {
+        if pa.is_str() || pb.is_str() {
             let x = self.to_str(&pa);
             let y = self.to_str(&pb);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             if self.str_too_long((x.as_bytes().len() + y.as_bytes().len()) as double) {
-                return Val::Undef;
+                return Val::Undef();
             }
             let mut s = String::new();
             s.push_str(x.as_str());
@@ -4522,8 +4960,8 @@ impl Vm {
 
     /// `<`: 1 true, 0 false, -1 undefined (NaN)
     pub fn less_than(&mut self, a: &Val, b: &Val) -> int {
-        if let (Val::Num(x), Val::Num(y)) = (a, b) {
-            if is_nan(*x) || is_nan(*y) {
+        if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
+            if is_nan(x) || is_nan(y) {
                 return -1;
             }
             return if x < y { 1 } else { 0 };
@@ -4536,8 +4974,8 @@ impl Vm {
         if self.throwing {
             return -1;
         }
-        if let (Val::Str(x), Val::Str(y)) = (&pa, &pb) {
-            return if jsstr::compare(self.sref(*x), self.sref(*y)) < 0 { 1 } else { 0 };
+        if (&pa).is_str() && (&pb).is_str() { let x = (&pa).strh(); let y = (&pb).strh();
+            return if jsstr::compare(self.sref(x), self.sref(y)) < 0 { 1 } else { 0 };
         }
         if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
             return self.big_less(&pa, &pb);
@@ -4555,7 +4993,7 @@ impl Vm {
     }
 
     pub fn compare(&mut self, code: int, a: &Val, b: &Val) -> bool {
-        if let (Val::Num(x), Val::Num(y)) = (a, b) {
+        if a.is_num() && b.is_num() { let x = a.num(); let y = b.num();
             return match code {
                 OP_LT => x < y,
                 OP_GT => x > y,
@@ -4584,11 +5022,11 @@ impl Vm {
             }
             let pa = self.to_primitive(a, "number");
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             let pb = self.to_primitive(b, "number");
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             if self.class_of(&pa) == C_BIGINT || self.class_of(&pb) == C_BIGINT {
                 return self.big_arith(code, &pa, &pb);
@@ -4596,26 +5034,20 @@ impl Vm {
             let x = self.to_number(&pa);
             let y = self.to_number(&pb);
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             return Val::Num(arith_num(code, x, y));
         }
-        if matches!(a, Val::Big(_)) || matches!(b, Val::Big(_)) {
+        if a.is_big() || b.is_big() {
             return self.big_arith(code, a, b);
         }
-        let x = match a {
-            Val::Num(n) => *n,
-            _ => self.to_number(a),
-        };
+        let x = if let Some(n) = a.as_num() { n } else { self.to_number(a) };
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
-        let y = match b {
-            Val::Num(n) => *n,
-            _ => self.to_number(b),
-        };
+        let y = if let Some(n) = b.as_num() { n } else { self.to_number(b) };
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         Val::Num(arith_num(code, x, y))
     }
@@ -4631,33 +5063,33 @@ impl Vm {
         if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION {
             let base = self.frames.len() as int;
             self.stack.push(f.clone());
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
             self.stack.push(a.clone());
             self.stack.push(b.clone());
-            if !self.enter_function(fo, 2, false, Val::Undef) {
-                return Val::Undef;
+            if !self.enter_function(fo, 2, false, Val::Undef()) {
+                return Val::Undef();
             }
             self.native_depth += 1;
             self.run(base);
             self.native_depth -= 1;
             if self.throwing {
-                return Val::Undef;
+                return Val::Undef();
             }
             return self.stack.pop().unwrap();
         }
-        self.call_fixed(f.clone(), Val::Undef, 2, a.clone(), b.clone(), Val::Undef)
+        self.call_fixed(f.clone(), Val::Undef(), 2, a.clone(), b.clone(), Val::Undef())
     }
 
     pub fn call_value(&mut self, f: Val, this: Val, args: Vec<Val>) -> Val {
         let fo = obj_of(&f);
         if fo < 0 || !self.is_callable(&f) {
             self.throw_type("value is not a function");
-            return Val::Undef;
+            return Val::Undef();
         }
         let class = self.objs[fo as usize].class;
         if class == C_NATIVE {
             let id = self.objs[fo as usize].func as int;
-            return self.call_native(id, fo, this, &args, false, Val::Undef);
+            return self.call_native(id, fo, this, &args, false, Val::Undef());
         }
         if class == C_BOUND {
             let target = self.objs[fo as usize].env as int;
@@ -4679,14 +5111,14 @@ impl Vm {
         for a in args {
             self.stack.push(a);
         }
-        if !self.enter_function(fo, argc, false, Val::Undef) {
-            return Val::Undef;
+        if !self.enter_function(fo, argc, false, Val::Undef()) {
+            return Val::Undef();
         }
         self.native_depth += 1;
         self.run(base);
         self.native_depth -= 1;
         if self.throwing || self.suspended {
-            return Val::Undef;
+            return Val::Undef();
         }
         self.stack.pop().unwrap()
     }
@@ -4720,14 +5152,14 @@ impl Vm {
         if n > 2 {
             self.stack.push(c);
         }
-        if !self.enter_function(fo, n, false, Val::Undef) {
-            return Val::Undef;
+        if !self.enter_function(fo, n, false, Val::Undef()) {
+            return Val::Undef();
         }
         self.native_depth += 1;
         self.run(base);
         self.native_depth -= 1;
         if self.throwing || self.suspended {
-            return Val::Undef;
+            return Val::Undef();
         }
         self.stack.pop().unwrap()
     }
@@ -4736,7 +5168,7 @@ impl Vm {
     /// the script's own frames are safe points for the collector.
     pub fn run_program(&mut self, f: Val, this: Val) -> Val {
         self.native_depth -= 1;
-        let r = self.call_fixed(f, this, 0, Val::Undef, Val::Undef, Val::Undef);
+        let r = self.call_fixed(f, this, 0, Val::Undef(), Val::Undef(), Val::Undef());
         self.native_depth += 1;
         r
     }
@@ -4748,9 +5180,12 @@ impl Vm {
         if self.native_depth != 0 {
             return self.call_value(f, this, args);
         }
+        // a host call of its own: the time limit counts from here
+        let began = self.begin_call(false);
         self.native_depth -= 1;
         let r = self.call_value(f, this, args);
         self.native_depth += 1;
+        self.end_call(began);
         r
     }
 
@@ -4788,16 +5223,16 @@ impl Vm {
         let fo = obj_of(&f);
         if fo < 0 || !self.is_callable(&f) {
             self.throw_type("value is not a constructor");
-            return Val::Undef;
+            return Val::Undef();
         }
         let class = self.objs[fo as usize].class;
         if class == C_NATIVE && !self.is_constructor(&f) {
             self.throw_type("value is not a constructor");
-            return Val::Undef;
+            return Val::Undef();
         }
         if class == C_NATIVE {
             let id = self.objs[fo as usize].func as int;
-            let this = Val::Undef;
+            let this = Val::Undef();
             return self.call_native(id, fo, this, &args, true, new_target);
         }
         if class == C_BOUND {
@@ -4816,7 +5251,7 @@ impl Vm {
         let pi = self.objs[fo as usize].func as int;
         if !self.protos[pi as usize].constructible() {
             self.throw_type("value is not a constructor");
-            return Val::Undef;
+            return Val::Undef();
         }
         let this = self.make_this(&new_target);
         let base = self.frames.len() as int;
@@ -4827,13 +5262,13 @@ impl Vm {
             self.stack.push(a);
         }
         if !self.enter_function(fo, argc, true, new_target) {
-            return Val::Undef;
+            return Val::Undef();
         }
         self.native_depth += 1;
         self.run(base);
         self.native_depth -= 1;
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         self.stack.pop().unwrap()
     }
@@ -4844,7 +5279,7 @@ impl Vm {
         let mut proto = self.object_proto;
         if nt >= 0 {
             let p = self.get_obj(nt, A_PROTOTYPE, new_target);
-            if let Val::Obj(po) = p {
+            if let Some(po) = p.as_obj() {
                 proto = po;
             }
         }
@@ -5117,7 +5552,8 @@ impl Vm {
     pub fn mapped_get(&mut self, o: int, atom: int, slot: int) -> Val {
         let e = self.mapped_slot(o, atom);
         let home = self.colds[self.objs[o as usize].cold as usize].home;
-        if e < 0 || home < 0 {
+        // (checked: a restored snapshot's map may name a slot past the env)
+        if e < 0 || home < 0 || e >= (self.evecs[self.objs[home as usize].elems as usize].v.len() as int) {
             return self.objs[o as usize].get_slot(slot as usize).clone();
         }
         self.evecs[self.objs[home as usize].elems as usize].v[e as usize].clone()
@@ -5127,7 +5563,7 @@ impl Vm {
     pub fn mapped_put(&mut self, o: int, atom: int, v: &Val) {
         let e = self.mapped_slot(o, atom);
         let home = self.colds[self.objs[o as usize].cold as usize].home;
-        if e >= 0 && home >= 0 {
+        if e >= 0 && home >= 0 && e < (self.evecs[self.objs[home as usize].elems as usize].v.len() as int) {
             self.put_elem(home, e, v.clone());
         }
     }
@@ -5187,23 +5623,23 @@ impl Vm {
             self.stack.truncate((bp + rest) as usize);
             // fewer arguments than the parameters before the rest one
             while (self.stack.len() as int) < bp + rest {
-                self.stack.push(Val::Undef);
+                self.stack.push(Val::Undef());
             }
             self.stack.push(Val::Obj(arr));
         } else if argc > nparams {
             self.stack.truncate((bp + nparams) as usize);
         }
         while (self.stack.len() as int) < bp + nslots {
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
         }
         let mut this_val = self.stack[(bp - 1) as usize].clone();
         let mut nt = new_target;
         if arrow {
             this_val = self.colds[self.objs[fo as usize].cold as usize].prim.clone();
             // new.target as the arrow found it
-            nt = if self.colds[self.objs[fo as usize].cold as usize].elems2.is_empty() { Val::Undef } else { self.colds[self.objs[fo as usize].cold as usize].elems2[0].clone() };
+            nt = if self.colds[self.objs[fo as usize].cold as usize].elems2.is_empty() { Val::Undef() } else { self.colds[self.objs[fo as usize].cold as usize].elems2[0].clone() };
         } else if !strict && !construct {
-            if matches!(this_val, Val::Undef) || matches!(this_val, Val::Null) {
+            if this_val.is_undef() || this_val.is_null() {
                 this_val = Val::Obj(self.global);
             } else if !is_obj(&this_val) {
                 // a sloppy function sees a primitive `this` boxed
@@ -5216,7 +5652,7 @@ impl Vm {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
             while i < env_size {
-                self.push_elem(e, Val::Undef);
+                self.push_elem(e, Val::Undef());
                 i += 1;
             }
             env = e;
@@ -5257,16 +5693,16 @@ impl Vm {
             self.stack.truncate((bp + nparams) as usize);
         }
         while (self.stack.len() as int) < bp + nslots {
-            self.stack.push(Val::Undef);
+            self.stack.push(Val::Undef());
         }
         let arrow = self.protos[pi as usize].arrow;
-        let mut nt = Val::Undef;
+        let mut nt = Val::Undef();
         if arrow && !self.colds[self.objs[fo as usize].cold as usize].elems2.is_empty() {
             nt = self.colds[self.objs[fo as usize].cold as usize].elems2[0].clone();
         }
         let mut this_val = if arrow { self.colds[self.objs[fo as usize].cold as usize].prim.clone() } else { self.stack[(bp - 1) as usize].clone() };
         if !arrow && !self.protos[pi as usize].strict {
-            if matches!(this_val, Val::Undef) || matches!(this_val, Val::Null) {
+            if this_val.is_undef() || this_val.is_null() {
                 this_val = Val::Obj(self.global);
             } else if !is_obj(&this_val) {
                 let bo = self.to_object(&this_val);
@@ -5278,7 +5714,7 @@ impl Vm {
             let e = self.alloc(C_ENV, env);
             let mut i = 0;
             while i < env_size {
-                self.push_elem(e, Val::Undef);
+                self.push_elem(e, Val::Undef());
                 i += 1;
             }
             env = e;
@@ -5308,7 +5744,7 @@ impl Vm {
             return;
         }
         let f = self.colds[self.objs[ctor as usize].cold as usize].elems2[0].clone();
-        self.call_fixed(f, this.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+        self.call_fixed(f, this.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
     }
 
     /// Unwinds to the innermost handler of this run; false when there is
@@ -5323,6 +5759,11 @@ impl Vm {
             if hf < base {
                 break;
             }
+            if self.terminated {
+                // past the time limit: no catch or finally runs
+                self.handlers.pop();
+                continue;
+            }
             let (catch_pc, sp, env) = (self.handlers[h].catch_pc, self.handlers[h].sp, self.handlers[h].env);
             self.handlers.pop();
             self.frames.truncate((hf + 1) as usize);
@@ -5332,7 +5773,7 @@ impl Vm {
             self.frames[fi].env = env;
             let e = self.exc.clone();
             self.stack.push(e);
-            self.exc = Val::Undef;
+            self.exc = Val::Undef();
             self.throwing = false;
             return true;
         }
@@ -5382,38 +5823,38 @@ impl Vm {
 
     pub fn iter_values(&mut self, v: &Val) -> Val {
         // arrays, strings, and anything with a Symbol.iterator method
-        if let Val::Obj(o) = v {
-            let class = self.objs[*o as usize].class;
+        if let Some(o) = v.as_obj() {
+            let class = self.objs[o as usize].class;
             if class == C_ARRAY || class == C_ARGUMENTS {
-                let plain = class == C_ARGUMENTS || self.array_iter_plain(*o) || obj_of(&self.get_obj(*o, A_ITERATOR, v)) == self.array_values_fn;
+                let plain = class == C_ARGUMENTS || self.array_iter_plain(o) || obj_of(&self.get_obj(o, A_ITERATOR, v)) == self.array_values_fn;
                 if plain {
                     let ip = self.iter_proto;
                     let it = self.alloc(C_ITER, ip);
-                    self.put_env(it, *o);
+                    self.put_env(it, o);
                     self.objs[it as usize].func = 0;
                     return Val::Obj(it);
                 }
             }
         }
-        if let Val::Str(_) = v {
+        if let Some(_) = v.as_str() {
             let ip = self.iter_proto;
             return self.string_iter(v.clone(), ip);
         }
         let f = self.get(v, A_ITERATOR);
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if !self.is_callable(&f) {
             self.throw_type("object is not iterable");
-            return Val::Undef;
+            return Val::Undef();
         }
-        let it = self.call_fixed(f, v.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+        let it = self.call_fixed(f, v.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
         if self.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         if !is_obj(&it) {
             self.throw_type("Result of the Symbol.iterator method is not an object");
-            return Val::Undef;
+            return Val::Undef();
         }
         it
     }
@@ -5537,14 +5978,14 @@ impl Vm {
             return Some(v);
         }
         let plain = o >= 0 && self.objs[o as usize].class == C_GENERATOR && self.gen_plain_next(o);
-        let next = if plain { Val::Undef } else { self.get(it, A_NEXT) };
+        let next = if plain { Val::Undef() } else { self.get(it, A_NEXT) };
         if self.throwing {
             return None;
         }
         // a generator with its own next: resumed here, no result object
         let nf = obj_of(&next);
         if plain || (o >= 0 && nf >= 0 && self.objs[nf as usize].class == C_NATIVE && (self.objs[nf as usize].func as int) == crate::coroutine::NF_GEN_NEXT && self.objs[o as usize].class == C_GENERATOR && !self.protos[self.objs[o as usize].func as usize].is_async) {
-            let v = self.gen_resume_s(o, crate::coroutine::GM_NEXT, Val::Undef, safe);
+            let v = self.gen_resume_s(o, crate::coroutine::GM_NEXT, Val::Undef(), safe);
             if self.throwing || self.gen_done {
                 return None;
             }
@@ -5562,7 +6003,7 @@ impl Vm {
             }
             return Some(self.get(&v, A_VALUE));
         }
-        let r = self.call_fixed(next, it.clone(), 0, Val::Undef, Val::Undef, Val::Undef);
+        let r = self.call_fixed(next, it.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
         if self.throwing {
             return None;
         }
@@ -5578,9 +6019,9 @@ impl Vm {
     }
 
     pub fn iterable_to_vec(&mut self, v: &Val) -> Vec<Val> {
-        if let Val::Obj(o) = v {
-            if self.array_iter_plain(*o) {
-                return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
+        if let Some(o) = v.as_obj() {
+            if self.array_iter_plain(o) {
+                return self.evecs[self.objs[o as usize].elems as usize].v.clone();
             }
         }
         let it = self.iter_values(v);
@@ -5685,9 +6126,9 @@ impl Vm {
     /// The first `n` values of an iterable; an iterator not done by then is
     /// closed (array destructuring without a rest element).
     pub fn iterable_take(&mut self, v: &Val, n: int) -> Vec<Val> {
-        if let Val::Obj(o) = v {
-            if self.array_iter_plain(*o) {
-                return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
+        if let Some(o) = v.as_obj() {
+            if self.array_iter_plain(o) {
+                return self.evecs[self.objs[o as usize].elems as usize].v.clone();
             }
         }
         let it = self.iter_values(v);
@@ -5746,6 +6187,15 @@ impl Vm {
             }
             return;
         }
+        self.srun(base);
+        if self.terminated && self.throwing {
+            // stopped at a branch past the deadline: the frames go
+            self.unwind(base);
+        }
+    }
+
+    /// The stack VM's loop (run).
+    fn srun(&mut self, base: int) {
         self.check_native_stack();
         'frames: loop {
             if self.throwing {
@@ -5756,7 +6206,7 @@ impl Vm {
             if (self.frames.len() as int) <= base {
                 return;
             }
-            if self.slicing && self.frame_brk() {
+            if self.checking && self.frame_brk() {
                 return;
             }
             let fi = self.frames.len() - 1;
@@ -5788,8 +6238,8 @@ impl Vm {
                         self.add_local_pop(op, bp);
                     }
                     // cheap ops, here rather than through step()
-                    OP_UNDEF => self.stack.push(Val::Undef),
-                    OP_NULL => self.stack.push(Val::Null),
+                    OP_UNDEF => self.stack.push(Val::Undef()),
+                    OP_NULL => self.stack.push(Val::Null()),
                     OP_TRUE => self.stack.push(Val::Bool(true)),
                     OP_FALSE => self.stack.push(Val::Bool(false)),
                     OP_DUP => {
@@ -5839,7 +6289,7 @@ impl Vm {
                     }
                     OP_INC_LOCAL => {
                         let i = (bp + (op.a as int)) as usize;
-                        if let Val::Num(n) = self.stack[i] {
+                        if let Some(n) = self.stack[i].as_num() {
                             self.stack[i] = Val::Num(n + (op.b as double));
                         } else {
                             let v = self.stack[i].clone();
@@ -5850,7 +6300,7 @@ impl Vm {
                     OP_CMP_JF => {
                         let b = self.pop();
                         let a = self.pop();
-                        let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
+                        let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             match (op.b as int) {
                                 OP_LT => x < y,
                                 OP_GT => x > y,
@@ -5876,7 +6326,7 @@ impl Vm {
                                     self.gc();
                                 }
                             }
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5892,12 +6342,12 @@ impl Vm {
                         let e = self.get_env((op.a as int));
                         let v = self.evecs[self.objs[e as usize].elems as usize].v[op.b as usize].clone();
                         self.stack.push(v);
-                        self.stack.push(Val::Undef);
+                        self.stack.push(Val::Undef());
                     }
                     OP_CASE_INT_JT => {
-                        if let Val::Num(x) = self.stack[self.stack.len() - 1] {
+                        if let Some(x) = (self.stack[self.stack.len() - 1]).as_num() {
                             if x == (op.b as double) {
-                                if self.slicing && self.brk(fi, (op.a as int)) {
+                                if self.checking && self.brk(fi, (op.a as int)) {
                                     return;
                                 }
                                 pc = (op.a as int);
@@ -5906,11 +6356,7 @@ impl Vm {
                     }
                     OP_LOCAL_NULL_JF => {
                         let cmp = op.b % 256;
-                        let r = match self.stack[(bp + ((op.b / 256) as int)) as usize] {
-                            Val::Null => (cmp as int) == OP_SEQ || (cmp as int) == OP_EQ,
-                            Val::Undef => (cmp as int) == OP_SNE || (cmp as int) == OP_EQ,
-                            _ => (cmp as int) == OP_SNE || (cmp as int) == OP_NE,
-                        };
+                        let r = if (self.stack[(bp + ((op.b / 256) as int)) as usize]).is_null() { (cmp as int) == OP_SEQ || (cmp as int) == OP_EQ } else if (self.stack[(bp + ((op.b / 256) as int)) as usize]).is_undef() { (cmp as int) == OP_SNE || (cmp as int) == OP_EQ } else { (cmp as int) == OP_SNE || (cmp as int) == OP_NE };
                         if !r {
                             if (op.a as int) < pc {
                                 self.frames[fi].pc = (op.a as int);
@@ -5918,7 +6364,7 @@ impl Vm {
                                     self.gc();
                                 }
                             }
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5927,7 +6373,7 @@ impl Vm {
                     OP_CASE_JT => {
                         let b = self.pop();
                         let n = self.stack.len() - 1;
-                        let hit = if let (Val::Num(x), Val::Num(y)) = (&self.stack[n], &b) {
+                        let hit = if (&self.stack[n]).is_num() && (&b).is_num() { let x = (&self.stack[n]).num(); let y = (&b).num();
                             x == y
                         } else {
                             let q = quick_eq(&self.stack[n], &b, true);
@@ -5939,7 +6385,7 @@ impl Vm {
                             }
                         };
                         if hit {
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5952,7 +6398,7 @@ impl Vm {
                                 self.gc();
                             }
                         }
-                        if self.slicing && self.brk(fi, (op.a as int)) {
+                        if self.checking && self.brk(fi, (op.a as int)) {
                             return;
                         }
                         pc = (op.a as int);
@@ -5960,7 +6406,7 @@ impl Vm {
                     OP_JF => {
                         let v = self.pop();
                         if !self.truthy_v(&v) {
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5969,7 +6415,7 @@ impl Vm {
                     OP_JT => {
                         let v = self.pop();
                         if self.truthy_v(&v) {
-                            if self.slicing && self.brk(fi, (op.a as int)) {
+                            if self.checking && self.brk(fi, (op.a as int)) {
                                 return;
                             }
                             pc = (op.a as int);
@@ -5978,7 +6424,7 @@ impl Vm {
                     OP_ADD => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             self.stack.push(Val::Num(x + y));
                         } else {
                             self.frames[fi].pc = pc;
@@ -5989,8 +6435,8 @@ impl Vm {
                     OP_DIV | OP_MOD | OP_EXP | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR | OP_USHR => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
-                            self.stack.push(Val::Num(arith_num((op.code as int), *x, *y)));
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
+                            self.stack.push(Val::Num(arith_num((op.code as int), x, y)));
                         } else {
                             self.frames[fi].pc = pc;
                             let r = self.arith((op.code as int), &a, &b);
@@ -6021,7 +6467,7 @@ impl Vm {
                     }
                     OP_POSTINC_LOCAL | OP_PREINC_LOCAL => {
                         let i = (bp + (op.a as int)) as usize;
-                        if let Val::Num(old) = self.stack[i] {
+                        if let Some(old) = self.stack[i].as_num() {
                             let nv = old + (op.b as double);
                             self.stack[i] = Val::Num(nv);
                             self.stack.push(Val::Num(if (op.code as int) == OP_PREINC_LOCAL { nv } else { old }));
@@ -6036,7 +6482,7 @@ impl Vm {
                     OP_SUB => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             self.stack.push(Val::Num(x - y));
                         } else {
                             self.frames[fi].pc = pc;
@@ -6047,7 +6493,7 @@ impl Vm {
                     OP_MUL => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Val::Num(x), Val::Num(y)) = (&a, &b) {
+                        if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num();
                             self.stack.push(Val::Num(x * y));
                         } else {
                             self.frames[fi].pc = pc;
@@ -6059,8 +6505,8 @@ impl Vm {
                         let v = self.frames[fi].this_val.clone();
                         let atom = op.a;
                         let mut done = false;
-                        if let Val::Obj(o) = &v {
-                            let o = *o;
+                        if let Some(o) = (&v).as_obj() {
+                            let o = o;
                             let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
                                 let r = self.objs[o as usize].get_slot(slot as usize).clone();
@@ -6083,8 +6529,8 @@ impl Vm {
                         let v = self.stack[(bp + (op.a as int)) as usize].clone();
                         let atom = op.b;
                         let mut done = false;
-                        if let Val::Obj(o) = &v {
-                            let o = *o;
+                        if let Some(o) = (&v).as_obj() {
+                            let o = o;
                             let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
                                 let r = self.objs[o as usize].get_slot(slot as usize).clone();
@@ -6107,8 +6553,8 @@ impl Vm {
                         let v = self.pop();
                         let atom = op.a;
                         let mut done = false;
-                        if let Val::Obj(o) = &v {
-                            let o = *o;
+                        if let Some(o) = (&v).as_obj() {
+                            let o = o;
                             let slot = self.ic_get(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
                                 let r = self.objs[o as usize].get_slot(slot as usize).clone();
@@ -6132,8 +6578,8 @@ impl Vm {
                         let target = self.pop();
                         let atom = op.a;
                         let mut done = false;
-                        if let Val::Obj(o) = &target {
-                            let o = *o;
+                        if let Some(o) = (&target).as_obj() {
+                            let o = o;
                             let slot = self.ic_set(o, (atom as int), (op.c as int), pi, pc);
                             if slot >= 0 {
                                 self.put_slot(o, slot, val.clone());
@@ -6154,17 +6600,17 @@ impl Vm {
                         let k = self.pop();
                         let v = self.pop();
                         let mut done = false;
-                        if let (Val::Obj(o), Val::Num(n)) = (&v, &k) {
-                            let ob = &self.objs[*o as usize];
+                        if let Some(o) = (&v).as_obj() { if let Some(n) = (&k).as_num() {
+                            let ob = &self.objs[o as usize];
                             if ob.class == C_ARRAY {
-                                let i = *n as int;
-                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n && ob.pos != 3 && !self.idx_protos {
+                                let i = n as int;
+                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.pos != 3 && !self.idx_protos {
                                     let r = self.evecs[ob.elems as usize].v[i as usize].clone();
                                     self.stack.push(r);
                                     done = true;
                                 }
                             }
-                        }
+                        }}
                         if !done {
                             self.frames[fi].pc = pc;
                             let r = self.get_elem(&v, &k);
@@ -6176,14 +6622,14 @@ impl Vm {
                         let k = self.pop();
                         let target = self.pop();
                         let mut done = false;
-                        if let (Val::Obj(o), Val::Num(n)) = (&target, &k) {
+                        if let Some(o) = (&target).as_obj() { if let Some(n) = (&k).as_num() {
                             self.inc(&val);
-                            let ob = &mut self.objs[*o as usize];
+                            let ob = &mut self.objs[o as usize];
                             let mut old: int = -1;
                             let mut old_s: int = 0;
                             if ob.class == C_ARRAY {
-                                let i = *n as int;
-                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n && ob.pos < 2 {
+                                let i = n as int;
+                                if i >= 0 && i < (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.pos < 2 {
                                     old = obj_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     old_s = str_of(&self.evecs[ob.elems as usize].v[i as usize]);
                                     elem_put(&mut self.evecs[ob.elems as usize], i as usize, val.clone());
@@ -6193,7 +6639,7 @@ impl Vm {
                                         self.colds[oc].elems2[i as usize] = Val::Bool(false);
                                     }
                                     done = true;
-                                } else if i >= 0 && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == *n && ob.extensible && ob.pos != 3 {
+                                } else if i >= 0 && i < MAX_ELEMS && i == (self.evecs[ob.elems as usize].v.len() as int) && (i as double) == n && ob.extensible && ob.pos != 3 && !self.idx_protos {
                                     if ob.elems == 0 {
                                         if !self.efree.is_empty() {
                                             ob.elems = self.efree.pop().unwrap();
@@ -6213,7 +6659,7 @@ impl Vm {
                             } else {
                                 self.dec(&val);
                             }
-                        }
+                        }}
                         if !done {
                             self.frames[fi].pc = pc;
                             self.set_elem(&target, &k, val.clone());
@@ -6228,11 +6674,11 @@ impl Vm {
                         let v = self.pop();
                         self.frames[fi].pc = pc;
                         let atom = op.a;
-                        let mut f = Val::Undef;
+                        let mut f = Val::Undef();
                         let mut done = false;
-                        if let Val::Obj(o) = &v {
+                        if let Some(o) = (&v).as_obj() {
                             // own slot, else the prototype's slot, cached
-                            let o = *o;
+                            let o = o;
                             let slot = self.find(o, (atom as int));
                             if slot >= 0 && (self.attr_at(o, slot) & P_ACCESSOR) == 0 {
                                 f = self.objs[o as usize].get_slot(slot as usize).clone();
@@ -6266,7 +6712,7 @@ impl Vm {
                         // a function of this program: straight in
                         let fo = obj_of(&self.stack[self.stack.len() - (argc as usize) - 2]);
                         if fo >= 0 && self.objs[fo as usize].class == C_FUNCTION {
-                            self.enter_function(fo, (argc as int), false, Val::Undef);
+                            self.enter_function(fo, (argc as int), false, Val::Undef());
                             continue 'frames;
                         }
                         if self.call_op((argc as int)) {
@@ -6274,10 +6720,10 @@ impl Vm {
                         }
                     }
                     OP_RETURN | OP_RETURN_UNDEF => {
-                        let mut v = if (op.code as int) == OP_RETURN { self.pop() } else { Val::Undef };
+                        let mut v = if (op.code as int) == OP_RETURN { self.pop() } else { Val::Undef() };
                         let fr = self.frames.pop().unwrap();
                         if fr.construct && !is_obj(&v) {
-                            if !matches!(v, Val::Undef) && self.protos[fr.proto as usize].derived {
+                            if !v.is_undef() && self.protos[fr.proto as usize].derived {
                                 self.frames.push(fr);
                                 self.throw_type("Derived constructors may only return object or undefined");
                                 if !self.unwind(base) {
@@ -6310,7 +6756,7 @@ impl Vm {
                             continue 'frames;
                         }
                         // a branch in step (JF_KEEP, JNULLISH, ITER_NEXT...)
-                        if pc != pc0 && self.slicing && self.brk(fi, pc) {
+                        if pc != pc0 && self.checking && self.brk(fi, pc) {
                             return;
                         }
                     }
@@ -6344,7 +6790,7 @@ impl Vm {
         }
         let name = if self.class_of(k) == C_SYMBOL {
             let d = self.colds[self.objs[obj_of(k) as usize].cold as usize].prim.clone();
-            if matches!(d, Val::Undef) {
+            if d.is_undef() {
                 String::new()
             } else {
                 format!("[{}]", self.to_string(&d))
@@ -6360,7 +6806,7 @@ impl Vm {
     /// ToNumeric(v) and it plus `delta`: numbers or BigInts.
     pub fn numeric_step(&mut self, v: &Val, delta: int) -> (Val, Val) {
         let p = if is_obj(v) { self.to_primitive(v, "number") } else { v.clone() };
-        if let Val::Big(n) = p {
+        if let VK::Big(n) = p.kind() {
             let b = self.big_step(n, delta as double);
             return (p, b);
         }
@@ -6386,10 +6832,7 @@ impl Vm {
         }
         // a binding, not matches!(.., Val::Bool(true)): rgrc's JS matches the
         // variant only and would count every marker as a hole
-        match &e2[i as usize] {
-            Val::Bool(b) => *b,
-            _ => false,
-        }
+        let e = &e2[i as usize]; e.is_bool() && e.boolv()
     }
 
     pub fn mark_hole(&mut self, o: int, i: int) {
@@ -6409,18 +6852,18 @@ impl Vm {
     /// and whether it was present.
     pub fn elem_to_prop(&mut self, o: int, i: int) -> (Val, bool) {
         let len = self.evecs[self.objs[o as usize].elems as usize].v.len() as int;
-        let mut v = Val::Undef;
+        let mut v = Val::Undef();
         let mut present = false;
         if i < len {
             if !self.is_hole(o, i) {
                 v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
                 present = true;
-                self.put_elem(o, i, Val::Undef);
+                self.put_elem(o, i, Val::Undef());
             }
         } else {
             let mut k = len;
             while k <= i {
-                self.push_elem(o, Val::Undef);
+                self.push_elem(o, Val::Undef());
                 k += 1;
             }
             let mut h = len;
@@ -6468,24 +6911,235 @@ impl Vm {
     }
 
     pub fn freeze_obj(&mut self, o: int) {
-        self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef, &vec![Val::Obj(o)], false, Val::Undef);
+        self.call_native(crate::builtins::NF_O_FREEZE, -1, Val::Undef(), &vec![Val::Obj(o)], false, Val::Undef());
     }
 
     /// At a branch, call or return with slices on: whether this slice is
     /// over and the script can stop here, with no native code under it
     /// (native_depth 0). The clock is read once in SLICE_TICKS branches.
+    /// With a deadline the clock is read under native code too, and a call
+    /// past it is stopped (Vm::terminate) wherever it is.
     pub fn slice_over(&mut self) -> bool {
         if self.prof_on {
             self.prof_tick();
-            return false;
+            if self.deadline <= 0.0 {
+                return false;
+            }
         }
         self.ticks -= 1;
-        if self.ticks > 0 || self.native_depth != 0 {
+        if self.ticks > 0 {
             return false;
         }
         self.ticks = SLICE_TICKS;
         let now = crate::builtins::now_ms();
+        if self.deadline > 0.0 && now >= self.deadline {
+            self.terminate();
+            return true;
+        }
+        if self.over_heap() {
+            return true;
+        }
+        if !self.slicing || self.native_depth != 0 || self.slice_ms <= 0.0 {
+            return false;
+        }
         now - self.slice_t0 >= self.slice_ms
+    }
+
+    /// The longest one host call may run (Engine::set_time_limit), in ms;
+    /// 0: no limit (the default). Past it the script is stopped wherever it
+    /// is, under native code too: an Error no catch or finally sees leaves
+    /// the call, and `terminated` stays set until the next host call.
+    pub fn set_time_limit(&mut self, ms: double) {
+        self.time_limit = if ms > 0.0 { ms } else { 0.0 };
+    }
+
+    /// The most memory this engine may hold (Engine::set_heap_limit), in
+    /// bytes; 0: no limit (the default). Needs the host's probe
+    /// (builtins::set_mem_probe); without one nothing is measured.
+    pub fn set_heap_limit(&mut self, bytes: double) {
+        self.heap_limit = if bytes > 0.0 { bytes } else { 0.0 };
+    }
+
+    /// Memory this engine's host calls took and kept, by the probe: the
+    /// calls before this one and the running one so far.
+    pub fn heap_used(&self) -> double {
+        let mut n = self.mem_own;
+        if self.in_call {
+            n += crate::builtins::mem_now() - self.mem_start;
+        }
+        if n < 0.0 { 0.0 } else { n }
+    }
+
+    /// At a check (slice_over, poll_slow, a collection): past the heap
+    /// limit the script is stopped as by the time limit (terminate); the
+    /// first time in a call a whole collection runs first (heap_pending).
+    #[inline(never)]
+    pub fn over_heap(&mut self) -> bool {
+        if self.heap_limit <= 0.0 || !self.in_call {
+            return false;
+        }
+        if self.heap_used() <= self.heap_limit {
+            return false;
+        }
+        if !self.heap_collected {
+            // over the first time in this call: a whole collection first
+            // (at the next safe point), as what only it frees counts until
+            // then; over again in this call, stop. Once a call: a buffer
+            // the collection trims would grow back over and over.
+            self.heap_collected = true;
+            self.heap_pending = true;
+            self.gc_flag = true;
+            return false;
+        }
+        self.heap_over = true;
+        self.terminate();
+        true
+    }
+
+    /// A host call begins (Engine::run / eval / call / resume, call_top or
+    /// run_jobs from the host): its time limit and slice start now. false
+    /// when one is already running (a nested call keeps the outer
+    /// deadline); end_call(false) is a no-op then.
+    pub fn begin_call(&mut self, slices: bool) -> bool {
+        if self.in_call {
+            return false;
+        }
+        self.in_call = true;
+        let now = crate::builtins::now_ms();
+        self.slice_t0 = now;
+        self.ticks = SLICE_TICKS;
+        self.terminated = false;
+        self.heap_over = false;
+        self.heap_pending = false;
+        self.heap_collected = false;
+        self.mem_start = crate::builtins::mem_now();
+        self.poll_left = crate::builtins::POLL_EVERY;
+        crate::builtins::set_deadline(0.0);
+        crate::builtins::set_regex_limit(self.regex_steps);
+        crate::builtins::take_regex_over();
+        if self.time_limit > 0.0 {
+            self.deadline = now + self.time_limit;
+            crate::builtins::set_deadline(self.deadline);
+        }
+        self.slicing = (slices && self.slice_ms > 0.0) || self.prof_on;
+        self.checking = self.slicing || self.deadline > 0.0 || self.heap_limit > 0.0;
+        true
+    }
+
+    /// The host call begun by begin_call (began true) returns.
+    pub fn end_call(&mut self, began: bool) {
+        if !began {
+            return;
+        }
+        self.in_call = false;
+        self.mem_own += crate::builtins::mem_now() - self.mem_start;
+        if self.mem_own < 0.0 {
+            self.mem_own = 0.0;
+        }
+        self.deadline = 0.0;
+        crate::builtins::set_deadline(0.0);
+        self.slicing = self.prof_on;
+        self.checking = self.prof_on;
+    }
+
+    /// The time limit passed: an Error leaves the running host call, past
+    /// every catch and finally (unwind), and each later check throws it
+    /// again, so a native that drops an exception does not keep the script
+    /// going.
+    #[inline(never)]
+    pub fn terminate(&mut self) {
+        if !self.terminated {
+            self.stops += 1;
+            if self.heap_over {
+                self.heap_stops += 1;
+            }
+        }
+        self.terminated = true;
+        self.ticks = 1;
+        if self.throwing {
+            return;
+        }
+        let p = self.error_proto;
+        let msg = if self.heap_over {
+            format!("script heap limit exceeded ({} bytes)", self.heap_limit)
+        } else {
+            format!("script time limit exceeded ({} ms)", self.time_limit)
+        };
+        let e = self.new_error(p, msg.as_str());
+        self.throw_val(Val::Obj(e));
+    }
+
+    /// A native's long loop, `cost` more units of work (elements, steps)
+    /// done: true when the deadline passed (the script is stopped then,
+    /// Vm::terminate), so the loop ends. The clock is read once in
+    /// builtins::POLL_EVERY units; a slice that ran out meanwhile ends at
+    /// the next branch the script takes.
+    #[inline(always)]
+    pub fn poll(&mut self, cost: int) -> bool {
+        if !self.checking {
+            return false;
+        }
+        self.poll_slow(cost)
+    }
+
+    #[inline(never)]
+    fn poll_slow(&mut self, cost: int) -> bool {
+        if self.terminated {
+            if !self.throwing {
+                self.terminate();
+            }
+            return true;
+        }
+        self.poll_left -= cost;
+        if self.poll_left > 0 {
+            return false;
+        }
+        self.poll_left = crate::builtins::POLL_EVERY;
+        let now = crate::builtins::now_ms();
+        if self.deadline > 0.0 && now >= self.deadline {
+            self.terminate();
+            return true;
+        }
+        if self.over_heap() {
+            return true;
+        }
+        if self.slicing && self.slice_ms > 0.0 && now - self.slice_t0 >= self.slice_ms {
+            self.ticks = 1;
+        }
+        false
+    }
+
+    /// After a regex match attempt: one that ran out of the backtracking
+    /// budget (set_regex_step_limit) throws a RangeError, one stopped by
+    /// the deadline stops the script.
+    pub fn rx_after(&mut self) {
+        if crate::builtins::take_regex_over() {
+            if !self.throwing {
+                self.throw_range("regular expression backtracking limit exceeded");
+            }
+            return;
+        }
+        self.check_expired();
+    }
+
+    /// The most backtracking steps one regex match attempt may take before it throws
+    /// a RangeError (backtracking such as /^(a+)+$/ grows exponentially);
+    /// 0: no limit. The default, builtins::REGEX_STEPS (10 million), is about
+    /// a second of a pathological pattern.
+    pub fn set_regex_step_limit(&mut self, n: double) {
+        self.regex_steps = if n > 0.0 { n } else { 0.0 };
+        crate::builtins::set_regex_limit(self.regex_steps);
+    }
+
+    /// Code with no Vm at hand (the regex matcher, BigInt arithmetic, a
+    /// number sort) stopped early because the deadline passed
+    /// (builtins::time_up): the script stops here. true then.
+    pub fn check_expired(&mut self) -> bool {
+        if self.deadline > 0.0 && crate::builtins::expired() {
+            self.terminate();
+            return true;
+        }
+        false
     }
 
     /// The profiler's tick (prof_on): the time since the last tick to the
@@ -6527,7 +7181,9 @@ impl Vm {
             return false;
         }
         self.frames[fi].pc = to;
-        self.suspended = true;
+        // past the deadline the frame stopped with the exception thrown
+        // instead (run unwinds it)
+        self.suspended = !self.terminated;
         true
     }
 
@@ -6537,7 +7193,7 @@ impl Vm {
         if !self.slice_over() {
             return false;
         }
-        self.suspended = true;
+        self.suspended = !self.terminated;
         true
     }
 
@@ -6592,19 +7248,13 @@ impl Vm {
         // Math's functions of numbers, straight off the stack
         let which = id - crate::builtins::NF_MATH;
         if which >= 0 && which <= 30 && argc >= 1 {
-            let x = match &self.stack[bp as usize] {
-                Val::Num(n) => *n,
-                _ => nan(),
-            };
+            let x = if let Some(n) = (&self.stack[bp as usize]).as_num() { n } else { nan() };
             let y = if which >= 28 && argc >= 2 {
-                match &self.stack[(bp + 1) as usize] {
-                    Val::Num(n) => *n,
-                    _ => nan(),
-                }
+                if let Some(n) = (&self.stack[(bp + 1) as usize]).as_num() { n } else { nan() }
             } else {
                 0.0
             };
-            let numbers = matches!(self.stack[bp as usize], Val::Num(_)) && (which < 28 || (argc >= 2 && matches!(self.stack[(bp + 1) as usize], Val::Num(_))));
+            let numbers = (self.stack[bp as usize]).is_num() && (which < 28 || (argc >= 2 && (self.stack[(bp + 1) as usize]).is_num()));
             if numbers {
                 let r = match which {
                     28 => arith_num(crate::ops::OP_EXP, x, y),
@@ -6620,7 +7270,7 @@ impl Vm {
         // anything but a number is false
         if id >= crate::builtins::NF_N_ISINTEGER && id <= crate::builtins::NF_N_ISNAN {
             let r = if argc >= 1 {
-                if let Val::Num(n) = self.stack[bp as usize] {
+                if let Some(n) = (self.stack[bp as usize]).as_num() {
                     if id == crate::builtins::NF_N_ISINTEGER {
                         is_finite(n) && n == to_integer(n)
                     } else if id == crate::builtins::NF_N_ISSAFEINTEGER {
@@ -6641,7 +7291,7 @@ impl Vm {
         }
         // isNaN / isFinite of a number (others coerce: the full call)
         if (id == crate::builtins::NF_ISNAN || id == crate::builtins::NF_ISFINITE) && argc >= 1 {
-            if let Val::Num(n) = self.stack[bp as usize] {
+            if let Some(n) = (self.stack[bp as usize]).as_num() {
                 let r = if id == crate::builtins::NF_ISNAN { is_nan(n) } else { is_finite(n) };
                 self.stack[fpos as usize] = Val::Bool(r);
                 return true;
@@ -6654,7 +7304,7 @@ impl Vm {
             let mut numbers = true;
             let mut i: int = 0;
             while i < argc {
-                if let Val::Num(n) = self.stack[(bp + i) as usize] {
+                if let Some(n) = (self.stack[(bp + i) as usize]).as_num() {
                     if is_nan(n) {
                         nan_seen = true;
                     } else if which == 31 {
@@ -6678,25 +7328,24 @@ impl Vm {
         // String(x) of a string or a number
         if id == crate::builtins::NF_STRING && argc >= 1 {
             let a = self.stack[bp as usize].clone();
-            let mut r = Val::Undef;
-            if let Val::Str(_) = a {
+            let mut r = Val::Undef();
+            if let Some(_) = a.as_str() {
                 r = a;
-            } else if let Val::Num(n) = a {
+            } else if let Some(n) = a.as_num() {
                 r = self.string_val(number_to_string(n));
             }
-            if !matches!(r, Val::Undef) {
+            if !r.is_undef() {
                 self.stack[fpos as usize] = r;
                 return true;
             }
         }
         // "s".slice(a, b) / substring(a, b) with whole-number (or no) bounds
         if (id == crate::builtins::NF_SP_SLICE || id == crate::builtins::NF_SP_SUBSTRING) && argc <= 2 {
-            if let Val::Str(h) = self.stack[(fpos + 1) as usize] {
-                let a0 = if argc >= 1 { self.stack[bp as usize] } else { Val::Undef };
-                let a1 = if argc >= 2 { self.stack[(bp + 1) as usize] } else { Val::Undef };
+            if let Some(h) = (self.stack[(fpos + 1) as usize]).as_str() {
+                let a0 = if argc >= 1 { self.stack[bp as usize] } else { Val::Undef() };
+                let a1 = if argc >= 2 { self.stack[(bp + 1) as usize] } else { Val::Undef() };
                 if slice_bound_ok(&a0) && slice_bound_ok(&a1) {
-                    let s = self.sget(h);
-                    let len = self.str_len(&s);
+                    let len = self.hlen(h);
                     let slice = id == crate::builtins::NF_SP_SLICE;
                     let mut a = slice_at(&a0, 0, len, slice);
                     let mut b = slice_at(&a1, len, len, slice);
@@ -6710,8 +7359,15 @@ impl Vm {
                     } else if a >= b {
                         Val::Str(0)
                     } else {
-                        let tw = self.str_slice(&s, a, b);
-                        self.string_val(tw)
+                        // (where the text is: a view's is not copied)
+                        let r0 = self.hslice(h, a, b);
+                        if r0.is_undef() {
+                            let s = self.sget(h);
+                            let tw = self.str_slice(&s, a, b);
+                            self.string_val(tw)
+                        } else {
+                            r0
+                        }
                     };
                     self.stack[fpos as usize] = r;
                     return true;
@@ -6723,14 +7379,14 @@ impl Vm {
             let t = self.stack[(fpos + 1) as usize];
             let a = self.stack[bp as usize];
             let r = self.char_code_fast(&t, &a);
-            if !matches!(r, Val::Undef) {
+            if !r.is_undef() {
                 self.stack[fpos as usize] = r;
                 return true;
             }
         }
         if id == crate::builtins::NF_NP_TOSTRING && argc <= 1 {
             let radix = if argc == 0 { Val::Num(10.0) } else { self.stack[bp as usize] };
-            if let (Val::Num(n), Val::Num(rx)) = (self.stack[(fpos + 1) as usize], radix) {
+            if (self.stack[(fpos + 1) as usize]).is_num() && radix.is_num() { let n = (self.stack[(fpos + 1) as usize]).num(); let rx = radix.num();
                 if rx != 2.0 && rx != 8.0 && rx != 10.0 && rx != 16.0 && rx != 36.0 {
                     return false;
                 }
@@ -6746,7 +7402,7 @@ impl Vm {
             if tobj >= 0 {
                 let tclass = self.objs[tobj as usize].class;
                 let weak = self.objs[tobj as usize].func == 1;
-                let mut r = Val::Undef;
+                let mut r = Val::Undef();
                 let mut hit = false;
                 if id == crate::builtins::NF_OP_HASOWN && tclass != C_PROXY {
                     let k = self.stack[bp as usize].clone();
@@ -6755,7 +7411,7 @@ impl Vm {
                         return true;
                     }
                     hit = true;
-                } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && self.objs[tobj as usize].extensible && self.objs[tobj as usize].pos != 3 && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
+                } else if id == crate::builtins::NF_AP_PUSH && argc == 1 && tclass == C_ARRAY && !self.idx_protos && self.objs[tobj as usize].extensible && self.objs[tobj as usize].pos != 3 && self.colds[self.objs[tobj as usize].cold as usize].elems2.is_empty() {
                     let a = self.stack[bp as usize].clone();
                     self.push_elem(tobj, a);
                     r = Val::Num(self.evecs[self.objs[tobj as usize].elems as usize].v.len() as double);
@@ -6769,7 +7425,7 @@ impl Vm {
                         } else if i >= 0 {
                             self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
                         } else {
-                            Val::Undef
+                            Val::Undef()
                         };
                         hit = true;
                     } else if tclass == C_MAP && id == crate::builtins::NF_MP_SET && argc >= 2 {
@@ -6794,7 +7450,7 @@ impl Vm {
                     } else if i >= 0 {
                         self.colds[self.objs[tobj as usize].cold as usize].elems2[i as usize].clone()
                     } else {
-                        Val::Undef
+                        Val::Undef()
                     };
                     hit = true;
                 } else if weak && tclass == C_MAP && id == crate::builtins::NF_WM_SET && argc >= 2 && obj_of(&self.stack[bp as usize]) >= 0 && self.objs[obj_of(&self.stack[bp as usize]) as usize].class != C_SYMBOL {
@@ -6843,20 +7499,24 @@ impl Vm {
     }
 
     pub fn char_code_fast(&mut self, t: &Val, a: &Val) -> Val {
-        if let (Val::Str(h), Val::Num(x)) = (t, a) {
-            let i = *x as int;
-            if (i as double) != *x {
-                return Val::Undef;
+        if let Some(h) = t.as_str() { if let Some(x) = a.as_num() {
+            let i = x as int;
+            if (i as double) != x {
+                return Val::Undef();
             }
-            let c0 = if i < 0 { -1 } else { self.hunit(*h, i) };
+            let c0 = if i < 0 { -1 } else { self.hunit(h, i) };
             if c0 != -2 {
                 return Val::Num(if c0 < 0 { nan() } else { c0 as double });
             }
-            let s = self.sget(*h);
+            let c1 = if i < 0 { -1 } else { self.hview_unit(h, i) };
+            if c1 >= 0 {
+                return Val::Num(c1 as double);
+            }
+            let s = self.sget(h);
             let c = if i < 0 { -1 } else { self.str_at(&s, i) };
             return Val::Num(if c < 0 { nan() } else { c as double });
-        }
-        Val::Undef
+        }}
+        Val::Undef()
     }
 
     /// The calling part of OP_CALL; true when a frame was pushed or the
@@ -6873,7 +7533,7 @@ impl Vm {
             }
             let class = self.objs[fo as usize].class;
             if class == C_FUNCTION {
-                return self.enter_function(fo, argc, false, Val::Undef) || true;
+                return self.enter_function(fo, argc, false, Val::Undef()) || true;
             }
             if class == C_NATIVE {
                 let id = self.objs[fo as usize].func as int;
@@ -6882,7 +7542,7 @@ impl Vm {
                     // [call, f, this, a…] → [f, this, a…]
                     self.stack.remove(fpos as usize);
                     if argc == 0 {
-                        self.stack.push(Val::Undef);
+                        self.stack.push(Val::Undef());
                         argc = 1;
                     }
                     argc -= 1;
@@ -6890,8 +7550,8 @@ impl Vm {
                 }
                 if id == crate::builtins::NF_APPLY {
                     // [apply, f, this, arr] → [f, this, a…]
-                    let arr = if argc >= 2 { self.stack[(fpos + 3) as usize].clone() } else { Val::Undef };
-                    let this = if argc >= 1 { self.stack[(fpos + 2) as usize].clone() } else { Val::Undef };
+                    let arr = if argc >= 2 { self.stack[(fpos + 3) as usize].clone() } else { Val::Undef() };
+                    let this = if argc >= 1 { self.stack[(fpos + 2) as usize].clone() } else { Val::Undef() };
                     let items = self.array_like_to_vec(&arr);
                     if self.throwing {
                         return false;
@@ -6923,7 +7583,7 @@ impl Vm {
                 self.stack.truncate(fpos as usize);
                 self.nat_ff = self.native_depth == self.gc_free_depth;
                 self.native_depth += 1;
-                let r = self.call_native(id, fo, this, &args, false, Val::Undef);
+                let r = self.call_native(id, fo, this, &args, false, Val::Undef());
                 self.native_depth -= 1;
                 give_args(&mut self.arg_pool, args);
                 self.stack.push(r);
@@ -6965,12 +7625,12 @@ impl Vm {
 
     pub fn array_like_to_vec(&mut self, v: &Val) -> Vec<Val> {
         let mut out: Vec<Val> = Vec::new();
-        match v {
-            Val::Undef | Val::Null => return out,
-            Val::Obj(o) => {
-                let class = self.objs[*o as usize].class;
-                if (class == C_ARRAY && self.objs[*o as usize].pos != 3 && !(self.idx_protos && !self.colds[self.objs[*o as usize].cold as usize].elems2.is_empty())) || class == C_ARGUMENTS {
-                    return self.evecs[self.objs[*o as usize].elems as usize].v.clone();
+        match v.kind() {
+            VK::Undef | VK::Null => return out,
+            VK::Obj(o) => {
+                let class = self.objs[o as usize].class;
+                if (class == C_ARRAY && self.objs[o as usize].pos != 3 && !(self.idx_protos && !self.colds[self.objs[o as usize].cold as usize].elems2.is_empty())) || class == C_ARGUMENTS {
+                    return self.evecs[self.objs[o as usize].elems as usize].v.clone();
                 }
                 let l = self.get(v, A_LENGTH);
                 let nd = to_integer(self.to_number(&l));
@@ -7042,18 +7702,18 @@ impl Vm {
     /// -1 for the ordinary way.
     #[inline]
     pub fn append_val(&mut self, cur: Val, b: Val) -> int {
-        if let (Val::Str(h), Val::Str(hb)) = (cur, b) {
+        if cur.is_str() && b.is_str() { let h = cur.strh(); let hb = b.strh();
             if hb == 0 {
                 return h;
             }
             let bs = self.sget(hb);
             return self.str_append(h, bs.as_str());
         }
-        if let (Val::Str(h), Val::Num(y)) = (cur, b) {
+        if let Some(h) = cur.as_str() { if let Some(y) = b.as_num() {
             // a number's text (a template's `${s}${i}`, `s += i`)
             let t = number_to_string(y);
             return self.str_append(h, t.as_str());
-        }
+        }}
         -1
     }
 
@@ -7066,7 +7726,7 @@ impl Vm {
             self.stack[i] = Val::Str(h);
         } else {
             let a = self.stack[i];
-            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
             self.stack[i] = r;
         }
     }
@@ -7077,10 +7737,10 @@ impl Vm {
         let e = self.get_env((op.a as int));
         let i = op.b as usize;
         let mut done = false;
-        if let Val::Str(_) = b {
+        if let Some(_) = b.as_str() {
             let n = self.stack.len() - 1;
             let cur = self.evecs[self.objs[e as usize].elems as usize].v[i];
-            if let (Val::Str(x), Val::Str(y)) = (self.stack[n], cur) {
+            if self.stack[n].is_str() && cur.is_str() { let x = self.stack[n].strh(); let y = cur.strh();
                 if x == y {
                     let h = self.append_val(cur, b);
                     if h >= 0 {
@@ -7097,7 +7757,7 @@ impl Vm {
         }
         if !done {
             let a = self.pop();
-            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
             if !self.throwing {
                 self.put_elem(e, (i) as int, r);
             }
@@ -7108,9 +7768,9 @@ impl Vm {
     /// was worked out; a string grows in place when nothing else holds it.
     pub fn add_env(&mut self, depth: int, i: int, a: Val, b: Val) {
         let e = self.get_env(depth);
-        if let (Val::Str(x), Val::Str(_)) = (a, b) {
+        if a.is_str() && b.is_str() { let x = a.strh();
             let cur = self.evecs[self.objs[e as usize].elems as usize].v[i as usize];
-            if let Val::Str(y) = cur {
+            if let Some(y) = cur.as_str() {
                 if x == y {
                     let h = self.append_val(cur, b);
                     if h >= 0 {
@@ -7122,7 +7782,7 @@ impl Vm {
                 }
             }
         }
-        let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+        let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
         if !self.throwing {
             self.put_elem(e, i, r);
         }
@@ -7133,14 +7793,14 @@ impl Vm {
         let b = self.pop();
         let atom = op.a;
         let mut done = false;
-        if let Val::Str(_) = b {
+        if let Some(_) = b.as_str() {
             let n = self.stack.len();
             let o = obj_of(&self.stack[n - 2]);
             if o >= 0 {
                 let slot = self.find(o, (atom as int));
                 if slot >= 0 && self.attr_at(o, slot) == 0 {
                     let cur = self.objs[o as usize].get_slot(slot as usize);
-                    if let (Val::Str(x), Val::Str(y)) = (self.stack[n - 1], cur) {
+                    if (self.stack[n - 1]).is_str() && cur.is_str() { let x = (self.stack[n - 1]).strh(); let y = cur.strh();
                         if x == y {
                             let h = self.append_val(cur, b);
                             if h >= 0 {
@@ -7159,7 +7819,7 @@ impl Vm {
         if !done {
             let a = self.pop();
             let target = self.pop();
-            let r = if let (Val::Num(x), Val::Num(y)) = (&a, &b) { Val::Num(x + y) } else { self.add_vals(&a, &b) };
+            let r = if (&a).is_num() && (&b).is_num() { let x = (&a).num(); let y = (&b).num(); Val::Num(x + y) } else { self.add_vals(&a, &b) };
             if !self.throwing {
                 self.set(&target, (atom as int), r);
             }
@@ -7203,10 +7863,10 @@ impl Vm {
             // a template's substitution: an ADD onto a string always comes
             // next, and for a primitive (no symbol: symbols are objects) it
             // gives what ToString would: the value stays as it is
-            if !matches!(self.stack[n - 1], Val::Obj(_)) {
+            if !(self.stack[n - 1]).is_obj() {
                 done = true;
             }
-        } else if let Val::Num(x) = self.stack[n - 1] {
+        } else if let Some(x) = (self.stack[n - 1]).as_num() {
             if (op.code as int) == OP_TONUM {
                 done = true;
             } else {
@@ -7225,7 +7885,7 @@ impl Vm {
             }
             OP_CHECK_TDZ => {
                 let t = self.top().clone();
-                if let Val::Obj(o) = t {
+                if let Some(o) = t.as_obj() {
                     if o == self.tdz_obj {
                         let n = self.protos[pi].consts[op.a as usize].clone();
                         let ns = self.to_string(&n);
@@ -7234,10 +7894,7 @@ impl Vm {
                 }
             }
             OP_CHECK_UNINIT => {
-                let bound = match self.top() {
-                    Val::Obj(o) => *o != self.tdz_obj,
-                    _ => true,
-                };
+                let bound = if let Some(o) = self.top().as_obj() { o != self.tdz_obj } else { true };
                 if bound {
                     self.throw_ref("Super constructor may only be called once");
                 }
@@ -7245,7 +7902,7 @@ impl Vm {
             OP_BIGINT => {
                 let v = self.pop();
                 // a literal's text: small ones skip the copy
-                let n = if let Val::Str(h) = v { crate::bigint::small_big_of(self.sref(h)) } else { crate::bigint::small_big_limit() };
+                let n = if let Some(h) = v.as_str() { crate::bigint::small_big_of(self.sref(h)) } else { crate::bigint::small_big_limit() };
                 if n < crate::bigint::small_big_limit() {
                     let b = self.bigint_small(n);
                     self.stack.push(b);
@@ -7290,8 +7947,8 @@ impl Vm {
                 if self.throwing {
                     return false;
                 }
-                if !matches!(m, Val::Undef) && !matches!(m, Val::Null) {
-                    let it = self.call_fixed(m, v, 0, Val::Undef, Val::Undef, Val::Undef);
+                if !m.is_undef() && !m.is_null() {
+                    let it = self.call_fixed(m, v, 0, Val::Undef(), Val::Undef(), Val::Undef());
                     if !self.throwing && !is_obj(&it) {
                         self.throw_type("Result of the Symbol.asyncIterator method is not an object");
                     }
@@ -7303,12 +7960,12 @@ impl Vm {
                     return false;
                 }
                 let wrap = self.async_from_sync;
-                let it = self.call_fixed(Val::Obj(wrap), Val::Undef, 1, sync, Val::Undef, Val::Undef);
+                let it = self.call_fixed(Val::Obj(wrap), Val::Undef(), 1, sync, Val::Undef(), Val::Undef());
                 self.stack.push(it);
             }
             OP_GEN_RESUME => {
                 let mode = self.pop();
-                if let Val::Num(m) = mode {
+                if let Some(m) = mode.as_num() {
                     if m == 1.0 {
                         *pc = (op.a as int);
                     } else if m == 2.0 {
@@ -7338,8 +7995,8 @@ impl Vm {
                     *pc = (op.b as int);
                 }
             }
-            OP_UNDEF => self.stack.push(Val::Undef),
-            OP_NULL => self.stack.push(Val::Null),
+            OP_UNDEF => self.stack.push(Val::Undef()),
+            OP_NULL => self.stack.push(Val::Null()),
             OP_TRUE => self.stack.push(Val::Bool(true)),
             OP_FALSE => self.stack.push(Val::Bool(false)),
             OP_DUP => {
@@ -7403,7 +8060,7 @@ impl Vm {
             OP_DECL_GLOBAL => {
                 let g = self.global;
                 if self.find(g, (op.a as int)) < 0 {
-                    self.add_own(g, (op.a as int), Val::Undef, if op.b == 1 { 0 } else { P_FIXED });
+                    self.add_own(g, (op.a as int), Val::Undef(), if op.b == 1 { 0 } else { P_FIXED });
                 }
             }
             OP_TYPEOF_GLOBAL => {
@@ -7420,25 +8077,25 @@ impl Vm {
             }
             OP_DEL_PROP => {
                 let v = self.pop();
-                match v {
-                    Val::Obj(o) => {
+                match v.kind() {
+                    VK::Obj(o) => {
                         let k = self.key_val((op.a as int));
                         let r = self.delete(o, &k);
                         self.stack.push(Val::Bool(r));
                     }
-                    Val::Undef | Val::Null => self.throw_type("Cannot convert undefined or null to object"),
+                    VK::Undef | VK::Null => self.throw_type("Cannot convert undefined or null to object"),
                     _ => self.stack.push(Val::Bool(true)),
                 }
             }
             OP_DEL_ELEM => {
                 let k = self.pop();
                 let v = self.pop();
-                match v {
-                    Val::Obj(o) => {
+                match v.kind() {
+                    VK::Obj(o) => {
                         let r = self.delete(o, &k);
                         self.stack.push(Val::Bool(r));
                     }
-                    Val::Undef | Val::Null => self.throw_type("Cannot convert undefined or null to object"),
+                    VK::Undef | VK::Null => self.throw_type("Cannot convert undefined or null to object"),
                     _ => self.stack.push(Val::Bool(true)),
                 }
             }
@@ -7452,13 +8109,10 @@ impl Vm {
                 let v = self.pop();
                 if op.b == -2 {
                     // the AST compiler's private names: a plain lookup
-                    let has = match &v {
-                        Val::Obj(o) => {
+                    let has = if let Some(o) = (&v).as_obj() {
                             let k = self.key_val((op.a as int));
-                            self.has_property(*o, &k)
-                        }
-                        _ => false,
-                    };
+                            self.has_property(o, &k)
+                        } else { false };
                     if !has {
                         self.throw_private(op.a as int, "read");
                     } else {
@@ -7500,14 +8154,11 @@ impl Vm {
                 self.pop();
                 let r = {
                     if args.is_empty() {
-                        Val::Undef
-                    } else if let Val::Str(s) = &args[0] {
+                        Val::Undef()
+                    } else if let Some(s) = (&args[0]).as_str() {
                         let src = self.sget(s.clone()).as_ref().clone();
                         let dv = self.protos[pi].consts[op.b as usize].clone();
-                        let desc = match &dv {
-                            Val::Str(d) => self.sget(d.clone()).as_ref().clone(),
-                            _ => String::new(),
-                        };
+                        let desc = if let Some(d) = (&dv).as_str() { self.sget(d.clone()).as_ref().clone() } else { String::new() };
                         self.direct_eval(src.as_str(), desc.as_str())
                     } else {
                         args[0].clone()
@@ -7531,13 +8182,15 @@ impl Vm {
             OP_IN => {
                 let b = self.pop();
                 let a = self.pop();
-                match b {
-                    Val::Obj(o) => {
-                        let r = self.has_property(o, &a);
+                if let Some(o) = b.as_obj() {
+                        let mut r = self.has_property(o, &a);
+                        if r && op.a == 1 && !self.throwing {
+                            // a `with` object's binding (HasBinding):
+                            // not one its @@unscopables names
+                            r = !self.unscopable(o, &a);
+                        }
                         self.stack.push(Val::Bool(r));
-                    }
-                    _ => self.throw_type("Cannot use 'in' operator to search for a key in a primitive"),
-                }
+                    } else { self.throw_type("Cannot use 'in' operator to search for a key in a primitive") }
             }
             OP_NEG => {
                 let v = self.pop();
@@ -7554,7 +8207,7 @@ impl Vm {
             }
             OP_TONUM => {
                 let v = self.pop();
-                if let Val::Num(_) = v {
+                if let Some(_) = v.as_num() {
                     self.stack.push(v);
                 } else if self.class_of(&v) == C_BIGINT {
                     // ToNumeric keeps a BigInt; unary + (a = 1) is ToNumber
@@ -7578,7 +8231,7 @@ impl Vm {
                 if self.throwing {
                     return false;
                 }
-                if let Val::Big(x) = p {
+                if let VK::Big(x) = p.kind() {
                     // ~x is -x - 1
                     let b = self.big_step(-x, -1.0);
                     self.stack.push(b);
@@ -7599,7 +8252,7 @@ impl Vm {
             }
             OP_INC | OP_DEC => {
                 let v = self.pop();
-                if let Val::Big(n) = v {
+                if let VK::Big(n) = v.kind() {
                     let b = self.big_step(n, if (op.code as int) == OP_INC { 1.0 } else { -1.0 });
                     self.stack.push(b);
                     return false;
@@ -7611,10 +8264,7 @@ impl Vm {
                     self.stack.push(b);
                     return false;
                 }
-                let n = match v {
-                    Val::Num(x) => x,
-                    _ => self.to_number(&v),
-                };
+                let n = if let Some(x) = v.as_num() { x } else { self.to_number(&v) };
                 self.stack.push(Val::Num(if (op.code as int) == OP_INC { n + 1.0 } else { n - 1.0 }));
             }
             OP_TO_KEY => {
@@ -7623,7 +8273,7 @@ impl Vm {
                 if self.throwing {
                     return false;
                 }
-                if let Val::Str(_) = p {
+                if let Some(_) = p.as_str() {
                     self.stack.push(p);
                 } else if is_obj(&p) && self.class_of(&p) == C_SYMBOL {
                     self.stack.push(p);
@@ -7635,7 +8285,7 @@ impl Vm {
             }
             OP_TOSTR => {
                 let v = self.pop();
-                if let Val::Str(_) = v {
+                if let Some(_) = v.as_str() {
                     self.stack.push(v);
                 } else {
                     let s = self.to_str(&v);
@@ -7659,7 +8309,7 @@ impl Vm {
             }
             OP_JNN_KEEP => {
                 let t = self.top();
-                if !(matches!(t, Val::Undef) || matches!(t, Val::Null)) {
+                if !(t.is_undef() || t.is_null()) {
                     *pc = (op.a as int);
                 } else {
                     self.stack.pop();
@@ -7667,27 +8317,27 @@ impl Vm {
             }
             OP_JNOT_UNDEF => {
                 let v = self.pop();
-                if !matches!(v, Val::Undef) {
+                if !v.is_undef() {
                     *pc = (op.a as int);
                 }
             }
             OP_JNULLISH => {
                 if op.b == 1 {
                     let t = self.top();
-                    if matches!(t, Val::Undef) || matches!(t, Val::Null) {
+                    if t.is_undef() || t.is_null() {
                         self.stack.pop();
-                        self.stack.push(Val::Undef);
+                        self.stack.push(Val::Undef());
                         *pc = (op.a as int);
                     }
                 } else {
                     let v = self.pop();
-                    if matches!(v, Val::Undef) || matches!(v, Val::Null) {
+                    if v.is_undef() || v.is_null() {
                         let mut k = 1;
                         while k < op.b {
                             self.stack.pop();
                             k += 1;
                         }
-                        self.stack.push(Val::Undef);
+                        self.stack.push(Val::Undef());
                         *pc = (op.a as int);
                     }
                 }
@@ -7762,13 +8412,13 @@ impl Vm {
                         return false;
                     }
                     // the native made its own object: give it this one's fields
-                    if let (Val::Obj(t), Val::Obj(n)) = (&this, &r) {
-                        self.compact_dict(*t);
-                        let keys = self.keys_of(*t);
-                        let vals = self.objs[*t as usize].slots();
+                    if (&this).is_obj() && (&r).is_obj() { let t = (&this).obj(); let n = (&r).obj();
+                        self.compact_dict(t);
+                        let keys = self.keys_of(t);
+                        let vals = self.objs[t as usize].slots();
                         let mut i: usize = 0;
                         while i < keys.len() {
-                            self.add_own(*n, keys[i], vals[i].clone(), 0);
+                            self.add_own(n, keys[i], vals[i].clone(), 0);
                             i += 1;
                         }
                     }
@@ -7805,7 +8455,7 @@ impl Vm {
                 if op.a >= 2 && a >= 0 {
                     self.map_arg(a, (op.a as int) - 2, op.b as int);
                 }
-                self.stack.push(if a >= 0 { Val::Obj(a) } else { Val::Undef });
+                self.stack.push(if a >= 0 { Val::Obj(a) } else { Val::Undef() });
             }
             OP_NEW_OBJECT => {
                 let o = self.new_object();
@@ -7815,11 +8465,7 @@ impl Vm {
                 let v = self.pop();
                 let o = obj_of(self.top());
                 if op.b == 1 {
-                    match v {
-                        Val::Obj(p) => self.put_proto(o, p),
-                        Val::Null => self.put_proto(o, -1),
-                        _ => {}
-                    }
+                    if let Some(p) = v.as_obj() { self.put_proto(o, p) } else if v.is_null() { self.put_proto(o, -1) } else {}
                 } else {
                     self.define(o, (op.a as int), v, 0);
                 }
@@ -7838,10 +8484,10 @@ impl Vm {
                     let slot = self.find(o, op.a as int);
                     if op.b == 1 {
                         // a private field or brand (PrivateFieldAdd)
+                        // a non-extensible (frozen) object still takes
+                        // private fields: PrivateFieldAdd does not ask
                         if slot >= 0 {
                             self.throw_private(op.a as int, "initialize twice");
-                        } else if !self.objs[o as usize].extensible {
-                            self.throw_private(op.a as int, "add to a non-extensible object");
                         } else {
                             self.add_own(o, (op.a as int), v, 0);
                         }
@@ -7881,8 +8527,8 @@ impl Vm {
             OP_INIT_SPREAD => {
                 let src = self.pop();
                 let o = obj_of(self.top());
-                if let Val::Obj(s) = &src {
-                    let keys = self.own_keys(*s, false, true);
+                if let Some(s) = (&src).as_obj() {
+                    let keys = self.own_keys(s, false, true);
                     for k in keys {
                         let v = self.get_elem(&src, &k);
                         if self.throwing {
@@ -7890,7 +8536,7 @@ impl Vm {
                         }
                         self.define_elem(o, &k, v, 0);
                     }
-                } else if let Val::Str(s) = &src {
+                } else if let Some(s) = (&src).as_str() {
                     let s = self.sget(s.clone());
                     let mut i: int = 0;
                     for c in s.chars() {
@@ -7944,20 +8590,28 @@ impl Vm {
             }
             OP_ARRAY_HOLE => {
                 let a = obj_of(self.top());
-                self.push_elem(a, Val::Undef);
+                self.push_elem(a, Val::Undef());
                 let i = (self.evecs[self.objs[a as usize].elems as usize].v.len() as int) - 1;
                 self.mark_hole(a, i);
             }
             OP_ARRAY_SPREAD => {
                 let src = self.pop();
                 let a = obj_of(self.top());
-                if let Val::Obj(so) = &src {
-                    if a >= 0 && self.array_iter_plain(*so) {
+                if let Some(so) = (&src).as_obj() {
+                    if a >= 0 && self.array_iter_plain(so) {
                         // a plain array: its elements in one copy, as
-                        // iterable_to_vec would give them
-                        self.inc_elems(*so);
+                        // iterable_to_vec would give them; past the
+                        // element limit RangeError (1024 spreads of a
+                        // 4M array asked for 64 GB: JSC
+                        // varargs-spread-fusion-checkpoint-length-overflow)
+                        let total = self.evecs[self.objs[a as usize].elems as usize].v.len() + self.evecs[self.objs[so as usize].elems as usize].v.len();
+                        if (total as int) > MAX_ELEMS {
+                            self.elems_too_many(total as double);
+                            return false;
+                        }
+                        self.inc_elems(so);
                         let de = self.elems_id(a);
-                        let se = self.objs[*so as usize].elems as usize;
+                        let se = self.objs[so as usize].elems as usize;
                         evecs_append(&mut self.evecs, de, se);
                         return false;
                     }
@@ -8019,7 +8673,7 @@ impl Vm {
             }
             OP_ITER_KEYS => {
                 let v = self.pop();
-                if let Val::Obj(o) = v {
+                if let Some(o) = v.as_obj() {
                     if self.for_in_fast(o) {
                         // no key list: the iterator walks the object's shape
                         let it = self.for_in_iter(o);
@@ -8027,9 +8681,7 @@ impl Vm {
                         return false;
                     }
                 }
-                let keys = match &v {
-                    Val::Obj(o) => self.for_in_keys(*o),
-                    Val::Str(s) => {
+                let keys = if let Some(o) = (&v).as_obj() { self.for_in_keys(o) } else if let Some(s) = (&v).as_str() {
                         let s = self.sget(s.clone());
                         let mut ks: Vec<Val> = Vec::new();
                         let n = jsstr::len(s.as_str());
@@ -8039,9 +8691,7 @@ impl Vm {
                             i += 1;
                         }
                         ks
-                    }
-                    _ => Vec::new(),
-                };
+                    } else { Vec::new() };
                 let arr = self.new_array(keys);
                 let ip = self.iter_proto;
                 let it = self.alloc(C_ITER, ip);
@@ -8049,10 +8699,10 @@ impl Vm {
                 self.objs[it as usize].func = 0;
                 // for-in skips keys deleted during the loop
                 self.put_home(it, obj_of(&v));
-                if let Val::Obj(so) = &v {
+                if let Some(so) = (&v).as_obj() {
                     // keys of a plain object's own only: none can go
                     // without a remove_own, so the deletes so far tell
-                    if self.objs[*so as usize].class == C_OBJECT && self.for_in_own_only(*so) {
+                    if self.objs[so as usize].class == C_OBJECT && self.for_in_own_only(so) {
                         let c = self.objs[it as usize].cold as usize;
                         self.colds[c].prim = Val::Num(self.del_count as double);
                     }
@@ -8097,7 +8747,7 @@ impl Vm {
                 let e = self.alloc(C_ENV, parent);
                 let mut i = 0;
                 while i < op.a {
-                    self.push_elem(e, Val::Undef);
+                    self.push_elem(e, Val::Undef());
                     i += 1;
                 }
                 self.frames[fi].env = e;
@@ -8125,7 +8775,7 @@ impl Vm {
                 if idx < 0 {
                     let flags = self.protos[pi].consts[op.b as usize].clone();
                     let s = self.to_string(&src);
-                    let f = if matches!(flags, Val::Undef) { String::new() } else { self.to_string(&flags) };
+                    let f = if flags.is_undef() { String::new() } else { self.to_string(&flags) };
                     idx = (self.regexp_index(s.as_str(), f.as_str()) as i32);
                     if idx < 0 {
                         return false;
@@ -8136,38 +8786,30 @@ impl Vm {
                 self.stack.push(r);
             }
             OP_CLASS => {
-                let mut sup = Val::Undef;
+                let mut sup = Val::Undef();
                 if op.a == 1 {
                     sup = self.pop();
                 }
                 let ctor = obj_of(self.top());
                 let mut proto_parent = self.object_proto;
                 if op.a == 1 {
-                    match &sup {
-                        Val::Null => {
+                    if (&sup).is_null() {
                             proto_parent = -1;
-                        }
-                        Val::Obj(s) => {
+                        } else if let Some(s) = (&sup).as_obj() {
                             if !self.is_callable(&sup) {
                                 self.throw_type("Class extends value is not a constructor or null");
                                 return false;
                             }
-                            let sp = self.get_obj(*s, A_PROTOTYPE, &sup);
-                            match sp {
-                                Val::Obj(p) => proto_parent = p,
-                                Val::Null => proto_parent = -1,
-                                _ => {
+                            let sp = self.get_obj(s, A_PROTOTYPE, &sup);
+                            if let Some(p) = sp.as_obj() { proto_parent = p } else if sp.is_null() { proto_parent = -1 } else {
                                     self.throw_type("Class extends value does not have valid prototype property");
                                     return false;
                                 }
-                            }
-                            self.put_proto(ctor, *s);
-                        }
-                        _ => {
+                            self.put_proto(ctor, s);
+                        } else {
                             self.throw_type("Class extends value is not a constructor or null");
                             return false;
                         }
-                    }
                 }
                 let p = self.alloc(C_OBJECT, proto_parent);
                 self.add_own(p, A_CONSTRUCTOR, Val::Obj(ctor), P_HIDDEN);
@@ -8221,7 +8863,7 @@ impl Vm {
                 }
                 let start = self.objs[home as usize].proto as int;
                 if start < 0 {
-                    self.stack.push(Val::Undef);
+                    self.stack.push(Val::Undef());
                 } else {
                     let (i, a) = self.to_key(&key);
                     let atom = if i >= 0 { self.index_atom(i) } else { a };
@@ -8231,7 +8873,7 @@ impl Vm {
             }
             OP_REQUIRE_OBJ => {
                 let t = self.top();
-                if matches!(t, Val::Undef) || matches!(t, Val::Null) {
+                if t.is_undef() || t.is_null() {
                     self.throw_type("Cannot destructure 'undefined' or 'null'");
                 }
             }
@@ -8259,13 +8901,13 @@ impl Vm {
                 self.stack.truncate(below as usize);
                 self.stack.push(src.clone());
                 let r = self.new_object();
-                let so = if is_obj(&src) { obj_of(&src) } else if matches!(src, Val::Undef) || matches!(src, Val::Null) { -1 } else { self.to_object(&src) };
+                let so = if is_obj(&src) { obj_of(&src) } else if src.is_undef() || src.is_null() { -1 } else { self.to_object(&src) };
                 if so >= 0 {
                     let srcv = Val::Obj(so);
                     let keys = self.own_keys(so, false, true);
                     for k in keys {
                         let is_sym = self.class_of(&k) == C_SYMBOL;
-                        let ks = if let Val::Str(x) = &k { self.sref(*x).to_string() } else if is_sym { String::new() } else { self.to_string(&k) };
+                        let ks = if let Some(x) = (&k).as_str() { self.sref(x).to_string() } else if is_sym { String::new() } else { self.to_string(&k) };
                         let mut skipped = is_sym && skip_syms.contains(&obj_of(&k));
                         if !is_sym {
                             for x in skip.iter() {
@@ -8288,7 +8930,7 @@ impl Vm {
             }
             OP_TO_ARRAY => {
                 let v = self.pop();
-                if matches!(v, Val::Undef) || matches!(v, Val::Null) {
+                if v.is_undef() || v.is_null() {
                     self.throw_type("value is not iterable");
                     return false;
                 }
@@ -8325,7 +8967,7 @@ impl Vm {
                     if class == C_FUNCTION {
                         let fp = self.objs[f as usize].func as int;
                         if self.protos[fp as usize].name.is_empty() {
-                            if let Val::Str(s) = &name {
+                            if let Some(s) = (&name).as_str() {
                                 let s = self.sget(s.clone());
                                 self.protos[fp as usize].name = s.as_ref().clone();
                             }
@@ -8382,15 +9024,11 @@ impl Vm {
 
     #[inline]
     pub fn inc(&mut self, v: &Val) {
-        match v {
-            Val::Obj(o) => {
-                self.objs[*o as usize].rc += 1;
-            }
-            Val::Str(h) => {
-                self.sinc(*h);
-            }
-            _ => {}
-        }
+        if let Some(o) = v.as_obj() {
+                self.objs[o as usize].rc += 1;
+            } else if let Some(h) = v.as_str() {
+                self.sinc(h);
+            } else {}
     }
 
     #[inline]
@@ -8402,15 +9040,11 @@ impl Vm {
 
     #[inline]
     pub fn dec(&mut self, v: &Val) {
-        match v {
-            Val::Obj(o) => {
-                self.dec_o(*o);
-            }
-            Val::Str(h) => {
-                self.sdec(*h);
-            }
-            _ => {}
-        }
+        if let Some(o) = v.as_obj() {
+                self.dec_o(o);
+            } else if let Some(h) = v.as_str() {
+                self.sdec(h);
+            } else {}
     }
 
     #[inline]
@@ -8510,8 +9144,17 @@ impl Vm {
 
     #[inline(always)]
     pub fn push_elem(&mut self, o: int, v: Val) {
-        self.inc(&v);
         let e = self.elems_id(o);
+        // the element limit (MAX_ELEMS): a push loop asked the allocator
+        // for 4 GB and the process aborted (JSC regress-157595: a match
+        // whose `global` getter lies never ends)
+        if (self.evecs[e].v.len() as int) >= MAX_ELEMS {
+            if !self.throwing {
+                self.elems_too_many((MAX_ELEMS + 1) as double);
+            }
+            return;
+        }
+        self.inc(&v);
         self.evecs[e].v.push(v);
     }
 
@@ -8593,7 +9236,7 @@ impl Vm {
     pub fn pop_elem_val(&mut self, o: int) -> Val {
         match self.evecs[self.objs[o as usize].elems as usize].v.pop() {
             Some(v) => v,
-            None => Val::Undef,
+            None => Val::Undef(),
         }
     }
 
@@ -8603,8 +9246,14 @@ impl Vm {
     }
 
     pub fn insert_elem(&mut self, o: int, i: int, v: Val) {
-        self.inc(&v);
         let e = self.elems_id(o);
+        if (self.evecs[e].v.len() as int) >= MAX_ELEMS {
+            if !self.throwing {
+                self.elems_too_many((MAX_ELEMS + 1) as double);
+            }
+            return;
+        }
+        self.inc(&v);
         self.evecs[e].v.insert(i as usize, v);
     }
 
@@ -8614,7 +9263,7 @@ impl Vm {
     }
 
     pub fn put_prim(&mut self, o: int, v: Val) {
-        if self.objs[o as usize].cold == 0 && matches!(v, Val::Undef) {
+        if self.objs[o as usize].cold == 0 && v.is_undef() {
             return;
         }
         self.inc(&v);
@@ -8754,7 +9403,7 @@ impl Vm {
         let n = self.stack.len();
         let mut i: usize = 0;
         while i < n {
-            if let Val::Obj(x) = self.stack[i] {
+            if let Some(x) = self.stack[i].as_obj() {
                 self.mark_obj(x, work);
             }
             i += 1;
@@ -8786,7 +9435,7 @@ impl Vm {
         let nt = self.temp_roots.len();
         i = 0;
         while i < nt {
-            if let Val::Obj(x) = self.temp_roots[i] {
+            if let Some(x) = self.temp_roots[i].as_obj() {
                 self.mark_obj(x, work);
             }
             i += 1;
@@ -8794,7 +9443,7 @@ impl Vm {
         let nj = self.jobs.len();
         i = 0;
         while i < nj {
-            if let Val::Obj(x) = self.jobs[i] {
+            if let Some(x) = self.jobs[i].as_obj() {
                 self.mark_obj(x, work);
             }
             i += 1;
@@ -8829,7 +9478,7 @@ impl Vm {
             let nv = self.objs[o as usize].nv as usize;
             let mut j: usize = 0;
             while j < nv {
-                if let Val::Obj(x) = self.objs[o as usize].get_slot(j) {
+                if let Some(x) = (self.objs[o as usize].get_slot(j)).as_obj() {
                     if count {
                         self.objs[x as usize].rc += 1;
                     }
@@ -8840,7 +9489,7 @@ impl Vm {
             let ne = self.evecs[self.objs[o as usize].elems as usize].v.len();
             j = 0;
             while j < ne {
-                if let Val::Obj(x) = self.evecs[self.objs[o as usize].elems as usize].v[j] {
+                if let Some(x) = (self.evecs[self.objs[o as usize].elems as usize].v[j]).as_obj() {
                     if count {
                         self.objs[x as usize].rc += 1;
                     }
@@ -8851,7 +9500,7 @@ impl Vm {
             let ne2 = self.colds[self.objs[o as usize].cold as usize].elems2.len();
             j = 0;
             while j < ne2 {
-                if let Val::Obj(x) = self.colds[self.objs[o as usize].cold as usize].elems2[j] {
+                if let Some(x) = (self.colds[self.objs[o as usize].cold as usize].elems2[j]).as_obj() {
                     if count {
                         self.objs[x as usize].rc += 1;
                     }
@@ -8865,9 +9514,31 @@ impl Vm {
     /// A collection when one is due, else a reclaim (the safe points call
     /// this when gc_due).
     pub fn gc(&mut self) {
-        if self.rc_on && self.alloc_count < self.gc_threshold && self.made < self.made_limit && self.snew < self.slimit && self.sbytes < self.sbytes_limit {
+        self.gc_run();
+        if self.heap_limit > 0.0 && self.in_call {
+            // still past the heap limit with the garbage gone: the next
+            // branch stops the script (slice_over, over_heap), where
+            // stopping is safe
+            self.heap_pending = false;
+            if self.heap_used() > self.heap_limit {
+                self.ticks = 1;
+            }
+        }
+    }
+
+    fn gc_run(&mut self) {
+        // over the heap limit: a whole collection, as references a stopped
+        // call left uncounted are found only by it
+        if self.rc_on && !self.heap_pending && self.alloc_count < self.gc_threshold && self.made < self.made_limit {
+            // Strings count against their limits until a reclaim frees
+            // them, so strings alone make a collection due only when the
+            // reclaim leaves them near the limit: a page that makes a few
+            // MB of text again on each change (a DOM's render) collected
+            // the whole heap each time otherwise.
             self.reclaim();
-            return;
+            if self.snew < self.slimit - self.slimit / 4 && self.sbytes < self.sbytes_limit - self.sbytes_limit / 4 {
+                return;
+            }
         }
         self.collect();
     }
@@ -8876,6 +9547,7 @@ impl Vm {
     /// too) and counts every object's references again.
     pub fn collect(&mut self) {
         self.gc_runs += 1;
+        self.big_drop();
         let total = self.objs.len();
         let mut old: Vec<int> = Vec::new();
         let mut i2: usize = 0;
@@ -9120,15 +9792,11 @@ impl Vm {
         self.drop_ref(env as int, work);
         let mut j: usize = 0;
         while j < nv {
-            match crate::rvm::obj_at(&self.objs, x as usize).get_slot(j) {
-                Val::Obj(c) => {
+            if let Some(c) = (crate::rvm::obj_at(&self.objs, x as usize).get_slot(j)).as_obj() {
                     self.drop_ref(c, work);
-                }
-                Val::Str(h) => {
+                } else if let Some(h) = (crate::rvm::obj_at(&self.objs, x as usize).get_slot(j)).as_str() {
                     self.sdec(h);
-                }
-                _ => {}
-            }
+                } else {}
             j += 1;
         }
         if xe == 0 {
@@ -9137,15 +9805,11 @@ impl Vm {
         let ne = crate::rvm::evec_at(&self.evecs, xe).v.len();
         j = 0;
         while j < ne {
-            match *crate::rvm::val_at(&crate::rvm::evec_at(&self.evecs, xe).v, j) {
-                Val::Obj(c) => {
+            if let Some(c) = (*crate::rvm::val_at(&crate::rvm::evec_at(&self.evecs, xe).v, j)).as_obj() {
                     self.drop_ref(c, work);
-                }
-                Val::Str(h) => {
+                } else if let Some(h) = (*crate::rvm::val_at(&crate::rvm::evec_at(&self.evecs, xe).v, j)).as_str() {
                     self.sdec(h);
-                }
-                _ => {}
-            }
+                } else {}
             j += 1;
         }
     }
@@ -9170,15 +9834,11 @@ impl Vm {
         let ne2 = crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2.len();
         let mut j: usize = 0;
         while j < ne2 {
-            match crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2[j] {
-                Val::Obj(c) => {
+            if let Some(c) = (crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2[j]).as_obj() {
                     self.drop_ref(c, work);
-                }
-                Val::Str(h) => {
+                } else if let Some(h) = (crate::rvm::cold_at(&self.colds, crate::rvm::obj_at(&self.objs, x as usize).cold as usize).elems2[j]).as_str() {
                     self.sdec(h);
-                }
-                _ => {}
-            }
+                } else {}
             j += 1;
         }
     }
@@ -9344,7 +10004,7 @@ impl Vm {
         let nv = self.objs[o as usize].nv as usize;
         let mut j: usize = 0;
         while j < nv {
-            if let Val::Obj(c) = self.objs[o as usize].get_slot(j) {
+            if let Some(c) = (self.objs[o as usize].get_slot(j)).as_obj() {
                 self.objs[c as usize].rc += 1;
             }
             j += 1;
@@ -9352,7 +10012,7 @@ impl Vm {
         let ne = self.evecs[self.objs[o as usize].elems as usize].v.len();
         j = 0;
         while j < ne {
-            if let Val::Obj(c) = self.evecs[self.objs[o as usize].elems as usize].v[j] {
+            if let Some(c) = (self.evecs[self.objs[o as usize].elems as usize].v[j]).as_obj() {
                 self.objs[c as usize].rc += 1;
             }
             j += 1;
@@ -9360,7 +10020,7 @@ impl Vm {
         let ne2 = self.colds[self.objs[o as usize].cold as usize].elems2.len();
         j = 0;
         while j < ne2 {
-            if let Val::Obj(c) = self.colds[self.objs[o as usize].cold as usize].elems2[j] {
+            if let Some(c) = (self.colds[self.objs[o as usize].cold as usize].elems2[j]).as_obj() {
                 self.objs[c as usize].rc += 1;
             }
             j += 1;
@@ -9620,7 +10280,7 @@ pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
     } else {
         c.elems2.clear();
     }
-    c.prim = Val::Undef;
+    c.prim = Val::Undef();
     c.home = -1;
 }
 
@@ -9632,13 +10292,13 @@ pub fn reset_cold(colds: &mut Vec<Cold>, i: usize) {
 /// The stack grows to `n` values, undefined.
 #[ranger::target(rust)]
 pub fn grow_stack(v: &mut Vec<Val>, n: usize) {
-    v.resize(n, Val::Undef);
+    v.resize(n, Val::Undef());
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn grow_stack(v: &mut Vec<Val>, n: usize) {
     while v.len() < n {
-        v.push(Val::Undef);
+        v.push(Val::Undef());
     }
 }
 
@@ -9878,17 +10538,13 @@ pub fn inc_refs(objs: &mut Vec<JsObj>, strs: &mut Vec<SEnt>, e: &Elems) {
     let n = e.v.len();
     let mut i: usize = 0;
     while i < n {
-        match e.v[i] {
-            Val::Obj(o) => {
+        if let Some(o) = e.v[i].as_obj() {
                 objs[o as usize].rc += 1;
-            }
-            Val::Str(h) => {
+            } else if let Some(h) = e.v[i].as_str() {
                 if h > 0 {
                     strs[h as usize].rc += 1;
                 }
-            }
-            _ => {}
-        }
+            } else {}
         i += 1;
     }
 }
@@ -10017,20 +10673,13 @@ pub fn native_fast_id(id: int) -> bool {
 /// A bound native_fast's slice/substring takes: undefined or a whole
 /// number (the rest is the builtin's coercion).
 pub fn slice_bound_ok(v: &Val) -> bool {
-    match v {
-        Val::Undef => true,
-        Val::Num(x) => x.abs() < 1e9 && *x == ((*x as int) as double),
-        _ => false,
-    }
+    if v.is_undef() { true } else if let Some(x) = v.as_num() { x.abs() < 1e9 && x == ((x as int) as double) } else { false }
 }
 
 /// Bound `v` (undefined: dflt) clamped to [0, len]; slice counts a
 /// negative one from the end, substring takes it as 0.
 pub fn slice_at(v: &Val, dflt: int, len: int, slice: bool) -> int {
-    let n = match v {
-        Val::Num(x) => *x as int,
-        _ => dflt,
-    };
+    let n = if let Some(x) = v.as_num() { x as int } else { dflt };
     if slice && n < 0 {
         return if len + n < 0 { 0 } else { len + n };
     }
@@ -10267,13 +10916,16 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
     let n = b.len();
     if *pos >= n {
         vm.throw_syntax("Unexpected end of JSON input");
-        return Val::Undef;
+        return Val::Undef();
     }
     let c = b[*pos];
+    if (c == b'{' || c == b'[') && vm.poll(64) {
+        return Val::Undef();
+    }
     // nesting: the native stack is looked at every 32 levels
     if (depth & 31) == 31 && (c == b'{' || c == b'[') && vm.stack_exhausted() {
         vm.throw_range("Maximum call stack size exceeded");
-        return Val::Undef;
+        return Val::Undef();
     }
     if c == b'{' {
         *pos += 1;
@@ -10290,12 +10942,12 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
             if *pos >= n || b[*pos] != b'"' {
                 vm.throw_syntax("Unexpected token in JSON");
                 vm.temp_roots.pop();
-                return Val::Undef;
+                return Val::Undef();
             }
             let (ka, kb, kesc) = jf_string(vm, s, b, pos, buf);
             if vm.throwing {
                 vm.temp_roots.pop();
-                return Val::Undef;
+                return Val::Undef();
             }
             // the key straight to its atom: no string value in between. The
             // key a shared shape last gained in this text (objects of one
@@ -10322,13 +10974,13 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
             if *pos >= n || b[*pos] != b':' {
                 vm.throw_syntax("Expected ':' in JSON");
                 vm.temp_roots.pop();
-                return Val::Undef;
+                return Val::Undef();
             }
             *pos += 1;
             let v = jf_value(vm, s, b, pos, buf, memo, depth + 1);
             if vm.throwing {
                 vm.temp_roots.pop();
-                return Val::Undef;
+                return Val::Undef();
             }
             if fresh {
                 vm.add_own(o, atom, v, 0);
@@ -10352,7 +11004,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
             }
             vm.throw_syntax("Unexpected token in JSON");
             vm.temp_roots.pop();
-            return Val::Undef;
+            return Val::Undef();
         }
         vm.temp_roots.pop();
         return Val::Obj(o);
@@ -10371,7 +11023,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
             let v = jf_value(vm, s, b, pos, buf, memo, depth + 1);
             if vm.throwing {
                 vm.temp_roots.pop();
-                return Val::Undef;
+                return Val::Undef();
             }
             vm.push_elem(a, v);
             jf_ws(b, pos);
@@ -10385,7 +11037,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
             }
             vm.throw_syntax("Unexpected token in JSON");
             vm.temp_roots.pop();
-            return Val::Undef;
+            return Val::Undef();
         }
         vm.temp_roots.pop();
         return Val::Obj(a);
@@ -10393,7 +11045,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
     if c == b'"' {
         let (a, e, esc) = jf_string(vm, s, b, pos, buf);
         if vm.throwing {
-            return Val::Undef;
+            return Val::Undef();
         }
         return if esc { jf_str_val(vm, buf.as_str()) } else { jf_str_val(vm, &s[a..e]) };
     }
@@ -10407,7 +11059,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
     }
     if c == b'n' && b[*pos..].starts_with(b"null") {
         *pos += 4;
-        return Val::Null;
+        return Val::Null();
     }
     if c == b'-' || (c >= b'0' && c <= b'9') {
         let start = *pos;
@@ -10416,7 +11068,7 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
         }
         if *pos + 1 < n && b[*pos] == b'0' && b[*pos + 1].is_ascii_digit() {
             vm.throw_syntax("Unexpected number in JSON");
-            return Val::Undef;
+            return Val::Undef();
         }
         // an integer of up to 15 digits is exact as it is summed
         let d0 = *pos;
@@ -10454,13 +11106,13 @@ fn jf_value(vm: &mut Vm, s: &str, b: &[u8], pos: &mut usize, buf: &mut String, m
         let v = if jf_num_ok(&b[start..*pos]) { string_to_number(&s[start..*pos]) } else { nan() };
         if is_nan(v) {
             vm.throw_syntax("Unexpected number in JSON");
-            return Val::Undef;
+            return Val::Undef();
         }
         return Val::Num(v);
     }
     let ch = s[*pos..].chars().next().unwrap_or(' ');
     vm.throw_syntax(format!("Unexpected token '{}' in JSON", ch).as_str());
-    Val::Undef
+    Val::Undef()
 }
 
 /// Script frames at once before a call throws RangeError (V8 allows about
@@ -10475,6 +11127,12 @@ pub const MAX_STR_BYTES: int = 536870888;
 /// The most elements an array stores (they are stored densely, 16 bytes
 /// each and a hole flag more): a longer array is a RangeError.
 pub const MAX_ELEMS: int = 33554432;
+
+/// The most one allocation of the engine may ask for (alloc_refused).
+pub const BIG_ALLOC: double = 2147483648.0;
+
+/// The longest string (in bytes) the regexp engine copies to UTF-16 units.
+pub const RX_MAX_UNITS: int = 134217728;
 
 /// The address of a local: where the native stack is now (Rust; it grows
 /// down). 0 on the other targets.
@@ -10504,12 +11162,14 @@ pub fn stack_deeper_than(base: int, budget: int) -> bool {
 }
 
 /// How deep native code may go below the host's entry: 1 MB, half of a
-/// spawned Rust thread's 2 MB; 512 KB in WebAssembly, whose whole stack
-/// is 1 MB.
+/// spawned Rust thread's 2 MB; 128 KB in WebAssembly, where native_sp()
+/// sees only the shadow stack and the host's machine stack (about 1 MB in
+/// V8, wasm frames included) runs out first: at 256 KB a deep JSON.parse
+/// or flat() still overflowed V8's stack (parse_stack_budget for parsing).
 #[ranger::target(rust)]
 pub fn default_stack_budget() -> int {
     if cfg!(target_arch = "wasm32") {
-        512 * 1024
+        128 * 1024
     } else {
         1024 * 1024
     }
@@ -10519,3 +11179,26 @@ pub fn default_stack_budget() -> int {
 pub fn default_stack_budget() -> int {
     0
 }
+
+/// The native stack the parsers and compilers may use: in WebAssembly
+/// twice default_stack_budget (their frames take less of V8's machine
+/// stack per byte of shadow stack: 256 KB parses 700 nested brackets and
+/// a 10 000-deep `!!!…` refuses cleanly), elsewhere the same.
+pub fn parse_stack_budget() -> int {
+    if is_wasm32() {
+        default_stack_budget() * 2
+    } else {
+        default_stack_budget()
+    }
+}
+
+#[ranger::target(rust)]
+fn is_wasm32() -> bool {
+    cfg!(target_arch = "wasm32")
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn is_wasm32() -> bool {
+    false
+}
+

@@ -4,3 +4,4 @@ fuzz-out/
 libfuzzer/target/
 libfuzzer/corpus/
 libfuzzer/artifacts/
+/foreign

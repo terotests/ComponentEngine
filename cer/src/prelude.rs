@@ -598,6 +598,15 @@ if (typeof Object.groupBy !== 'function') hide(Object, 'groupBy', function group
   return o;
 });
 
+// ---- Error.captureStackTrace (V8's, which libraries call when present)
+hide(Error, 'captureStackTrace', function captureStackTrace(o) {
+  if (Object(o) !== o) throw new TypeError('Invalid argument');
+  var s = String(new Error().stack); var i = s.indexOf('\n');
+  var name = o.name === undefined ? 'Error' : String(o.name);
+  var msg = o.message === undefined ? '' : String(o.message);
+  defineProperty(o, 'stack', { value: (msg ? name + ': ' + msg : name) + (i >= 0 ? s.slice(i) : ''), writable: true, configurable: true });
+});
+
 // ---- Annex B accessor methods
 var OP = Object.prototype;
 hide(OP, '__defineGetter__', function __defineGetter__(name, f) {
@@ -899,6 +908,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
       if (spreadable(e)) {
         var len = lenOf(e);
         if (n + len > MAX) throw new TypeError('Invalid array length');
+        // an array result could never hold it: RangeError now, not after
+        // 2 ** 53 element checks (JSC concat-length tests)
+        if (n + len > 4294967295 && isArray(a)) throw new RangeError('Invalid array length');
         for (var k = 0; k < len; k++, n++) if (k in e) createDataPropertyOrThrow(a, n, e[k]);
       } else {
         if (n >= MAX) throw new TypeError('Invalid array length');
@@ -909,6 +921,9 @@ var setArrayGeneric = globalThis.__setArrayGeneric; delete globalThis.__setArray
   };
   fns[7] = function join(sep) {
     var o = toObj(this), len = lenOf(o), s = sep === undefined ? ',' : str(sep), r = '';
+    // the separators alone past the string limit: RangeError now, not after
+    // half a billion reads (Hermes array-join-truncation, length 2 ** 32 + 1)
+    if (len > 1 && (len - 1) * s.length > 536870888) throw new RangeError('Invalid string length');
     for (var k = 0; k < len; k++) { if (k > 0) r += s; var e = o[k]; if (e !== undefined && e !== null) r += str(e); }
     return r;
   };
@@ -2695,7 +2710,9 @@ if (!DP.toDateString || DP.toDateString.call(new Date(0)).length > 15) hide(DP, 
 });
 if (!DP.toTimeString) hide(DP, 'toTimeString', function toTimeString() {
   if (!dateOk(this)) return 'Invalid Date';
-  return pad2(this.getHours()) + ':' + pad2(this.getMinutes()) + ':' + pad2(this.getSeconds()) + ' GMT+0000 (Coordinated Universal Time)';
+  // the time, its zone's offset and name: toString's end
+  var s = DP.toString.call(this);
+  return s.slice(s.indexOf(':') - 2);
 });
 if (!DP.toLocaleDateString) hide(DP, 'toLocaleDateString', function toLocaleDateString() {
   if (!dateOk(this)) return 'Invalid Date';
@@ -2721,13 +2738,14 @@ if (!DP.toLocaleString) hide(DP, 'toLocaleString', function toLocaleString() {
 // The implementation is intl.rs's INTL, compiled the first time a script
 // reaches for Intl or a toLocale… method, so that a script that does not
 // pays nothing for it.
-var intlTable = globalThis.__cerIntlTable, intlCollate = globalThis.__cerIntlCollate, intlSource = globalThis.__cerIntlSource;
+var intlTable = globalThis.__cerIntlTable, intlCollate = globalThis.__cerIntlCollate, intlSource = globalThis.__cerIntlSource, intlTz = globalThis.__cerTz;
+delete globalThis.__cerTz;
 delete globalThis.__cerIntlTable;
 delete globalThis.__cerIntlCollate;
 delete globalThis.__cerIntlSource;
 var INTL = null;
 function intl() {
-  if (!INTL) INTL = intlSource()(hide, tag, isObject, create, defineProperty, toIntegerOrInfinity, DP, dateOk, intlTable, intlCollate);
+  if (!INTL) INTL = intlSource()(hide, tag, isObject, create, defineProperty, toIntegerOrInfinity, DP, dateOk, intlTable, intlCollate, intlTz);
   return INTL;
 }
 defineProperty(globalThis, 'Intl', { enumerable: false, configurable: true,

@@ -46,7 +46,7 @@ T("getter-on-global-proto",()=>{Object.defineProperty(Object.prototype,"zzq",{ge
 T("with-proxy-scope",()=>{let log=[];let p=new Proxy({x:1},{has(t,k){log.push(k);return k==="x"}});return Function("p","with(p){return x}")(p)+":"+log.join()});
 T("Symbol.unscopables-getter",()=>{let a=[];let o={get [Symbol.unscopables](){return {}},keys:5};return Function("o","with(o){return keys}")(o)});
 T("Map-forEach-delete-add",()=>{let m=new Map([[1,1],[2,2],[3,3]]);let r=[];m.forEach((v,k)=>{r.push(k);if(k===1){m.delete(2);m.set(4,4)}});return r.join()});
-T("Map-iter-clear",()=>{let m=new Map([[1,1],[2,2]]);let r=[];for(const [k] of m){r.push(k);m.clear();m.set(9,9)}return r.join()});
+T("Map-iter-clear",()=>{let m=new Map([[1,1],[2,2]]);let r=[];for(const [k] of m){r.push(k);if(r.length>9)break;m.clear();m.set(9,9)}return r.join()});
 T("Set-iter-delete-readd",()=>{let s=new Set([1,2,3]);let r=[];for(const k of s){r.push(k);if(r.length<10){s.delete(k);s.add(k)}}return r.join()});
 T("Map-proto-set-override",()=>{let orig=Map.prototype.set;Map.prototype.set=function(){throw new EvalError()};try{return new Map([[1,1]]).size}finally{Map.prototype.set=orig}});
 T("Map-__proto__-array",()=>{let m=new Map();m.__proto__=[];return String(m)});

@@ -584,7 +584,7 @@ impl Parser {
 
     /// Whether the nesting has used the native stack up: a SyntaxError.
     fn too_nested(&mut self) -> bool {
-        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::default_stack_budget()) {
+        if !crate::vm::stack_deeper_than(self.sp0, crate::vm::parse_stack_budget()) {
             return false;
         }
         self.fail("Maximum call stack size exceeded");
@@ -1891,6 +1891,10 @@ impl Parser {
     }
 
     pub(crate) fn unary(&mut self) -> int {
+        // `!!!!…x` recurses here without passing a statement
+        if self.too_nested() {
+            return self.node(N_EMPTY);
+        }
         let line = self.line();
         if self.kind() == T_PUNCT {
             let op = self.text();
