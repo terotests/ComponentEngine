@@ -550,6 +550,8 @@ pub struct Vm {
     pub norm: crate::normalize::Norm,
     /// Intl's collation tables, decoded on first use
     pub intl: crate::intl::Intl,
+    /// time zones: Date's local zone, the zones Intl was asked for
+    pub tz: crate::tz::Tz,
 }
 
 /// The same string: the same one first (Rust's Rc, Go's string compare
@@ -869,6 +871,7 @@ impl Vm {
             rx_units2: Vec::new(),
             norm: crate::normalize::Norm::new(),
             intl: crate::intl::Intl::new(),
+            tz: crate::tz::Tz::new(),
             host_sync: Box::new(NoHostSync {}),
             host_sync_set: false,
         };

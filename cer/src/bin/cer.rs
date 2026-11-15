@@ -12,6 +12,13 @@ fn main() {
         e.vm.regs = v == "1";
     }
     e.set_echo(true);
+    // TZ=Europe/Helsinki: Date's local zone, as Node takes it
+    if let Ok(z) = std::env::var("TZ") {
+        let name = z.trim_start_matches(':');
+        if !name.is_empty() {
+            e.set_time_zone(name);
+        }
+    }
     let r = e.eval(src.as_str());
     // CER_RDUMP=1: the register code of the functions that ran
     if std::env::var("CER_RDUMP").map(|v| v == "1").unwrap_or(false) {
