@@ -402,6 +402,46 @@ pub fn limits(op: int, _x: double) -> double {
     0.0
 }
 
+// The host's memory probe (set_mem_probe): the bytes the process holds now,
+// as its allocator counts them, for Vm::set_heap_limit. Rust only; the
+// other targets measure nothing.
+
+/// Installs the host's probe (for this thread's engines): a function
+/// answering the bytes its allocator holds now (a counting
+/// #[global_allocator]). An engine's heap limit counts what the probe grew
+/// by during that engine's host calls.
+#[ranger::target(rust)]
+pub fn set_mem_probe(f: fn() -> f64) {
+    mem_probe(Some(f));
+}
+
+#[ranger::target(rust)]
+fn mem_probe(set: Option<fn() -> f64>) -> Option<fn() -> f64> {
+    thread_local! {
+        static P: std::cell::Cell<Option<fn() -> f64>> = const { std::cell::Cell::new(None) };
+    }
+    P.with(|c| {
+        if set.is_some() {
+            c.set(set);
+        }
+        c.get()
+    })
+}
+
+/// The probe's reading, 0 without one.
+#[ranger::target(rust)]
+pub fn mem_now() -> double {
+    match mem_probe(None) {
+        Some(f) => f(),
+        None => 0.0,
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn mem_now() -> double {
+    0.0
+}
+
 pub fn set_deadline(t: double) {
     limits(LIM_SET_DEADLINE, t);
 }

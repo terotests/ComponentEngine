@@ -432,6 +432,24 @@ pub struct Vm {
     /// stopped: no catch or finally runs then, and every later check stops
     /// it again until the host call returns
     pub time_limit: double,
+    /// The most memory one engine may hold, in bytes (set_heap_limit); 0:
+    /// no limit. Measured by the host's probe (builtins::set_mem_probe).
+    pub heap_limit: double,
+    /// The probe's reading when the running host call began, and what the
+    /// engine's calls have taken before it (memory they allocated and did
+    /// not free).
+    pub mem_start: double,
+    pub mem_own: double,
+    /// The last stop (terminate) was the heap limit's, not the clock's.
+    pub heap_over: bool,
+    /// Over the heap limit: the next collection is a whole one (over_heap,
+    /// gc); and a collection for the limit ran in this call already.
+    pub heap_pending: bool,
+    pub heap_collected: bool,
+    /// How many host calls a limit stopped (terminate), and how many of
+    /// them the heap limit: a host's count of a misbehaving script.
+    pub stops: int,
+    pub heap_stops: int,
     pub deadline: double,
     pub terminated: bool,
     /// a host call is running (begin_call)
@@ -792,6 +810,14 @@ impl Vm {
             suspended: false,
             slicing: false,
             time_limit: 0.0,
+            heap_limit: 0.0,
+            mem_start: 0.0,
+            mem_own: 0.0,
+            heap_over: false,
+            heap_pending: false,
+            heap_collected: false,
+            stops: 0,
+            heap_stops: 0,
             deadline: 0.0,
             terminated: false,
             in_call: false,
@@ -6587,6 +6613,9 @@ impl Vm {
             self.terminate();
             return true;
         }
+        if self.over_heap() {
+            return true;
+        }
         if !self.slicing || self.native_depth != 0 || self.slice_ms <= 0.0 {
             return false;
         }
@@ -6599,6 +6628,49 @@ impl Vm {
     /// the call, and `terminated` stays set until the next host call.
     pub fn set_time_limit(&mut self, ms: double) {
         self.time_limit = if ms > 0.0 { ms } else { 0.0 };
+    }
+
+    /// The most memory this engine may hold (Engine::set_heap_limit), in
+    /// bytes; 0: no limit (the default). Needs the host's probe
+    /// (builtins::set_mem_probe); without one nothing is measured.
+    pub fn set_heap_limit(&mut self, bytes: double) {
+        self.heap_limit = if bytes > 0.0 { bytes } else { 0.0 };
+    }
+
+    /// Memory this engine's host calls took and kept, by the probe: the
+    /// calls before this one and the running one so far.
+    pub fn heap_used(&self) -> double {
+        let mut n = self.mem_own;
+        if self.in_call {
+            n += crate::builtins::mem_now() - self.mem_start;
+        }
+        if n < 0.0 { 0.0 } else { n }
+    }
+
+    /// At a check (slice_over, poll_slow, a collection): past the heap
+    /// limit the script is stopped as by the time limit (terminate); the
+    /// first time in a call a whole collection runs first (heap_pending).
+    #[inline(never)]
+    pub fn over_heap(&mut self) -> bool {
+        if self.heap_limit <= 0.0 || !self.in_call {
+            return false;
+        }
+        if self.heap_used() <= self.heap_limit {
+            return false;
+        }
+        if !self.heap_collected {
+            // over the first time in this call: a whole collection first
+            // (at the next safe point), as what only it frees counts until
+            // then; over again in this call, stop. Once a call: a buffer
+            // the collection trims would grow back over and over.
+            self.heap_collected = true;
+            self.heap_pending = true;
+            self.gc_flag = true;
+            return false;
+        }
+        self.heap_over = true;
+        self.terminate();
+        true
     }
 
     /// A host call begins (Engine::run / eval / call / resume, call_top or
@@ -6614,6 +6686,10 @@ impl Vm {
         self.slice_t0 = now;
         self.ticks = SLICE_TICKS;
         self.terminated = false;
+        self.heap_over = false;
+        self.heap_pending = false;
+        self.heap_collected = false;
+        self.mem_start = crate::builtins::mem_now();
         self.poll_left = crate::builtins::POLL_EVERY;
         crate::builtins::set_deadline(0.0);
         crate::builtins::set_regex_limit(self.regex_steps);
@@ -6623,7 +6699,7 @@ impl Vm {
             crate::builtins::set_deadline(self.deadline);
         }
         self.slicing = (slices && self.slice_ms > 0.0) || self.prof_on;
-        self.checking = self.slicing || self.deadline > 0.0;
+        self.checking = self.slicing || self.deadline > 0.0 || self.heap_limit > 0.0;
         true
     }
 
@@ -6633,6 +6709,10 @@ impl Vm {
             return;
         }
         self.in_call = false;
+        self.mem_own += crate::builtins::mem_now() - self.mem_start;
+        if self.mem_own < 0.0 {
+            self.mem_own = 0.0;
+        }
         self.deadline = 0.0;
         crate::builtins::set_deadline(0.0);
         self.slicing = self.prof_on;
@@ -6645,13 +6725,23 @@ impl Vm {
     /// going.
     #[inline(never)]
     pub fn terminate(&mut self) {
+        if !self.terminated {
+            self.stops += 1;
+            if self.heap_over {
+                self.heap_stops += 1;
+            }
+        }
         self.terminated = true;
         self.ticks = 1;
         if self.throwing {
             return;
         }
         let p = self.error_proto;
-        let msg = format!("script time limit exceeded ({} ms)", self.time_limit);
+        let msg = if self.heap_over {
+            format!("script heap limit exceeded ({} bytes)", self.heap_limit)
+        } else {
+            format!("script time limit exceeded ({} ms)", self.time_limit)
+        };
         let e = self.new_error(p, msg.as_str());
         self.throw_val(Val::Obj(e));
     }
@@ -6685,6 +6775,9 @@ impl Vm {
         let now = crate::builtins::now_ms();
         if self.deadline > 0.0 && now >= self.deadline {
             self.terminate();
+            return true;
+        }
+        if self.over_heap() {
             return true;
         }
         if self.slicing && self.slice_ms > 0.0 && now - self.slice_t0 >= self.slice_ms {
@@ -9060,7 +9153,22 @@ impl Vm {
     /// A collection when one is due, else a reclaim (the safe points call
     /// this when gc_due).
     pub fn gc(&mut self) {
-        if self.rc_on && self.alloc_count < self.gc_threshold && self.made < self.made_limit {
+        self.gc_run();
+        if self.heap_limit > 0.0 && self.in_call {
+            // still past the heap limit with the garbage gone: the next
+            // branch stops the script (slice_over, over_heap), where
+            // stopping is safe
+            self.heap_pending = false;
+            if self.heap_used() > self.heap_limit {
+                self.ticks = 1;
+            }
+        }
+    }
+
+    fn gc_run(&mut self) {
+        // over the heap limit: a whole collection, as references a stopped
+        // call left uncounted are found only by it
+        if self.rc_on && !self.heap_pending && self.alloc_count < self.gc_threshold && self.made < self.made_limit {
             // Strings count against their limits until a reclaim frees
             // them, so strings alone make a collection due only when the
             // reclaim leaves them near the limit: a page that makes a few
