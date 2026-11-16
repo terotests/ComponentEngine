@@ -469,17 +469,35 @@ pub fn snapshot(vm: &Vm) -> String {
 /// An engine's state from a snapshot's text, into `vm` (a new Vm); false
 /// when the text is not one, and `vm` is then not to be used.
 pub fn restore(vm: &mut Vm, text: &str) -> bool {
-    restore_as(vm, text, true)
+    restore_as(vm, text, true, false)
 }
 
 /// restore of a text the engine itself carries (the prelude's): its code
 /// is not checked again (unit::code_ok).
 pub fn restore_built_in(vm: &mut Vm, text: &str) -> bool {
-    restore_as(vm, text, false)
+    restore_as(vm, text, false, false)
 }
 
-/// restore; `check`: every function's code passes unit::code_ok.
-fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
+/// `restore` with `keep_tables`: `vm.objs` and `vm.colds` are emptied and
+/// filled again in the room they have, tables a host kept from a dropped
+/// engine (Engine::from_snapshot_with).
+pub fn restore_with(vm: &mut Vm, text: &str, keep_tables: bool) -> bool {
+    restore_as(vm, text, true, keep_tables)
+}
+
+/// A table's room for `n` items (a count read from the text).
+fn room(n: int) -> usize {
+    if n > 0 {
+        n as usize
+    } else {
+        0
+    }
+}
+
+/// restore; `check`: every function's code passes unit::code_ok. The
+/// tables are made to their size at once (the counts come first), so a
+/// restore does not grow them step by step.
+fn restore_as(vm: &mut Vm, text: &str, check: bool, keep_tables: bool) -> bool {
     let mut r = Reader::new(text);
     if r.num() != SNAPSHOT_FORMAT {
         return false;
@@ -488,8 +506,8 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     // the snapshot's strings stay (pinned): constants and names mostly
     vm.reset_strs();
     vm.type_vals = Vec::new();
-    let mut strs: Vec<Val> = Vec::new();
-    let mut texts: Vec<Rc<String>> = Vec::new();
+    let mut strs: Vec<Val> = Vec::with_capacity(room(ns));
+    let mut texts: Vec<Rc<String>> = Vec::with_capacity(room(ns));
     let mut i: int = 0;
     while i < ns && !r.bad {
         let t = Rc::new(r.string());
@@ -504,7 +522,6 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     vm.atom_hash = Vec::new();
     vm.fa_seen = 0;
     vm.fa_count = 0;
-    vm.atom_names = Vec::new();
     vm.atom_cache = Vec::new();
     vm.idx_keys = Vec::new();
     vm.idx_vals = Vec::new();
@@ -513,6 +530,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     vm.atom_vals = Vec::new();
     vm.char_vals = Vec::new();
     let na = r.num();
+    vm.atom_names = Vec::with_capacity(room(na));
     i = 0;
     while i < na && !r.bad {
         let a = get_str(&mut r, &texts);
@@ -532,7 +550,6 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
         vm.symbol_atoms.insert(k, v);
         i += 1;
     }
-    vm.protos = Vec::new();
     vm.rcode = Vec::new();
     vm.kvals = Vec::new();
     vm.rtab = Vec::new();
@@ -544,6 +561,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     vm.shape_epoch += 1;
     vm.chain_epoch += 1;
     let np = r.num();
+    vm.protos = Vec::with_capacity(room(np));
     i = 0;
     while i < np && !r.bad {
         let name = get_str(&mut r, &texts);
@@ -584,8 +602,12 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
         vm.protos.push(p);
         i += 1;
     }
-    vm.objs = Vec::new();
-    vm.colds = Vec::new();
+    if keep_tables {
+        vm.objs.clear();
+        vm.colds.clear();
+    } else {
+        vm.colds = Vec::new();
+    }
     vm.colds.push(Cold::new());
     vm.free_colds = Vec::new();
     vm.evecs = Vec::new();
@@ -598,6 +620,9 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool) -> bool {
     vm.free_shapes = Vec::new();
     vm.t_far = TFar::new();
     let no = r.num();
+    if !keep_tables {
+        vm.objs = Vec::with_capacity(room(no));
+    }
     let mut for_ins: Vec<(int, Vec<int>)> = Vec::new();
     i = 0;
     while i < no && !r.bad {
