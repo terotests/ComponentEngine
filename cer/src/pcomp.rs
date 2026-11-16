@@ -7741,6 +7741,9 @@ impl PComp {
             self.no_in = saved_no_in;
             self.op(OP_RETURN);
         } else {
+            // (`in` is an operator again in a body inside a for head)
+            let saved_body_no_in = self.no_in;
+            self.no_in = false;
             let body_end = self.mate_of(self.pos);
             self.expect("{");
             own_strict = self.directives();
@@ -7782,6 +7785,7 @@ impl PComp {
             if !props.is_empty() {
                 self.ts_fail();
             }
+            self.no_in = saved_body_no_in;
             self.expect("}");
             self.ctor_this_check();
             self.op(OP_RETURN_UNDEF);

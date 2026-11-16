@@ -7,6 +7,7 @@
 //   node cerxes/bench/cases.mjs                     # JavaScript (bin/Cerxes.cjs)
 //   node cerxes/bench/cases.mjs --targets=js,cpp,go # also C++ and Go
 //   node cerxes/bench/cases.mjs --targets=cer-js    # CEr's cases on CEr's JS build
+//   CER_REGS=1 node cerxes/bench/cases.mjs --targets=cer-js   # … on its register VM
 //   node cerxes/bench/cases.mjs --build             # rebuild first
 //
 // js is `rgrc -es6 -nodemodule src/lib.rs`; cpp and go are
@@ -61,7 +62,10 @@ for (const t of targets) {
     engines["cer-js"] = (mode, src) => {
       if (mode !== "js") return null;
       try {
-        return Engine.new_().eval(src);
+        const e = Engine.new_();
+        // CER_REGS=1: on the register VM (Vm.regs)
+        if (process.env.CER_REGS === "1") e.vm.regs = true;
+        return e.eval(src);
       } catch (ex) {
         return "host exception: " + ex;
       }
