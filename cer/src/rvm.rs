@@ -1076,12 +1076,15 @@ impl Vm {
                     R_RET | R_RET_UNDEF => {
                         let mut v = if ((w0 & 255) as int) == R_RET { self.rget(bp, (w1 as int)).clone() } else { Val::Undef() };
                         if frame_at(&self.frames, fi).construct && !is_obj(&v) {
-                            if self.r_ret_construct(&mut v, fi, pc) {
+                            if self.r_ret_construct(&v, fi, pc) {
                                 if !self.unwind(base) {
                                     return;
                                 }
                                 continue 'frames;
                             }
+                            // (`this` here, not through a &mut parameter: the
+                            // Ranger JavaScript build passes a Val by value)
+                            v = self.frames[fi].this_val.clone();
                         }
                         let fr = self.frames.pop().unwrap();
                         let depth = self.frames.len() as int;
@@ -2446,16 +2449,15 @@ impl Vm {
         false
     }
 
-    /// A constructor's return of a non-object: `this`, or true when it
-    /// threw (a derived constructor's).
+    /// A constructor's return of a non-object: true when it threw (a
+    /// derived constructor's); otherwise the caller takes `this`.
     #[inline(never)]
-    fn r_ret_construct(&mut self, v: &mut Val, fi: usize, pc: int) -> bool {
+    fn r_ret_construct(&mut self, v: &Val, fi: usize, pc: int) -> bool {
         if !(*v).is_undef() && self.protos[self.frames[fi].proto as usize].derived {
             self.frames[fi].pc = pc + 1;
             self.throw_type("Derived constructors may only return object or undefined");
             return true;
         }
-        *v = self.frames[fi].this_val.clone();
         false
     }
 

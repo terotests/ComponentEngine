@@ -1262,6 +1262,9 @@ impl Parser {
         self.in_generator = (self.ast.nodes[owner as usize].flags & F_GENERATOR) != 0;
         let saved_labels = self.labels.clone();
         self.labels.clear();
+        // (`in` is an operator again in a body inside a for head)
+        let saved_no_in = self.no_in;
+        self.no_in = false;
         let n = self.node(N_BLOCK);
         self.expect("{");
         self.directives(owner);
@@ -1272,6 +1275,7 @@ impl Parser {
         }
         self.expect("}");
         self.ast.nodes[n as usize].list = body;
+        self.no_in = saved_no_in;
         self.labels = saved_labels;
         self.in_function = saved;
         self.in_generator = saved_gen;
