@@ -1325,7 +1325,7 @@ impl Vm {
                 start = l as int;
             }
         }
-        let caps = self.regexes[idx as usize].exec(&self.rx_units, start);
+        let caps = self.regexes[idx as usize].exec_in(&self.rx_units, start, &mut self.rx_regs, &mut self.rx_stack);
         self.rx_after();
         if caps.is_empty() {
             if global || sticky {

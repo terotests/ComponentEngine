@@ -559,6 +559,9 @@ pub struct Vm {
     /// turn converted the input again after each word
     pub rx_s2: Rc<String>,
     pub rx_units2: Vec<int>,
+    /// Regex::exec_in's registers and backtrack stack, kept between execs
+    pub rx_regs: Vec<int>,
+    pub rx_stack: Vec<(int, int, int)>,
     /// String.prototype.normalize's tables, decoded on first use
     pub norm: crate::normalize::Norm,
     /// Intl's collation tables, decoded on first use
@@ -902,6 +905,8 @@ impl Vm {
             rx_units: Vec::new(),
             rx_s2: Rc::new(String::new()),
             rx_units2: Vec::new(),
+            rx_regs: Vec::new(),
+            rx_stack: Vec::new(),
             norm: crate::normalize::Norm::new(),
             intl: crate::intl::Intl::new(),
             tz: crate::tz::Tz::new(),

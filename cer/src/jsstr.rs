@@ -232,6 +232,19 @@ pub fn join_fix(s: &mut String, at: int) {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn join_fix(_s: &mut String, _at: int) {}
 
+/// Room for `n` more bytes in `s` (Rust: one allocation for a text whose
+/// length is known before it is built, Vm::array_join; the other targets
+/// grow their own strings).
+#[ranger::target(rust)]
+pub fn str_reserve(s: &mut String, n: int) {
+    if n > 0 {
+        s.reserve(n as usize);
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn str_reserve(_s: &mut String, _n: int) {}
+
 /// Whether `a` + `b` joins a lone high surrogate to a lone low one (so the
 /// result is not the two texts side by side).
 #[ranger::target(rust)]
