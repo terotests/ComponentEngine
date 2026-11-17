@@ -2866,6 +2866,15 @@ impl Regex {
     }
 
     pub fn exec(&self, input: &Vec<int>, start: int) -> Vec<int> {
+        let mut regs: Vec<int> = Vec::new();
+        let mut stack: Vec<(int, int, int)> = Vec::new();
+        self.exec_in(input, start, &mut regs, &mut stack)
+    }
+
+    /// exec with the register and backtrack buffers of the caller (Vm keeps
+    /// them between calls, RegExp.prototype.exec): two fewer allocations
+    /// for each exec of a short match
+    pub fn exec_in(&self, input: &Vec<int>, start: int, regs: &mut Vec<int>, stack: &mut Vec<(int, int, int)>) -> Vec<int> {
         if crate::builtins::regex_stopped() {
             // an attempt ran out of steps or time: no more tries until
             // Vm::rx_after has thrown
@@ -2874,7 +2883,8 @@ impl Regex {
         let n = input.len() as int;
         let mut s = start;
         let ncap = ((self.ngroups + 1) * 2) as usize;
-        let mut regs: Vec<int> = Vec::new();
+        regs.clear();
+        stack.clear();
         let mut r: int = 0;
         while r < self.nregs {
             regs.push(-1);
@@ -2883,7 +2893,6 @@ impl Regex {
         // one capture list for every start: a failed try leaves it to be
         // cleared, not dropped
         let mut caps: Vec<int> = Vec::with_capacity(ncap);
-        let mut stack: Vec<(int, int, int)> = Vec::new();
         // where lit was found last (-1: not looked for yet)
         let mut lp: int = -1;
         if self.anchor == 1 && s > 0 {
@@ -2938,7 +2947,7 @@ impl Regex {
                 caps.push(-1);
                 i += 1;
             }
-            let e = self.run(input, s, 0, &mut caps, &mut regs, false, &mut stack);
+            let e = self.run(input, s, 0, &mut caps, regs, false, stack);
             if e >= 0 {
                 return caps;
             }

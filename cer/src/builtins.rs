@@ -1325,7 +1325,7 @@ impl Vm {
                 start = l as int;
             }
         }
-        let caps = self.regexes[idx as usize].exec(&self.rx_units, start);
+        let caps = self.regexes[idx as usize].exec_in(&self.rx_units, start, &mut self.rx_regs, &mut self.rx_stack);
         self.rx_after();
         if caps.is_empty() {
             if global || sticky {
@@ -4920,17 +4920,10 @@ impl Vm {
                     if let Some(src) = (&self.protos[pi as usize].src).as_str() {
                         let src = self.sget(src.clone());
                         let (a, b) = (self.protos[pi as usize].src_start, self.protos[pi as usize].src_end);
-                        let mut text = String::new();
-                        let mut i: int = 0;
-                        for c in src.chars() {
-                            if i >= b {
-                                break;
-                            }
-                            if i >= a {
-                                text.push(c);
-                            }
-                            i += 1;
-                        }
+                        // (an ASCII source's chars are its bytes: a bundle's
+                        // function read with toString was a walk of the
+                        // 700 KB before it, char by char, every time)
+                        let text = jsstr::char_range(src.as_str(), a, b);
                         return self.string_val(text);
                     }
                     if self.protos[pi as usize].class_ctor {

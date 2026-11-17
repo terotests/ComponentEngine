@@ -203,6 +203,19 @@ impl Vm {
         // read again as they are now: that code may have changed them
         let mut dirty = false;
         let mut out = String::new();
+        // the bytes of the string elements and separators, reserved at once:
+        // growing by doubling copied a long result several times
+        if n0 > 1 {
+            let mut room: int = (sep.as_bytes().len() * (n0 - 1)) as int;
+            for it in items.iter() {
+                if let Some(h) = it.as_str() {
+                    room += self.hbytes(h);
+                }
+            }
+            if room <= MAX_STR_BYTES {
+                jsstr::str_reserve(&mut out, room);
+            }
+        }
         let mut i: usize = 0;
         while i < n0 {
             let it = if dirty { self.get_index(&ov, i as int) } else { items[i] };
