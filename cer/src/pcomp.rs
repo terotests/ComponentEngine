@@ -9742,7 +9742,14 @@ fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &s
 /// Rust: the script's tokens without the room their doubling left.
 #[ranger::target(rust)]
 fn trim_toks(v: &mut Vec<PTok>) {
-    v.shrink_to_fit();
+    // a quarter left over: the tokens push_tokens reads later (a class
+    // body's fields) go after these, and an exact fit would have them
+    // copy the whole script's tokens into a table twice its size. On WASM
+    // that big passing block fragments memory, which never shrinks.
+    let room = v.len() + v.len() / 4 + 16;
+    if v.capacity() > room {
+        v.shrink_to(room);
+    }
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
