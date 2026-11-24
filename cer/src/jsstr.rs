@@ -195,10 +195,28 @@ fn push_lone(s: &mut String, _cp: int) {
 
 /// `t` onto `s` as JavaScript joins strings: a lone high surrogate at the
 /// end of `s` and a lone low one at the start of `t` become one character.
+#[ranger::target(rust)]
 pub fn push_js(s: &mut String, t: &str) {
     let at = s.as_bytes().len();
     s.push_str(t);
     join_fix(s, at as int);
+}
+
+/// (the other targets have no stand-ins to join: the length is not
+/// needed, and in JavaScript it is an encoding of the whole of `s`)
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn push_js(s: &mut String, t: &str) {
+    s.push_str(t);
+}
+
+/// A string's size for budgets and limits: its bytes in Rust and the
+/// targets whose strings know their bytes; in JavaScript its UTF-16 length,
+/// which a string has at hand (its UTF-8 length is an encoding of the whole
+/// string, linear in it: a string built by `+=` would be encoded at each
+/// step). Never for a byte position.
+pub fn size(s: &str) -> int {
+    let n: int = ranger::native!(rust: { s.as_bytes().len() as int }, es6: "{s}.length");
+    n
 }
 
 /// Whether the 4 bytes before x[at] are a lone high surrogate's stand-in

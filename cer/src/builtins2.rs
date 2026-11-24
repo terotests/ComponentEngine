@@ -209,7 +209,7 @@ impl Vm {
             let mut room: int = (sep.as_bytes().len() * (n0 - 1)) as int;
             for it in items.iter() {
                 if let Some(h) = it.as_str() {
-                    room += self.hbytes(h);
+                    room += self.hsize(h);
                 }
             }
             if room <= MAX_STR_BYTES {
@@ -228,7 +228,7 @@ impl Vm {
             if (i & 8191) == 8191 && self.poll(131072) {
                 return String::new();
             }
-            if (out.as_bytes().len() as int) > MAX_STR_BYTES {
+            if jsstr::size(out.as_str()) > MAX_STR_BYTES {
                 self.throw_range("Invalid string length");
                 return String::new();
             }
@@ -1162,7 +1162,7 @@ impl Vm {
                 let mut hl: int = -1;
                 if id == NF_SP_STARTSWITH || id == NF_SP_ENDSWITH {
                     if let Some(h) = this.as_str() {
-                        if self.hbytes(h) >= 256 {
+                        if self.hsize(h) >= 256 {
                             hl = h;
                         }
                     }
@@ -1262,7 +1262,7 @@ impl Vm {
             NF_SP_SLICE => {
                 if let Some(h) = this.as_str() {
                     // a long text (or a view of one) is not copied for its piece
-                    if self.hbytes(h) >= 256 {
+                    if self.hsize(h) >= 256 {
                         let len = self.hlen(h);
                         let a = self.rel_index(&a0, len, 0);
                         let b = self.rel_index(&a1, len, len);
@@ -1295,7 +1295,7 @@ impl Vm {
             }
             NF_SP_SUBSTRING => {
                 if let Some(h) = this.as_str() {
-                    if self.hbytes(h) >= 256 {
+                    if self.hsize(h) >= 256 {
                         let len = self.hlen(h);
                         let a = self.rel_index_pos(&a0, len, 0);
                         let b = self.rel_index_pos(&a1, len, len);
@@ -1334,7 +1334,7 @@ impl Vm {
             }
             NF_SP_SUBSTR => {
                 if let Some(h) = this.as_str() {
-                    if self.hbytes(h) >= 256 {
+                    if self.hsize(h) >= 256 {
                         let len = self.hlen(h);
                         let a = self.rel_index(&a0, len, 0);
                         let n = if a1.is_undef() { len - a } else { to_integer(self.to_number(&a1)) as int };
