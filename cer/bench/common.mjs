@@ -101,6 +101,12 @@ export function runComponentEngine(src) {
   return out;
 }
 
+/** g++ optimization flags for the C++ builds: CER_CXXFLAGS, else -O2. */
+function cxxFlags() {
+  const f = (process.env.CER_CXXFLAGS || "").trim();
+  return f ? f.split(/\s+/) : ["-O2"];
+}
+
 /** CEr built by cargo. */
 export function runCerNative(src) {
   const bin = path.join(CER, "target/release/cer");
@@ -189,7 +195,7 @@ export function build(want) {
     const dir = path.join(os.tmpdir(), "cer-cppjit");
     fs.mkdirSync(dir, { recursive: true });
     run("node", ["--stack-size=8000", rgrc(), "-l=cpp", path.join(CER, "bench/CerMainJit.rgr"), "-d=" + dir, "-o=cer_main.cpp"]);
-    run("g++", ["-std=c++17", "-O2", "-o", path.join(CER, "bin", "cer_main_cppjit"), path.join(dir, "cer_main.cpp")]);
+    run("g++", ["-std=c++17", ...cxxFlags(), "-o", path.join(CER, "bin", "cer_main_cppjit"), path.join(dir, "cer_main.cpp")]);
   }
   for (const t of ["cpp", "go"]) {
     if (!want.includes("cer-" + t)) continue;
@@ -199,7 +205,7 @@ export function build(want) {
     run("node", ["--stack-size=8000", rgrc(), "-l=" + t, path.join(CER, "bench/CerMain.rgr"), "-d=" + dir, "-o=" + srcName]);
     const bin = path.join(CER, "bin", "cer_main_" + t);
     if (t === "cpp") {
-      run("g++", ["-std=c++17", "-O2", "-o", bin, path.join(dir, srcName)]);
+      run("g++", ["-std=c++17", ...cxxFlags(), "-o", bin, path.join(dir, srcName)]);
     } else {
       run("go", ["build", "-o", bin, srcName], dir);
     }

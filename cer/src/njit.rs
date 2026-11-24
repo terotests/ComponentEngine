@@ -24,6 +24,8 @@ use ranger::prelude::*;
 use crate::ops::*;
 use crate::regs::*;
 use crate::value::*;
+use crate::vm::*;
+use crate::rvm::*;
 
 /// value.rs (C++): the size of a Val and where its parts lie
 const VSZ: int = 16;
@@ -47,6 +49,14 @@ const A_BUD: int = 3;
 /// the operand bases, machine-neutral
 const B_SP: int = 0;
 const B_KV: int = 1;
+/// The context block (the sixth argument): &this, the Elems table, the
+/// frame's scope
+const CTX_THIS: int = 0;
+const CTX_EVECS: int = 8;
+const CTX_ENV: int = 16;
+const CTX_VM: int = 24;
+const CTX_FN: int = 32;
+const CTX_BP: int = 40;
 
 /// conditions, machine-neutral (each machine maps them)
 const C_EQ: int = 0;
@@ -404,7 +414,7 @@ impl Asm {
     }
     // ------------------------------------------- objects (shape guards)
     // The object table (Vm.objs: one std::shared_ptr<JsObj> per object,
-    // its pointer first) comes in r8 / x4, `this` (a Val) in r9 / x5. The
+    // its pointer first) comes in r8 / x4, the context block (CTX_*) in r9 / x5. The
     // object being read is p: rax / x12.
 
     /// AArch64 ldr/str from a register base (rn), far offsets through x9
@@ -452,32 +462,218 @@ impl Asm {
         }
         self.obj_from_index();
     }
+    /// q (r10 / x14) = the pointer at [ctx + disp]
+    fn ctx_ptr(&mut self, disp: int) {
+        if self.arm {
+            self.a_ldst_r(0xF940, 14, 5, disp, 8);
+        } else {
+            // mov r10, [r9 + disp8]
+            self.u8(0x4D);
+            self.u8(0x8B);
+            self.u8(0x51);
+            self.u8(disp);
+        }
+    }
     /// compare `this`'s kind with k
     fn cmp_this_kind(&mut self, k: int) {
+        self.ctx_ptr(CTX_THIS);
         if self.arm {
-            self.a_ldst_r(0xB940, 9, 5, 0, 4);
+            self.a_ldst_r(0xB940, 9, 14, 0, 4);
             self.w(0x7100 + (k >> 6), ((k & 63) << 10) + (9 << 5) + 31);
         } else {
-            // cmp dword [r9], k
+            // cmp dword [r10], k
             self.u8(0x41);
             self.u8(0x83);
-            self.u8(0xB9);
-            self.d32(0);
+            self.u8(0x3A);
             self.u8(k);
         }
     }
-    /// p = the JsObj of `this`
+    /// p = the JsObj of `this` (after cmp_this_kind: q holds &this)
     fn this_obj_ptr(&mut self) {
         if self.arm {
-            self.a_ldst_r(0xB980, 12, 5, OFF_I, 4);
+            self.a_ldst_r(0xB980, 12, 14, OFF_I, 4);
         } else {
-            // movsxd rax, [r9 + 4]
+            // movsxd rax, [r10 + 4]
             self.u8(0x49);
             self.u8(0x63);
-            self.u8(0x81);
-            self.d32(OFF_I);
+            self.u8(0x42);
+            self.u8(OFF_I);
         }
         self.obj_from_index();
+    }
+    /// p = the frame's scope (an object index; negative: none)
+    fn env_index(&mut self) {
+        if self.arm {
+            self.a_ldst_r(0xB980, 12, 5, CTX_ENV, 4);
+        } else {
+            // movsxd rax, [r9 + disp8]
+            self.u8(0x49);
+            self.u8(0x63);
+            self.u8(0x41);
+            self.u8(CTX_ENV);
+        }
+    }
+    /// p = the int at [p+disp], sign-extended (p a pointer)
+    fn p_load_int(&mut self, disp: int) {
+        if self.arm {
+            self.a_ldst_r(0xB980, 12, 12, disp, 4);
+        } else {
+            // movsxd rax, [rax + disp32]
+            self.u8(0x48);
+            self.u8(0x63);
+            self.u8(0x80);
+            self.d32(disp);
+        }
+    }
+    /// to l when the index in p is negative
+    fn p_neg(&mut self, l: int) {
+        if self.arm {
+            // cmp w12, #0; b.mi l (C_FLT is MI on AArch64)
+            self.w(0x7100, (12 << 5) + 31);
+            self.jcc(C_FLT, l);
+        } else {
+            // test eax, eax; js l
+            self.u8(0x85);
+            self.u8(0xC0);
+            self.u8(0x0F);
+            self.u8(0x88);
+            self.x_rel32(l);
+        }
+    }
+    /// p = the element vector's buffer of the Elems index in p, to l when
+    /// it holds no more than `need` bytes (q is overwritten)
+    fn elems_buf(&mut self, ev: int, need: int, l: int) {
+        self.ctx_ptr(CTX_EVECS);
+        if self.arm {
+            // lsl x12, x12, #4; ldr x12, [x14, x12]
+            self.w(0xD37C, 0xED8C);
+            self.w(0xF86C, 0x69CC);
+            self.a_ldst_r(0xF940, 14, 12, ev + 8, 8);
+            self.a_ldst_r(0xF940, 12, 12, ev, 8);
+            // sub x14, x14, x12; cmp x14, x9
+            self.w(0xCB0C, (14 << 5) + 14);
+            self.a_mov32(9, need);
+            self.w(0xEB09, (14 << 5) + 31);
+        } else {
+            // shl rax, 4; mov rax, [r10 + rax]
+            self.u8(0x48);
+            self.u8(0xC1);
+            self.u8(0xE0);
+            self.u8(4);
+            self.u8(0x49);
+            self.u8(0x8B);
+            self.u8(0x04);
+            self.u8(0x02);
+            // mov r10, [rax + ev + 8]; mov rax, [rax + ev]
+            self.u8(0x4C);
+            self.u8(0x8B);
+            self.u8(0x90);
+            self.d32(ev + 8);
+            self.u8(0x48);
+            self.u8(0x8B);
+            self.u8(0x80);
+            self.d32(ev);
+            // sub r10, rax; cmp r10, need
+            self.u8(0x49);
+            self.u8(0x29);
+            self.u8(0xC2);
+            self.u8(0x49);
+            self.u8(0x81);
+            self.u8(0xFA);
+            self.d32(need);
+        }
+        self.jcc(C_BE, l);
+    }
+    /// slow(vm, pi, pc, bp) (the context block's function): on when it
+    /// did the op, to l when it answers 0. The frame's registers are saved
+    /// around the call; no value lives in a float register across ops.
+    fn slow_call(&mut self, pi: int, pc: int, l: int) {
+        if self.arm {
+            // stp x29, x30, [sp, #-64]!; stp x0, x1, [sp, #16];
+            // stp x3, x4, [sp, #32]; str x5, [sp, #48]
+            self.w(0xA9BC, 0x7BFD);
+            self.w(0xA901, 0x07E0);
+            self.w(0xA902, 0x13E3);
+            self.w(0xF900, 0x1BE5);
+            self.a_ldst_r(0xB940, 3, 5, CTX_BP, 4);
+            self.a_mov32(1, pi);
+            self.a_mov32(2, pc);
+            self.a_ldst_r(0xF940, 0, 5, CTX_VM, 8);
+            self.a_ldst_r(0xF940, 9, 5, CTX_FN, 8);
+            // blr x9; mov w9, w0
+            self.w(0xD63F, 0x0120);
+            self.w(0x2A00, 0x03E9);
+            // ldp x0, x1, [sp, #16]; ldp x3, x4, [sp, #32];
+            // ldr x5, [sp, #48]; ldp x29, x30, [sp], #64
+            self.w(0xA941, 0x07E0);
+            self.w(0xA942, 0x13E3);
+            self.w(0xF940, 0x1BE5);
+            self.w(0xA8C4, 0x7BFD);
+            // cbz w9, l
+            self.fix(l, 2);
+            self.w(0x3400, 9);
+        } else {
+            // push rdi; push rsi; push r8; push r9 (rsp stays 16-aligned:
+            // the return address and rbx are on it already)
+            self.u8(0x57);
+            self.u8(0x56);
+            self.u8(0x41);
+            self.u8(0x50);
+            self.u8(0x41);
+            self.u8(0x51);
+            // mov rax, [r9 + CTX_FN]; mov esi, pi; mov edx, pc;
+            // mov ecx, [r9 + CTX_BP]; mov rdi, [r9 + CTX_VM]; call rax
+            self.u8(0x49);
+            self.u8(0x8B);
+            self.u8(0x41);
+            self.u8(CTX_FN);
+            self.u8(0xBE);
+            self.d32(pi);
+            self.u8(0xBA);
+            self.d32(pc);
+            self.u8(0x41);
+            self.u8(0x8B);
+            self.u8(0x49);
+            self.u8(CTX_BP);
+            self.u8(0x49);
+            self.u8(0x8B);
+            self.u8(0x79);
+            self.u8(CTX_VM);
+            self.u8(0xFF);
+            self.u8(0xD0);
+            // pop r9; pop r8; pop rsi; pop rdi; test eax, eax; jz l
+            self.u8(0x41);
+            self.u8(0x59);
+            self.u8(0x41);
+            self.u8(0x58);
+            self.u8(0x5E);
+            self.u8(0x5F);
+            self.u8(0x85);
+            self.u8(0xC0);
+            self.jcc(C_EQ, l);
+        }
+    }
+    /// the kinds of x (scratch) and y (w13 on AArch64), then cmp_kinds
+    fn load_kinds(&mut self, xb: int, xd: int, yb: int, yd: int) {
+        if self.arm {
+            // y first: a far x reuses x9
+            self.a_ldst(0xB940, 13, yb, yd, 4);
+            self.a_ldst(0xB940, 9, xb, xd, 4);
+        } else {
+            self.u8(0x8B);
+            self.x_mem(RAX, Asm::x_base(xb), xd);
+        }
+    }
+    /// compare the scratch with y's word at [yb+yd] (loaded by load_kinds
+    /// on AArch64)
+    fn cmp_kinds(&mut self, yb: int, yd: int) {
+        if self.arm {
+            self.w(0x6B0D, (9 << 5) + 31);
+        } else {
+            // cmp eax, [y]
+            self.u8(0x3B);
+            self.x_mem(RAX, Asm::x_base(yb), yd);
+        }
     }
     /// compare the int at [p+disp] with v (then jcc)
     fn p_cmp32(&mut self, disp: int, v: int) {
@@ -667,13 +863,17 @@ fn opnd_disp(x: int) -> int {
 
 /// Where the object's parts lie in the C++ build (layout()): ok (1 when
 /// the table holds 16-byte std::shared_ptr entries), then the offsets of
-/// JsObj.shape, inl0, inl1, vals and Slots.v.
+/// JsObj.shape, inl0, inl1, vals, Slots.v, JsObj.proto, JsObj.elems and
+/// Elems.v.
 const L_OK: usize = 0;
 const L_SHAPE: usize = 1;
 const L_INL0: usize = 2;
 const L_INL1: usize = 3;
 const L_VALS: usize = 4;
 const L_V: usize = 5;
+const L_PROTO: usize = 6;
+const L_ELEMS: usize = 7;
+const L_EV: usize = 8;
 
 /// A property op whose site's cache (w3: shape * 65536 + slot) saw one
 /// shape: read or written in place behind a check of that shape.
@@ -688,15 +888,59 @@ fn prop_site(kind: int, sub: int, w3: int, lay: &Vec<int>) -> bool {
     kind == R_GET_PROP || kind == R_GET_THIS_PROP || (kind == R_SET_PROP && sub == 0)
 }
 
-/// Whether the op is one this file writes.
-fn handles(o: Op, lay: &Vec<int>) -> bool {
+/// Whether the op is one this file writes (pc its place, tab Vm.rtab).
+fn handles(o: Op, pc: int, lay: &Vec<int>, tab: &Vec<int>) -> bool {
     let w0 = (o.code as int);
     let kind = w0 & 255;
     let sub = (w0 >> 8) & 255;
-    if kind == R_GET_PROP || kind == R_GET_THIS_PROP || kind == R_SET_PROP {
-        return prop_site(kind, sub, (o.c as int), lay);
+    if is_slow(kind, sub) {
+        return true;
+    }
+    if kind == R_GET_ENV {
+        // depth and slot within reach of one immediate
+        return lay[L_OK] == 1 && (o.b as int) >= 0 && (o.b as int) < 64 && (o.c as int) >= 0 && (o.c as int) < 1000000;
+    }
+    if kind == R_SWITCH {
+        return switch_ok(o, pc, tab);
     }
     handled(kind, sub)
+}
+
+/// An op the code hands to slow() (properties outside one shape's fast
+/// path, globals, arithmetic past + - * /): what the interpreter does
+/// without calls into JS, else back to the interpreter.
+fn is_slow(kind: int, sub: int) -> bool {
+    if kind == R_GET_PROP || kind == R_GET_THIS_PROP || kind == R_GET_GLOBAL || kind == R_SET_GLOBAL || kind == R_SET_ENV || kind == R_TYPEOF || kind == R_GET_ELEM || kind == R_TONUM {
+        return true;
+    }
+    if kind == R_SET_PROP {
+        return sub == 0;
+    }
+    kind == R_ARITH && sub != OP_DIV
+}
+
+/// A numeric switch with a small table that only jumps forward.
+fn switch_ok(o: Op, pc: int, tab: &Vec<int>) -> bool {
+    let t = (o.b as int);
+    if t < 0 || (t as usize) >= tab.len() {
+        return false;
+    }
+    let size = tab[t as usize];
+    if size < 0 || size > 64 || ((t + 1 + size) as usize) >= tab.len() {
+        return false;
+    }
+    let lo = (o.c as int);
+    if lo < -1000000 || lo > 1000000 {
+        return false;
+    }
+    let mut i: int = 0;
+    while i <= size {
+        if tab[(t + 1 + i) as usize] <= pc {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Whether the op kind is one this file writes.
@@ -707,10 +951,10 @@ fn handled(kind: int, sub: int) -> bool {
     if kind == R_ARITH {
         return sub == OP_DIV;
     }
-    if kind == R_CMP_JF || kind == R_CMP_JT || kind == R_LOOP || kind == R_CMP {
+    if kind == R_CMP_JF || kind == R_CMP_JT || kind == R_LOOP || kind == R_CMP || kind == R_CMP_JFK || kind == R_CMP_JTK {
         return is_num_cmp(sub);
     }
-    kind == R_JUMP || kind == R_JF || kind == R_JT || kind == R_INC_LOCAL || kind == R_INC || kind == R_POSTINC || kind == R_ADD_LOCAL_POP
+    kind == R_NOT || kind == R_JUMP || kind == R_JF || kind == R_JT || kind == R_JF_KEEP || kind == R_JT_KEEP || kind == R_LOCAL_NULL_JF || kind == R_INC_LOCAL || kind == R_INC || kind == R_POSTINC || kind == R_ADD_LOCAL_POP
 }
 
 fn is_num_cmp(c: int) -> bool {
@@ -768,9 +1012,8 @@ impl Cg {
         self.a.jmp(t);
     }
     /// p = the object's slot holder, and the slot's offset from it (the
-    /// shape checked: else back to the interpreter at pc)
-    fn slot_of(&mut self, slot: int, shape: int, pc: int, lay: &Vec<int>) -> int {
-        let ex = self.exit(pc);
+    /// shape checked: else to ex)
+    fn slot_of(&mut self, slot: int, shape: int, ex: int, lay: &Vec<int>) -> int {
         self.a.p_cmp32(lay[L_SHAPE], shape);
         self.a.jcc(C_NE, ex);
         if slot == 0 {
@@ -785,8 +1028,7 @@ impl Cg {
         (slot - 2) * VSZ
     }
     /// dst = obj.prop (w2 the object; `this` for R_GET_THIS_PROP)
-    fn get_prop(&mut self, kind: int, dst: int, w2: int, c: int, pc: int, lay: &Vec<int>) {
-        let ex = self.exit(pc);
+    fn get_prop(&mut self, kind: int, dst: int, w2: int, c: int, ex: int, lay: &Vec<int>) {
         if kind == R_GET_THIS_PROP {
             self.a.cmp_this_kind(5);
             self.a.jcc(C_NE, ex);
@@ -796,23 +1038,120 @@ impl Cg {
             self.a.jcc(C_NE, ex);
             self.a.obj_ptr(opnd_base(w2), opnd_disp(w2));
         }
-        let pd = self.slot_of(c & 65535, c >> 16, pc, lay);
+        let pd = self.slot_of(c & 65535, c >> 16, ex, lay);
         self.a.val_from_p(B_SP, dst * VSZ, pd);
     }
     /// obj.prop = v, when neither v nor the old value is counted (both
     /// undefined, null, a boolean or a number): no references to change
-    fn set_prop(&mut self, w1: int, w2: int, c: int, pc: int, lay: &Vec<int>) {
-        let ex = self.exit(pc);
+    fn set_prop(&mut self, w1: int, w2: int, c: int, ex: int, lay: &Vec<int>) {
         self.a.load_kind(opnd_base(w2), opnd_disp(w2));
         self.a.cmp_scratch(T_NUM);
         self.a.jcc(C_A, ex);
         self.a.cmp_kind(opnd_base(w1), opnd_disp(w1), 5);
         self.a.jcc(C_NE, ex);
         self.a.obj_ptr(opnd_base(w1), opnd_disp(w1));
-        let pd = self.slot_of(c & 65535, c >> 16, pc, lay);
+        let pd = self.slot_of(c & 65535, c >> 16, ex, lay);
         self.a.p_cmp_kind(pd, T_NUM);
         self.a.jcc(C_A, ex);
         self.a.val_to_p(pd, opnd_base(w2), opnd_disp(w2));
+    }
+    /// dst = slot k of the scope `depth` levels out (dst + 1 = undefined
+    /// for sub 1); a missing scope or slot goes back to the interpreter
+    fn get_env(&mut self, dst: int, depth: int, k: int, sub: int, pc: int, lay: &Vec<int>) {
+        let ex = self.exit(pc);
+        self.a.env_index();
+        let mut d: int = 0;
+        while d < depth {
+            self.a.p_neg(ex);
+            self.a.obj_from_index();
+            self.a.p_load_int(lay[L_PROTO]);
+            d += 1;
+        }
+        self.a.p_neg(ex);
+        self.a.obj_from_index();
+        self.a.p_load_int(lay[L_ELEMS]);
+        self.a.p_neg(ex);
+        self.a.elems_buf(lay[L_EV], k * VSZ + VSZ - 1, ex);
+        self.a.val_from_p(B_SP, dst * VSZ, k * VSZ);
+        if sub == 1 {
+            self.a.store_tag(B_SP, (dst + 1) * VSZ, 0, 0);
+        }
+    }
+    /// to `yes` when x op y holds (op a comparison code), else on; what
+    /// the code cannot decide goes back to the interpreter at pc
+    fn cond(&mut self, code: int, x: int, y: int, pc: int, yes: int) {
+        if code == OP_SEQ || code == OP_SNE || code == OP_EQ || code == OP_NE {
+            let no = self.a.label();
+            let eq_l = if code == OP_SEQ || code == OP_EQ { yes } else { no };
+            let ne_l = if code == OP_SEQ || code == OP_EQ { no } else { yes };
+            self.equal(x, y, code == OP_EQ || code == OP_NE, pc, eq_l, ne_l);
+            self.a.bind(no);
+            return;
+        }
+        self.guard_num(x, pc);
+        self.guard_num(y, pc);
+        self.load(0, x);
+        self.load(1, y);
+        self.a.jump_fcmp(fcond(code), 0, 1, yes);
+    }
+    /// to eq when x === y (x == y when loose), else to ne
+    fn equal(&mut self, x: int, y: int, loose: bool, pc: int, eq_l: int, ne_l: int) {
+        let xb = opnd_base(x);
+        let xd = opnd_disp(x);
+        let yb = opnd_base(y);
+        let yd = opnd_disp(y);
+        let ex = self.exit(pc);
+        let num = self.a.label();
+        let same = self.a.label();
+        self.a.load_kinds(xb, xd, yb, yd);
+        self.a.cmp_scratch(T_NUM);
+        self.a.jcc(C_EQ, num);
+        self.a.cmp_kinds(yb, yd);
+        self.a.jcc(C_EQ, same);
+        // kinds differ: strictly unequal; loosely, undefined == null and
+        // the rest converts
+        if loose {
+            self.a.cmp_scratch(1);
+            self.a.jcc(C_A, ex);
+            self.a.cmp_kind(yb, yd, 1);
+            self.a.jcc(C_A, ex);
+            self.a.jmp(eq_l);
+        } else {
+            self.a.jmp(ne_l);
+        }
+        self.a.bind(same);
+        // undefined or null
+        self.a.cmp_scratch(1);
+        self.a.jcc(C_BE, eq_l);
+        // a BigInt
+        self.a.cmp_scratch(5);
+        self.a.jcc(C_A, ex);
+        let s = self.a.label();
+        self.a.cmp_scratch(4);
+        self.a.jcc(C_EQ, s);
+        // a boolean or an object: the same i
+        self.a.load_kinds(xb, xd + OFF_I, yb, yd + OFF_I);
+        self.a.cmp_kinds(yb, yd + OFF_I);
+        self.a.jcc(C_EQ, eq_l);
+        self.a.jmp(ne_l);
+        // a string: the same handle is equal, others are compared by the
+        // interpreter
+        self.a.bind(s);
+        self.a.load_kinds(xb, xd + OFF_I, yb, yd + OFF_I);
+        self.a.cmp_kinds(yb, yd + OFF_I);
+        self.a.jcc(C_EQ, eq_l);
+        self.a.jmp(ex);
+        self.a.bind(num);
+        self.a.cmp_kind(yb, yd, T_NUM);
+        if loose {
+            self.a.jcc(C_NE, ex);
+        } else {
+            self.a.jcc(C_NE, ne_l);
+        }
+        self.load(0, x);
+        self.load(1, y);
+        self.a.jump_fcmp(C_FEQ, 0, 1, eq_l);
+        self.a.jmp(ne_l);
     }
     /// to label `yes` when x is truthy (want true) or falsy (want false);
     /// a BigInt goes back to the interpreter
@@ -840,8 +1179,10 @@ impl Cg {
         self.a.zero_d(1);
         self.a.load_d(0, b, d + OFF_D);
         // 0 and NaN are false
-        self.a.jump_fcmp(C_FNE, 0, 1, tru);
-        self.a.jmp(fal);
+        self.a.jump_fcmp(C_FEQ, 0, 1, fal);
+        self.a.fcmp(0, 0);
+        self.a.jnan(fal);
+        self.a.jmp(tru);
         let go = self.a.label();
         let on = self.a.label();
         self.a.bind(tru);
@@ -875,10 +1216,12 @@ fn targets(ops: &Vec<Op>, rb: int, n: int) -> Vec<bool> {
         let mut to2: int = -1;
         if kind == R_JUMP {
             to = (o.a as int);
-        } else if kind == R_JF || kind == R_JT {
+        } else if kind == R_JF || kind == R_JT || kind == R_JF_KEEP || kind == R_JT_KEEP {
             to = (o.b as int);
-        } else if kind == R_CMP_JF || kind == R_CMP_JT {
+        } else if kind == R_CMP_JF || kind == R_CMP_JT || kind == R_LOCAL_NULL_JF {
             to = (o.c as int);
+        } else if kind == R_CMP_JFK || kind == R_CMP_JTK {
+            to = (o.a as int) >> 16;
         } else if kind == R_LOOP {
             to = w0 >> 16;
             to2 = (o.c as int);
@@ -919,7 +1262,7 @@ fn resumes(ops: &Vec<Op>, rb: int, n: int) -> Vec<bool> {
 
 /// The machine code of function rcode[rb .. rb + n] for AArch64 (arm) or
 /// x86-64, or an empty Vec when it has no loop the code handles.
-pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool, lay: &Vec<int>) -> Vec<int> {
+pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int>, tab: &Vec<int>) -> Vec<int> {
     let tg = targets(ops, rb, n);
     let rs = resumes(ops, rb, n);
     let mut worth = false;
@@ -929,7 +1272,7 @@ pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool, lay: &Vec<int>) -> Vec
         let o = ops[(rb + pc) as usize];
         let w0 = (o.code as int);
         let kind = w0 & 255;
-        if handles(o, lay) {
+        if handles(o, pc, lay, tab) {
             if kind == R_LOOP || (kind == R_JUMP && (o.a as int) <= pc) {
                 worth = true;
             }
@@ -960,7 +1303,7 @@ pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool, lay: &Vec<int>) -> Vec
     cg.a.prologue();
     pc = 0;
     while pc < n {
-        if (pc == 0 || tg[pc as usize] || rs[pc as usize]) && handles(ops[(rb + pc) as usize], lay) {
+        if (pc == 0 || tg[pc as usize] || rs[pc as usize]) && handles(ops[(rb + pc) as usize], pc, lay, tab) {
             cg.a.entry(pc, pc);
         }
         pc += 1;
@@ -981,14 +1324,55 @@ pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool, lay: &Vec<int>) -> Vec
         let w3 = (o.c as int);
         let next = pc + 1 + skip;
         let mut falls = true;
-        if !handles(o, lay) {
+        if !handles(o, pc, lay, tab) {
             let l = cg.exit(pc);
             cg.a.jmp(l);
             falls = false;
-        } else if kind == R_GET_PROP || kind == R_GET_THIS_PROP {
-            cg.get_prop(kind, w1, w2, w3, pc, lay);
-        } else if kind == R_SET_PROP {
-            cg.set_prop(w1, w2, w3, pc, lay);
+        } else if (kind == R_GET_PROP || kind == R_GET_THIS_PROP || kind == R_SET_PROP) && prop_site(kind, sub, w3, lay) {
+            // one shape in place; anything else through slow()
+            let slow = cg.a.label();
+            let done = cg.a.label();
+            if kind == R_SET_PROP {
+                cg.set_prop(w1, w2, w3, slow, lay);
+            } else {
+                cg.get_prop(kind, w1, w2, w3, slow, lay);
+            }
+            cg.a.jmp(done);
+            cg.a.bind(slow);
+            let ex = cg.exit(pc);
+            cg.a.slow_call(pi, pc, ex);
+            cg.a.bind(done);
+        } else if kind == R_ARITH && sub == OP_DIV {
+            cg.guard_num(w2, pc);
+            cg.guard_num(w3, pc);
+            cg.load(0, w2);
+            cg.load(1, w3);
+            cg.a.arith(F_DIV, 0, 1);
+            cg.store_num(0, w1);
+        } else if kind == R_TONUM && sub != 1 {
+            // a number stays itself; the rest converts in slow()
+            let slow = cg.a.label();
+            let done = cg.a.label();
+            cg.a.cmp_kind(opnd_base(w2), opnd_disp(w2), T_NUM);
+            cg.a.jcc(C_NE, slow);
+            cg.a.copy_val(B_SP, w1 * VSZ, opnd_base(w2), opnd_disp(w2));
+            cg.a.jmp(done);
+            cg.a.bind(slow);
+            let ex = cg.exit(pc);
+            cg.a.slow_call(pi, pc, ex);
+            cg.a.bind(done);
+        } else if kind == R_NOT {
+            let tru = cg.a.label();
+            let after = cg.a.label();
+            cg.jump_truth(w2, pc, true, tru);
+            cg.a.store_tag(B_SP, w1 * VSZ, 2, 1);
+            cg.a.jmp(after);
+            cg.a.bind(tru);
+            cg.a.store_tag(B_SP, w1 * VSZ, 2, 0);
+            cg.a.bind(after);
+        } else if is_slow(kind, sub) {
+            let ex = cg.exit(pc);
+            cg.a.slow_call(pi, pc, ex);
         } else if kind == R_NOP {
             // nothing
         } else if kind == R_MOVE {
@@ -996,25 +1380,75 @@ pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool, lay: &Vec<int>) -> Vec
         } else if kind == R_LOAD2 {
             cg.a.copy_val(B_SP, w1 * VSZ, opnd_base(w2), opnd_disp(w2));
             cg.a.copy_val(B_SP, (w1 + 1) * VSZ, opnd_base(w3), opnd_disp(w3));
-        } else if kind == R_ADD || kind == R_SUB || kind == R_MUL || kind == R_ARITH {
+        } else if kind == R_ADD || kind == R_SUB || kind == R_MUL {
             cg.guard_num(w2, pc);
             cg.guard_num(w3, pc);
             cg.load(0, w2);
             cg.load(1, w3);
-            let f = if kind == R_ADD { F_ADD } else if kind == R_SUB { F_SUB } else if kind == R_MUL { F_MUL } else { F_DIV };
+            let f = if kind == R_ADD { F_ADD } else if kind == R_SUB { F_SUB } else { F_MUL };
             cg.a.arith(f, 0, 1);
             cg.store_num(0, w1);
-        } else if kind == R_CMP_JF || kind == R_CMP_JT || kind == R_LOOP || kind == R_CMP {
-            let x = if kind == R_CMP { w2 } else { w1 };
-            let y = if kind == R_CMP { w3 } else { w2 };
-            cg.guard_num(x, pc);
-            cg.guard_num(y, pc);
-            cg.load(0, x);
-            cg.load(1, y);
+        } else if kind == R_GET_ENV {
+            cg.get_env(w1, w2, w3, sub, pc, lay);
+        } else if kind == R_SWITCH {
+            // a number in the table's range to its case, anything else to
+            // the default
+            let size = tab[w2 as usize];
+            let dflt = tab[(w2 + 1 + size) as usize];
+            cg.a.load_kind(B_SP, w1 * VSZ);
+            cg.a.cmp_scratch(T_NUM);
+            cg.a.jcc(C_NE, dflt);
+            cg.load(0, w1);
+            let mut i: int = 0;
+            while i < size {
+                cg.a.dbl_imm(1, w3 + i);
+                cg.a.jump_fcmp(C_FEQ, 0, 1, tab[(w2 + 1 + i) as usize]);
+                i += 1;
+            }
+            cg.a.jmp(dflt);
+            falls = false;
+        } else if kind == R_LOCAL_NULL_JF {
+            // on when (x null, cmp === or ==), (undefined, !== or ==),
+            // (else, !== or !=); else to w3
+            let on_null = w2 == OP_SEQ || w2 == OP_EQ;
+            let on_undef = w2 == OP_SNE || w2 == OP_EQ;
+            let on_else = w2 == OP_SNE || w2 == OP_NE;
+            let go = cg.a.label();
+            let on = cg.a.label();
+            cg.a.load_kind(B_SP, w1 * VSZ);
+            cg.a.cmp_scratch(1);
+            cg.a.jcc(C_EQ, if on_null { on } else { go });
+            cg.a.cmp_scratch(0);
+            cg.a.jcc(C_EQ, if on_undef { on } else { go });
+            if on_else { cg.a.jmp(on); } else { cg.a.jmp(go); }
+            cg.a.bind(go);
+            cg.jump_to(pc, w3);
+            cg.a.bind(on);
+        } else if kind == R_CMP_JFK || kind == R_CMP_JTK {
+            // the result goes to its slot either way, then the jump
+            let dst = w1 & 65535;
+            let to = w1 >> 16;
             let yes = cg.a.label();
             let after = cg.a.label();
-            cg.a.jump_fcmp(fcond(sub), 0, 1, yes);
-            // does not hold
+            cg.cond(sub, w2, w3, pc, yes);
+            cg.a.store_tag(B_SP, dst * VSZ, 2, 0);
+            if kind == R_CMP_JFK {
+                cg.jump_to(pc, to);
+                cg.a.bind(yes);
+                cg.a.store_tag(B_SP, dst * VSZ, 2, 1);
+            } else {
+                cg.a.jmp(after);
+                cg.a.bind(yes);
+                cg.a.store_tag(B_SP, dst * VSZ, 2, 1);
+                cg.jump_to(pc, to);
+            }
+            cg.a.bind(after);
+        } else if kind == R_CMP_JF || kind == R_CMP_JT || kind == R_CMP {
+            let x = if kind == R_CMP { w2 } else { w1 };
+            let y = if kind == R_CMP { w3 } else { w2 };
+            let yes = cg.a.label();
+            let after = cg.a.label();
+            cg.cond(sub, x, y, pc, yes);
             if kind == R_CMP {
                 cg.a.store_tag(B_SP, w1 * VSZ, 2, 0);
                 cg.a.jmp(after);
@@ -1025,26 +1459,35 @@ pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool, lay: &Vec<int>) -> Vec
                 cg.jump_to(pc, w3);
                 cg.a.bind(yes);
                 cg.a.bind(after);
-            } else if kind == R_CMP_JT {
+            } else {
                 cg.a.jmp(after);
                 cg.a.bind(yes);
                 cg.jump_to(pc, w3);
                 cg.a.bind(after);
-            } else {
-                // R_LOOP: holds -> the body (skip), else the exit (w3)
-                cg.jump_to(pc, w3);
-                cg.a.bind(yes);
-                cg.jump_to(pc, skip);
-                cg.a.bind(after);
-                falls = false;
             }
+        } else if kind == R_LOOP {
+            let x = w1;
+            let y = w2;
+            cg.guard_num(x, pc);
+            cg.guard_num(y, pc);
+            cg.load(0, x);
+            cg.load(1, y);
+            let yes = cg.a.label();
+            let after = cg.a.label();
+            cg.a.jump_fcmp(fcond(sub), 0, 1, yes);
+            // holds -> the body (skip), else the exit (w3)
+            cg.jump_to(pc, w3);
+            cg.a.bind(yes);
+            cg.jump_to(pc, skip);
+            cg.a.bind(after);
+            falls = false;
         } else if kind == R_JUMP {
             cg.jump_to(pc, w1);
             falls = false;
-        } else if kind == R_JF || kind == R_JT {
+        } else if kind == R_JF || kind == R_JT || kind == R_JF_KEEP || kind == R_JT_KEEP {
             let yes = cg.a.label();
             let after = cg.a.label();
-            cg.jump_truth(w1, pc, kind == R_JT, yes);
+            cg.jump_truth(w1, pc, kind == R_JT || kind == R_JT_KEEP, yes);
             cg.a.jmp(after);
             cg.a.bind(yes);
             cg.jump_to(pc, w2);
@@ -1124,7 +1567,7 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: int, pc: int, budget: int) -
         if rb >= 0 && ((rb + n) as usize) <= vm.rcode.len() {
             let m = arch();
             let lay = layout();
-            let code = if m > 0 { compile(&vm.rcode, rb, n, m == 2, &lay) } else { Vec::new() };
+            let code = if m > 0 { compile(&vm.rcode, pi as int, rb, n, m == 2, &lay, &vm.rtab) } else { Vec::new() };
             if code.len() > 0 {
                 h = install(&code);
             }
@@ -1147,10 +1590,18 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: int, pc: int, budget: int) -
         vm.jit_fn[pi] = h;
     }
     if h < 0 {
+        // nothing compiled: rvm.rs jit_run no longer comes here from pc
+        let ri = (vm.protos[pi].rbase + pc) as usize;
+        while vm.jit_miss.len() <= ri {
+            vm.jit_miss.push(0);
+        }
+        vm.jit_miss[ri] = 1 << 30;
         return pc;
     }
     let fi = vm.frames.len() - 1;
-    let r = call(h, &vm.stack, bp, &vm.kvals, pc, budget, &vm.objs, &vm.frames[fi].this_val);
+    // the context block (CTX_*): &this, the Elems table, the frame's
+    // scope, the machine, slow() and the frame base
+    let r: int = ranger::native!(rust: pc, cpp: "njit_call({h}, (void*)({vm}->stack.data() + {bp}), (void*)({vm}->kvals.data()), {pc}, {budget}, (void*)({vm}->objs.data()), (void*)(&{vm}->frames[{fi}].this_val), (void*)({vm}->evecs.data()), {vm}->frames[{fi}].env, (void*)(&{vm}), (void*)(&Njit::slow), {bp})");
     if r == pc {
         // back at once: the loop head starts with an op the code does not
         // do; after JIT_MISS_MAX of these the head is no longer entered
@@ -1161,6 +1612,166 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: int, pc: int, budget: int) -
         vm.jit_miss[ri] += 4;
     }
     r
+}
+
+/// The op at pc of function pi for compiled code (frame base bp): 1 when
+/// it is done (the interpreter's paths that call no JS and throw nothing),
+/// 0 to go back to the interpreter at pc. Compiled code calls it through
+/// the context block (CTX_FN): it allocates nothing, so the stack, object
+/// and element tables stay where the code has them.
+pub fn slow(vm: &mut crate::vm::Vm, pi: int, pc: int, bp: int) -> int {
+    let rb = vm.protos[pi as usize].rbase;
+    let site = (rb + pc) as usize;
+    let o = vm.rcode[site];
+    let w0 = (o.code as int);
+    let kind = w0 & 255;
+    let sub = (w0 >> 8) & 255;
+    let w1 = (o.a as int);
+    let w2 = (o.b as int);
+    let w3 = (o.c as int);
+    if kind == R_GET_GLOBAL || kind == R_SET_GLOBAL {
+        let g = vm.global;
+        let c = vm.protos[pi as usize].code[pc as usize].c as int;
+        if kind == R_GET_GLOBAL {
+            let slot = vm.global_ic(g, w3, c);
+            if slot < 0 {
+                return 0;
+            }
+            let v = slot_at(vm.ob(g), slot as usize);
+            vm.rset((bp + w1) as usize, v);
+            return 1;
+        }
+        let slot = vm.ic_slot(g, w3, c, true);
+        if slot < 0 {
+            return 0;
+        }
+        let v = vm.rget(bp, w1).clone();
+        vm.put_slot(g, slot, v);
+        return 1;
+    }
+    if kind == R_TONUM {
+        if let Some(x) = (vm.rget(bp, w2)).as_num() {
+            let r = if sub == 1 { -x } else { x };
+            vm.rset((bp + w1) as usize, Val::NumC(r));
+            return 1;
+        }
+        return 0;
+    }
+    if kind == R_SET_ENV {
+        let fi = vm.frames.len() - 1;
+        let e = vm.env_of(fi, w2);
+        let v = vm.rget(bp, w1).clone();
+        vm.env_put(e, w3, v);
+        return 1;
+    }
+    if kind == R_TYPEOF {
+        if vm.type_vals.is_empty() {
+            return 0;
+        }
+        let v = vm.rget(bp, w2).clone();
+        let t = vm.type_val(&v);
+        vm.rset((bp + w1) as usize, t);
+        return 1;
+    }
+    if kind == R_GET_ELEM {
+        let mut r = Val::Undef();
+        let mut done = false;
+        if let Some(o) = (vm.rget(bp, w2)).as_obj() {
+            if let Some(n) = (vm.rget(bp, w3)).as_num() {
+                let ob = obj_at(&vm.objs, o as usize);
+                if ob.class == C_ARRAY {
+                    let i = n as int;
+                    let ev = ob.elems as usize;
+                    if i >= 0 && i < (evec_at(&vm.evecs, ev).v.len() as int) && (i as double) == n && ob.pos != 3 && !vm.idx_protos {
+                        r = val_at(&evec_at(&vm.evecs, ev).v, i as usize).clone();
+                        done = true;
+                    }
+                }
+            }
+        }
+        if !done {
+            return 0;
+        }
+        vm.rset((bp + w1) as usize, r);
+        return 1;
+    }
+    if kind == R_ARITH {
+        let va = *vm.rget(bp, w2);
+        let vb = *vm.rget(bp, w3);
+        if !(va.is_num() && vb.is_num()) {
+            return 0;
+        }
+        let a = va.num();
+        let b = vb.num();
+        let r = if sub >= OP_BAND && sub <= OP_USHR {
+            bit_fast(sub, a, b)
+        } else if sub == OP_MOD && a >= 1.0 && b > 0.0 && a <= 2147483647.0 && b <= 2147483647.0 && a == ((a as int) as double) && b == ((b as int) as double) {
+            ((a as int) % (b as int)) as double
+        } else {
+            arith_num(sub, a, b)
+        };
+        vm.rset((bp + w1) as usize, Val::NumC(r));
+        return 1;
+    }
+    if kind == R_SET_PROP {
+        let ob = obj_of(vm.rget(bp, w1));
+        if ob < 0 || w3 < 65536 || sub != 0 {
+            return 0;
+        }
+        let mut c = w3;
+        if ((c >> 16) as int) != vm.ob(ob).shape as int {
+            if site >= vm.ic2.len() {
+                return 0;
+            }
+            let c2 = vm.ic2[site] as int;
+            if c2 < 65536 || (c2 >> 16) != vm.ob(ob).shape as int {
+                return 0;
+            }
+            c = c2;
+        }
+        let v = vm.rget(bp, w2).clone();
+        vm.put_slot(ob, c & 65535, v);
+        return 1;
+    }
+    if kind == R_GET_PROP || kind == R_GET_THIS_PROP {
+        let mut ob: int = -1;
+        if kind == R_GET_PROP {
+            if let Some(x) = (vm.rget(bp, w2)).as_obj() {
+                ob = x;
+            }
+        } else {
+            let fi = vm.frames.len() - 1;
+            if let Some(x) = (&vm.frames[fi].this_val).as_obj() {
+                ob = x;
+            }
+        }
+        if ob < 0 {
+            return 0;
+        }
+        let c = w3;
+        if c >= 65536 {
+            let mut cc = c;
+            if (c >> 16) != vm.ob(ob).shape as int {
+                if site >= vm.ic2.len() {
+                    return 0;
+                }
+                cc = vm.ic2[site] as int;
+                if cc < 65536 || (cc >> 16) != vm.ob(ob).shape as int {
+                    return 0;
+                }
+            }
+            let r = slot_at(vm.ob(ob), (cc & 65535) as usize);
+            vm.rset((bp + w1) as usize, r);
+            return 1;
+        }
+        if c == -4 && (vm.ob(ob).class == C_ARRAY || vm.ob(ob).class == C_ARGUMENTS) {
+            let n = evec_at(&vm.evecs, vm.ob(ob).elems as usize).v.len() as double;
+            vm.rset((bp + w1) as usize, Val::NumC(n));
+            return 1;
+        }
+        return 0;
+    }
+    0
 }
 
 /// The bytes into executable memory, a handle back (-2 when it cannot).
@@ -1196,7 +1807,7 @@ fn arch() -> int {
 #endif
 
 namespace njit_rt {
-typedef long long (*Fn)(void* sp, void* kv, long long pc, long long budget, void* objs, void* self);
+typedef long long (*Fn)(void* sp, void* kv, long long pc, long long budget, void* objs, void* ctx);
 struct Code {
   void* p;
   size_t n;
@@ -1266,23 +1877,20 @@ inline int njit_install(const std::vector<int>& bytes) {
 #endif
 }
 
-inline int njit_call(int h, void* sp, void* kv, int pc, int budget, void* objs, void* self) {
+/// ctx: &this, the Elems table, the frame's scope (njit.rs CTX_*)
+inline int njit_call(int h, void* sp, void* kv, int pc, int budget, void* objs, void* self, void* evecs, int env, void* vm, void* slow, int bp) {
   njit_rt::Fn f = (njit_rt::Fn)njit_rt::codes()[(size_t)h].p;
-  return (int)f(sp, kv, pc, budget, objs, self);
+  long long ctx[6] = {(long long)(intptr_t)self, (long long)(intptr_t)evecs, (long long)env, (long long)(intptr_t)vm, (long long)(intptr_t)slow, (long long)bp};
+  return (int)f(sp, kv, pc, budget, objs, (void*)ctx);
 }
 "#
     );
     m
 }
 
-fn call(h: int, stack: &Vec<Val>, bp: int, kv: &Vec<Val>, pc: int, budget: int, objs: &Vec<JsObj>, this: &Val) -> int {
-    let r: int = ranger::native!(rust: pc, cpp: "njit_call({h}, (void*)({stack}.data() + {bp}), (void*)({kv}.data()), {pc}, {budget}, (void*)({objs}.data()), (void*)(&{this}))");
-    r
-}
-
 /// The object layout of the C++ build (L_OK..L_V); all 0 elsewhere.
 fn layout() -> Vec<int> {
-    let ok: int = ranger::native!(rust: 0, cpp: "((int)sizeof(std::shared_ptr<JsObj>) == 16 ? 1 : 0)");
+    let ok: int = ranger::native!(rust: 0, cpp: "((int)sizeof(std::shared_ptr<JsObj>) == 16 && (int)sizeof(std::shared_ptr<Elems>) == 16 ? 1 : 0)");
     let mut v: Vec<int> = Vec::new();
     v.push(ok);
     let a: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, shape)");
@@ -1295,5 +1903,11 @@ fn layout() -> Vec<int> {
     v.push(d);
     let e: int = ranger::native!(rust: 0, cpp: "(int)offsetof(Slots, v)");
     v.push(e);
+    let f: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, proto)");
+    v.push(f);
+    let g: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, elems)");
+    v.push(g);
+    let h: int = ranger::native!(rust: 0, cpp: "(int)offsetof(Elems, v)");
+    v.push(h);
     v
 }
