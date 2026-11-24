@@ -49,8 +49,22 @@ jobs:
   cerxes:
     name: CErXes (cargo, rgrc JS / C++ / Go)
     runs-on: ubuntu-latest
+    env:
+      # the C++ build needs a Ranger newer than the npm package (@(copy)
+      # values, native!'s cpp_polyfill for the native JIT's runtime):
+      # scripts/compiler.mjs takes RANGER_ROOT/dist/rgrc.js first
+      RANGER_ROOT: ${{ github.workspace }}/Ranger
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: terotests/Ranger
+          ref: 3d42a92d993da31c00c08a8404820f535d19d3b3
+          path: Ranger
+          sparse-checkout: |
+            dist
+            compiler
+            lib
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:

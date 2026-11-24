@@ -879,11 +879,13 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: int, pc: int, budget: int) -
 /// The bytes into executable memory, a handle back (-2 when it cannot).
 /// njit_install is in the runtime arch() writes.
 fn install(code: &Vec<int>) -> int {
-    let h: int = ranger::native!(cpp: "njit_install({code})");
+    let h: int = ranger::native!(rust: -2, cpp: "njit_install({code})");
     h
 }
 
-/// The machine: 1 x86-64, 2 AArch64, 0 one the JIT does not write. Its
+/// The machine: 1 x86-64, 2 AArch64, 0 one the JIT does not write (and
+/// every target but C++: the `rust` arms, which rustc never sees, as the
+/// module is not in cargo's build). Its
 /// cpp_polyfill is the C++ runtime of the JIT (executable memory, the call
 /// into it), written once at the top of the generated file, so a C++ host
 /// needs nothing of its own. One mapping per function, written while it is
@@ -892,6 +894,7 @@ fn install(code: &Vec<int>) -> int {
 /// environment turns the JIT off.
 fn arch() -> int {
     let m: int = ranger::native!(
+        rust: 0,
         cpp: "njit_arch()",
         cpp_polyfill: r#"#include <cstdint>
 #include <cstdlib>
@@ -985,6 +988,6 @@ inline int njit_call(int h, void* sp, void* kv, int pc, int budget) {
 }
 
 fn call(h: int, stack: &Vec<Val>, bp: int, kv: &Vec<Val>, pc: int, budget: int) -> int {
-    let r: int = ranger::native!(cpp: "njit_call({h}, (void*)({stack}.data() + {bp}), (void*)({kv}.data()), {pc}, {budget})");
+    let r: int = ranger::native!(rust: pc, cpp: "njit_call({h}, (void*)({stack}.data() + {bp}), (void*)({kv}.data()), {pc}, {budget})");
     r
 }
