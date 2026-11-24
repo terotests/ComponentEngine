@@ -5,7 +5,7 @@
 ;
 ;   cer_main <dir> <file.js> [jit]
 ;
-; The C++ file rgrc writes is included after cer/native/njit_rt.hpp
+; The C++ file rgrc writes carries the JIT's runtime itself
 ; (bench/common.mjs, the cer-cpp-jit engine).
 
 Import "../src/lib.rs"

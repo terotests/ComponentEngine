@@ -185,13 +185,11 @@ export function build(want) {
     else run("node", ["scripts/build.mjs"]);
   }
   if (want.includes("cer-cpp-jit")) {
-    // CerMainJit.rgr, included by a host file after the JIT's runtime
+    // CerMainJit.rgr: the generated file carries the JIT's runtime
     const dir = path.join(os.tmpdir(), "cer-cppjit");
     fs.mkdirSync(dir, { recursive: true });
     run("node", ["--stack-size=8000", rgrc(), "-l=cpp", path.join(CER, "bench/CerMainJit.rgr"), "-d=" + dir, "-o=cer_main.cpp"]);
-    const host = path.join(dir, "host.cpp");
-    fs.writeFileSync(host, '#include "' + path.join(CER, "native/njit_rt.hpp") + '"\n#include "cer_main.cpp"\n');
-    run("g++", ["-std=c++17", "-O2", "-o", path.join(CER, "bin", "cer_main_cppjit"), host]);
+    run("g++", ["-std=c++17", "-O2", "-o", path.join(CER, "bin", "cer_main_cppjit"), path.join(dir, "cer_main.cpp")]);
   }
   for (const t of ["cpp", "go"]) {
     if (!want.includes("cer-" + t)) continue;

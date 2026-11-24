@@ -74,8 +74,8 @@ pub mod wjit {
     include!("wjit.rs");
 }
 
-/// the native JIT of the C++ build (njit.rs, x86-64 machine code; the
-/// host includes cer/native/njit_rt.hpp)
+/// the native JIT of the C++ build (njit.rs, x86-64 / AArch64 machine
+/// code; its C++ runtime is written into the generated file)
 #[cfg(any())]
 pub mod njit;
 
