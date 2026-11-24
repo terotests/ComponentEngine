@@ -994,6 +994,17 @@ impl Vm {
                                 if self.checking && self.frame_brk() {
                                     return;
                                 }
+                                if self.jit_on && jit_at_call() {
+                                    // the callee's compiled code from its start
+                                    pc = self.jit_run(pi, rb, bp, fi, pc);
+                                    cp = code_at(&self.rcode, rb);
+                                    if pc < 0 {
+                                        if pc == -1 || (pc == -2 && !self.unwind(base)) {
+                                            return;
+                                        }
+                                        continue 'frames;
+                                    }
+                                }
                                 continue;
                             }
                         }
@@ -1008,6 +1019,17 @@ impl Vm {
                         }
                         cp = code_at(&self.rcode, rb);
                         pc = (pc + 1 + ((w0 >> 16) as int));
+                        if self.jit_on && jit_at_call() && ((rb + pc) as usize) < self.jit_res.len() && self.jit_res[(rb + pc) as usize] {
+                            // after a native call out of compiled code: back in
+                            pc = self.jit_go(pi, bp, fi, pc, false);
+                            cp = code_at(&self.rcode, rb);
+                            if pc < 0 {
+                                if pc == -1 || (pc == -2 && !self.unwind(base)) {
+                                    return;
+                                }
+                                continue 'frames;
+                            }
+                        }
                         continue;
                     }
                     R_NEW_ARRAY => {
@@ -3376,6 +3398,19 @@ pub fn unknown_op() {}
 #[ranger::target(rust)]
 pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bool) -> int {
     crate::wjit::enter(vm, pi, bp, pc, budget as i32, head)
+}
+
+/// Whether a call enters the callee's compiled code at its start (njit.rs:
+/// a function without a loop is compiled too). wjit.rs is entered at back
+/// edges only.
+#[ranger::target(cpp)]
+pub fn jit_at_call() -> bool {
+    true
+}
+
+#[ranger::target(rust, es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_at_call() -> bool {
+    false
 }
 
 /// C++: the native JIT (njit.rs)

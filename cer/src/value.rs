@@ -290,105 +290,162 @@ impl Val {
     }
 }
 
-/// C++: a plain 16-byte value, held by value (rgrc writes a Copy struct of
-/// scalars as a C++ value class): `t` the kind (0 undefined, 1 null,
-/// 2 boolean, 3 number, 4 string, 5 object, 6 small BigInt), `i` a
-/// boolean's bit, a string's handle or an object's index, `d` a number or a
-/// small BigInt. The layout is fixed so that native code (the JIT) can read
-/// a register: t at 0, i at 4, d at 8.
+/// C++: the Rust build's NaN-boxed 8 bytes (V_TAG and on above), kept in a
+/// double (rgrc's C++ has no 64-bit integer type); the bits are read and
+/// written by the inline functions of nb_rt()'s polyfill. Below
+/// 0xFFF9 << 48 the bits are a number; above: undefined FFF9, null FFFA,
+/// boolean FFFB (bit 0), string FFFC and object FFFD (a 32-bit handle or
+/// index), small BigInt FFFE (48-bit payload). Native code (the JIT) reads
+/// the same bits.
 #[ranger::target(cpp)]
 #[derive(Clone, Copy)]
 pub struct Val {
-    pub t: int,
-    pub i: int,
-    pub d: double,
+    pub b: double,
+}
+
+/// The C++ runtime of Val: written once at the top of the generated file.
+#[ranger::target(cpp)]
+pub fn nb_rt() -> int {
+    let r: int = ranger::native!(
+        rust: 0,
+        cpp: "0",
+        cpp_polyfill: r#"#include <cstdint>
+#include <cstring>
+static inline uint64_t nb_bits(double d) { uint64_t b; std::memcpy(&b, &d, 8); return b; }
+static inline double nb_dbl(uint64_t b) { double d; std::memcpy(&d, &b, 8); return d; }
+static inline double nb_num(double x) { return nb_bits(x) >= 0xFFF9000000000000ull ? nb_dbl(0x7FF8000000000000ull) : x; }
+static inline double nb_tag(uint64_t tag, int v) { return nb_dbl(tag | (uint64_t)(uint32_t)v); }
+static inline bool nb_isnum(double d) { return nb_bits(d) < 0xFFF9000000000000ull; }
+static inline bool nb_is(double d, uint64_t tag) { return (nb_bits(d) - tag) <= 0xFFFFFFFFull; }
+static inline bool nb_top(double d, unsigned top) { return (nb_bits(d) >> 48) == top; }
+static inline int nb_low(double d) { return (int)(uint32_t)nb_bits(d); }
+static inline int nb_kind(double d) { uint64_t b = nb_bits(d); return b < 0xFFF9000000000000ull ? 3 : (int)(b >> 48) == 0xFFF9 ? 0 : (int)(b >> 48) == 0xFFFA ? 1 : (int)(b >> 48) == 0xFFFB ? 2 : (int)(b >> 48) == 0xFFFC ? 4 : (int)(b >> 48) == 0xFFFD ? 5 : 6; }
+static inline double nb_big(double n) { return nb_dbl(0xFFFE000000000000ull | ((uint64_t)(int64_t)n & 0x0000FFFFFFFFFFFFull)); }
+static inline double nb_bigv(double d) { return (double)(((int64_t)(nb_bits(d) << 16)) >> 16); }
+"#
+    );
+    r
 }
 
 #[ranger::target(cpp)]
 #[allow(non_snake_case)]
 impl Val {
     pub fn Undef() -> Val {
-        Val { t: 0, i: 0, d: 0.0 }
+        Val { b: ranger::native!(rust: 0.0, cpp: "nb_dbl(0xFFF9000000000000ull)") }
     }
     pub fn Null() -> Val {
-        Val { t: 1, i: 0, d: 0.0 }
+        Val { b: ranger::native!(rust: 0.0, cpp: "nb_dbl(0xFFFA000000000000ull)") }
     }
-    pub fn Bool(b: bool) -> Val {
-        Val { t: 2, i: if b { 1 } else { 0 }, d: 0.0 }
+    pub fn Bool(x: bool) -> Val {
+        Val { b: ranger::native!(rust: 0.0, cpp: "nb_dbl(0xFFFB000000000000ull | ({x} ? 1ull : 0ull))") }
     }
     pub fn Num(x: double) -> Val {
-        Val { t: 3, i: 0, d: x }
+        Val { b: ranger::native!(rust: 0.0, cpp: "nb_num({x})") }
     }
+    /// Val::Num of a number that is no NaN with other bits than the
+    /// hardware's (an arithmetic result of numbers, an integer)
     pub fn NumC(x: double) -> Val {
-        Val { t: 3, i: 0, d: x }
+        Val { b: x }
     }
     pub fn Str(h: int) -> Val {
-        Val { t: 4, i: h, d: 0.0 }
+        Val { b: ranger::native!(rust: 0.0, cpp: "nb_tag(0xFFFC000000000000ull, {h})") }
     }
     pub fn Obj(o: int) -> Val {
-        Val { t: 5, i: o, d: 0.0 }
+        Val { b: ranger::native!(rust: 0.0, cpp: "nb_tag(0xFFFD000000000000ull, {o})") }
     }
     pub fn Big(n: double) -> Val {
-        Val { t: 6, i: 0, d: n }
+        Val { b: ranger::native!(rust: 0.0, cpp: "nb_big({n})") }
     }
     pub fn kind(&self) -> VK {
-        match self.t {
+        let b = self.b;
+        let t: int = ranger::native!(rust: 0, cpp: "nb_kind({b})");
+        match t {
             0 => VK::Undef,
             1 => VK::Null,
-            2 => VK::Bool(self.i != 0),
-            3 => VK::Num(self.d),
-            4 => VK::Str(self.i),
-            5 => VK::Obj(self.i),
-            _ => VK::Big(self.d),
+            2 => VK::Bool(self.boolv()),
+            3 => VK::Num(b),
+            4 => VK::Str(self.low()),
+            5 => VK::Obj(self.low()),
+            _ => {
+                let v: double = ranger::native!(rust: 0.0, cpp: "nb_bigv({b})");
+                VK::Big(v)
+            }
         }
     }
+    /// the low 32 bits (a string's handle, an object's index)
+    pub fn low(&self) -> int {
+        let b = self.b;
+        let r: int = ranger::native!(rust: 0, cpp: "nb_low({b})");
+        r
+    }
     pub fn as_num(&self) -> Option<double> {
-        if self.t == 3 { Some(self.d) } else { None }
+        if self.is_num() { Some(self.b) } else { None }
     }
     pub fn as_obj(&self) -> Option<int> {
-        if self.t == 5 { Some(self.i) } else { None }
+        if self.is_obj() { Some(self.low()) } else { None }
     }
     pub fn as_str(&self) -> Option<int> {
-        if self.t == 4 { Some(self.i) } else { None }
+        if self.is_str() { Some(self.low()) } else { None }
     }
     pub fn num(&self) -> double {
-        if self.t == 3 { self.d } else { 0.0 }
+        self.b
     }
     pub fn obj(&self) -> int {
-        if self.t == 5 { self.i } else { -1 }
+        self.low()
     }
     pub fn strh(&self) -> int {
-        if self.t == 4 { self.i } else { 0 }
+        self.low()
     }
     pub fn boolv(&self) -> bool {
-        self.t == 2 && self.i != 0
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "((nb_bits({b}) & 1ull) != 0)");
+        r
     }
     pub fn is_num(&self) -> bool {
-        self.t == 3
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "nb_isnum({b})");
+        r
     }
     pub fn is_obj(&self) -> bool {
-        self.t == 5
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "nb_is({b}, 0xFFFD000000000000ull)");
+        r
     }
     pub fn is_str(&self) -> bool {
-        self.t == 4
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "nb_is({b}, 0xFFFC000000000000ull)");
+        r
     }
     pub fn is_bool(&self) -> bool {
-        self.t == 2
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "nb_top({b}, 0xFFFBu)");
+        r
     }
     pub fn is_big(&self) -> bool {
-        self.t == 6
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "nb_top({b}, 0xFFFEu)");
+        r
     }
+    /// an object or a string (what reference counts track)
     pub fn is_heap(&self) -> bool {
-        self.t == 4 || self.t == 5
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "((nb_bits({b}) >> 49) == 0x7FFEull)");
+        r
     }
     pub fn is_undef(&self) -> bool {
-        self.t == 0
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "(nb_bits({b}) == 0xFFF9000000000000ull)");
+        r
     }
     pub fn is_null(&self) -> bool {
-        self.t == 1
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "(nb_bits({b}) == 0xFFFA000000000000ull)");
+        r
     }
     pub fn is_nullish(&self) -> bool {
-        self.t <= 1
+        let b = self.b;
+        let r: bool = ranger::native!(rust: false, cpp: "(nb_bits({b}) == 0xFFF9000000000000ull || nb_bits({b}) == 0xFFFA000000000000ull)");
+        r
     }
 }
 
