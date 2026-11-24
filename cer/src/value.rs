@@ -197,13 +197,13 @@ impl Val {
     }
 }
 
-#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+#[ranger::target(es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
 #[derive(Clone, Copy)]
 pub struct Val {
     pub k: VK,
 }
 
-#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+#[ranger::target(es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
 #[allow(non_snake_case)]
 impl Val {
     #[inline(always)]
@@ -287,6 +287,108 @@ impl Val {
     }
     pub fn is_nullish(&self) -> bool {
         matches!(self.k, VK::Undef | VK::Null)
+    }
+}
+
+/// C++: a plain 16-byte value, held by value (rgrc writes a Copy struct of
+/// scalars as a C++ value class): `t` the kind (0 undefined, 1 null,
+/// 2 boolean, 3 number, 4 string, 5 object, 6 small BigInt), `i` a
+/// boolean's bit, a string's handle or an object's index, `d` a number or a
+/// small BigInt. The layout is fixed so that native code (the JIT) can read
+/// a register: t at 0, i at 4, d at 8.
+#[ranger::target(cpp)]
+#[derive(Clone, Copy)]
+pub struct Val {
+    pub t: int,
+    pub i: int,
+    pub d: double,
+}
+
+#[ranger::target(cpp)]
+#[allow(non_snake_case)]
+impl Val {
+    pub fn Undef() -> Val {
+        Val { t: 0, i: 0, d: 0.0 }
+    }
+    pub fn Null() -> Val {
+        Val { t: 1, i: 0, d: 0.0 }
+    }
+    pub fn Bool(b: bool) -> Val {
+        Val { t: 2, i: if b { 1 } else { 0 }, d: 0.0 }
+    }
+    pub fn Num(x: double) -> Val {
+        Val { t: 3, i: 0, d: x }
+    }
+    pub fn NumC(x: double) -> Val {
+        Val { t: 3, i: 0, d: x }
+    }
+    pub fn Str(h: int) -> Val {
+        Val { t: 4, i: h, d: 0.0 }
+    }
+    pub fn Obj(o: int) -> Val {
+        Val { t: 5, i: o, d: 0.0 }
+    }
+    pub fn Big(n: double) -> Val {
+        Val { t: 6, i: 0, d: n }
+    }
+    pub fn kind(&self) -> VK {
+        match self.t {
+            0 => VK::Undef,
+            1 => VK::Null,
+            2 => VK::Bool(self.i != 0),
+            3 => VK::Num(self.d),
+            4 => VK::Str(self.i),
+            5 => VK::Obj(self.i),
+            _ => VK::Big(self.d),
+        }
+    }
+    pub fn as_num(&self) -> Option<double> {
+        if self.t == 3 { Some(self.d) } else { None }
+    }
+    pub fn as_obj(&self) -> Option<int> {
+        if self.t == 5 { Some(self.i) } else { None }
+    }
+    pub fn as_str(&self) -> Option<int> {
+        if self.t == 4 { Some(self.i) } else { None }
+    }
+    pub fn num(&self) -> double {
+        if self.t == 3 { self.d } else { 0.0 }
+    }
+    pub fn obj(&self) -> int {
+        if self.t == 5 { self.i } else { -1 }
+    }
+    pub fn strh(&self) -> int {
+        if self.t == 4 { self.i } else { 0 }
+    }
+    pub fn boolv(&self) -> bool {
+        self.t == 2 && self.i != 0
+    }
+    pub fn is_num(&self) -> bool {
+        self.t == 3
+    }
+    pub fn is_obj(&self) -> bool {
+        self.t == 5
+    }
+    pub fn is_str(&self) -> bool {
+        self.t == 4
+    }
+    pub fn is_bool(&self) -> bool {
+        self.t == 2
+    }
+    pub fn is_big(&self) -> bool {
+        self.t == 6
+    }
+    pub fn is_heap(&self) -> bool {
+        self.t == 4 || self.t == 5
+    }
+    pub fn is_undef(&self) -> bool {
+        self.t == 0
+    }
+    pub fn is_null(&self) -> bool {
+        self.t == 1
+    }
+    pub fn is_nullish(&self) -> bool {
+        self.t <= 1
     }
 }
 
