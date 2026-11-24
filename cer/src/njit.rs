@@ -27,11 +27,16 @@ use crate::value::*;
 use crate::vm::*;
 use crate::rvm::*;
 
-/// value.rs (C++): the size of a Val and where its parts lie
-const VSZ: int = 16;
-const OFF_I: int = 4;
-const OFF_D: int = 8;
-const T_NUM: int = 3;
+/// value.rs (C++): a Val is 8 NaN-boxed bytes; its top 16 bits (the
+/// "kind" the code compares) are at most TG_NUM for a number, else a tag
+const VSZ: int = 8;
+const TG_NUM: int = 0xFFF8;
+const TG_UNDEF: int = 0xFFF9;
+const TG_NULL: int = 0xFFFA;
+const TG_BOOL: int = 0xFFFB;
+const TG_STR: int = 0xFFFC;
+const TG_OBJ: int = 0xFFFD;
+const TG_BIG: int = 0xFFFE;
 
 /// x86-64 registers: sp in rdi, kv in rsi, pc in edx, budget in rcx
 /// (System V), kept in rbx
@@ -244,34 +249,44 @@ impl Asm {
             self.x_rel32(l);
         }
     }
-    /// compare the kind (t) of [base+disp] with k
+    /// compare the kind (top 16 bits) of [base+disp] with k (scratch
+    /// overwritten)
     fn cmp_kind(&mut self, base: int, disp: int, k: int) {
-        if self.arm {
-            self.a_ldst(0xB940, 9, base, disp, 4);
-            // cmp w9, #k
-            self.w(0x7100 + (k >> 6), ((k & 63) << 10) + (9 << 5) + 31);
-        } else {
-            self.u8(0x83);
-            self.x_mem(7, Asm::x_base(base), disp);
-            self.u8(k);
-        }
+        self.load_kind(base, disp);
+        self.cmp_scratch(k);
     }
-    /// load the kind into the scratch register (then cmp_scratch)
+    /// to l when [base+disp] is not a number
+    fn not_num(&mut self, base: int, disp: int, l: int) {
+        self.cmp_kind(base, disp, TG_NUM);
+        self.jcc(C_A, l);
+    }
+    /// the kind (top 16 bits) of [base+disp] into the scratch register
+    /// (rax / x9), then cmp_scratch
     fn load_kind(&mut self, base: int, disp: int) {
         if self.arm {
-            self.a_ldst(0xB940, 9, base, disp, 4);
+            self.a_ldst(0xF940, 9, base, disp, 8);
+            // lsr x9, x9, #48
+            self.w(0xD370, 0xFD29);
         } else {
+            // mov rax, [mem]; shr rax, 48
+            self.u8(0x48);
             self.u8(0x8B);
             self.x_mem(RAX, Asm::x_base(base), disp);
+            self.u8(0x48);
+            self.u8(0xC1);
+            self.u8(0xE8);
+            self.u8(48);
         }
     }
     fn cmp_scratch(&mut self, k: int) {
         if self.arm {
-            self.w(0x7100 + (k >> 6), ((k & 63) << 10) + (9 << 5) + 31);
+            self.a_mov32(11, k);
+            // cmp w9, w11
+            self.w(0x6B0B, (9 << 5) + 31);
         } else {
-            self.u8(0x83);
-            self.u8(0xF8);
-            self.u8(k);
+            // cmp eax, imm32
+            self.u8(0x3D);
+            self.d32(k);
         }
     }
     fn load_d(&mut self, f: int, base: int, disp: int) {
@@ -363,40 +378,35 @@ impl Asm {
             self.u8(0xC0 + ((f & 7) << 3) + RAX);
         }
     }
-    /// a Val's t and i
-    fn store_tag(&mut self, base: int, disp: int, t: int, i: int) {
+    /// a tagged Val (tag << 48 | low, low a small int) to [base+disp]
+    fn store_tag(&mut self, base: int, disp: int, tag: int, low: int) {
         if self.arm {
-            self.a_mov32(10, t);
-            self.a_ldst(0xB900, 10, base, disp, 4);
-            if i == 0 {
-                self.a_ldst(0xB900, 31, base, disp + OFF_I, 4);
-            } else {
-                self.a_mov32(10, i);
-                self.a_ldst(0xB900, 10, base, disp + OFF_I, 4);
-            }
+            // movz x10, #low; movk x10, #tag, lsl 48
+            self.w(0xD280 + (low >> 11), ((low & 2047) << 5) + 10);
+            self.w(0xF2E0 + (tag >> 11), ((tag & 2047) << 5) + 10);
+            self.a_ldst(0xF900, 10, base, disp, 8);
         } else {
-            self.u8(0xC7);
-            self.x_mem(0, Asm::x_base(base), disp);
-            self.d32(t);
-            self.u8(0xC7);
-            self.x_mem(0, Asm::x_base(base), disp + OFF_I);
-            self.d32(i);
+            // mov rax, imm64; mov [mem], rax
+            self.u8(0x48);
+            self.u8(0xB8);
+            self.d32(low);
+            self.u8(0);
+            self.u8(0);
+            self.u8(tag & 255);
+            self.u8((tag >> 8) & 255);
+            self.u8(0x48);
+            self.u8(0x89);
+            self.x_mem(RAX, Asm::x_base(base), disp);
         }
     }
     /// a whole Val from [sb+sd] to [db+dd]
     fn copy_val(&mut self, db: int, dd: int, sb: int, sd: int) {
         if self.arm {
             self.a_ldst(0xF940, 10, sb, sd, 8);
-            self.a_ldst(0xF940, 11, sb, sd + 8, 8);
             self.a_ldst(0xF900, 10, db, dd, 8);
-            self.a_ldst(0xF900, 11, db, dd + 8, 8);
         } else {
-            self.u8(0x0F);
-            self.u8(0x10);
-            self.x_mem(7, Asm::x_base(sb), sd);
-            self.u8(0x0F);
-            self.u8(0x11);
-            self.x_mem(7, Asm::x_base(db), dd);
+            self.x_sse_m(0xF2, 0x10, 7, sb, sd);
+            self.x_sse_m(0xF2, 0x11, 7, db, dd);
         }
     }
     /// the budget less one; to l when it runs out
@@ -449,16 +459,15 @@ impl Asm {
             self.u8(0x00);
         }
     }
-    /// p = the JsObj of the object Val at [base+disp]
+    /// p = the JsObj of the object Val at [base+disp] (its low 32 bits)
     fn obj_ptr(&mut self, base: int, disp: int) {
         if self.arm {
-            // ldrsw x12, [base, #disp+4]
-            self.a_ldst(0xB980, 12, base, disp + OFF_I, 4);
+            // ldr w12, [base, #disp]
+            self.a_ldst(0xB940, 12, base, disp, 4);
         } else {
-            // movsxd rax, [base + disp + 4]
-            self.u8(0x48);
-            self.u8(0x63);
-            self.x_mem(RAX, Asm::x_base(base), disp + OFF_I);
+            // mov eax, [base + disp]
+            self.u8(0x8B);
+            self.x_mem(RAX, Asm::x_base(base), disp);
         }
         self.obj_from_index();
     }
@@ -474,30 +483,33 @@ impl Asm {
             self.u8(disp);
         }
     }
-    /// compare `this`'s kind with k
+    /// compare `this`'s kind with k (q then holds &this)
     fn cmp_this_kind(&mut self, k: int) {
         self.ctx_ptr(CTX_THIS);
         if self.arm {
-            self.a_ldst_r(0xB940, 9, 14, 0, 4);
-            self.w(0x7100 + (k >> 6), ((k & 63) << 10) + (9 << 5) + 31);
+            self.a_ldst_r(0xF940, 9, 14, 0, 8);
+            self.w(0xD370, 0xFD29);
         } else {
-            // cmp dword [r10], k
-            self.u8(0x41);
-            self.u8(0x83);
-            self.u8(0x3A);
-            self.u8(k);
+            // mov rax, [r10]; shr rax, 48
+            self.u8(0x49);
+            self.u8(0x8B);
+            self.u8(0x02);
+            self.u8(0x48);
+            self.u8(0xC1);
+            self.u8(0xE8);
+            self.u8(48);
         }
+        self.cmp_scratch(k);
     }
     /// p = the JsObj of `this` (after cmp_this_kind: q holds &this)
     fn this_obj_ptr(&mut self) {
         if self.arm {
-            self.a_ldst_r(0xB980, 12, 14, OFF_I, 4);
+            self.a_ldst_r(0xB940, 12, 14, 0, 4);
         } else {
-            // movsxd rax, [r10 + 4]
-            self.u8(0x49);
-            self.u8(0x63);
-            self.u8(0x42);
-            self.u8(OFF_I);
+            // mov eax, [r10]
+            self.u8(0x41);
+            self.u8(0x8B);
+            self.u8(0x02);
         }
         self.obj_from_index();
     }
@@ -653,26 +665,36 @@ impl Asm {
             self.jcc(C_EQ, l);
         }
     }
-    /// the kinds of x (scratch) and y (w13 on AArch64), then cmp_kinds
-    fn load_kinds(&mut self, xb: int, xd: int, yb: int, yd: int) {
+    /// to l when the 8 bytes at x and y are the same
+    fn same_bits(&mut self, xb: int, xd: int, yb: int, yd: int, l: int) {
         if self.arm {
             // y first: a far x reuses x9
-            self.a_ldst(0xB940, 13, yb, yd, 4);
-            self.a_ldst(0xB940, 9, xb, xd, 4);
+            self.a_ldst(0xF940, 13, yb, yd, 8);
+            self.a_ldst(0xF940, 9, xb, xd, 8);
+            // cmp x9, x13
+            self.w(0xEB0D, (9 << 5) + 31);
         } else {
+            // mov rax, [x]; cmp rax, [y]
+            self.u8(0x48);
             self.u8(0x8B);
             self.x_mem(RAX, Asm::x_base(xb), xd);
-        }
-    }
-    /// compare the scratch with y's word at [yb+yd] (loaded by load_kinds
-    /// on AArch64)
-    fn cmp_kinds(&mut self, yb: int, yd: int) {
-        if self.arm {
-            self.w(0x6B0D, (9 << 5) + 31);
-        } else {
-            // cmp eax, [y]
+            self.u8(0x48);
             self.u8(0x3B);
             self.x_mem(RAX, Asm::x_base(yb), yd);
+        }
+        self.jcc(C_EQ, l);
+    }
+    /// compare the low 32 bits of [base+disp] with 0
+    fn low_zero(&mut self, base: int, disp: int) {
+        if self.arm {
+            self.a_ldst(0xB940, 9, base, disp, 4);
+            // cmp w9, #0
+            self.w(0x7100, (9 << 5) + 31);
+        } else {
+            // cmp dword [mem], 0
+            self.u8(0x83);
+            self.x_mem(7, Asm::x_base(base), disp);
+            self.u8(0);
         }
     }
     /// compare the int at [p+disp] with v (then jcc)
@@ -690,17 +712,53 @@ impl Asm {
             self.d32(v);
         }
     }
-    /// compare the kind at [p+disp] with a small k (then jcc)
+    /// keep the scratch kind (in r11 / w13)
+    fn p_save_kind(&mut self) {
+        if self.arm {
+            // mov w13, w9
+            self.w(0x2A09, 0x03ED);
+        } else {
+            // mov r11d, eax
+            self.u8(0x41);
+            self.u8(0x89);
+            self.u8(0xC3);
+        }
+    }
+    /// compare the scratch kind with the kept one
+    fn cmp_saved_kind(&mut self) {
+        if self.arm {
+            // cmp w9, w13
+            self.w(0x6B0D, (9 << 5) + 31);
+        } else {
+            // cmp eax, r11d
+            self.u8(0x44);
+            self.u8(0x39);
+            self.u8(0xD8);
+        }
+    }
+    /// compare the kind of the Val at [p+disp] with k (p kept)
     fn p_cmp_kind(&mut self, disp: int, k: int) {
         if self.arm {
-            self.a_ldst_r(0xB940, 13, 12, disp, 4);
-            self.w(0x7100 + (k >> 6), ((k & 63) << 10) + (13 << 5) + 31);
+            self.a_ldst_r(0xF940, 13, 12, disp, 8);
+            // lsr x13, x13, #48
+            self.w(0xD370, 0xFDAD);
+            self.a_mov32(11, k);
+            // cmp w13, w11
+            self.w(0x6B0B, (13 << 5) + 31);
         } else {
-            // cmp dword [rax + disp], imm8
-            self.u8(0x83);
-            self.u8(0xB8);
+            // mov r11, [rax + disp]; shr r11, 48; cmp r11d, imm32
+            self.u8(0x4C);
+            self.u8(0x8B);
+            self.u8(0x98);
             self.d32(disp);
-            self.u8(k);
+            self.u8(0x49);
+            self.u8(0xC1);
+            self.u8(0xEB);
+            self.u8(48);
+            self.u8(0x41);
+            self.u8(0x81);
+            self.u8(0xFB);
+            self.d32(k);
         }
     }
     /// p = the pointer at [p+disp]
@@ -719,32 +777,26 @@ impl Asm {
     fn val_from_p(&mut self, db: int, dd: int, pd: int) {
         if self.arm {
             self.a_ldst_r(0xF940, 10, 12, pd, 8);
-            self.a_ldst_r(0xF940, 11, 12, pd + 8, 8);
             self.a_ldst(0xF900, 10, db, dd, 8);
-            self.a_ldst(0xF900, 11, db, dd + 8, 8);
         } else {
-            // movups xmm7, [rax + pd]
+            // movsd xmm7, [rax + pd]
+            self.u8(0xF2);
             self.u8(0x0F);
             self.u8(0x10);
             self.u8(0xB8);
             self.d32(pd);
-            self.u8(0x0F);
-            self.u8(0x11);
-            self.x_mem(7, Asm::x_base(db), dd);
+            self.x_sse_m(0xF2, 0x11, 7, db, dd);
         }
     }
     /// the Val at [sb+sd] to [p+pd]
     fn val_to_p(&mut self, pd: int, sb: int, sd: int) {
         if self.arm {
             self.a_ldst(0xF940, 10, sb, sd, 8);
-            self.a_ldst(0xF940, 11, sb, sd + 8, 8);
             self.a_ldst_r(0xF900, 10, 12, pd, 8);
-            self.a_ldst_r(0xF900, 11, 12, pd + 8, 8);
         } else {
-            self.u8(0x0F);
-            self.u8(0x10);
-            self.x_mem(7, Asm::x_base(sb), sd);
-            // movups [rax + pd], xmm7
+            self.x_sse_m(0xF2, 0x10, 7, sb, sd);
+            // movsd [rax + pd], xmm7
+            self.u8(0xF2);
             self.u8(0x0F);
             self.u8(0x11);
             self.u8(0xB8);
@@ -992,16 +1044,15 @@ impl Cg {
     /// operand x is a number, else back to the interpreter at pc
     fn guard_num(&mut self, x: int, pc: int) {
         let l = self.exit(pc);
-        self.a.cmp_kind(opnd_base(x), opnd_disp(x), T_NUM);
-        self.a.jcc(C_NE, l);
+        self.a.not_num(opnd_base(x), opnd_disp(x), l);
     }
     fn load(&mut self, f: int, x: int) {
-        self.a.load_d(f, opnd_base(x), opnd_disp(x) + OFF_D);
+        self.a.load_d(f, opnd_base(x), opnd_disp(x));
     }
-    /// f into register slot r as a number
+    /// f into register slot r as a number (a NaN keeps the hardware's
+    /// bits, below the tags)
     fn store_num(&mut self, f: int, r: int) {
-        self.a.store_tag(B_SP, r * VSZ, T_NUM, 0);
-        self.a.store_d(f, B_SP, r * VSZ + OFF_D);
+        self.a.store_d(f, B_SP, r * VSZ);
     }
     /// a jump from pc to t: a back edge spends one of the budget
     fn jump_to(&mut self, pc: int, t: int) {
@@ -1030,11 +1081,11 @@ impl Cg {
     /// dst = obj.prop (w2 the object; `this` for R_GET_THIS_PROP)
     fn get_prop(&mut self, kind: int, dst: int, w2: int, c: int, ex: int, lay: &Vec<int>) {
         if kind == R_GET_THIS_PROP {
-            self.a.cmp_this_kind(5);
+            self.a.cmp_this_kind(TG_OBJ);
             self.a.jcc(C_NE, ex);
             self.a.this_obj_ptr();
         } else {
-            self.a.cmp_kind(opnd_base(w2), opnd_disp(w2), 5);
+            self.a.cmp_kind(opnd_base(w2), opnd_disp(w2), TG_OBJ);
             self.a.jcc(C_NE, ex);
             self.a.obj_ptr(opnd_base(w2), opnd_disp(w2));
         }
@@ -1045,13 +1096,13 @@ impl Cg {
     /// undefined, null, a boolean or a number): no references to change
     fn set_prop(&mut self, w1: int, w2: int, c: int, ex: int, lay: &Vec<int>) {
         self.a.load_kind(opnd_base(w2), opnd_disp(w2));
-        self.a.cmp_scratch(T_NUM);
+        self.a.cmp_scratch(TG_BOOL);
         self.a.jcc(C_A, ex);
-        self.a.cmp_kind(opnd_base(w1), opnd_disp(w1), 5);
+        self.a.cmp_kind(opnd_base(w1), opnd_disp(w1), TG_OBJ);
         self.a.jcc(C_NE, ex);
         self.a.obj_ptr(opnd_base(w1), opnd_disp(w1));
         let pd = self.slot_of(c & 65535, c >> 16, ex, lay);
-        self.a.p_cmp_kind(pd, T_NUM);
+        self.a.p_cmp_kind(pd, TG_BOOL);
         self.a.jcc(C_A, ex);
         self.a.val_to_p(pd, opnd_base(w2), opnd_disp(w2));
     }
@@ -1074,7 +1125,7 @@ impl Cg {
         self.a.elems_buf(lay[L_EV], k * VSZ + VSZ - 1, ex);
         self.a.val_from_p(B_SP, dst * VSZ, k * VSZ);
         if sub == 1 {
-            self.a.store_tag(B_SP, (dst + 1) * VSZ, 0, 0);
+            self.a.store_tag(B_SP, (dst + 1) * VSZ, TG_UNDEF, 0);
         }
     }
     /// to `yes` when x op y holds (op a comparison code), else on; what
@@ -1102,52 +1153,47 @@ impl Cg {
         let yd = opnd_disp(y);
         let ex = self.exit(pc);
         let num = self.a.label();
-        let same = self.a.label();
-        self.a.load_kinds(xb, xd, yb, yd);
-        self.a.cmp_scratch(T_NUM);
-        self.a.jcc(C_EQ, num);
-        self.a.cmp_kinds(yb, yd);
-        self.a.jcc(C_EQ, same);
-        // kinds differ: strictly unequal; loosely, undefined == null and
-        // the rest converts
+        self.a.cmp_kind(xb, xd, TG_NUM);
+        self.a.jcc(C_BE, num);
+        // x is no number: the same bits are equal (undefined, null, the
+        // same boolean, object, string handle or small BigInt)
+        self.a.same_bits(xb, xd, yb, yd, eq_l);
         if loose {
-            self.a.cmp_scratch(1);
-            self.a.jcc(C_A, ex);
-            self.a.cmp_kind(yb, yd, 1);
-            self.a.jcc(C_A, ex);
-            self.a.jmp(eq_l);
-        } else {
+            // undefined == null; another kind converts (interpreter)
+            let nx = self.a.label();
+            self.a.cmp_kind(xb, xd, TG_NULL);
+            self.a.jcc(C_A, nx);
+            self.a.cmp_kind(yb, yd, TG_UNDEF);
+            self.a.jcc(C_EQ, eq_l);
+            self.a.cmp_scratch(TG_NULL);
+            self.a.jcc(C_EQ, eq_l);
             self.a.jmp(ne_l);
+            self.a.bind(nx);
+            // y nullish: unequal
+            self.a.cmp_kind(yb, yd, TG_UNDEF);
+            self.a.jcc(C_EQ, ne_l);
+            self.a.cmp_scratch(TG_NULL);
+            self.a.jcc(C_EQ, ne_l);
         }
-        self.a.bind(same);
-        // undefined or null
-        self.a.cmp_scratch(1);
-        self.a.jcc(C_BE, eq_l);
-        // a BigInt
-        self.a.cmp_scratch(5);
-        self.a.jcc(C_A, ex);
+        // two strings with other handles: their text decides
         let s = self.a.label();
-        self.a.cmp_scratch(4);
-        self.a.jcc(C_EQ, s);
-        // a boolean or an object: the same i
-        self.a.load_kinds(xb, xd + OFF_I, yb, yd + OFF_I);
-        self.a.cmp_kinds(yb, yd + OFF_I);
-        self.a.jcc(C_EQ, eq_l);
-        self.a.jmp(ne_l);
-        // a string: the same handle is equal, others are compared by the
-        // interpreter
+        self.a.cmp_kind(xb, xd, TG_STR);
+        self.a.jcc(C_NE, s);
+        self.a.cmp_kind(yb, yd, TG_STR);
+        self.a.jcc(C_EQ, ex);
         self.a.bind(s);
-        self.a.load_kinds(xb, xd + OFF_I, yb, yd + OFF_I);
-        self.a.cmp_kinds(yb, yd + OFF_I);
-        self.a.jcc(C_EQ, eq_l);
-        self.a.jmp(ex);
-        self.a.bind(num);
-        self.a.cmp_kind(yb, yd, T_NUM);
         if loose {
+            // other kinds differing: conversions (interpreter); the same
+            // kind with other bits: unequal
+            self.a.load_kind(xb, xd);
+            self.a.p_save_kind();
+            self.a.load_kind(yb, yd);
+            self.a.cmp_saved_kind();
             self.a.jcc(C_NE, ex);
-        } else {
-            self.a.jcc(C_NE, ne_l);
         }
+        self.a.jmp(ne_l);
+        self.a.bind(num);
+        self.a.not_num(yb, yd, if loose { ex } else { ne_l });
         self.load(0, x);
         self.load(1, y);
         self.a.jump_fcmp(C_FEQ, 0, 1, eq_l);
@@ -1163,21 +1209,21 @@ impl Cg {
         let num = self.a.label();
         let ex = self.exit(pc);
         self.a.load_kind(b, d);
-        self.a.cmp_scratch(T_NUM);
-        self.a.jcc(C_EQ, num);
-        self.a.cmp_scratch(5);
+        self.a.cmp_scratch(TG_NUM);
+        self.a.jcc(C_BE, num);
+        self.a.cmp_scratch(TG_OBJ);
         self.a.jcc(C_EQ, tru);
-        self.a.cmp_scratch(1);
+        self.a.cmp_scratch(TG_NULL);
         self.a.jcc(C_BE, fal);
-        self.a.cmp_scratch(4);
+        self.a.cmp_scratch(TG_STR);
         self.a.jcc(C_A, ex);
-        // a boolean or a string: i != 0
-        self.a.cmp_kind(b, d + OFF_I, 0);
+        // a boolean or a string: low bits != 0 (the empty string is handle 0)
+        self.a.low_zero(b, d);
         self.a.jcc(C_EQ, fal);
         self.a.jmp(tru);
         self.a.bind(num);
         self.a.zero_d(1);
-        self.a.load_d(0, b, d + OFF_D);
+        self.a.load_d(0, b, d);
         // 0 and NaN are false
         self.a.jump_fcmp(C_FEQ, 0, 1, fal);
         self.a.fcmp(0, 0);
@@ -1353,8 +1399,7 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             // a number stays itself; the rest converts in slow()
             let slow = cg.a.label();
             let done = cg.a.label();
-            cg.a.cmp_kind(opnd_base(w2), opnd_disp(w2), T_NUM);
-            cg.a.jcc(C_NE, slow);
+            cg.a.not_num(opnd_base(w2), opnd_disp(w2), slow);
             cg.a.copy_val(B_SP, w1 * VSZ, opnd_base(w2), opnd_disp(w2));
             cg.a.jmp(done);
             cg.a.bind(slow);
@@ -1365,10 +1410,10 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             let tru = cg.a.label();
             let after = cg.a.label();
             cg.jump_truth(w2, pc, true, tru);
-            cg.a.store_tag(B_SP, w1 * VSZ, 2, 1);
+            cg.a.store_tag(B_SP, w1 * VSZ, TG_BOOL, 1);
             cg.a.jmp(after);
             cg.a.bind(tru);
-            cg.a.store_tag(B_SP, w1 * VSZ, 2, 0);
+            cg.a.store_tag(B_SP, w1 * VSZ, TG_BOOL, 0);
             cg.a.bind(after);
         } else if is_slow(kind, sub) {
             let ex = cg.exit(pc);
@@ -1396,8 +1441,8 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             let size = tab[w2 as usize];
             let dflt = tab[(w2 + 1 + size) as usize];
             cg.a.load_kind(B_SP, w1 * VSZ);
-            cg.a.cmp_scratch(T_NUM);
-            cg.a.jcc(C_NE, dflt);
+            cg.a.cmp_scratch(TG_NUM);
+            cg.a.jcc(C_A, dflt);
             cg.load(0, w1);
             let mut i: int = 0;
             while i < size {
@@ -1416,9 +1461,9 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             let go = cg.a.label();
             let on = cg.a.label();
             cg.a.load_kind(B_SP, w1 * VSZ);
-            cg.a.cmp_scratch(1);
+            cg.a.cmp_scratch(TG_NULL);
             cg.a.jcc(C_EQ, if on_null { on } else { go });
-            cg.a.cmp_scratch(0);
+            cg.a.cmp_scratch(TG_UNDEF);
             cg.a.jcc(C_EQ, if on_undef { on } else { go });
             if on_else { cg.a.jmp(on); } else { cg.a.jmp(go); }
             cg.a.bind(go);
@@ -1431,15 +1476,15 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             let yes = cg.a.label();
             let after = cg.a.label();
             cg.cond(sub, w2, w3, pc, yes);
-            cg.a.store_tag(B_SP, dst * VSZ, 2, 0);
+            cg.a.store_tag(B_SP, dst * VSZ, TG_BOOL, 0);
             if kind == R_CMP_JFK {
                 cg.jump_to(pc, to);
                 cg.a.bind(yes);
-                cg.a.store_tag(B_SP, dst * VSZ, 2, 1);
+                cg.a.store_tag(B_SP, dst * VSZ, TG_BOOL, 1);
             } else {
                 cg.a.jmp(after);
                 cg.a.bind(yes);
-                cg.a.store_tag(B_SP, dst * VSZ, 2, 1);
+                cg.a.store_tag(B_SP, dst * VSZ, TG_BOOL, 1);
                 cg.jump_to(pc, to);
             }
             cg.a.bind(after);
@@ -1450,10 +1495,10 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             let after = cg.a.label();
             cg.cond(sub, x, y, pc, yes);
             if kind == R_CMP {
-                cg.a.store_tag(B_SP, w1 * VSZ, 2, 0);
+                cg.a.store_tag(B_SP, w1 * VSZ, TG_BOOL, 0);
                 cg.a.jmp(after);
                 cg.a.bind(yes);
-                cg.a.store_tag(B_SP, w1 * VSZ, 2, 1);
+                cg.a.store_tag(B_SP, w1 * VSZ, TG_BOOL, 1);
                 cg.a.bind(after);
             } else if kind == R_CMP_JF {
                 cg.jump_to(pc, w3);
@@ -1497,7 +1542,7 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             cg.load(0, w1);
             cg.a.dbl_imm(1, w2);
             cg.a.arith(F_ADD, 0, 1);
-            cg.a.store_d(0, B_SP, w1 * VSZ + OFF_D);
+            cg.a.store_d(0, B_SP, w1 * VSZ);
         } else if kind == R_INC {
             cg.guard_num(w2, pc);
             cg.load(0, w2);
@@ -1510,7 +1555,7 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             cg.load(0, w2);
             cg.a.dbl_imm(1, w3);
             cg.a.arith(F_ADD, 1, 0);
-            cg.a.store_d(1, B_SP, w2 * VSZ + OFF_D);
+            cg.a.store_d(1, B_SP, w2 * VSZ);
             cg.store_num(if sub == 0 { 0 } else { 1 }, w1);
         } else if kind == R_ADD_LOCAL_POP {
             cg.guard_num(w1, pc);
@@ -1518,7 +1563,7 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             cg.load(0, w1);
             cg.load(1, w2);
             cg.a.arith(F_ADD, 0, 1);
-            cg.a.store_d(0, B_SP, w1 * VSZ + OFF_D);
+            cg.a.store_d(0, B_SP, w1 * VSZ);
         }
         if falls && next != pc + 1 {
             cg.a.jmp(next);
@@ -1890,7 +1935,7 @@ inline int njit_call(int h, void* sp, void* kv, int pc, int budget, void* objs, 
 
 /// The object layout of the C++ build (L_OK..L_V); all 0 elsewhere.
 fn layout() -> Vec<int> {
-    let ok: int = ranger::native!(rust: 0, cpp: "((int)sizeof(std::shared_ptr<JsObj>) == 16 && (int)sizeof(std::shared_ptr<Elems>) == 16 ? 1 : 0)");
+    let ok: int = ranger::native!(rust: 0, cpp: "((int)sizeof(std::shared_ptr<JsObj>) == 16 && (int)sizeof(std::shared_ptr<Elems>) == 16 && (int)sizeof(Val) == 8 ? 1 : 0)");
     let mut v: Vec<int> = Vec::new();
     v.push(ok);
     let a: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, shape)");
