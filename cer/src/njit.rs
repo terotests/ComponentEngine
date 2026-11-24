@@ -95,6 +95,10 @@ pub struct Asm {
     pub fix_at: Vec<int>,
     pub fix_label: Vec<int>,
     pub fix_kind: Vec<int>,
+    /// the object and Elems tables' entry sizes when they hold the objects
+    /// themselves; 0: 16-byte std::shared_ptr entries
+    pub osz: int,
+    pub esz: int,
 }
 
 impl Asm {
@@ -105,7 +109,7 @@ impl Asm {
             labels.push(-1);
             i += 1;
         }
-        Asm { arm: arm, b: Vec::new(), labels: labels, fix_at: Vec::new(), fix_label: Vec::new(), fix_kind: Vec::new() }
+        Asm { arm: arm, b: Vec::new(), labels: labels, fix_at: Vec::new(), fix_label: Vec::new(), fix_kind: Vec::new(), osz: 0, esz: 0 }
     }
     fn u8(&mut self, x: int) {
         self.b.push(x & 255);
@@ -441,8 +445,22 @@ impl Asm {
         let lo = ((off & 63) << 10) + (b << 5) + rt;
         self.w(op + (off >> 6), lo);
     }
-    /// p = the JsObj of the object index in p (16-byte table entries)
+    /// p = the JsObj of the object index in p
     fn obj_from_index(&mut self) {
+        if self.osz > 0 {
+            let sz = self.osz;
+            self.index_times(sz);
+            if self.arm {
+                // add x12, x4, x12
+                self.w(0x8B0C, 0x008C);
+            } else {
+                // add rax, r8
+                self.u8(0x4C);
+                self.u8(0x01);
+                self.u8(0xC0);
+            }
+            return;
+        }
         if self.arm {
             // lsl x12, x12, #4; ldr x12, [x4, x12]
             self.w(0xD37C, 0xED8C);
@@ -457,6 +475,20 @@ impl Asm {
             self.u8(0x8B);
             self.u8(0x04);
             self.u8(0x00);
+        }
+    }
+    /// p = p * sz (an index into a table of sz-byte entries)
+    fn index_times(&mut self, sz: int) {
+        if self.arm {
+            self.a_mov32(9, sz);
+            // mul x12, x12, x9
+            self.w(0x9B09, 0x7D8C);
+        } else {
+            // imul rax, rax, imm32
+            self.u8(0x48);
+            self.u8(0x69);
+            self.u8(0xC0);
+            self.d32(sz);
         }
     }
     /// p = the JsObj of the object Val at [base+disp] (its low 32 bits)
@@ -556,10 +588,25 @@ impl Asm {
     /// it holds no more than `need` bytes (q is overwritten)
     fn elems_buf(&mut self, ev: int, need: int, l: int) {
         self.ctx_ptr(CTX_EVECS);
+        if self.esz > 0 {
+            let sz = self.esz;
+            self.index_times(sz);
+            if self.arm {
+                // add x12, x14, x12
+                self.w(0x8B0C, 0x01CC);
+            } else {
+                // add rax, r10
+                self.u8(0x4C);
+                self.u8(0x01);
+                self.u8(0xD0);
+            }
+        }
         if self.arm {
-            // lsl x12, x12, #4; ldr x12, [x14, x12]
-            self.w(0xD37C, 0xED8C);
-            self.w(0xF86C, 0x69CC);
+            if self.esz == 0 {
+                // lsl x12, x12, #4; ldr x12, [x14, x12]
+                self.w(0xD37C, 0xED8C);
+                self.w(0xF86C, 0x69CC);
+            }
             self.a_ldst_r(0xF940, 14, 12, ev + 8, 8);
             self.a_ldst_r(0xF940, 12, 12, ev, 8);
             // sub x14, x14, x12; cmp x14, x9
@@ -567,15 +614,17 @@ impl Asm {
             self.a_mov32(9, need);
             self.w(0xEB09, (14 << 5) + 31);
         } else {
-            // shl rax, 4; mov rax, [r10 + rax]
-            self.u8(0x48);
-            self.u8(0xC1);
-            self.u8(0xE0);
-            self.u8(4);
-            self.u8(0x49);
-            self.u8(0x8B);
-            self.u8(0x04);
-            self.u8(0x02);
+            if self.esz == 0 {
+                // shl rax, 4; mov rax, [r10 + rax]
+                self.u8(0x48);
+                self.u8(0xC1);
+                self.u8(0xE0);
+                self.u8(4);
+                self.u8(0x49);
+                self.u8(0x8B);
+                self.u8(0x04);
+                self.u8(0x02);
+            }
             // mov r10, [rax + ev + 8]; mov rax, [rax + ev]
             self.u8(0x4C);
             self.u8(0x8B);
@@ -926,6 +975,9 @@ const L_V: usize = 5;
 const L_PROTO: usize = 6;
 const L_ELEMS: usize = 7;
 const L_EV: usize = 8;
+const L_OSZ: usize = 9;
+const L_ESZ: usize = 10;
+const L_VINL: usize = 11;
 
 /// A property op whose site's cache (w3: shape * 65536 + slot) saw one
 /// shape: read or written in place behind a check of that shape.
@@ -1073,9 +1125,14 @@ impl Cg {
         if slot == 1 {
             return lay[L_INL1];
         }
-        // the Slots object, then its vector's buffer
-        self.a.p_load_ptr(lay[L_VALS]);
-        self.a.p_load_ptr(lay[L_V]);
+        // the Slots (in the object, or behind a pointer), then its
+        // vector's buffer
+        if lay[L_VINL] == 1 {
+            self.a.p_load_ptr(lay[L_VALS] + lay[L_V]);
+        } else {
+            self.a.p_load_ptr(lay[L_VALS]);
+            self.a.p_load_ptr(lay[L_V]);
+        }
         (slot - 2) * VSZ
     }
     /// dst = obj.prop (w2 the object; `this` for R_GET_THIS_PROP)
@@ -1338,6 +1395,8 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
     }
     // labels 0..n are the pcs
     let mut cg = Cg { a: Asm::new(arm, n), n: n, exits: Vec::new(), budgets: Vec::new(), epi: 0 };
+    cg.a.osz = lay[L_OSZ];
+    cg.a.esz = lay[L_ESZ];
     let mut i: int = 0;
     while i < n {
         cg.exits.push(-1);
@@ -1611,7 +1670,7 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: int, pc: int, budget: int) -
         let n = vm.protos[pi].code.len() as int;
         if rb >= 0 && ((rb + n) as usize) <= vm.rcode.len() {
             let m = arch();
-            let lay = layout();
+            let lay = layout(vm);
             let code = if m > 0 { compile(&vm.rcode, pi as int, rb, n, m == 2, &lay, &vm.rtab) } else { Vec::new() };
             if code.len() > 0 {
                 h = install(&code);
@@ -1840,6 +1899,7 @@ fn arch() -> int {
         rust: 0,
         cpp: "njit_arch()",
         cpp_polyfill: r#"#include <cstddef>
+#include <type_traits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -1934,8 +1994,12 @@ inline int njit_call(int h, void* sp, void* kv, int pc, int budget, void* objs, 
 }
 
 /// The object layout of the C++ build (L_OK..L_V); all 0 elsewhere.
-fn layout() -> Vec<int> {
-    let ok: int = ranger::native!(rust: 0, cpp: "((int)sizeof(std::shared_ptr<JsObj>) == 16 && (int)sizeof(std::shared_ptr<Elems>) == 16 && (int)sizeof(Val) == 8 ? 1 : 0)");
+fn layout(vm: &crate::vm::Vm) -> Vec<int> {
+    // the tables hold the objects themselves (osz, esz: their sizes) or
+    // 16-byte std::shared_ptrs to them (0)
+    let osz: int = ranger::native!(rust: 0, cpp: "(std::is_same<typename std::decay<decltype({vm}->objs[0])>::type, JsObj>::value ? (int)sizeof(JsObj) : 0)");
+    let esz: int = ranger::native!(rust: 0, cpp: "(std::is_same<typename std::decay<decltype({vm}->evecs[0])>::type, Elems>::value ? (int)sizeof(Elems) : 0)");
+    let ok: int = ranger::native!(rust: 0, cpp: "(((int)sizeof({vm}->objs[0]) == 16 || {osz} > 0) && ((int)sizeof({vm}->evecs[0]) == 16 || {esz} > 0) && (int)sizeof(Val) == 8 ? 1 : 0)");
     let mut v: Vec<int> = Vec::new();
     v.push(ok);
     let a: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, shape)");
@@ -1954,5 +2018,9 @@ fn layout() -> Vec<int> {
     v.push(g);
     let h: int = ranger::native!(rust: 0, cpp: "(int)offsetof(Elems, v)");
     v.push(h);
+    v.push(osz);
+    v.push(esz);
+    let vinl: int = ranger::native!(rust: 0, cpp: "(std::is_same<decltype(JsObj::vals), Slots>::value ? 1 : 0)");
+    v.push(vinl);
     v
 }
