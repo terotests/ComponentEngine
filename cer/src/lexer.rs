@@ -4,6 +4,7 @@
 //! it, as a parser would.
 
 use ranger::prelude::*;
+use crate::jsstr;
 
 pub const T_EOF: int = 0;
 pub const T_NUM: int = 1;
@@ -336,14 +337,16 @@ impl Lexer {
             let c0 = c as int;
             for p in ps.iter() {
                 // punctuators are ASCII: compare bytes, first byte first
-                if (p.as_bytes()[0] as int) != c0 {
+                // (jsstr::byte_at, jsstr::size: in JavaScript as_bytes is an
+                // encoding of p, for each punctuator at each token)
+                if jsstr::byte_at(p.as_str(), 0) != c0 {
                     continue;
                 }
-                let plen = p.as_bytes().len() as int;
+                let plen = jsstr::size(p.as_str());
                 let mut ok = true;
                 let mut k: int = 1;
                 while k < plen {
-                    if (self.at(self.pos + k) as int) != (p.as_bytes()[k as usize] as int) {
+                    if (self.at(self.pos + k) as int) != jsstr::byte_at(p.as_str(), k) {
                         ok = false;
                         break;
                     }

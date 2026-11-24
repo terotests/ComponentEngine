@@ -1683,7 +1683,7 @@ impl Vm {
     }
 
     fn new_handle(&mut self, s: Rc<String>, flag: int) -> int {
-        let h = self.take_handle(s.as_bytes().len() as int, flag);
+        let h = self.take_handle(jsstr::size(s.as_str()), flag);
         self.strs[h as usize].s = s;
         h
     }
@@ -1795,7 +1795,7 @@ impl Vm {
         let i = h as usize;
         let up = self.strs[i].up;
         if up < 0 {
-            self.sbytes -= self.strs[i].s.as_bytes().len() as int;
+            self.sbytes -= jsstr::size(self.strs[i].s.as_str());
             if self.sbytes < 0 {
                 self.sbytes = 0;
             }
@@ -1838,7 +1838,7 @@ impl Vm {
         if s.is_empty() {
             return Val::Str(0);
         }
-        let h = self.take_handle(s.as_bytes().len() as int, 0);
+        let h = self.take_handle(jsstr::size(s), 0);
         rc_fill_str(&mut self.strs[h as usize].s, s);
         Val::Str(h)
     }
@@ -1847,7 +1847,7 @@ impl Vm {
         if s.is_empty() {
             return Val::Str(0);
         }
-        let h = self.take_handle(s.as_bytes().len() as int, 0);
+        let h = self.take_handle(jsstr::size(s.as_str()), 0);
         rc_refill(&mut self.strs[h as usize].s, s);
         Val::Str(h)
     }
@@ -1931,7 +1931,9 @@ impl Vm {
     /// old text, a prefix of it), or -1 and nothing changed.
     pub fn str_append(&mut self, h: int, b: &str) -> int {
         let i = h as usize;
-        if h <= 0 || self.strs[i].up >= 0 || self.strs[i].flag != 0 {
+        // (an append in place is Rust's, rc_push: the others' strings are
+        // immutable values, and their lengths below are not free)
+        if !prepend_ok() || h <= 0 || self.strs[i].up >= 0 || self.strs[i].flag != 0 {
             return -1;
         }
         let n = self.strs[i].s.as_bytes().len() as int;
@@ -1955,6 +1957,15 @@ impl Vm {
         // h's text now lies in h2's buffer: h holds h2
         self.strs[h2 as usize].rc += 1;
         h2
+    }
+
+    /// A string's size for budgets and heuristics (jsstr::size: bytes, or
+    /// in JavaScript its length, which needs no encoding of the text).
+    pub fn hsize(&self, h: int) -> int {
+        if self.strs[h as usize].up < 0 {
+            return jsstr::size(self.strs[h as usize].s.as_str());
+        }
+        self.strs[h as usize].len as int
     }
 
     /// A string's length in bytes.
@@ -4867,7 +4878,7 @@ impl Vm {
                 // a long string on the left: appended in its own buffer when
                 // nothing else holds it (x stays its text, a prefix view), so
                 // 'a' + 'a' + ... in one expression copies nothing again
-                if self.hbytes(x) >= 1024 {
+                if self.hsize(x) >= 1024 {
                     let ys = self.sget(y);
                     let h = self.str_append(x, ys.as_str());
                     if h >= 0 {
@@ -4875,20 +4886,20 @@ impl Vm {
                     }
                 }
                 // a short string before a long one: into the room before it
-                let yb = self.hbytes(y);
-                if yb >= 32 && self.hbytes(x) * 4 <= yb {
+                let yb = self.hsize(y);
+                if yb >= 32 && self.hsize(x) * 4 <= yb {
                     let xt = self.sget(x);
                     let r = self.str_prepend(xt.as_str(), y);
                     if r >= 0 {
                         return Val::Str(r);
                     }
                 }
-                let n = self.sref(x).as_bytes().len() + self.sref(y).as_bytes().len();
+                let n = self.hsize(x) + self.hsize(y);
                 if self.str_too_long(n as double) {
                     return Val::Undef();
                 }
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
+                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n as usize);
                 s.push_str(self.sref(x));
                 jsstr::push_js(&mut s, self.sref(y));
                 rc_refill(&mut self.strs[h as usize].s, s);
@@ -4897,9 +4908,9 @@ impl Vm {
             (VK::Str(x), VK::Num(y)) => {
                 // "k" + i: a small whole number's digits straight onto the copy
                 if y >= 0.0 && y < 2147483647.0 && y == ((y as int) as double) {
-                    let n = self.sref(x).as_bytes().len() + 10;
+                    let n = self.hsize(x) + 10;
                     let h = self.take_handle(n as int, 0);
-                    let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
+                    let mut s = rc_take_buf(&mut self.strs[h as usize].s, n as usize);
                     s.push_str(self.sref(x));
                     if push_small_int(&mut s, y) >= 0 {
                         rc_refill(&mut self.strs[h as usize].s, s);
@@ -4910,9 +4921,9 @@ impl Vm {
                     return Val::Str(h);
                 }
                 let t = number_to_string(y);
-                let n = self.sref(x).as_bytes().len() + t.as_bytes().len();
+                let n = self.hsize(x) + jsstr::size(t.as_str());
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
+                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n as usize);
                 s.push_str(self.sref(x));
                 s.push_str(t.as_str());
                 rc_refill(&mut self.strs[h as usize].s, s);
@@ -4920,9 +4931,9 @@ impl Vm {
             }
             (VK::Num(x), VK::Str(y)) => {
                 let t = number_to_string(x);
-                let n = t.as_bytes().len() + self.sref(y).as_bytes().len();
+                let n = jsstr::size(t.as_str()) + self.hsize(y);
                 let h = self.take_handle(n as int, 0);
-                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n);
+                let mut s = rc_take_buf(&mut self.strs[h as usize].s, n as usize);
                 s.push_str(t.as_str());
                 s.push_str(self.sref(y));
                 rc_refill(&mut self.strs[h as usize].s, s);
@@ -4947,7 +4958,7 @@ impl Vm {
             if self.throwing {
                 return Val::Undef();
             }
-            if self.str_too_long((x.as_bytes().len() + y.as_bytes().len()) as double) {
+            if self.str_too_long((jsstr::size(x.as_str()) + jsstr::size(y.as_str())) as double) {
                 return Val::Undef();
             }
             let mut s = String::new();
