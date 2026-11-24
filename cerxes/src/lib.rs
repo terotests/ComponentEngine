@@ -47,6 +47,11 @@ pub mod proxy;
 pub mod regex;
 pub mod regs;
 pub mod rvm;
+/// the native JIT of the C++ build (njit.rs, x86-64 / AArch64 machine
+/// code; its C++ runtime is written into the generated file). Ranger
+/// reads it, cargo leaves it out.
+#[cfg(any())]
+pub mod njit;
 pub mod snapshot;
 pub mod ts;
 pub mod typed;

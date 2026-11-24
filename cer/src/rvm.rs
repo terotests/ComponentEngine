@@ -3378,7 +3378,13 @@ pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bo
     crate::wjit::enter(vm, pi, bp, pc, budget as i32, head)
 }
 
-#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+/// C++: the native JIT (njit.rs)
+#[ranger::target(cpp)]
+pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, _head: bool) -> int {
+    crate::njit::enter(vm, pi, bp, pc, budget)
+}
+
+#[ranger::target(es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn jit_enter(_vm: &mut Vm, _pi: usize, _bp: int, pc: int, _budget: int, _head: bool) -> int {
     pc
 }

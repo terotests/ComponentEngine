@@ -138,10 +138,10 @@ export function runQuickJs(src) {
 }
 
 /** CEr compiled by rgrc to C++ or Go (bin/cer_main_<target>). */
-export function runCerBinary(target, src) {
+export function runCerBinary(target, src, extra = []) {
   const bin = path.join(CER, "bin", "cer_main_" + target);
   const f = tmpFile(src);
-  const r = spawnSync(bin, [path.dirname(f), path.basename(f)], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 600000 });
+  const r = spawnSync(bin, [path.dirname(f), path.basename(f), ...extra], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 600000 });
   fs.unlinkSync(f);
   return lines(r.stdout).concat(lines(r.stderr));
 }
@@ -154,6 +154,8 @@ export function engines(want) {
     "cer-js": runCerJs,
     "cer-cpp": (s) => runCerBinary("cpp", s),
     "cer-go": (s) => runCerBinary("go", s),
+    // C++ on the register machine with the native JIT (src/njit.rs)
+    "cer-cpp-jit": (s) => runCerBinary("cppjit", s, ["jit"]),
     qjs: runQuickJs,
   };
   const out = {};
@@ -181,6 +183,13 @@ export function build(want) {
   if (want.includes("ce-js") && !fs.existsSync(CE_MODULE)) {
     if (IN_RANGER) run("bash", ["scripts/build-engine-module.sh"]);
     else run("node", ["scripts/build.mjs"]);
+  }
+  if (want.includes("cer-cpp-jit")) {
+    // CerMainJit.rgr: the generated file carries the JIT's runtime
+    const dir = path.join(os.tmpdir(), "cer-cppjit");
+    fs.mkdirSync(dir, { recursive: true });
+    run("node", ["--stack-size=8000", rgrc(), "-l=cpp", path.join(CER, "bench/CerMainJit.rgr"), "-d=" + dir, "-o=cer_main.cpp"]);
+    run("g++", ["-std=c++17", "-O2", "-o", path.join(CER, "bin", "cer_main_cppjit"), path.join(dir, "cer_main.cpp")]);
   }
   for (const t of ["cpp", "go"]) {
     if (!want.includes("cer-" + t)) continue;

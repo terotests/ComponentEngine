@@ -1,0 +1,38 @@
+; SPDX-License-Identifier: AGPL-3.0-or-later
+;
+; CEr on the register machine (C++): runs one script file and prints what
+; it prints; a third argument turns the native JIT on (src/njit.rs).
+;
+;   cer_main <dir> <file.js> [jit]
+;
+; The C++ file rgrc writes carries the JIT's runtime itself
+; (bench/common.mjs, the cer-cpp-jit engine).
+
+Import "../src/lib.rs"
+
+class CerMain {
+    sfn m@(main):void () {
+        if ((shell_arg_cnt) < 2) {
+            print "usage: cer_main <dir> <file.js>"
+            return
+        }
+        def dirPath:string (shell_arg 0)
+        def fileName:string (shell_arg 1)
+        def content@(optional):string (read_file dirPath fileName)
+        if (null? content) {
+            print ("error: could not read " + (dirPath + ("/" + fileName)))
+            return
+        }
+        def src:string (unwrap content)
+        def e:Engine (Engine.new_())
+        e.set_echo(true)
+        e.vm.regs = true
+        if ((shell_arg_cnt) > 2) {
+            e.vm.jit_on = true
+        }
+        def r:string (e.eval(src))
+        if ((strlen e.error) > 0) {
+            print r
+        }
+    }
+}
