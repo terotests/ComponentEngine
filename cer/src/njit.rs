@@ -402,6 +402,159 @@ impl Asm {
         }
         self.jcc(C_EQ, l);
     }
+    // ------------------------------------------- objects (shape guards)
+    // The object table (Vm.objs: one std::shared_ptr<JsObj> per object,
+    // its pointer first) comes in r8 / x4, `this` (a Val) in r9 / x5. The
+    // object being read is p: rax / x12.
+
+    /// AArch64 ldr/str from a register base (rn), far offsets through x9
+    fn a_ldst_r(&mut self, op: int, rt: int, rn: int, disp: int, scale: int) {
+        let mut b = rn;
+        let mut off = disp / scale;
+        if disp % scale != 0 || off >= 4096 {
+            self.a_mov32(9, disp);
+            // add x9, rn, x9
+            self.w(0x8B09, (rn << 5) + 9);
+            b = 9;
+            off = 0;
+        }
+        let lo = ((off & 63) << 10) + (b << 5) + rt;
+        self.w(op + (off >> 6), lo);
+    }
+    /// p = the JsObj of the object index in p (16-byte table entries)
+    fn obj_from_index(&mut self) {
+        if self.arm {
+            // lsl x12, x12, #4; ldr x12, [x4, x12]
+            self.w(0xD37C, 0xED8C);
+            self.w(0xF86C, 0x688C);
+        } else {
+            // shl rax, 4; mov rax, [r8 + rax]
+            self.u8(0x48);
+            self.u8(0xC1);
+            self.u8(0xE0);
+            self.u8(4);
+            self.u8(0x49);
+            self.u8(0x8B);
+            self.u8(0x04);
+            self.u8(0x00);
+        }
+    }
+    /// p = the JsObj of the object Val at [base+disp]
+    fn obj_ptr(&mut self, base: int, disp: int) {
+        if self.arm {
+            // ldrsw x12, [base, #disp+4]
+            self.a_ldst(0xB980, 12, base, disp + OFF_I, 4);
+        } else {
+            // movsxd rax, [base + disp + 4]
+            self.u8(0x48);
+            self.u8(0x63);
+            self.x_mem(RAX, Asm::x_base(base), disp + OFF_I);
+        }
+        self.obj_from_index();
+    }
+    /// compare `this`'s kind with k
+    fn cmp_this_kind(&mut self, k: int) {
+        if self.arm {
+            self.a_ldst_r(0xB940, 9, 5, 0, 4);
+            self.w(0x7100 + (k >> 6), ((k & 63) << 10) + (9 << 5) + 31);
+        } else {
+            // cmp dword [r9], k
+            self.u8(0x41);
+            self.u8(0x83);
+            self.u8(0xB9);
+            self.d32(0);
+            self.u8(k);
+        }
+    }
+    /// p = the JsObj of `this`
+    fn this_obj_ptr(&mut self) {
+        if self.arm {
+            self.a_ldst_r(0xB980, 12, 5, OFF_I, 4);
+        } else {
+            // movsxd rax, [r9 + 4]
+            self.u8(0x49);
+            self.u8(0x63);
+            self.u8(0x81);
+            self.d32(OFF_I);
+        }
+        self.obj_from_index();
+    }
+    /// compare the int at [p+disp] with v (then jcc)
+    fn p_cmp32(&mut self, disp: int, v: int) {
+        if self.arm {
+            self.a_ldst_r(0xB940, 13, 12, disp, 4);
+            self.a_mov32(9, v);
+            // cmp w13, w9
+            self.w(0x6B09, (13 << 5) + 31);
+        } else {
+            // cmp dword [rax + disp], imm32
+            self.u8(0x81);
+            self.u8(0xB8);
+            self.d32(disp);
+            self.d32(v);
+        }
+    }
+    /// compare the kind at [p+disp] with a small k (then jcc)
+    fn p_cmp_kind(&mut self, disp: int, k: int) {
+        if self.arm {
+            self.a_ldst_r(0xB940, 13, 12, disp, 4);
+            self.w(0x7100 + (k >> 6), ((k & 63) << 10) + (13 << 5) + 31);
+        } else {
+            // cmp dword [rax + disp], imm8
+            self.u8(0x83);
+            self.u8(0xB8);
+            self.d32(disp);
+            self.u8(k);
+        }
+    }
+    /// p = the pointer at [p+disp]
+    fn p_load_ptr(&mut self, disp: int) {
+        if self.arm {
+            self.a_ldst_r(0xF940, 12, 12, disp, 8);
+        } else {
+            // mov rax, [rax + disp]
+            self.u8(0x48);
+            self.u8(0x8B);
+            self.u8(0x80);
+            self.d32(disp);
+        }
+    }
+    /// the Val at [p+pd] to [db+dd]
+    fn val_from_p(&mut self, db: int, dd: int, pd: int) {
+        if self.arm {
+            self.a_ldst_r(0xF940, 10, 12, pd, 8);
+            self.a_ldst_r(0xF940, 11, 12, pd + 8, 8);
+            self.a_ldst(0xF900, 10, db, dd, 8);
+            self.a_ldst(0xF900, 11, db, dd + 8, 8);
+        } else {
+            // movups xmm7, [rax + pd]
+            self.u8(0x0F);
+            self.u8(0x10);
+            self.u8(0xB8);
+            self.d32(pd);
+            self.u8(0x0F);
+            self.u8(0x11);
+            self.x_mem(7, Asm::x_base(db), dd);
+        }
+    }
+    /// the Val at [sb+sd] to [p+pd]
+    fn val_to_p(&mut self, pd: int, sb: int, sd: int) {
+        if self.arm {
+            self.a_ldst(0xF940, 10, sb, sd, 8);
+            self.a_ldst(0xF940, 11, sb, sd + 8, 8);
+            self.a_ldst_r(0xF900, 10, 12, pd, 8);
+            self.a_ldst_r(0xF900, 11, 12, pd + 8, 8);
+        } else {
+            self.u8(0x0F);
+            self.u8(0x10);
+            self.x_mem(7, Asm::x_base(sb), sd);
+            // movups [rax + pd], xmm7
+            self.u8(0x0F);
+            self.u8(0x11);
+            self.u8(0xB8);
+            self.d32(pd);
+        }
+    }
     fn prologue(&mut self) {
         if !self.arm {
             // push rbx; mov rbx, rcx
@@ -512,6 +665,40 @@ fn opnd_disp(x: int) -> int {
     if x >= 0 { x * VSZ } else { (-1 - x) * VSZ }
 }
 
+/// Where the object's parts lie in the C++ build (layout()): ok (1 when
+/// the table holds 16-byte std::shared_ptr entries), then the offsets of
+/// JsObj.shape, inl0, inl1, vals and Slots.v.
+const L_OK: usize = 0;
+const L_SHAPE: usize = 1;
+const L_INL0: usize = 2;
+const L_INL1: usize = 3;
+const L_VALS: usize = 4;
+const L_V: usize = 5;
+
+/// A property op whose site's cache (w3: shape * 65536 + slot) saw one
+/// shape: read or written in place behind a check of that shape.
+fn prop_site(kind: int, sub: int, w3: int, lay: &Vec<int>) -> bool {
+    if lay[L_OK] != 1 || w3 < 65536 {
+        return false;
+    }
+    // a far slot past what one AArch64 load reaches
+    if ((w3 & 65535) - 2) * VSZ + 8 >= 32760 {
+        return false;
+    }
+    kind == R_GET_PROP || kind == R_GET_THIS_PROP || (kind == R_SET_PROP && sub == 0)
+}
+
+/// Whether the op is one this file writes.
+fn handles(o: Op, lay: &Vec<int>) -> bool {
+    let w0 = (o.code as int);
+    let kind = w0 & 255;
+    let sub = (w0 >> 8) & 255;
+    if kind == R_GET_PROP || kind == R_GET_THIS_PROP || kind == R_SET_PROP {
+        return prop_site(kind, sub, (o.c as int), lay);
+    }
+    handled(kind, sub)
+}
+
 /// Whether the op kind is one this file writes.
 fn handled(kind: int, sub: int) -> bool {
     if kind == R_NOP || kind == R_MOVE || kind == R_LOAD2 || kind == R_ADD || kind == R_SUB || kind == R_MUL {
@@ -579,6 +766,53 @@ impl Cg {
             self.a.spend(l);
         }
         self.a.jmp(t);
+    }
+    /// p = the object's slot holder, and the slot's offset from it (the
+    /// shape checked: else back to the interpreter at pc)
+    fn slot_of(&mut self, slot: int, shape: int, pc: int, lay: &Vec<int>) -> int {
+        let ex = self.exit(pc);
+        self.a.p_cmp32(lay[L_SHAPE], shape);
+        self.a.jcc(C_NE, ex);
+        if slot == 0 {
+            return lay[L_INL0];
+        }
+        if slot == 1 {
+            return lay[L_INL1];
+        }
+        // the Slots object, then its vector's buffer
+        self.a.p_load_ptr(lay[L_VALS]);
+        self.a.p_load_ptr(lay[L_V]);
+        (slot - 2) * VSZ
+    }
+    /// dst = obj.prop (w2 the object; `this` for R_GET_THIS_PROP)
+    fn get_prop(&mut self, kind: int, dst: int, w2: int, c: int, pc: int, lay: &Vec<int>) {
+        let ex = self.exit(pc);
+        if kind == R_GET_THIS_PROP {
+            self.a.cmp_this_kind(5);
+            self.a.jcc(C_NE, ex);
+            self.a.this_obj_ptr();
+        } else {
+            self.a.cmp_kind(opnd_base(w2), opnd_disp(w2), 5);
+            self.a.jcc(C_NE, ex);
+            self.a.obj_ptr(opnd_base(w2), opnd_disp(w2));
+        }
+        let pd = self.slot_of(c & 65535, c >> 16, pc, lay);
+        self.a.val_from_p(B_SP, dst * VSZ, pd);
+    }
+    /// obj.prop = v, when neither v nor the old value is counted (both
+    /// undefined, null, a boolean or a number): no references to change
+    fn set_prop(&mut self, w1: int, w2: int, c: int, pc: int, lay: &Vec<int>) {
+        let ex = self.exit(pc);
+        self.a.load_kind(opnd_base(w2), opnd_disp(w2));
+        self.a.cmp_scratch(T_NUM);
+        self.a.jcc(C_A, ex);
+        self.a.cmp_kind(opnd_base(w1), opnd_disp(w1), 5);
+        self.a.jcc(C_NE, ex);
+        self.a.obj_ptr(opnd_base(w1), opnd_disp(w1));
+        let pd = self.slot_of(c & 65535, c >> 16, pc, lay);
+        self.a.p_cmp_kind(pd, T_NUM);
+        self.a.jcc(C_A, ex);
+        self.a.val_to_p(pd, opnd_base(w2), opnd_disp(w2));
     }
     /// to label `yes` when x is truthy (want true) or falsy (want false);
     /// a BigInt goes back to the interpreter
@@ -660,22 +894,55 @@ fn targets(ops: &Vec<Op>, rb: int, n: int) -> Vec<bool> {
     t
 }
 
+/// Where the interpreter comes back into the code: the op after each call
+/// (rvm.rs jit_res), so a function that calls goes on in compiled code.
+fn resumes(ops: &Vec<Op>, rb: int, n: int) -> Vec<bool> {
+    let mut t: Vec<bool> = Vec::new();
+    let mut i: int = 0;
+    while i < n {
+        t.push(false);
+        i += 1;
+    }
+    let mut pc: int = 0;
+    while pc < n {
+        let w0 = (ops[(rb + pc) as usize].code as int);
+        if (w0 & 255) == R_CALL {
+            let at = pc + 1 + (w0 >> 16);
+            if at < n {
+                t[at as usize] = true;
+            }
+        }
+        pc += 1;
+    }
+    t
+}
+
 /// The machine code of function rcode[rb .. rb + n] for AArch64 (arm) or
 /// x86-64, or an empty Vec when it has no loop the code handles.
-pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool) -> Vec<int> {
+pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool, lay: &Vec<int>) -> Vec<int> {
     let tg = targets(ops, rb, n);
+    let rs = resumes(ops, rb, n);
     let mut worth = false;
+    let mut count: int = 0;
     let mut pc: int = 0;
     while pc < n {
         let o = ops[(rb + pc) as usize];
         let w0 = (o.code as int);
         let kind = w0 & 255;
-        if handled(kind, (w0 >> 8) & 255) {
+        if handles(o, lay) {
             if kind == R_LOOP || (kind == R_JUMP && (o.a as int) <= pc) {
                 worth = true;
             }
+            if kind != R_NOP {
+                count += 1;
+            }
         }
         pc += 1;
+    }
+    // a function without a loop is entered at its start and after each
+    // call: worth it when it does some work here
+    if count >= 4 {
+        worth = true;
     }
     if !worth {
         return Vec::new();
@@ -693,8 +960,7 @@ pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool) -> Vec<int> {
     cg.a.prologue();
     pc = 0;
     while pc < n {
-        let w0 = (ops[(rb + pc) as usize].code as int);
-        if (pc == 0 || tg[pc as usize]) && handled(w0 & 255, (w0 >> 8) & 255) {
+        if (pc == 0 || tg[pc as usize] || rs[pc as usize]) && handles(ops[(rb + pc) as usize], lay) {
             cg.a.entry(pc, pc);
         }
         pc += 1;
@@ -715,10 +981,14 @@ pub fn compile(ops: &Vec<Op>, rb: int, n: int, arm: bool) -> Vec<int> {
         let w3 = (o.c as int);
         let next = pc + 1 + skip;
         let mut falls = true;
-        if !handled(kind, sub) {
+        if !handles(o, lay) {
             let l = cg.exit(pc);
             cg.a.jmp(l);
             falls = false;
+        } else if kind == R_GET_PROP || kind == R_GET_THIS_PROP {
+            cg.get_prop(kind, w1, w2, w3, pc, lay);
+        } else if kind == R_SET_PROP {
+            cg.set_prop(w1, w2, w3, pc, lay);
         } else if kind == R_NOP {
             // nothing
         } else if kind == R_MOVE {
@@ -853,9 +1123,25 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: int, pc: int, budget: int) -
         let n = vm.protos[pi].code.len() as int;
         if rb >= 0 && ((rb + n) as usize) <= vm.rcode.len() {
             let m = arch();
-            let code = if m > 0 { compile(&vm.rcode, rb, n, m == 2) } else { Vec::new() };
+            let lay = layout();
+            let code = if m > 0 { compile(&vm.rcode, rb, n, m == 2, &lay) } else { Vec::new() };
             if code.len() > 0 {
                 h = install(&code);
+            }
+            if h >= 0 {
+                // the interpreter comes back in after each call
+                let rs = resumes(&vm.rcode, rb, n);
+                let mut i: int = 0;
+                while i < n {
+                    if rs[i as usize] {
+                        let at = (rb + i) as usize;
+                        while vm.jit_res.len() <= at {
+                            vm.jit_res.push(false);
+                        }
+                        vm.jit_res[at] = true;
+                    }
+                    i += 1;
+                }
             }
         }
         vm.jit_fn[pi] = h;
@@ -863,7 +1149,8 @@ pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: int, pc: int, budget: int) -
     if h < 0 {
         return pc;
     }
-    let r = call(h, &vm.stack, bp, &vm.kvals, pc, budget);
+    let fi = vm.frames.len() - 1;
+    let r = call(h, &vm.stack, bp, &vm.kvals, pc, budget, &vm.objs, &vm.frames[fi].this_val);
     if r == pc {
         // back at once: the loop head starts with an op the code does not
         // do; after JIT_MISS_MAX of these the head is no longer entered
@@ -896,7 +1183,8 @@ fn arch() -> int {
     let m: int = ranger::native!(
         rust: 0,
         cpp: "njit_arch()",
-        cpp_polyfill: r#"#include <cstdint>
+        cpp_polyfill: r#"#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -908,7 +1196,7 @@ fn arch() -> int {
 #endif
 
 namespace njit_rt {
-typedef long long (*Fn)(void* sp, void* kv, long long pc, long long budget);
+typedef long long (*Fn)(void* sp, void* kv, long long pc, long long budget, void* objs, void* self);
 struct Code {
   void* p;
   size_t n;
@@ -978,16 +1266,34 @@ inline int njit_install(const std::vector<int>& bytes) {
 #endif
 }
 
-inline int njit_call(int h, void* sp, void* kv, int pc, int budget) {
+inline int njit_call(int h, void* sp, void* kv, int pc, int budget, void* objs, void* self) {
   njit_rt::Fn f = (njit_rt::Fn)njit_rt::codes()[(size_t)h].p;
-  return (int)f(sp, kv, pc, budget);
+  return (int)f(sp, kv, pc, budget, objs, self);
 }
 "#
     );
     m
 }
 
-fn call(h: int, stack: &Vec<Val>, bp: int, kv: &Vec<Val>, pc: int, budget: int) -> int {
-    let r: int = ranger::native!(rust: pc, cpp: "njit_call({h}, (void*)({stack}.data() + {bp}), (void*)({kv}.data()), {pc}, {budget})");
+fn call(h: int, stack: &Vec<Val>, bp: int, kv: &Vec<Val>, pc: int, budget: int, objs: &Vec<JsObj>, this: &Val) -> int {
+    let r: int = ranger::native!(rust: pc, cpp: "njit_call({h}, (void*)({stack}.data() + {bp}), (void*)({kv}.data()), {pc}, {budget}, (void*)({objs}.data()), (void*)(&{this}))");
     r
+}
+
+/// The object layout of the C++ build (L_OK..L_V); all 0 elsewhere.
+fn layout() -> Vec<int> {
+    let ok: int = ranger::native!(rust: 0, cpp: "((int)sizeof(std::shared_ptr<JsObj>) == 16 ? 1 : 0)");
+    let mut v: Vec<int> = Vec::new();
+    v.push(ok);
+    let a: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, shape)");
+    v.push(a);
+    let b: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, inl0)");
+    v.push(b);
+    let c: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, inl1)");
+    v.push(c);
+    let d: int = ranger::native!(rust: 0, cpp: "(int)offsetof(JsObj, vals)");
+    v.push(d);
+    let e: int = ranger::native!(rust: 0, cpp: "(int)offsetof(Slots, v)");
+    v.push(e);
+    v
 }
