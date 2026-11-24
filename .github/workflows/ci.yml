@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: terotests/Ranger
-          ref: 3d42a92d993da31c00c08a8404820f535d19d3b3
+          ref: 2efe4411cf394026e42e35a4915ec63220693426
           path: Ranger
           sparse-checkout: |
             dist
