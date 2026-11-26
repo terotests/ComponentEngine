@@ -2275,11 +2275,16 @@ impl Vm {
         let sp = self.string_proto;
         let slot = -16 - w3;
         let sh = self.ob(sp).shape;
-        // this site's key in the slot as last checked (sm_memo): same shape
-        // and epoch, so the slot still holds it as a data property
+        // this site's key in the slot as last checked (sm_memo, five
+        // numbers for each of 16 sites by site % 16): same shape and
+        // epoch, so the slot still holds it as a data property
         let site = rb + pc;
+        let e = ((site & 15) * 5) as usize;
+        while self.sm_memo.len() < 80 {
+            self.sm_memo.push(-1);
+        }
         let m = &self.sm_memo;
-        let known = m.len() >= 5 && i32_at(m, 0) == sh && i32_at(m, 1) == (self.shape_epoch as i32) && (i32_at(m, 2) as int) == slot && (i32_at(m, 3) as int) == site;
+        let known = i32_at(m, e) == sh && i32_at(m, e + 1) == (self.shape_epoch as i32) && (i32_at(m, e + 2) as int) == slot && (i32_at(m, e + 3) as int) == site;
         if !known {
             let atom = self.protos[self.frames[fi].proto as usize].code[pc as usize].a as int;
             if self.ic_slot(sp, atom, slot, false) < 0 {
@@ -2287,19 +2292,18 @@ impl Vm {
             }
             let f0 = obj_of(&slot_at(self.ob(sp), slot as usize));
             let cc = if f0 >= 0 && self.ob(f0).class == C_NATIVE && (self.ob(f0).func as int) == crate::builtins::NF_SP_CHARCODEAT { f0 } else { -1 };
-            self.sm_memo.clear();
-            self.sm_memo.push(sh);
-            self.sm_memo.push(self.shape_epoch as i32);
-            self.sm_memo.push(slot as i32);
-            self.sm_memo.push(site as i32);
-            self.sm_memo.push(cc as i32);
+            self.sm_memo[e] = sh;
+            self.sm_memo[e + 1] = self.shape_epoch as i32;
+            self.sm_memo[e + 2] = slot as i32;
+            self.sm_memo[e + 3] = site as i32;
+            self.sm_memo[e + 4] = cc as i32;
         }
         let v = *self.rget(bp, w2);
         let f = slot_at(self.ob(sp), slot as usize);
         let fo = obj_of(&f);
         // the native charCodeAt checked then (and still: the id could be
         // another object's by now)
-        if fo >= 0 && (fo as i32) == i32_at(&self.sm_memo, 4) && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_SP_CHARCODEAT {
+        if fo >= 0 && (fo as i32) == i32_at(&self.sm_memo, e + 4) && self.ob(fo).class == C_NATIVE && (self.ob(fo).func as int) == crate::builtins::NF_SP_CHARCODEAT {
             let to = self.r_char_code_call(bp, rb, pc, w0, w1, v);
             if to >= 0 {
                 return to;
