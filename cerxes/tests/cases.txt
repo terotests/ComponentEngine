@@ -959,3 +959,22 @@ function K(n) { this.v = k(n).v; }
 [g(300), h(300), k(150).v].join()
 ----
 303,303,153
+
+# JetStream 3 (2026-11-26): RegExp's legacy statics (ARES-6 Basic, WSL)
+==== js RegExp.lastMatch, rightContext, $1
+/^\s+/.test("  abc"); var a = [RegExp.lastMatch.length, RegExp.rightContext]; /(b)(c)/.exec("abcd"); "xay".replace(/a/, "-");
+a.concat([RegExp.$1, RegExp.lastMatch, RegExp["$`"], RegExp.leftContext]).join("|")
+----
+2|abc||a|x|x
+
+# parseInt past 15 digits is rounded once (RexBench OfflineAssembler)
+==== js parseInt of a long decimal
+[parseInt("18446462598732840000"), parseInt("123456789012345678")].join()
+----
+18446462598732840000,123456789012345680
+
+# Date.parse of what toString and toUTCString give (validatorjs)
+==== js Date.parse of toString and toUTCString forms
+[Date.parse("Sat Sep 10 2011 00:00:00 GMT+0000 (Coordinated Universal Time)"), Date.parse("Thu, 01 Jan 1970 02:00:00 GMT+0200"), Date.parse("Sep 10 2011 10:00 PM GMT"), Date.parse("foo")].join()
+----
+1315612800000,0,1315692000000,NaN
