@@ -1017,3 +1017,14 @@ f64[0] = -2.5; f64[1] = 1e-310; i32[4] = -5; u16[10] = 65535; f32[6] = 0.1; f32[
 [f64[0], f64[1], i32[0], i32[1], u16[3], i32[4], u16[10], u16[11], f32[6], 1 / f32[7], i8[32], dv.getFloat64(33), dv.getUint32(41, true), dv.getUint32(41), f32[0], Array.prototype.slice.call(new Uint8Array(b), 24, 48).join(" ")].join()
 ----
 -2.5,1e-310,0,-1073479680,49156,-5,65535,0,0.10000000149011612,-Infinity,-1,3.141592653589793,3735928559,4022250974,0,205 204 204 61 0 0 0 128 255 64 9 33 251 84 68 45 24 239 190 173 222 0 0 0
+
+# a buffer of a multiple of 4 bytes holds them as words, another one as
+# bytes: narrow kinds inside a word, NaN, a copy between the two, a copy
+# inside one, a slice
+==== js typed arrays over words and bytes
+var w = new ArrayBuffer(16), o = new ArrayBuffer(15), wi8 = new Int8Array(w), wf = new Float32Array(w), wu16 = new Uint16Array(w), wi16 = new Int16Array(w), wu8 = new Uint8Array(w), ou8 = new Uint8Array(o), ow = new DataView(o);
+wi8[3] = -1; wi8[5] = -128; wf[2] = NaN; wi16[6] = -300; wu16[7] = 70000; wu8[1] = 300; ow.setInt32(3, -2); ow.setFloat32(9, 1.5, true);
+ou8.set(wu8.subarray(2, 9), 1); wu8.copyWithin(9, 0, 6);
+[wf[0] < -1.7e38, wi16[1], wu16[2], wi8[5], new Uint32Array(w)[2], wi16[6], wu16[7], wu8[1], Array.prototype.join.call(wu8, " "), Array.prototype.join.call(ou8, " "), ow.getInt32(3), new Uint8Array(w.slice(5, 11)).join(" ")].join()
+----
+true,-256,32768,-128,2883584,255,4480,44,0 44 0 255 0 128 0 0 0 0 44 0 255 0 128 17,0 0 255 0 128 0 0 0 0 0 0 192 63 0 0,8388608,128 0 0 0 0 44

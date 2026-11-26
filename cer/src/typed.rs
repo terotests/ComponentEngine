@@ -5,13 +5,17 @@
 //!
 //! An ArrayBuffer (C_ARRAYBUFFER) keeps its contents in `nums`; `pos` has
 //! bit 1 when detached and bit 2 when shared. `home` says what `nums`
-//! holds: the bytes (TK_UINT8), the bytes of a buffer nothing has read or
-//! written yet (-1, all zero), or the elements of one kind. The first
-//! typed array over the whole of a new buffer makes it hold its elements
-//! (`new Float64Array(n)`: one double per element, read and written as they
-//! are); anything else that looks at it -- a view of another kind, a
-//! DataView, a copy that is not whole elements -- turns it into bytes for
-//! good. A typed array (C_TYPED) is a view: `env` the buffer, `pos` the
+//! holds: the bytes (TK_UINT8), the bytes four to a slot (TK_WORDS), the
+//! bytes of a buffer nothing has read or written yet (-1, all zero), or the
+//! elements of one kind. The first typed array over the whole of a new
+//! buffer makes it hold its elements (`new Float64Array(n)`: one double per
+//! element, read and written as they are); anything else that looks at it
+//! -- a view of another kind, a DataView, a copy that is not whole
+//! elements -- turns it into words for good (bytes when its length is not
+//! a multiple of 4, or a BigInt view or a resize needs them: a heap of one
+//! buffer under views of every kind, as compiled C keeps it, takes a
+//! quarter of the memory as words, and an aligned 32-bit access is one
+//! slot). A typed array (C_TYPED) is a view: `env` the buffer, `pos` the
 //! element kind, `func` the byte offset, `prim` the length. Floats are
 //! encoded by arithmetic, so every Ranger target writes the same bytes.
 
@@ -32,6 +36,9 @@ pub const TK_FLOAT64: int = 8;
 pub const TK_BIGINT64: int = 9;
 pub const TK_BIGUINT64: int = 10;
 pub const TK_FLOAT16: int = 11;
+/// Not a kind: an ArrayBuffer's `home` when `nums` holds its bytes four to
+/// a slot, a little-endian 32-bit word each.
+pub const TK_WORDS: int = 12;
 
 /// A BigInt64 / BigUint64 kind.
 pub fn is_big(kind: int) -> bool {
@@ -229,9 +236,33 @@ fn f64_words(x: double) -> (double, double) {
 /// unsigned numbers: the four least significant, then the four above
 /// them. Rust: as integers.
 #[ranger::target(rust)]
-fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool) -> (double, double) {
+fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool, words: bool) -> (double, double) {
     let nums = &colds[c].nums;
     let a = at as usize;
+    if words {
+        // four bytes a slot: an aligned word (or two) as it is, a byte or
+        // two inside one word by a shift
+        if little && (a & 3) == 0 {
+            if size == 4 {
+                return (nums[a >> 2], 0.0);
+            }
+            if size == 8 {
+                return (nums[a >> 2], nums[(a >> 2) + 1]);
+            }
+        }
+        if little && size <= 2 && (a & 3) + (size as usize) <= 4 {
+            let m: u32 = if size == 1 { 255 } else { 65535 };
+            return ((((nums[a >> 2] as u32) >> ((a & 3) * 8)) & m) as f64, 0.0);
+        }
+        let mut v: u64 = 0;
+        let mut k: int = 0;
+        while k < size {
+            let idx = (if little { at + k } else { at + size - 1 - k }) as usize;
+            v |= ((((nums[idx >> 2] as u32) >> ((idx & 3) * 8)) & 255) as u64) << (8 * k);
+            k += 1;
+        }
+        return ((v & 0xffffffff) as f64, (v >> 32) as f64);
+    }
     if little {
         // the common case, unrolled: whole elements, least significant first
         if size == 4 {
@@ -256,14 +287,14 @@ fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool) -> (
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool) -> (double, double) {
+fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool, words: bool) -> (double, double) {
     let mut lo: double = 0.0;
     let mut hi: double = 0.0;
     let mut mul: double = 1.0;
     let mut k: int = 0;
     while k < size {
         let idx = if little { at + k } else { at + size - 1 - k };
-        let byte = colds[c].nums[idx as usize];
+        let byte = if words { word_byte(colds[c].nums[(idx / 4) as usize], idx % 4) } else { colds[c].nums[idx as usize] };
         if k < 4 {
             lo = lo + byte * mul;
         } else {
@@ -279,10 +310,39 @@ fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool) -> (
 /// four above them) as `size` bytes at `at` of colds[c].nums. Rust: as
 /// integers.
 #[ranger::target(rust)]
-fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi: double, little: bool) {
+fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi: double, little: bool, words: bool) {
     let v: u64 = (lo as u64) | ((hi as u64) << 32);
     let nums = &mut colds[c].nums;
     let a = at as usize;
+    if words {
+        if little && (a & 3) == 0 {
+            if size == 4 {
+                nums[a >> 2] = (v as u32) as f64;
+                return;
+            }
+            if size == 8 {
+                nums[a >> 2] = (v as u32) as f64;
+                nums[(a >> 2) + 1] = (v >> 32) as f64;
+                return;
+            }
+        }
+        if little && size <= 2 && (a & 3) + (size as usize) <= 4 {
+            let m: u32 = if size == 1 { 255 } else { 65535 };
+            let sh = (a & 3) * 8;
+            let w = nums[a >> 2] as u32;
+            nums[a >> 2] = ((w & !(m << sh)) | (((v as u32) & m) << sh)) as f64;
+            return;
+        }
+        let mut k: int = 0;
+        while k < size {
+            let idx = (if little { at + k } else { at + size - 1 - k }) as usize;
+            let sh = (idx & 3) * 8;
+            let w = nums[idx >> 2] as u32;
+            nums[idx >> 2] = ((w & !(255u32 << sh)) | ((((v >> (8 * k)) & 255) as u32) << sh)) as f64;
+            k += 1;
+        }
+        return;
+    }
     if little && size <= 4 {
         // the common case: whole elements, least significant first
         let w = v as u32;
@@ -305,7 +365,7 @@ fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi: double, little: bool) {
+fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi: double, little: bool, words: bool) {
     let mut l = lo;
     let mut h = hi;
     let mut k: int = 0;
@@ -313,7 +373,12 @@ fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi
         let idx = if little { at + k } else { at + size - 1 - k };
         let src = if k < 4 { l } else { h };
         let q = floor(src / 256.0);
-        colds[c].nums[idx as usize] = src - q * 256.0;
+        if words {
+            let w = colds[c].nums[(idx / 4) as usize];
+            colds[c].nums[(idx / 4) as usize] = w + (src - q * 256.0 - word_byte(w, idx % 4)) * word_mul(idx % 4);
+        } else {
+            colds[c].nums[idx as usize] = src - q * 256.0;
+        }
         if k < 4 {
             l = q;
         } else {
@@ -321,6 +386,103 @@ fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi
         }
         k += 1;
     }
+}
+
+/// A view's element at byte `at` (aligned to its size, as views are) of a
+/// buffer holding words: (true, the number) where this target reads it
+/// straight from the word, else (false, 0) and bytes_read does it. Rust:
+/// every kind but the BigInt ones; the rest: none.
+#[ranger::target(rust)]
+#[inline]
+fn words_get(colds: &Vec<Cold>, c: usize, at: int, kind: int) -> (bool, double) {
+    let nums = &colds[c].nums;
+    if nums.len() == 0 || colds[c].home != TK_WORDS {
+        return (false, 0.0);
+    }
+    let a = at as usize;
+    let w = nums[a >> 2] as u32;
+    let sh = (a & 3) * 8;
+    let x = match kind {
+        TK_INT8 => ((w >> sh) as u8 as i8) as f64,
+        TK_UINT8 | TK_UINT8C => ((w >> sh) & 255) as f64,
+        TK_INT16 => ((w >> sh) as u16 as i16) as f64,
+        TK_UINT16 => ((w >> sh) & 65535) as f64,
+        TK_INT32 => (w as i32) as f64,
+        TK_UINT32 => w as f64,
+        TK_FLOAT32 => f32::from_bits(w) as f64,
+        TK_FLOAT64 => f64::from_bits((w as u64) | ((nums[(a >> 2) + 1] as u32 as u64) << 32)),
+        _ => return (false, 0.0),
+    };
+    (true, x)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn words_get(colds: &Vec<Cold>, c: usize, at: int, kind: int) -> (bool, double) {
+    (false, 0.0)
+}
+
+/// Writes `x` (a number) as a view's element at byte `at` (aligned) of a
+/// buffer holding words, where this target writes it straight into the
+/// word: true then, false when nothing was written (bytes_write does it).
+/// Rust: the integer kinds for a number below 2^63 (ToInt32 and the rest
+/// are its low bits truncated), Float32 and Float64, NaN as one NaN.
+#[ranger::target(rust)]
+#[inline]
+fn words_put(colds: &mut Vec<Cold>, c: usize, at: int, kind: int, x: double) -> bool {
+    if colds[c].home != TK_WORDS {
+        return false;
+    }
+    let a = at as usize;
+    let k = a >> 2;
+    let nums = &mut colds[c].nums;
+    if kind == TK_FLOAT64 {
+        let v = if x.is_nan() { 0x7ff8000000000000u64 } else { x.to_bits() };
+        nums[k] = (v as u32) as f64;
+        nums[k + 1] = (v >> 32) as f64;
+        return true;
+    }
+    let v: u32 = if kind == TK_FLOAT32 {
+        if x.is_nan() { 0x7fc00000 } else { (x as f32).to_bits() }
+    } else if kind == TK_UINT8C || kind > TK_FLOAT64 || !(x > -9.2e18 && x < 9.2e18) {
+        return false;
+    } else {
+        (x as i64) as u32
+    };
+    let size = kind_size(kind);
+    if size == 4 {
+        nums[k] = v as f64;
+        return true;
+    }
+    let sh = (a & 3) * 8;
+    let m: u32 = if size == 1 { 255 } else { 65535 };
+    let w = nums[k] as u32;
+    nums[k] = ((w & !(m << sh)) | ((v & m) << sh)) as f64;
+    true
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn words_put(colds: &mut Vec<Cold>, c: usize, at: int, kind: int, x: double) -> bool {
+    false
+}
+
+/// 256 to the power `r` (0..3): where byte `r` of a word starts.
+fn word_mul(r: int) -> double {
+    if r == 0 {
+        1.0
+    } else if r == 1 {
+        256.0
+    } else if r == 2 {
+        65536.0
+    } else {
+        16777216.0
+    }
+}
+
+/// Byte `r` (0 the least significant) of word `w` (an unsigned 32-bit
+/// number).
+fn word_byte(w: double, r: int) -> double {
+    let q = floor(w / word_mul(r));
+    q - floor(q / 256.0) * 256.0
 }
 
 /// `x` (a number) as a `kind` integer element's bits, unsigned: an
@@ -373,6 +535,15 @@ pub fn copy_nums(colds: &mut Vec<Cold>, sc: usize, s0: usize, tc: usize, d0: usi
 pub fn kind_shift(kind: int) -> int {
     // two bits a kind, TK_INT8 (0) to TK_FLOAT16 (11): 0 0 0 1 1 2 2 2 3 3 3 1
     (8366400 >> (2 * kind)) & 3
+}
+
+/// The bytes a slot of a buffer's `nums` holds under `home` = `mode`.
+pub fn mode_size(mode: int) -> int {
+    if mode == TK_WORDS {
+        4
+    } else {
+        kind_size(mode)
+    }
 }
 
 pub fn kind_size(kind: int) -> int {
@@ -825,16 +996,36 @@ impl Vm {
         if mode < 0 {
             n
         } else {
-            n * kind_size(mode)
+            n * mode_size(mode)
         }
     }
 
-    /// Makes buffer `b` hold its bytes, if it holds elements.
+    /// Makes buffer `b` hold its bytes one a slot, if it holds elements or
+    /// words.
     pub fn buf_to_bytes(&mut self, b: int) {
         let mode = self.colds[self.objs[b as usize].cold as usize].home;
         if mode < 0 || mode == TK_UINT8 {
             let cid = self.cold_id(b) as usize;
             self.colds[cid].home = TK_UINT8;
+            return;
+        }
+        if mode == TK_WORDS {
+            let c = self.cold_id(b) as usize;
+            let ws = self.colds[c].nums.clone();
+            self.colds[c].nums = zeros((ws.len() as int) * 4);
+            self.colds[c].home = TK_UINT8;
+            let mut i: usize = 0;
+            while i < ws.len() {
+                let mut w = ws[i];
+                let mut k: usize = 0;
+                while w != 0.0 && k < 4 {
+                    let q = floor(w / 256.0);
+                    self.colds[c].nums[i * 4 + k] = w - q * 256.0;
+                    w = q;
+                    k += 1;
+                }
+                i += 1;
+            }
             return;
         }
         // zeros, then each element that is not +0 written over them
@@ -853,17 +1044,46 @@ impl Vm {
         }
     }
 
+    /// Makes buffer `b` hold its bytes: as words when its byte length is a
+    /// multiple of 4 and nothing made it bytes already, else one a slot.
+    pub fn buf_to_mixed(&mut self, b: int) {
+        let mode = self.colds[self.objs[b as usize].cold as usize].home;
+        if mode == TK_UINT8 || mode == TK_WORDS {
+            return;
+        }
+        let n = self.buf_size(b);
+        if n % 4 != 0 || self.buf_resizable(b) {
+            self.buf_to_bytes(b);
+            return;
+        }
+        let c = self.cold_id(b) as usize;
+        let old = self.colds[c].nums.clone();
+        self.colds[c].nums = zeros(n / 4);
+        self.colds[c].home = TK_WORDS;
+        // zeros, then each element (or byte) that is not +0 written over
+        let k = if mode < 0 { TK_UINT8 } else { mode };
+        let size = kind_size(k);
+        let mut i: usize = 0;
+        while i < old.len() {
+            let x = old[i];
+            if x != 0.0 || 1.0 / x < 0.0 {
+                self.bytes_write(b, (i as int) * size, k, x, true);
+            }
+            i += 1;
+        }
+    }
+
     /// Reads a `kind` element at byte `at` of buffer `b`.
     pub fn buf_read(&mut self, b: int, at: int, kind: int, little: bool) -> double {
-        self.buf_to_bytes(b);
+        self.buf_to_mixed(b);
         self.bytes_read(b, at, kind, little)
     }
 
-    /// buf_read for a buffer that holds bytes already.
+    /// buf_read for a buffer that holds bytes (or words) already.
     fn bytes_read(&self, b: int, at: int, kind: int, little: bool) -> double {
         let c = self.objs[b as usize].cold as usize;
         let size = kind_size(kind);
-        let (lo, hi) = get_bytes(&self.colds, c, at, size, little);
+        let (lo, hi) = get_bytes(&self.colds, c, at, size, little, self.colds[c].home == TK_WORDS);
         if kind == TK_FLOAT32 {
             return f32_of_bits(lo);
         }
@@ -887,11 +1107,11 @@ impl Vm {
 
     /// Writes `x` (a number already) as a `kind` element at byte `at`.
     pub fn buf_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
-        self.buf_to_bytes(b);
+        self.buf_to_mixed(b);
         self.bytes_write(b, at, kind, x, little);
     }
 
-    /// buf_write for a buffer that holds bytes already.
+    /// buf_write for a buffer that holds bytes (or words) already.
     fn bytes_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
         let size = kind_size(kind);
         let mut hi: double = 0.0;
@@ -908,10 +1128,11 @@ impl Vm {
             uint_bits(kind, x)
         };
         let c = self.objs[b as usize].cold as usize;
-        put_bytes(&mut self.colds, c, at, size, lo, hi, little);
+        let words = self.colds[c].home == TK_WORDS;
+        put_bytes(&mut self.colds, c, at, size, lo, hi, little, words);
     }
 
-    /// The byte where `ta[i]` starts when its buffer holds bytes (a view
+    /// The byte where `ta[i]` starts when its buffer holds bytes or words (a view
     /// of another kind made it so) and the access needs nothing else: a
     /// fixed-length view, not a BigInt kind, over a buffer neither
     /// detached nor resizable, `i` inside it. -1 otherwise.
@@ -932,7 +1153,7 @@ impl Vm {
         }
         let bc = crate::rvm::cold_at(&self.colds, bo.cold as usize);
         let kind = ob.pos as int;
-        if bc.prim.is_num() || bc.home != TK_UINT8 || is_big(kind) {
+        if bc.prim.is_num() || (bc.home != TK_UINT8 && bc.home != TK_WORDS) || is_big(kind) {
             return -1;
         }
         (ob.func as int) + (i << kind_shift(kind))
@@ -946,6 +1167,11 @@ impl Vm {
             return (false, 0.0);
         }
         let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        let c = crate::rvm::obj_at(&self.objs, ob.env as usize).cold as usize;
+        let (done, x) = words_get(&self.colds, c, at, ob.pos as int);
+        if done {
+            return (true, x);
+        }
         (true, self.bytes_read(ob.env as int, at, ob.pos as int, true))
     }
 
@@ -958,7 +1184,10 @@ impl Vm {
         }
         let b = self.objs[o as usize].env as int;
         let kind = self.objs[o as usize].pos as int;
-        self.bytes_write(b, at, kind, x, true);
+        let c = self.objs[b as usize].cold as usize;
+        if !words_put(&mut self.colds, c, at, kind, x) {
+            self.bytes_write(b, at, kind, x, true);
+        }
         true
     }
 
@@ -1414,53 +1643,14 @@ impl Vm {
         true
     }
 
-    /// buf_read for a DataView: integer kinds straight from the bytes.
+    /// buf_read for a DataView.
     fn dv_read(&mut self, b: int, at: int, kind: int, little: bool) -> double {
-        if kind == TK_FLOAT32 || kind == TK_FLOAT64 || kind == TK_FLOAT16 {
-            return self.buf_read(b, at, kind, little);
-        }
-        self.buf_to_bytes(b);
-        let size = kind_size(kind);
-        let c = self.objs[b as usize].cold as usize;
-        // in doubles: a 32-bit int (C++) would overflow at 4 bytes
-        let mut u: double = 0.0;
-        let mut k: int = 0;
-        while k < size {
-            let idx = if little { at + size - 1 - k } else { at + k };
-            u = u * 256.0 + self.colds[c].nums[idx as usize];
-            k += 1;
-        }
-        if kind == TK_INT8 && u >= 128.0 {
-            u -= 256.0;
-        } else if kind == TK_INT16 && u >= 32768.0 {
-            u -= 65536.0;
-        } else if kind == TK_INT32 && u >= 2147483648.0 {
-            u -= 4294967296.0;
-        }
-        u
+        self.buf_read(b, at, kind, little)
     }
 
-    /// buf_write for a DataView: integer kinds straight to the bytes.
+    /// buf_write for a DataView.
     fn dv_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
-        if kind == TK_FLOAT32 || kind == TK_FLOAT64 || kind == TK_FLOAT16 || !(x > -9007199254740992.0 && x < 9007199254740992.0) {
-            self.buf_write(b, at, kind, x, little);
-            return;
-        }
-        self.buf_to_bytes(b);
-        let size = kind_size(kind);
-        // ToInt8 … ToUint32: the low bits of the truncated number, in
-        // doubles (exact below 2^53; a 32-bit int would overflow)
-        let tr = if x < 0.0 { -((-x).floor()) } else { x.floor() };
-        let mut u = tr - (tr / 4294967296.0).floor() * 4294967296.0;
-        let c = self.objs[b as usize].cold as usize;
-        let mut k: int = 0;
-        while k < size {
-            let idx = if little { at + k } else { at + size - 1 - k };
-            let q = (u / 256.0).floor();
-            self.colds[c].nums[idx as usize] = u - q * 256.0;
-            u = q;
-            k += 1;
-        }
+        self.buf_write(b, at, kind, x, little);
     }
 
     /// NF_TA_LEN: `this.length` for a typed array (0 when detached or out
@@ -1740,7 +1930,7 @@ impl Vm {
             let ms = self.colds[self.objs[s as usize].cold as usize].home;
             let mut md = self.colds[self.objs[d as usize].cold as usize].home;
             if ms > TK_UINT8 || ms == TK_INT8 {
-                let size = kind_size(ms);
+                let size = mode_size(ms);
                 if md < 0 && ts == 0 && n == self.buf_size(d) && n % size == 0 {
                     let z = zeros(n / size);
                     self.note_buf_bytes((z.len() as int) * 8);
@@ -1764,17 +1954,30 @@ impl Vm {
                     return Val::Undef();
                 }
             }
-            self.buf_to_bytes(s);
-            self.buf_to_bytes(d);
+            self.buf_to_mixed(s);
+            self.buf_to_mixed(d);
             let mut tmp: Vec<double> = Vec::new();
             let mut i = 0;
+            if self.colds[self.objs[s as usize].cold as usize].home == TK_UINT8 && self.colds[self.objs[d as usize].cold as usize].home == TK_UINT8 {
+                while i < n {
+                    tmp.push(self.colds[self.objs[s as usize].cold as usize].nums[(fs + i) as usize]);
+                    i += 1;
+                }
+                i = 0;
+                while i < n {
+                    { let c = self.cold_id(d) as usize; self.colds[c].nums[(ts + i) as usize] = tmp[i as usize]; }
+                    i += 1;
+                }
+                return Val::Undef();
+            }
+            // words on either side: byte by byte through them
             while i < n {
-                tmp.push(self.colds[self.objs[s as usize].cold as usize].nums[(fs + i) as usize]);
+                tmp.push(self.bytes_read(s, fs + i, TK_UINT8, true));
                 i += 1;
             }
             i = 0;
             while i < n {
-                { let c = self.cold_id(d) as usize; self.colds[c].nums[(ts + i) as usize] = tmp[i as usize]; }
+                self.bytes_write(d, ts + i, TK_UINT8, tmp[i as usize], true);
                 i += 1;
             }
             return Val::Undef();
