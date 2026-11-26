@@ -5,6 +5,7 @@
 
 import { WORKLOADS, SAMPLE, SAMPLES, wrap } from "./workloads.js";
 import { setupZoo } from "./zoo.js";
+import { setupJetStream } from "./jetstream.js";
 
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -387,7 +388,7 @@ function esc(s) {
 }
 
 function tabs() {
-  const ids = ["bench", "zoo", "editor", "about"];
+  const ids = ["bench", "zoo", "js3", "editor", "about"];
   const show = (id) => {
     for (const t of ids) {
       $("tab-" + t).setAttribute("aria-selected", String(t === id));
@@ -419,6 +420,7 @@ async function main() {
   renderAbout();
   tabs();
   setupZoo({ chosen, runnerFor, store, rev: manifest.rev || manifest.built, setEngineState });
+  setupJetStream({ chosen, runnerFor, store, rev: manifest.rev || manifest.built, setEngineState });
   renderSummary([], []);
 
   const code = $("code");

@@ -173,3 +173,9 @@ textarea#code {
 .zoo-details .why { color: var(--text-muted); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
 .zoo-details .err { color: var(--bad); }
 progress { width: 140px; }
+.results.js3 td:first-child, .results.js3 th:first-child { text-align: left; }
+.results.js3 tr.member td { font-size: 12px; color: var(--text-secondary); }
+.results.js3 tr.member td:first-child { padding-left: 24px; }
+.results.js3 tr.total td { border-bottom: 2px solid var(--border); }
+.js3-skipped { font-size: 13px; color: var(--text-secondary); }
+.workload-list .ratio { color: var(--text-muted); font-size: 11px; }

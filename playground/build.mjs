@@ -19,6 +19,8 @@
 //   sandbox/           the sandbox demo: four CErXes engines (wasm/cerxes.wasm)
 //                      running endless programs in time slices on the page,
 //                      in Web Workers or in iframes
+//   jetstream/         JetStream 3's JavaScript benchmarks (jetstream/update.mjs
+//                      fetches them from WebKit/JetStream at a pinned revision)
 //   travel/            the travelling-engine demo: snapshot speed, and one
 //                      query over hosts in Web Workers three ways
 //
@@ -327,6 +329,13 @@ if (!status["cerxes-wasm"]) {
 // The zoo ranking's material (zoo/update.mjs refreshes it): Octane suites,
 // conformance tests, zoo.js.org's published results.
 fs.cpSync(path.join(HERE, "zoo"), path.join(DIST, "zoo"), { recursive: true, filter: (f) => !f.endsWith(".mjs") });
+
+// JetStream 3's JavaScript benchmarks for the "JetStream 3" tab: fetched at
+// a pinned revision (a sparse checkout in jetstream/JetStream, git ignored)
+// and written to dist/jetstream by jetstream/update.mjs.
+step("jetstream", () => {
+  log(run(process.execPath, [path.join(HERE, "jetstream/update.mjs"), "--out=" + path.join(DIST, "jetstream")]).trim());
+});
 
 // ---- the manifest ---------------------------------------------------------
 

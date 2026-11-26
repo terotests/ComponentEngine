@@ -26,6 +26,7 @@
       <nav class="tabs" role="tablist">
         <button role="tab" id="tab-bench" aria-selected="true" aria-controls="panel-bench">Benchmark</button>
         <button role="tab" id="tab-zoo" aria-selected="false" aria-controls="panel-zoo">Zoo ranking</button>
+        <button role="tab" id="tab-js3" aria-selected="false" aria-controls="panel-js3">JetStream 3</button>
         <button role="tab" id="tab-editor" aria-selected="false" aria-controls="panel-editor">Editor</button>
         <button role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about">Engines</button>
       </nav>
@@ -100,6 +101,37 @@
       <div class="table-wrap"><table id="zoo-table" class="results zoo"></table></div>
       <h3>Conformance details</h3>
       <div id="zoo-details" class="zoo-details"><p class="note">Run the conformance tests to see what each engine fails.</p></div>
+    </section>
+
+    <section id="panel-js3" role="tabpanel" aria-labelledby="tab-js3" hidden>
+      <p class="note zoo-intro">The JavaScript benchmarks of WebKit's <a href="https://github.com/WebKit/JetStream" target="_blank" rel="noopener">JetStream 3</a>
+        (those it runs by default), run in every ticked engine as JetStream's shell driver runs them: each benchmark in a fresh realm
+        (for the browser's own engine, a fresh worker): its preloads, its files and JetStream's runner as one script. Scored as JetStream scores:
+        5000 / ms for the first iteration, the worst few after it and their average, a benchmark's score the geometric mean of those,
+        the total the geometric mean of the benchmarks. With fewer iterations than JetStream's own the scores are not JetStream's official
+        numbers, but every engine runs the same plan. The ratio next to a score is how many times slower the engine is than this browser.</p>
+      <div class="controls">
+        <label>Iterations <select id="js3-iter">
+          <option value="1">1 (first only)</option><option value="5" selected>at most 5</option><option value="20">at most 20</option><option value="0">JetStream's own (up to 120)</option>
+        </select></label>
+        <label>Time limit per benchmark <select id="js3-limit">
+          <option value="120000">2 min</option><option value="600000" selected>10 min</option><option value="1800000">30 min</option>
+        </select></label>
+        <button id="js3-run" class="primary">Run JetStream</button>
+        <button id="js3-stop" disabled>Stop</button>
+        <button id="js3-clear">Clear results</button>
+        <progress id="js3-progress" hidden></progress>
+        <span id="js3-status" class="status" aria-live="polite"></span>
+      </div>
+      <details class="workloads">
+        <summary id="js3-list-summary">Benchmarks (<span id="js3-count"></span>)</summary>
+        <div class="controls"><button id="js3-all" type="button">All</button> <button id="js3-none" type="button">None</button></div>
+        <div id="js3-list" class="workload-list"></div>
+      </details>
+      <p class="note"><span id="js3-source"></span> Hover a score for its subscores; ✗ shows why an engine failed.</p>
+      <div class="table-wrap"><table id="js3-table" class="results js3"></table></div>
+      <h3>Left out</h3>
+      <ul id="js3-skipped" class="js3-skipped"></ul>
     </section>
 
     <section id="panel-editor" role="tabpanel" aria-labelledby="tab-editor" hidden>

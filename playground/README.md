@@ -56,6 +56,17 @@ material and its licences are in `zoo/`.
 CEr's WASM build calls the few WASI functions it needs (clock, random,
 stdout) through `src/wasi.js`; there are no files and no network.
 
+## JetStream 3
+
+The **JetStream 3** tab runs the 63 JavaScript benchmarks of WebKit's
+[JetStream 3](https://github.com/WebKit/JetStream) default set in every
+ticked engine, each in a fresh realm, as JetStream's shell driver runs them,
+and scores them as JetStream does (5000 / ms for the first iteration, the
+worst few and the average; geometric means up from there). Iterations can be
+capped (default 5) so an interpreter finishes in reasonable time; every
+engine runs the same plan. The WebAssembly and Web Worker benchmarks are
+listed as left out. Material and licences: `jetstream/README.md`.
+
 ## CErXes sandbox demo
 
 **Live:** <https://terotests.github.io/ComponentEngine/sandbox/>
