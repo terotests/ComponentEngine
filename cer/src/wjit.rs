@@ -5642,7 +5642,7 @@ impl<'a> Cg<'a> {
                 }
             }
             R_GET_GLOBAL | R_GET_ENV | R_SET_ENV | R_THIS | R_TYPEOF | R_CHECK | R_STEP_PUSH | R_STEP_K | R_STEP0 | R_GET_METHOD
-            | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_NEW_ARRAY | R_SET_GLOBAL | R_CLOSURE | R_INIT_PROP | R_WIN => {
+            | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_NEW_ARRAY | R_SET_GLOBAL | R_CLOSURE | R_INIT_PROP | R_WIN | R_GET_PRIVATE | R_SET_PRIVATE => {
                 let next = p + 1 + ((w0 >> 16) as i64);
                 self.helper(H_OP, p, next);
                 true
@@ -8265,6 +8265,8 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             }
         }
         R_STEP_PUSH => vm.r_step_push(pi, bp, fi, pc, w1),
+        R_GET_PRIVATE => vm.r_get_private_slow(pi, rb, bp, fi, pc, w1, w2),
+        R_SET_PRIVATE => vm.r_set_private_slow(pi, rb, bp, fi, pc, w1, w2),
         R_STEP_K => {
             if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
                 // debug: HCOUNT[1300 + the stack op]

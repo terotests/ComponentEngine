@@ -1194,6 +1194,29 @@ impl Vm {
                             }
                         }
                     }
+                    R_GET_PRIVATE => {
+                        if let Some(o) = (self.rget(bp, (w2 as int))).as_obj() {
+                            if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
+                                let r = slot_at(self.ob(o), (w3 & 65535) as usize);
+                                self.rset((bp + (w1 as int)) as usize, r);
+                                pc = (pc + 1 + ((w0 >> 16) as int));
+                                continue;
+                            }
+                        }
+                        self.r_get_private_slow(pi, rb, bp, fi, pc, (w1 as int), (w2 as int));
+                    }
+                    R_SET_PRIVATE => {
+                        if let Some(o) = (self.rget(bp, (w1 as int))).as_obj() {
+                            if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
+                                let val = *self.rget(bp, (w2 as int));
+                                self.put_slot(o, (w3 & 65535) as int, val);
+                                self.rset((bp + (w1 as int)) as usize, val);
+                                pc = (pc + 1 + ((w0 >> 16) as int));
+                                continue;
+                            }
+                        }
+                        self.r_set_private_slow(pi, rb, bp, fi, pc, (w1 as int), (w2 as int));
+                    }
                     R_TYPEOF => {
                         let v = self.rget(bp, (w2 as int)).clone();
                         let t = self.type_val(&v);
@@ -1480,6 +1503,102 @@ impl Vm {
         self.ta_len_hit(o)
     }
 
+    /// R_SET_PRIVATE past its inline cache: an own data field fills the
+    /// cache; anything else as Vm::priv_set (an accessor's setter, the
+    /// TypeErrors).
+    pub fn r_set_private_slow(&mut self, pi: usize, rb: int, bp: int, fi: usize, pc: int, w1: int, w2: int) {
+        let op = self.protos[pi].code[pc as usize];
+        let a = op.a as int;
+        let v = *self.rget(bp, w1);
+        let val = *self.rget(bp, w2);
+        if let Some(o) = v.as_obj() {
+            let s = self.find(o, a);
+            if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
+                self.put_slot(o, s, val);
+                self.rset((bp + w1) as usize, val);
+                let nc = self.ic_of(o, s);
+                self.rcode[(rb + pc) as usize].c = nc as i32;
+                return;
+            }
+        }
+        self.frames[fi].pc = pc + 1;
+        self.priv_set(&v, a, op.b as int, op.c as int, val);
+        if !self.throwing {
+            self.rset((bp + w1) as usize, val);
+        }
+    }
+
+    /// R_GET_PRIVATE past its inline cache: an own data field fills the
+    /// cache; a private method or accessor (on the class's home object, by
+    /// the brand) as Vm::priv_get.
+    pub fn r_get_private_slow(&mut self, pi: usize, rb: int, bp: int, fi: usize, pc: int, w1: int, w2: int) {
+        let op = self.protos[pi].code[pc as usize];
+        let a = op.a as int;
+        let v = *self.rget(bp, w2);
+        if let Some(o) = v.as_obj() {
+            let c = self.rcode[(rb + pc) as usize].c as int;
+            if c >= 65536 && (c >> 16) == self.ob(o).shape as int {
+                let r = slot_at(self.ob(o), (c & 65535) as usize);
+                self.rset((bp + w1) as usize, r);
+                return;
+            }
+            let s = self.find(o, a);
+            if s >= 0 && (self.attr_at(o, s) & P_ACCESSOR) == 0 {
+                let r = self.objs[o as usize].get_slot(s as usize);
+                self.rset((bp + w1) as usize, r);
+                let nc = self.ic_of(o, s);
+                self.rcode[(rb + pc) as usize].c = nc as i32;
+                return;
+            }
+        }
+        let site = (rb + pc) as usize;
+        let brand = op.b as int;
+        if let Some(o) = v.as_obj() {
+            // a private method: the receiver's brand slot gives the class's
+            // home object, whose slot holds the method (fixed: a private
+            // method cannot be written or deleted). The cache: ic2 the
+            // receiver's (shape, brand slot), c -10 - the home's (shape,
+            // slot).
+            let c = self.rcode[site].c as int;
+            if c <= -10 && site < self.ic2.len() {
+                let rc = self.ic2[site] as int;
+                if rc >= 65536 && (rc >> 16) == self.ob(o).shape as int {
+                    if let Some(h) = slot_at(self.ob(o), (rc & 65535) as usize).as_obj() {
+                        let hc = -10 - c;
+                        if (hc >> 16) == self.ob(h).shape as int {
+                            let r = slot_at(self.ob(h), (hc & 65535) as usize);
+                            self.rset((bp + w1) as usize, r);
+                            return;
+                        }
+                    }
+                }
+            }
+            if brand >= 0 {
+                let h = self.priv_holder(o, a, brand);
+                if h >= 0 && h != o {
+                    let hs = self.find(h, a);
+                    let bs = self.find(o, brand);
+                    if hs >= 0 && bs >= 0 && (self.attr_at(h, hs) & P_ACCESSOR) == 0 {
+                        let r = self.objs[h as usize].get_slot(hs as usize);
+                        self.rset((bp + w1) as usize, r);
+                        let rc = self.ic_of(o, bs);
+                        let hc = self.ic_of(h, hs);
+                        if rc >= 65536 && hc >= 65536 {
+                            self.ic2_keep(site, rc as i32);
+                            self.rcode[site].c = (-10 - hc) as i32;
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        self.frames[fi].pc = pc + 1;
+        let r = self.priv_get(&v, a, brand);
+        if !self.throwing {
+            self.rset((bp + w1) as usize, r);
+        }
+    }
+
     /// R_GET_PROP / R_GET_THIS_PROP past its inline cache.
     #[inline(never)]
     pub fn r_get_prop_slow(&mut self, o: int, pi: usize, rb: int, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int) -> bool {
@@ -1559,6 +1678,32 @@ impl Vm {
                 // the next read here takes rrun's array-length path
                 self.rcode[(rb + pc) as usize].c = -4;
                 return false;
+            }
+            // an own getter (an object literal's `get x()`): a plain
+            // function runs as a call in this loop, not in a nested run
+            let os = self.find(o, atom);
+            if os >= 0 && (self.attr_at(o, os) & P_ACCESSOR) != 0 && self.objs[o as usize].class != C_PROXY {
+                let acc = self.objs[o as usize].get_slot(os as usize);
+                let ao = obj_of(&acc);
+                if ao >= 0 {
+                    let g = self.evecs[self.objs[ao as usize].elems as usize].v[0];
+                    let go = obj_of(&g);
+                    if go >= 0 && self.objs[go as usize].class == C_FUNCTION {
+                        let plain = {
+                            let p = &self.protos[self.objs[go as usize].func as usize];
+                            p.rest < 0 && !p.class_ctor && !p.generator && !p.is_async
+                        };
+                        if plain {
+                            let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
+                            self.frames[fi].pc = pc + 1;
+                            let fpos = bp + self.protos[pi].fsize;
+                            self.grow_stack((fpos + 2) as usize);
+                            self.stack[fpos as usize] = g;
+                            self.stack[(fpos + 1) as usize] = recv;
+                            return self.renter(go, fpos, 0, bp + w1);
+                        }
+                    }
+                }
             }
         }
         if o >= 0 {
