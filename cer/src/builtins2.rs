@@ -262,9 +262,44 @@ impl Vm {
         out
     }
 
+    /// RegExp.input, lastMatch, lastParen, leftContext, rightContext,
+    /// $1…$9 (k 0…13) of the last successful match; "" before any.
+    fn regexp_legacy(&mut self, k: int) -> Val {
+        let s = self.rx_last_s.clone();
+        let caps = self.rx_last_caps.clone();
+        if caps.is_empty() {
+            return self.string_val(String::new());
+        }
+        if k == 0 {
+            return self.rc_val(s);
+        }
+        let units = jsstr::units(s.as_str());
+        let n = units.len() as int;
+        let ng = (caps.len() / 2) as int;
+        let (a, b) = if k == 1 {
+            (caps[0], caps[1])
+        } else if k == 2 {
+            if ng > 1 { (caps[((ng - 1) * 2) as usize], caps[((ng - 1) * 2 + 1) as usize]) } else { (0, 0) }
+        } else if k == 3 {
+            (0, caps[0])
+        } else if k == 4 {
+            (caps[1], n)
+        } else {
+            let g = k - 4;
+            if g < ng { (caps[(g * 2) as usize], caps[(g * 2 + 1) as usize]) } else { (0, 0) }
+        };
+        if a < 0 || b < 0 {
+            return self.string_val(String::new());
+        }
+        self.string_val(jsstr::sub_units(s.as_str(), &units, a, b))
+    }
+
     pub fn call_native2(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
         let a0 = arg(&args, 0);
         let a1 = arg(&args, 1);
+        if id >= NF_RX_LEGACY0 && id < NF_RX_LEGACY0 + 14 {
+            return self.regexp_legacy(id - NF_RX_LEGACY0);
+        }
         if id >= NF_RP_FLAG0 && id < NF_RP_FLAG0 + 8 {
             let ro = obj_of(&this);
             if ro >= 0 && self.objs[ro as usize].class == C_REGEXP {
@@ -1473,6 +1508,10 @@ impl Vm {
                     let caps = self.regexes[idx as usize].exec(&units, 0);
                     self.rx_after();
                     self.rx_put(&s, units);
+                    if !caps.is_empty() {
+                        self.rx_last_s = s.clone();
+                        self.rx_last_caps = caps.clone();
+                    }
                     return Val::Num(if caps.is_empty() { -1.0 } else { caps[0] as double });
                 }
                 if id == NF_SP_MATCHALL {
@@ -1524,6 +1563,8 @@ impl Vm {
                     if caps.is_empty() {
                         break;
                     }
+                    self.rx_last_s = s.clone();
+                    self.rx_last_caps = caps.clone();
                     out.push(self.string_val(jsstr::from_units(&units, caps[0], caps[1])));
                     let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
                     start = if caps[1] == caps[0] { crate::builtins::adv_index(&units, caps[1], uni) } else { caps[1] };

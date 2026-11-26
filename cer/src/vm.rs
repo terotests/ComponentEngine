@@ -554,6 +554,10 @@ pub struct Vm {
     /// string converts it once
     pub rx_s: Rc<String>,
     pub rx_units: Vec<int>,
+    /// the input and captures of the last successful RegExp match, for the
+    /// legacy statics RegExp.lastMatch, $1…$9, leftContext, rightContext…
+    pub rx_last_s: Rc<String>,
+    pub rx_last_caps: Vec<int>,
     /// the one before (rx_cache swaps the two): a tokenizer that runs a
     /// sticky regexp over its whole input and others over short words in
     /// turn converted the input again after each word
@@ -903,6 +907,8 @@ impl Vm {
             bi_seen_next: 0,
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
+            rx_last_s: Rc::new(String::new()),
+            rx_last_caps: Vec::new(),
             rx_s2: Rc::new(String::new()),
             rx_units2: Vec::new(),
             rx_regs: Vec::new(),
