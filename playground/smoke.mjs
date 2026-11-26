@@ -23,6 +23,8 @@
 // wheel, + button) and a drag, go on
 // after a freeze and a thaw, and answer "Fetch results".
 //
+// --jetstream[=names] runs the JetStream 3 tab instead (see runJetStream).
+//
 // --travel opens the travelling-engine demo (travel/): every snapshot case
 // has to restore, a collected engine has to be smaller than one that only
 // asked for gc(), and the three ways of the query (engine moves, data moves,
@@ -40,6 +42,8 @@ const zoo = (process.argv.find((a) => a.startsWith("--zoo=")) || "").slice(6);
 const evgDemo = process.argv.includes("--evg");
 const sandboxDemo = process.argv.includes("--sandbox");
 const travelDemo = process.argv.includes("--travel");
+const js3 = (process.argv.find((a) => a.startsWith("--jetstream")) || "").replace(/^--jetstream=?/, "");
+const js3On = process.argv.some((a) => a.startsWith("--jetstream"));
 
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm" };
 const server = http.createServer((req, res) => {
@@ -71,6 +75,7 @@ if (travelDemo) await runTravel();
 await page.goto(url);
 await page.waitForSelector(".engine");
 if (zoo) await runZoo();
+if (js3On) await runJetStream();
 // every engine in the build, the optional ones too
 for (const box of await page.$$(".engine input")) if (!(await box.isDisabled())) await box.setChecked(true);
 await page.selectOption("#scale", process.env.SCALE || "1");
@@ -317,4 +322,39 @@ async function runTravel() {
   await browser.close();
   server.close();
   process.exit(bad.length ? 1 : 0);
+}
+
+// --jetstream[=a,b,...] runs the JetStream 3 tab on a few benchmarks (default
+// a small set, one iteration) in the browser's engine and ENGINES (default
+// cerxes-wasm): the browser has to score every one; the other engines'
+// scores and failures are printed.
+async function runJetStream() {
+  const want = (process.env.ENGINES || "cerxes-wasm").split(",");
+  const m = JSON.parse(fs.readFileSync(path.join(DIST, "engines.json"), "utf8"));
+  const boxes = await page.$$(".engine input");
+  for (let i = 0; i < boxes.length; i++) if (!(await boxes[i].isDisabled())) await boxes[i].setChecked(want.includes(m.engines[i].id));
+  await page.click("#tab-js3");
+  await page.waitForSelector("#js3-list input", { state: "attached" });
+  const only = (js3 || "richards,delta-blue,doxbee-async,hash-map,proxy-vue,Sunspider").split(",");
+  await page.click("#js3-list-summary");
+  await page.click("#js3-none");
+  for (const name of only) await page.setChecked(`#js3-list input[data-b="${name}"]`, true);
+  await page.selectOption("#js3-iter", process.env.JS3_ITER || "1");
+  await page.click("#js3-clear");
+  await page.click("#js3-run");
+  await page.waitForFunction(() => /^(done|stopped)$/.test(document.getElementById("js3-status").textContent), null, { timeout: 30 * 60 * 1000 });
+  const rows = await page.evaluate(() => {
+    const t = document.getElementById("js3-table");
+    const heads = [...t.querySelectorAll("thead th")].map((th) => th.textContent);
+    return [heads, ...[...t.querySelectorAll("tbody tr:not(.member)")].map((tr) => [...tr.children].map((td) => td.textContent + (td.className === "err" ? " [" + td.title + "]" : "")))];
+  });
+  let bad = 0;
+  for (const r of rows) console.log(r.map((c, i) => (i ? c.slice(0, 70).padStart(24) : c.padEnd(28))).join(""));
+  for (const r of rows.slice(2)) if (only.includes(r[0]) && !(parseFloat(r[1]) > 0)) (bad++, console.log("FAIL the browser did not score " + r[0] + ": " + r[1]));
+  if (shot) await page.screenshot({ path: shot, fullPage: true });
+  if (errors.length) (console.log("page errors:\n  " + errors.join("\n  ")), (bad += errors.length));
+  await browser.close();
+  server.close();
+  console.log(bad ? `${bad} problem(s)` : "ALL PASS");
+  process.exit(bad ? 1 : 0);
 }
