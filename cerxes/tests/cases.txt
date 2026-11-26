@@ -1008,3 +1008,12 @@ ta[0] = 2n ** 64n + 2n ** 63n + 5n; tu[0] = -3n;
 [a >> 7n, a << 70n, a >> 200n, BigInt.asIntN(64, a), BigInt.asUintN(70, a), ta[0], tu[0], Number(2n ** 53n + 1n), Number(2n ** 53n + 3n), (2n ** 70n).toString(36), BigInt("0x" + "f".repeat(30)) % 1000007n].join()
 ----
 -9903520314283042199192993696,-1496577676626844588240573254127070254371232383238144,-1,12345,12345,-9223372036854775803,18446744073709551613,9007199254740992,9007199254740996,6x5kxtvuwilukg,765797
+
+# views of several kinds over one buffer (it holds bytes then): every
+# kind read and written, DataView in both byte orders and unaligned
+==== js typed arrays of several kinds over one buffer
+var b = new ArrayBuffer(48), f64 = new Float64Array(b), i32 = new Int32Array(b), u16 = new Uint16Array(b), f32 = new Float32Array(b), i8 = new Int8Array(b), dv = new DataView(b);
+f64[0] = -2.5; f64[1] = 1e-310; i32[4] = -5; u16[10] = 65535; f32[6] = 0.1; f32[7] = -0; i8[32] = -1; dv.setFloat64(33, Math.PI); dv.setUint32(41, 0xdeadbeef, true);
+[f64[0], f64[1], i32[0], i32[1], u16[3], i32[4], u16[10], u16[11], f32[6], 1 / f32[7], i8[32], dv.getFloat64(33), dv.getUint32(41, true), dv.getUint32(41), f32[0], Array.prototype.slice.call(new Uint8Array(b), 24, 48).join(" ")].join()
+----
+-2.5,1e-310,0,-1073479680,49156,-5,65535,0,0.10000000149011612,-Infinity,-1,3.141592653589793,3735928559,4022250974,0,205 204 204 61 0 0 0 128 255 64 9 33 251 84 68 45 24 239 190 173 222 0 0 0

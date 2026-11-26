@@ -160,6 +160,185 @@ pub fn zeros(n: int) -> Vec<double> {
     z
 }
 
+/// A float32 from its 32 bits (0 to 2^32 - 1). Rust: the bits as they are.
+#[ranger::target(rust)]
+fn f32_of_bits(u: int) -> double {
+    f32::from_bits(u as u32) as f64
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn f32_of_bits(u: int) -> double {
+    let ud = u as double;
+    let sign = if ud >= 2147483648.0 { 1 } else { 0 };
+    let r = ud - (sign as double) * 2147483648.0;
+    let exp = floor(r / 8388608.0);
+    float_from_parts(sign, exp as int, r - exp * 8388608.0, 8, 23)
+}
+
+/// The 32 bits of `x` as a float32 (a NaN as 0x7fc00000).
+#[ranger::target(rust)]
+fn f32_bits(x: double) -> int {
+    if x != x {
+        return 2143289344;
+    }
+    (x as f32).to_bits() as int
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn f32_bits(x: double) -> int {
+    let (sign, exp, mant) = float_parts(x, 8, 23);
+    ((sign as double) * 2147483648.0 + (exp as double) * 8388608.0 + mant) as int
+}
+
+/// A float64 from its low and high 32 bits.
+#[ranger::target(rust)]
+fn f64_of_words(lo: int, hi: int) -> double {
+    f64::from_bits(((hi as u64) << 32) | ((lo as u64) & 0xffffffff))
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn f64_of_words(lo: int, hi: int) -> double {
+    let hd = hi as double;
+    let sign = if hd >= 2147483648.0 { 1 } else { 0 };
+    let r = hd - (sign as double) * 2147483648.0;
+    let exp = floor(r / 1048576.0);
+    let mant = (r - exp * 1048576.0) * 4294967296.0 + (lo as double);
+    float_from_parts(sign, exp as int, mant, 11, 52)
+}
+
+/// The low and high 32 bits of `x` as a float64 (a NaN as
+/// 0x7ff8000000000000).
+#[ranger::target(rust)]
+fn f64_words(x: double) -> (int, int) {
+    if x != x {
+        return (0, 2146959360);
+    }
+    let b = x.to_bits();
+    ((b & 0xffffffff) as int, (b >> 32) as int)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn f64_words(x: double) -> (int, int) {
+    let (sign, exp, mant) = float_parts(x, 11, 52);
+    let top = floor(mant / 4294967296.0);
+    let lo = mant - top * 4294967296.0;
+    (lo as int, ((sign as double) * 2147483648.0 + (exp as double) * 1048576.0 + top) as int)
+}
+
+/// The `size` bytes at `at` of colds[c].nums (bytes, one a slot) as
+/// unsigned numbers: the four least significant, then the four above
+/// them. Rust: as integers.
+#[ranger::target(rust)]
+fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool) -> (double, double) {
+    let nums = &colds[c].nums;
+    let a = at as usize;
+    if little {
+        // the common case, unrolled: whole elements, least significant first
+        if size == 4 {
+            let w = (nums[a] as u32) | ((nums[a + 1] as u32) << 8) | ((nums[a + 2] as u32) << 16) | ((nums[a + 3] as u32) << 24);
+            return (w as f64, 0.0);
+        }
+        if size == 2 {
+            return (((nums[a] as u32) | ((nums[a + 1] as u32) << 8)) as f64, 0.0);
+        }
+        if size == 1 {
+            return (nums[a], 0.0);
+        }
+    }
+    let mut v: u64 = 0;
+    let mut k: int = 0;
+    while k < size {
+        let idx = if little { at + k } else { at + size - 1 - k };
+        v |= (nums[idx as usize] as u64) << (8 * k);
+        k += 1;
+    }
+    ((v & 0xffffffff) as f64, (v >> 32) as f64)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn get_bytes(colds: &Vec<Cold>, c: usize, at: int, size: int, little: bool) -> (double, double) {
+    let mut lo: double = 0.0;
+    let mut hi: double = 0.0;
+    let mut mul: double = 1.0;
+    let mut k: int = 0;
+    while k < size {
+        let idx = if little { at + k } else { at + size - 1 - k };
+        let byte = colds[c].nums[idx as usize];
+        if k < 4 {
+            lo = lo + byte * mul;
+        } else {
+            hi = hi + byte * mul;
+        }
+        mul = if k == 3 { 1.0 } else { mul * 256.0 };
+        k += 1;
+    }
+    (lo, hi)
+}
+
+/// Writes `lo` (the four least significant bytes, unsigned) and `hi` (the
+/// four above them) as `size` bytes at `at` of colds[c].nums. Rust: as
+/// integers.
+#[ranger::target(rust)]
+fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi: double, little: bool) {
+    let v: u64 = (lo as u64) | ((hi as u64) << 32);
+    let nums = &mut colds[c].nums;
+    let a = at as usize;
+    if little && size <= 4 {
+        // the common case: whole elements, least significant first
+        let w = v as u32;
+        nums[a] = (w & 255) as f64;
+        if size >= 2 {
+            nums[a + 1] = ((w >> 8) & 255) as f64;
+        }
+        if size == 4 {
+            nums[a + 2] = ((w >> 16) & 255) as f64;
+            nums[a + 3] = (w >> 24) as f64;
+        }
+        return;
+    }
+    let mut k: int = 0;
+    while k < size {
+        let idx = if little { at + k } else { at + size - 1 - k };
+        nums[idx as usize] = ((v >> (8 * k)) & 255) as f64;
+        k += 1;
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn put_bytes(colds: &mut Vec<Cold>, c: usize, at: int, size: int, lo: double, hi: double, little: bool) {
+    let mut l = lo;
+    let mut h = hi;
+    let mut k: int = 0;
+    while k < size {
+        let idx = if little { at + k } else { at + size - 1 - k };
+        let src = if k < 4 { l } else { h };
+        let q = floor(src / 256.0);
+        colds[c].nums[idx as usize] = src - q * 256.0;
+        if k < 4 {
+            l = q;
+        } else {
+            h = q;
+        }
+        k += 1;
+    }
+}
+
+/// `x` (a number) as a `kind` integer element's bits, unsigned: an
+/// integer the kind holds without a modulo, the rest as int_bits does it.
+fn uint_bits(kind: int, x: double) -> double {
+    let size = kind_size(kind);
+    let m = if size == 1 { 256.0 } else if size == 2 { 65536.0 } else { 4294967296.0 };
+    if x == floor(x) {
+        if x >= 0.0 && x < m {
+            return x + 0.0;
+        }
+        if x < 0.0 && x >= -m && kind != TK_UINT8C {
+            return x + m;
+        }
+    }
+    int_bits(kind, x)
+}
+
 /// colds[tc].nums[d0..d0 + n] = colds[sc].nums[s0..s0 + n] (the two may be
 /// one buffer and overlap). Rust: one memmove.
 #[ranger::target(rust)]
@@ -301,7 +480,7 @@ fn round_even(x: double) -> double {
 /// Math.fround: `x` rounded to the nearest float32.
 pub fn fround(x: double) -> double {
     let r: double = ranger::native!(
-        rust: { fround_parts(x) },
+        rust: { (x as f32) as f64 },
         es6: "Math.fround({x})",
         go: "float64(float32({x}))",
         cpp: "(double)(float)({x})",
@@ -415,62 +594,6 @@ fn int_bits(kind: int, x: double) -> double {
     let u = to_uint32(x);
     let v = if size == 4 { u } else { u - m * floor(u / m) };
     v
-}
-
-/// The bytes of `x` (a number already) as a `kind` element, most
-/// significant first.
-fn encode(kind: int, x: double) -> Vec<int> {
-    let size = kind_size(kind);
-    let mut bytes: Vec<int> = Vec::new();
-    if kind == TK_FLOAT16 {
-        let (sign, exp, mant) = float_parts(x, 5, 10);
-        let m = mant as int;
-        bytes.push((sign << 7) | (exp << 2) | ((m >> 8) & 3));
-        bytes.push(m & 255);
-    } else if kind == TK_FLOAT32 {
-        let (sign, exp, mant) = float_parts(x, 8, 23);
-        let m = mant as int;
-        bytes.push((sign << 7) | (exp >> 1));
-        bytes.push(((exp & 1) << 7) | ((m >> 16) & 127));
-        bytes.push((m >> 8) & 255);
-        bytes.push(m & 255);
-    } else if kind == TK_FLOAT64 {
-        let (sign, exp, mant) = float_parts(x, 11, 52);
-        // the 52 mantissa bits: the top 4, then six bytes
-        let hi = floor(mant / two_pow(48));
-        let mut rest = mant - hi * two_pow(48);
-        bytes.push((sign << 7) | (exp >> 4));
-        bytes.push(((exp & 15) << 4) | (hi as int));
-        let mut low: Vec<int> = Vec::new();
-        let mut j = 0;
-        while j < 6 {
-            let q = floor(rest / 256.0);
-            low.push((rest - q * 256.0) as int);
-            rest = q;
-            j += 1;
-        }
-        let mut k = 5;
-        while k >= 0 {
-            bytes.push(low[k as usize]);
-            k -= 1;
-        }
-    } else {
-        let mut u = int_bits(kind, x);
-        let mut low: Vec<int> = Vec::new();
-        let mut j = 0;
-        while j < size {
-            let q = floor(u / 256.0);
-            low.push((u - q * 256.0) as int);
-            u = q;
-            j += 1;
-        }
-        let mut k = size - 1;
-        while k >= 0 {
-            bytes.push(low[k as usize]);
-            k -= 1;
-        }
-    }
-    bytes
 }
 
 impl Vm {
@@ -714,81 +837,129 @@ impl Vm {
             self.colds[cid].home = TK_UINT8;
             return;
         }
+        // zeros, then each element that is not +0 written over them
         let size = kind_size(mode);
-        let elems = self.colds[self.objs[b as usize].cold as usize].nums.clone();
-        let mut bytes: Vec<double> = Vec::with_capacity(elems.len() * (size as usize));
-        for x in elems.iter() {
-            let be = encode(mode, *x);
-            let mut k: int = size - 1;
-            while k >= 0 {
-                bytes.push(be[k as usize] as double);
-                k -= 1;
+        let c = self.cold_id(b) as usize;
+        let elems = self.colds[c].nums.clone();
+        self.colds[c].nums = zeros((elems.len() as int) * size);
+        self.colds[c].home = TK_UINT8;
+        let mut i: usize = 0;
+        while i < elems.len() {
+            let x = elems[i];
+            if x != 0.0 || 1.0 / x < 0.0 {
+                self.bytes_write(b, (i as int) * size, mode, x, true);
             }
+            i += 1;
         }
-        { let c = self.cold_id(b) as usize; self.colds[c].nums = bytes; }
-        let cid = self.cold_id(b) as usize;
-        self.colds[cid].home = TK_UINT8;
     }
 
     /// Reads a `kind` element at byte `at` of buffer `b`.
     pub fn buf_read(&mut self, b: int, at: int, kind: int, little: bool) -> double {
         self.buf_to_bytes(b);
+        self.bytes_read(b, at, kind, little)
+    }
+
+    /// buf_read for a buffer that holds bytes already.
+    fn bytes_read(&self, b: int, at: int, kind: int, little: bool) -> double {
+        let c = self.objs[b as usize].cold as usize;
         let size = kind_size(kind);
-        // the bytes as an unsigned big-endian number, in pieces for floats
-        let mut bytes: Vec<int> = Vec::new();
-        let mut k: int = 0;
-        while k < size {
-            let idx = if little { at + size - 1 - k } else { at + k };
-            bytes.push(self.byte(b, idx));
-            k += 1;
-        }
-        if kind == TK_FLOAT16 {
-            let sign = bytes[0] >> 7;
-            let exp = (bytes[0] >> 2) & 31;
-            let mant = (((bytes[0] & 3) * 256) + bytes[1]) as double;
-            return float_from_parts(sign, exp, mant, 5, 10);
-        }
+        let (lo, hi) = get_bytes(&self.colds, c, at, size, little);
         if kind == TK_FLOAT32 {
-            let sign = bytes[0] >> 7;
-            let exp = ((bytes[0] & 127) << 1) | (bytes[1] >> 7);
-            let mant = ((((bytes[1] & 127) * 256) + bytes[2]) * 256 + bytes[3]) as double;
-            return float_from_parts(sign, exp, mant, 8, 23);
+            return f32_of_bits(lo as int);
         }
         if kind == TK_FLOAT64 {
-            let sign = bytes[0] >> 7;
-            let exp = ((bytes[0] & 127) << 4) | (bytes[1] >> 4);
-            let mut mant: double = (bytes[1] & 15) as double;
-            let mut j: usize = 2;
-            while j < 8 {
-                mant = mant * 256.0 + (bytes[j] as double);
-                j += 1;
-            }
-            return float_from_parts(sign, exp, mant, 11, 52);
+            return f64_of_words(lo as int, hi as int);
         }
-        let mut u: double = 0.0;
-        for x in bytes.iter() {
-            u = u * 256.0 + (*x as double);
+        if kind == TK_FLOAT16 {
+            let sign = if lo >= 32768.0 { 1 } else { 0 };
+            let r = lo - (sign as double) * 32768.0;
+            let exp = floor(r / 1024.0);
+            return float_from_parts(sign, exp as int, r - exp * 1024.0, 5, 10);
         }
         if kind == TK_INT8 || kind == TK_INT16 || kind == TK_INT32 {
-            let half = two_pow(size * 8 - 1);
-            if u >= half {
-                u = u - 2.0 * half;
+            let half = if size == 1 { 128.0 } else if size == 2 { 32768.0 } else { 2147483648.0 };
+            if lo >= half {
+                return lo - 2.0 * half;
             }
         }
-        u
+        lo
     }
 
     /// Writes `x` (a number already) as a `kind` element at byte `at`.
     pub fn buf_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
         self.buf_to_bytes(b);
+        self.bytes_write(b, at, kind, x, little);
+    }
+
+    /// buf_write for a buffer that holds bytes already.
+    fn bytes_write(&mut self, b: int, at: int, kind: int, x: double, little: bool) {
         let size = kind_size(kind);
-        let bytes = encode(kind, x);
-        let mut k: int = 0;
-        while k < size {
-            let idx = if little { at + size - 1 - k } else { at + k };
-            { let c = self.cold_id(b) as usize; self.colds[c].nums[idx as usize] = bytes[k as usize] as double; }
-            k += 1;
+        let mut hi: double = 0.0;
+        let lo: double = if kind == TK_FLOAT32 {
+            f32_bits(x) as double
+        } else if kind == TK_FLOAT64 {
+            let (l, h) = f64_words(x);
+            hi = h as double;
+            l as double
+        } else if kind == TK_FLOAT16 {
+            let (sign, exp, mant) = float_parts(x, 5, 10);
+            (sign as double) * 32768.0 + (exp as double) * 1024.0 + mant
+        } else {
+            uint_bits(kind, x)
+        };
+        let c = self.objs[b as usize].cold as usize;
+        put_bytes(&mut self.colds, c, at, size, lo, hi, little);
+    }
+
+    /// The byte where `ta[i]` starts when its buffer holds bytes (a view
+    /// of another kind made it so) and the access needs nothing else: a
+    /// fixed-length view, not a BigInt kind, over a buffer neither
+    /// detached nor resizable, `i` inside it. -1 otherwise.
+    #[inline]
+    fn ta_byte_at(&self, o: int, i: int) -> int {
+        let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        let b = ob.env as int;
+        if b < 0 || i < 0 {
+            return -1;
         }
+        let bo = crate::rvm::obj_at(&self.objs, b as usize);
+        if (bo.pos & 1) != 0 || bo.cold <= 0 {
+            return -1;
+        }
+        let inside = if let Some(n) = (crate::rvm::cold_at(&self.colds, ob.cold as usize).prim).as_num() { (i as double) < n } else { false };
+        if !inside {
+            return -1;
+        }
+        let bc = crate::rvm::cold_at(&self.colds, bo.cold as usize);
+        let kind = ob.pos as int;
+        if bc.prim.is_num() || bc.home != TK_UINT8 || is_big(kind) {
+            return -1;
+        }
+        (ob.func as int) + (i << kind_shift(kind))
+    }
+
+    /// `ta[i]` over a buffer that holds bytes, as ta_byte_at finds it:
+    /// (true, the number), else (false, 0) and ta_get does it.
+    pub fn ta_bytes_get(&self, o: int, i: int) -> (bool, double) {
+        let at = self.ta_byte_at(o, i);
+        if at < 0 {
+            return (false, 0.0);
+        }
+        let ob = crate::rvm::obj_at(&self.objs, o as usize);
+        (true, self.bytes_read(ob.env as int, at, ob.pos as int, true))
+    }
+
+    /// `ta[i] = x` (a number) over a buffer that holds bytes, as
+    /// ta_byte_at finds it; false: nothing written, ta_set does it.
+    pub fn ta_bytes_put(&mut self, o: int, i: int, x: double) -> bool {
+        let at = self.ta_byte_at(o, i);
+        if at < 0 {
+            return false;
+        }
+        let b = self.objs[o as usize].env as int;
+        let kind = self.objs[o as usize].pos as int;
+        self.bytes_write(b, at, kind, x, true);
+        true
     }
 
     /// `ta[i]`: undefined outside the view.

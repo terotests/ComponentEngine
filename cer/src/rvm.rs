@@ -849,6 +849,13 @@ impl Vm {
                                     if s >= 0 {
                                         r = Val::Num(cold_at(&self.colds, obj_at(&self.objs, ob.env as usize).cold as usize).nums[s as usize]);
                                         done = true;
+                                    } else {
+                                        // over a buffer that holds bytes (views of several kinds)
+                                        let (ok, x) = self.ta_bytes_get(o, i);
+                                        if ok {
+                                            r = Val::Num(x);
+                                            done = true;
+                                        }
                                     }
                                 }
                             }
@@ -888,7 +895,7 @@ impl Vm {
                         if o >= 0 && num && obj_at(&self.objs, o as usize).class == C_TYPED {
                             if let Some(x) = val.as_num() {
                                 let i = index_int(n);
-                                if i >= 0 && self.ta_put_num(o, i, x) {
+                                if i >= 0 && (self.ta_put_num(o, i, x) || self.ta_bytes_put(o, i, x)) {
                                     if ((w0 >> 8) & 255) == 1 {
                                         self.rset((bp + (w1 as int)) as usize, val);
                                     }
