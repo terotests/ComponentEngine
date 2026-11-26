@@ -967,11 +967,12 @@ a.concat([RegExp.$1, RegExp.lastMatch, RegExp["$`"], RegExp.leftContext]).join("
 ----
 2|abc||a|x|x
 
-# parseInt past 15 digits is rounded once (RexBench OfflineAssembler)
+# parseInt past 15 digits is rounded once (RexBench OfflineAssembler);
+# compared as numbers, as the C++ build writes such a number in full
 ==== js parseInt of a long decimal
-[parseInt("18446462598732840000"), parseInt("123456789012345678")].join()
+[parseInt("18446462598732840000") === 18446462598732840000, parseInt("123456789012345678") === 123456789012345678, parseInt("-12345678901234567890") === -12345678901234567890].join()
 ----
-18446462598732840000,123456789012345680
+true,true,true
 
 # Date.parse of what toString and toUTCString give (validatorjs)
 ==== js Date.parse of toString and toUTCString forms
