@@ -8043,7 +8043,7 @@ impl PComp {
                 continue;
             }
             let mut flags = 0;
-            if self.is("static") && !self.peek_is(1, "(") && !self.peek_is(1, "=") {
+            if self.is("static") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.peek_is(1, ";") && !self.peek_is(1, "}") {
                 self.next();
                 flags |= F_STATIC;
                 if self.ts && self.ts_member_skipped() {
@@ -8062,7 +8062,7 @@ impl PComp {
             }
             let mut fflags = 0;
             let ms = self.pos;
-            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.tok_nl(self.pos + 1) {
+            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.peek_is(1, ";") && !self.peek_is(1, "}") && !self.tok_nl(self.pos + 1) {
                 self.next();
                 fflags |= F_ASYNC;
             }

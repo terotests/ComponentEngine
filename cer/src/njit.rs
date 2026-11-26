@@ -1030,7 +1030,7 @@ fn switch_ok(o: Op, pc: int, tab: &Vec<int>) -> bool {
         return false;
     }
     let size = tab[t as usize];
-    if size < 0 || size > 64 || ((t + 1 + size) as usize) >= tab.len() {
+    if size < 0 || size > 4 * 1024 + 8 || ((t + 1 + size) as usize) >= tab.len() {
         return false;
     }
     let lo = (o.c as int);
@@ -1504,9 +1504,12 @@ pub fn compile(ops: &Vec<Op>, pi: int, rb: int, n: int, arm: bool, lay: &Vec<int
             cg.a.jcc(C_A, dflt);
             cg.load(0, w1);
             let mut i: int = 0;
+            // the slots that go to the default need no test
             while i < size {
-                cg.a.dbl_imm(1, w3 + i);
-                cg.a.jump_fcmp(C_FEQ, 0, 1, tab[(w2 + 1 + i) as usize]);
+                if tab[(w2 + 1 + i) as usize] != dflt {
+                    cg.a.dbl_imm(1, w3 + i);
+                    cg.a.jump_fcmp(C_FEQ, 0, 1, tab[(w2 + 1 + i) as usize]);
+                }
                 i += 1;
             }
             cg.a.jmp(dflt);

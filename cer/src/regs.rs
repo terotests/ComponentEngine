@@ -118,6 +118,8 @@ pub const R_CMP_JTK: int = 44;
 /// table is in Vm.rtab (its size n, n targets, the default), w3 the key of
 /// the table's first target
 pub const R_SWITCH: int = 45;
+/// the most slots an R_SWITCH table has when its keys are spread out
+pub const SWITCH_TAB: int = 256;
 /// w1 dst, w2 x
 pub const R_TYPEOF: int = 46;
 /// w1 the iterator, w2 where to go when it is done, w3 the value's slot
@@ -1031,6 +1033,8 @@ impl Tr {
 
     /// A run of at least four R_CASE_INT_JT on one value with keys close
     /// together starts with an R_SWITCH that jumps where the run would.
+    /// Close together: the table at most four slots a key, or at most
+    /// SWITCH_TAB slots (a scanner's switch on character codes, 9 to 125).
     fn switch_tables(&mut self) {
         let n = self.n;
         let mut i: int = 0;
@@ -1059,7 +1063,7 @@ impl Tr {
                     k += 1;
                 }
                 let size = hi - lo + 1;
-                if keys.len() >= 4 && size <= 4 * (keys.len() as int) + 8 {
+                if keys.len() >= 4 && (size <= 4 * (keys.len() as int) + 8 || size <= SWITCH_TAB) {
                     let at = self.tbase + self.tab.len() as int;
                     self.tab.push(size);
                     let base = self.tab.len();
