@@ -1298,7 +1298,7 @@ impl Parser {
             }
             let m = self.node(N_PROP);
             let mut flags = 0;
-            if self.is("static") && !self.peek_is(1, "(") && !self.peek_is(1, "=") {
+            if self.is("static") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.peek_is(1, ";") && !self.peek_is(1, "}") {
                 self.next();
                 flags |= F_STATIC;
                 if self.is("{") {
@@ -1313,7 +1313,7 @@ impl Parser {
             }
             let mut fflags = 0;
             let ms = self.pos;
-            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.toks[(self.pos + 1) as usize].nl {
+            if self.is("async") && !self.peek_is(1, "(") && !self.peek_is(1, "=") && !self.peek_is(1, ";") && !self.peek_is(1, "}") && !self.toks[(self.pos + 1) as usize].nl {
                 self.next();
                 fflags |= F_ASYNC;
             }

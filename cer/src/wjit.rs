@@ -621,8 +621,10 @@ const H_SET_PROP: u32 = 3;
 const H_OP: u32 = 4;
 const H_CALL: u32 = 5;
 const H_SLOW: u32 = 6;
-/// R_SWITCH tables up to this size are written as a chain of selects
-const SWITCH_MAX: usize = 64;
+/// R_SWITCH tables up to this size (every table regs.rs makes: at most
+/// 1024 keys, four slots a key) are written as a chain of selects, one
+/// for each slot that is not the default
+const SWITCH_MAX: usize = 4 * 1024 + 8;
 const H_RET: u32 = 7;
 const NHELPERS: u32 = 8;
 /// the largest function body compiled (bytes)

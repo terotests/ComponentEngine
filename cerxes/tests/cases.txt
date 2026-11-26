@@ -979,3 +979,17 @@ true,true,true
 [Date.parse("Sat Sep 10 2011 00:00:00 GMT+0000 (Coordinated Universal Time)"), Date.parse("Thu, 01 Jan 1970 02:00:00 GMT+0200"), Date.parse("Sep 10 2011 10:00 PM GMT"), Date.parse("foo")].join()
 ----
 1315612800000,0,1315692000000,NaN
+
+# a switch on spread-out character codes gets a jump table (regs.rs
+# SWITCH_TAB): fall through, the first of two equal keys, non-integers
+==== js switch table with spread-out keys
+function k(t){switch(t){case 9:case 32:return "ws";case 64:return "at";case 125:return "rb";case 64:return "dup";case 40:return "lp";case 10:return "nl";default:return "-"}}
+[9, 32, 64, 125, 40, 10, 11, 64.5, "9", -1, 200, NaN, null].map(k).join()
+----
+ws,ws,at,rb,lp,nl,-,-,-,-,-,-,-
+
+# fields named static and async (esprima-next's classes)
+==== js class fields named static and async
+var A = class { static; async; x; static static = 1; static async }; [Object.keys(new A()), Object.keys(A)].join("|")
+----
+static,async,x|static,async
