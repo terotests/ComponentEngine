@@ -504,6 +504,7 @@ pub fn parse_int(s: &str, radix_in: int) -> double {
     }
     let mut v: double = 0.0;
     let mut any = false;
+    let start = i;
     while i < n {
         let d = digit_of(cs[i as usize]);
         if d >= radix {
@@ -515,6 +516,17 @@ pub fn parse_int(s: &str, radix_in: int) -> double {
     }
     if !any {
         return nan();
+    }
+    // past 15 decimal digits the running v * 10 + d rounds at every step:
+    // the digits as a decimal literal, rounded once (as Number() does)
+    if radix == 10 && i - start > 15 {
+        let mut text = String::new();
+        let mut j = start;
+        while j < i {
+            text.push(cs[j as usize]);
+            j += 1;
+        }
+        return sign * decimal(text.as_str());
     }
     sign * v
 }
@@ -570,6 +582,7 @@ fn parse_int_ascii(s: &str, radix_in: int) -> double {
     }
     let mut v: double = 0.0;
     let mut any = false;
+    let start = i;
     while i < n {
         let c = b[i];
         let d: int = if c >= b'0' && c <= b'9' {
@@ -588,11 +601,14 @@ fn parse_int_ascii(s: &str, radix_in: int) -> double {
         any = true;
         i += 1;
     }
-    if any {
-        sign * v
-    } else {
-        nan()
+    if !any {
+        return nan();
     }
+    // past 15 decimal digits: rounded once, as parse_int does
+    if radix == 10 && i - start > 15 {
+        return sign * decimal(&s[start..i]);
+    }
+    sign * v
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]

@@ -190,6 +190,9 @@ pub const NF_RP_SOURCE: int = 264;
 /// the flag getters hasIndices, global, ignoreCase, multiline, dotAll,
 /// unicode, unicodeSets, sticky
 pub const NF_RP_FLAG0: int = 1900;
+/// RegExp's legacy static getters: input, lastMatch, lastParen,
+/// leftContext, rightContext, $1…$9 (and the aliases $_ $& $+ $` $')
+pub const NF_RX_LEGACY0: int = 1910;
 // Date
 pub const NF_DATE_NOW: int = 270;
 pub const NF_DATE_UTC: int = 271;
@@ -913,7 +916,19 @@ impl Vm {
         self.method(reflect, "deleteProperty", NF_REFLECT_DELETE, 2);
 
         // RegExp
-        self.ctor("RegExp", NF_REGEXP, 2, rp);
+        let rxc = self.ctor("RegExp", NF_REGEXP, 2, rp);
+        let legacy: Vec<&str> = vec!["input", "lastMatch", "lastParen", "leftContext", "rightContext", "$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9"];
+        let mut lgi: int = 0;
+        while lgi < 14 {
+            self.getter(rxc, legacy[lgi as usize], NF_RX_LEGACY0 + lgi);
+            lgi += 1;
+        }
+        let alias: Vec<&str> = vec!["$_", "$&", "$+", "$`", "$'"];
+        lgi = 0;
+        while lgi < 5 {
+            self.getter(rxc, alias[lgi as usize], NF_RX_LEGACY0 + lgi);
+            lgi += 1;
+        }
         self.method(rp, "exec", NF_RP_EXEC, 1);
         self.method(rp, "test", NF_RP_TEST, 1);
         self.method(rp, "toString", NF_RP_TOSTRING, 0);
@@ -1339,6 +1354,8 @@ impl Vm {
                 return Val::Undef();
             }
         }
+        self.rx_last_s = s.clone();
+        self.rx_last_caps = caps.clone();
         if !want {
             return Val::Bool(true);
         }
@@ -1608,6 +1625,8 @@ impl Vm {
                 if caps.is_empty() {
                     break;
                 }
+                self.rx_last_s = s.clone();
+                self.rx_last_caps = caps.clone();
                 let (ms, me) = (caps[0], caps[1]);
                 jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, ms).as_str());
                 if plain_repl {
@@ -1765,6 +1784,8 @@ impl Vm {
                 if caps.is_empty() {
                     break;
                 }
+                self.rx_last_s = s.clone();
+                self.rx_last_caps = caps.clone();
                 let (ms, me) = (caps[0], caps[1]);
                 if me >= n + 1 || ms >= n {
                     break;
@@ -3527,10 +3548,241 @@ impl Vm {
     /// alone UTC (ECMA-262 21.4.3.2)
     pub fn parse_date_local(&self, s: &str) -> double {
         let t = Vm::parse_date(s);
-        if is_nan(t) || !Vm::date_is_local(s) {
+        if is_nan(t) {
+            // not ISO: the forms toString and toUTCString give, as engines
+            // read them (an implementation-specific fallback, 21.4.3.2)
+            let r = Vm::parse_date_legacy(s);
+            if is_nan(r[0]) || r[1] > 0.0 {
+                return Vm::time_clip(r[0]);
+            }
+            return self.local_to_utc(r[0]);
+        }
+        if !Vm::date_is_local(s) {
             return t;
         }
         self.local_to_utc(t)
+    }
+
+    /// Date.parse's fallback for what toString and toUTCString give and
+    /// the common hand-written forms ("Sat Sep 10 2011 00:00:00 GMT+0300
+    /// (EEST)", "Thu, 01 Jan 1970 00:00:00 GMT", "08/04/2011", "Sep 10 2011
+    /// 10:00 PM"): [t, 1] when an offset or GMT/UTC is named, [t, 0] for
+    /// local time; t NaN when it is not a date.
+    pub fn parse_date_legacy(s: &str) -> Vec<double> {
+        let cs: Vec<char> = s.chars().collect();
+        let n = cs.len();
+        let mut i: usize = 0;
+        let mut nums: Vec<int> = Vec::new();
+        let mut month: int = -1;
+        let mut time: Vec<int> = Vec::new();
+        let mut ms: int = 0;
+        let mut ampm: int = 0;
+        let mut offset: int = 0;
+        let mut has_off = false;
+        while i < n {
+            let c = cs[i];
+            if c == '(' {
+                let mut depth: int = 0;
+                while i < n {
+                    if cs[i] == '(' {
+                        depth += 1;
+                    } else if cs[i] == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if c >= '0' && c <= '9' {
+                let mut v: int = 0;
+                let mut k: int = 0;
+                while i < n && cs[i] >= '0' && cs[i] <= '9' {
+                    if k < 9 {
+                        v = v * 10 + ((cs[i] as int) - 48);
+                    }
+                    k += 1;
+                    i += 1;
+                }
+                if i < n && cs[i] == ':' && time.is_empty() {
+                    time.push(v);
+                    while i < n && cs[i] == ':' {
+                        i += 1;
+                        let mut w: int = 0;
+                        let mut kk: int = 0;
+                        while i < n && cs[i] >= '0' && cs[i] <= '9' {
+                            w = w * 10 + ((cs[i] as int) - 48);
+                            kk += 1;
+                            i += 1;
+                        }
+                        if kk == 0 || kk > 2 {
+                            return vec![nan(), 0.0];
+                        }
+                        time.push(w);
+                    }
+                    if i < n && cs[i] == '.' && time.len() == 3 {
+                        i += 1;
+                        let mut scale: int = 100;
+                        while i < n && cs[i] >= '0' && cs[i] <= '9' {
+                            ms += ((cs[i] as int) - 48) * scale;
+                            scale /= 10;
+                            i += 1;
+                        }
+                    }
+                    if time.len() > 3 {
+                        return vec![nan(), 0.0];
+                    }
+                } else {
+                    nums.push(v);
+                }
+                continue;
+            }
+            if (c == '+' || c == '-') && i + 1 < n && cs[i + 1] >= '0' && cs[i + 1] <= '9' && (!time.is_empty() || has_off) {
+                let sign: int = if c == '-' { -1 } else { 1 };
+                i += 1;
+                let mut d: int = 0;
+                let mut k: int = 0;
+                while i < n && cs[i] >= '0' && cs[i] <= '9' {
+                    d = d * 10 + ((cs[i] as int) - 48);
+                    k += 1;
+                    i += 1;
+                }
+                let mut off: int;
+                if i < n && cs[i] == ':' {
+                    i += 1;
+                    let mut mm: int = 0;
+                    while i < n && cs[i] >= '0' && cs[i] <= '9' {
+                        mm = mm * 10 + ((cs[i] as int) - 48);
+                        i += 1;
+                    }
+                    off = d * 60 + mm;
+                } else if k <= 2 {
+                    off = d * 60;
+                } else {
+                    off = (d / 100) * 60 + d % 100;
+                }
+                if off > 24 * 60 {
+                    return vec![nan(), 0.0];
+                }
+                off *= sign;
+                offset = off;
+                has_off = true;
+                continue;
+            }
+            if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+                let mut word = String::new();
+                while i < n && ((cs[i] >= 'a' && cs[i] <= 'z') || (cs[i] >= 'A' && cs[i] <= 'Z')) {
+                    word.push(cs[i]);
+                    i += 1;
+                }
+                let w = jsstr::to_lower(word.as_str());
+                if w == "am" || w == "pm" {
+                    ampm = if w == "am" { 1 } else { 2 };
+                    continue;
+                }
+                if w == "gmt" || w == "utc" || w == "ut" || w == "z" {
+                    has_off = true;
+                    continue;
+                }
+                if w.as_bytes().len() >= 3 {
+                    let w3 = String::from(&w[0..3]);
+                    let months: Vec<&str> = vec!["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+                    let mut mi: int = 0;
+                    let mut found = false;
+                    while mi < 12 {
+                        if w3 == months[mi as usize] {
+                            month = mi;
+                            found = true;
+                        }
+                        mi += 1;
+                    }
+                    if found {
+                        continue;
+                    }
+                    let days: Vec<&str> = vec!["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+                    let mut di: int = 0;
+                    while di < 7 {
+                        if w3 == days[di as usize] {
+                            found = true;
+                        }
+                        di += 1;
+                    }
+                    if found {
+                        continue;
+                    }
+                }
+                return vec![nan(), 0.0];
+            }
+            if c == ' ' || c == ',' || c == '/' || c == '-' || c == '.' || c == '\t' {
+                i += 1;
+                continue;
+            }
+            return vec![nan(), 0.0];
+        }
+        let mut y: int;
+        let m: int;
+        let d: int;
+        if month >= 0 {
+            if nums.len() != 2 {
+                return vec![nan(), 0.0];
+            }
+            m = month;
+            if nums[0] > 31 {
+                y = nums[0];
+                d = nums[1];
+            } else {
+                d = nums[0];
+                y = nums[1];
+            }
+        } else {
+            if nums.len() != 3 {
+                return vec![nan(), 0.0];
+            }
+            if nums[0] > 31 {
+                y = nums[0];
+                m = nums[1] - 1;
+                d = nums[2];
+            } else {
+                m = nums[0] - 1;
+                d = nums[1];
+                y = nums[2];
+            }
+        }
+        if y < 50 {
+            y += 2000;
+        } else if y < 100 {
+            y += 1900;
+        }
+        if m < 0 || m > 11 || d < 1 || d > 31 {
+            return vec![nan(), 0.0];
+        }
+        let mut h: int = 0;
+        let mut mi: int = 0;
+        let mut sec: int = 0;
+        if !time.is_empty() {
+            h = time[0];
+            mi = if time.len() > 1 { time[1] } else { 0 };
+            sec = if time.len() > 2 { time[2] } else { 0 };
+        }
+        if ampm > 0 {
+            if h > 12 {
+                return vec![nan(), 0.0];
+            }
+            if ampm == 2 && h < 12 {
+                h += 12;
+            } else if ampm == 1 && h == 12 {
+                h = 0;
+            }
+        }
+        if h > 24 || mi > 59 || sec > 59 || (h == 24 && (mi > 0 || sec > 0 || ms > 0)) {
+            return vec![nan(), 0.0];
+        }
+        let f: Vec<double> = vec![y as double, m as double, d as double, h as double, mi as double, sec as double, ms as double];
+        let t = Vm::make_time(&f) - (offset as double) * 60000.0;
+        vec![t, if has_off { 1.0 } else { 0.0 }]
     }
 
     /// an ISO date-time with a time and no Z or offset
