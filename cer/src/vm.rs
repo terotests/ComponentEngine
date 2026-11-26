@@ -1363,9 +1363,7 @@ impl Vm {
             return Val::Undef();
         }
         if self.class_of(&p) == C_BIGINT {
-            let t = self.big_text(&p);
-            let r = crate::bigint::negate(t.as_str());
-            return self.bigint_val(r.as_str());
+            return self.big_negate(&p);
         }
         let n = self.to_number(&p);
         Val::Num(-n)
@@ -1377,9 +1375,7 @@ impl Vm {
             return self.big_step(n, d);
         }
         if self.class_of(&v) == C_BIGINT {
-            let t = self.big_text(&v);
-            let r = if d > 0.0 { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
-            return self.bigint_val(r.as_str());
+            return self.big_add_small(&v, if d > 0.0 { 1.0 } else { -1.0 });
         }
         let n = if let Some(x) = v.as_num() { x } else { self.to_number(&v) };
         Val::Num(n + d)
@@ -2972,10 +2968,7 @@ impl Vm {
                     return Rc::new(String::new());
                 }
                 if self.objs[o as usize].class == C_BIGINT {
-                    let pv = self.colds[self.objs[o as usize].cold as usize].prim;
-                    if let Some(s) = pv.as_str() {
-                        return self.sget(s);
-                    }
+                    return Rc::new(self.big_text(v));
                 }
                 let p = self.to_primitive(v, "string");
                 if self.throwing {
@@ -6833,9 +6826,7 @@ impl Vm {
             return (p, b);
         }
         if self.class_of(&p) == C_BIGINT {
-            let t = self.big_text(&p);
-            let r = crate::bigint::add(t.as_str(), format!("{}", delta).as_str());
-            let b = self.bigint_val(r.as_str());
+            let b = self.big_add_small(&p, delta as double);
             return (p, b);
         }
         let n = self.to_number(&p);
@@ -8218,9 +8209,7 @@ impl Vm {
                 let v = self.pop();
                 let p = if is_obj(&v) { self.to_primitive(&v, "number") } else { v };
                 if self.class_of(&p) == C_BIGINT {
-                    let t = self.big_text(&p);
-                    let r = crate::bigint::negate(t.as_str());
-                    let b = self.bigint_val(r.as_str());
+                    let b = self.big_negate(&p);
                     self.stack.push(b);
                 } else {
                     let n = self.to_number(&p);
@@ -8258,9 +8247,7 @@ impl Vm {
                     let b = self.big_step(-x, -1.0);
                     self.stack.push(b);
                 } else if self.class_of(&p) == C_BIGINT {
-                    let t = self.big_text(&p);
-                    let r = crate::bigint::sub(crate::bigint::negate(t.as_str()).as_str(), "1");
-                    let b = self.bigint_val(r.as_str());
+                    let b = self.big_not(&p);
                     self.stack.push(b);
                 } else {
                     let n = self.to_number(&p);
@@ -8280,9 +8267,7 @@ impl Vm {
                     return false;
                 }
                 if self.class_of(&v) == C_BIGINT {
-                    let t = self.big_text(&v);
-                    let r = if (op.code as int) == OP_INC { crate::bigint::add(t.as_str(), "1") } else { crate::bigint::sub(t.as_str(), "1") };
-                    let b = self.bigint_val(r.as_str());
+                    let b = self.big_add_small(&v, if (op.code as int) == OP_INC { 1.0 } else { -1.0 });
                     self.stack.push(b);
                     return false;
                 }

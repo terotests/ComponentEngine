@@ -993,3 +993,18 @@ ws,ws,at,rb,lp,nl,-,-,-,-,-,-,-
 var A = class { static; async; x; static static = 1; static async }; [Object.keys(new A()), Object.keys(A)].join("|")
 ----
 static,async,x|static,async
+
+# BigInts in binary limbs (bigint.rs): operators, shifts, bitwise, the
+# 64-bit typed arrays, Number() rounding, text in other radices
+==== js BigInt arithmetic on large values
+var a = 123456789012345678901234567890n, b = -98765432109876543210987654321098765n, p = (1n << 255n) - 19n;
+[a + b, a - b, a * b, b / a, b % a, (a * a * a) % p, a & b, a | b, a ^ b, ~a, -b].join()
+----
+-98765308653087530865308753086530875,98765555566665555556666555555666655,-12193263113702179522618503273374485542990550701087806784787655850,-800000,-900000000090000000009098765,32982776189164714567781365315106785646798615598274272171007671240650424749385,43376304165097985064396262098,-98765352029391695963293817482792973,-98765395405695861061278881879055071,-123456789012345678901234567891,98765432109876543210987654321098765
+
+==== js BigInt shifts, asIntN, typed arrays, Number
+var a = -(2n ** 100n) + 12345n, ta = new BigInt64Array(1), tu = new BigUint64Array(1);
+ta[0] = 2n ** 64n + 2n ** 63n + 5n; tu[0] = -3n;
+[a >> 7n, a << 70n, a >> 200n, BigInt.asIntN(64, a), BigInt.asUintN(70, a), ta[0], tu[0], Number(2n ** 53n + 1n), Number(2n ** 53n + 3n), (2n ** 70n).toString(36), BigInt("0x" + "f".repeat(30)) % 1000007n].join()
+----
+-9903520314283042199192993696,-1496577676626844588240573254127070254371232383238144,-1,12345,12345,-9223372036854775803,18446744073709551613,9007199254740992,9007199254740996,6x5kxtvuwilukg,765797

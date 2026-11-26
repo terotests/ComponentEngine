@@ -99,8 +99,16 @@ fn time_limit_and_slices_together() {
         assert_eq!(r, "3000000", "regs {}", regs);
         assert!(stops >= 1 || t0.elapsed().as_millis() < 5, "regs {}", regs);
         assert!(!e.timed_out());
-        // under a getter the slice cannot stop: the limit ends it
-        let r = e.eval("({get a(){ for(;;){} }}).a");
+        // a plain getter runs in the loop (registers): it stops at slices
+        // and resumes to its result
+        let mut r = e.eval("({get a(){ var n = 0; while (n < 3000000) n++; return n }}).a");
+        while e.is_suspended() {
+            r = e.resume();
+        }
+        assert_eq!(r, "3000000", "regs {}", regs);
+        assert!(!e.timed_out());
+        // under a native's callback the slice cannot stop: the limit ends it
+        let r = e.eval("JSON.parse('[1]', function(){ for(;;){} })");
         assert!(!e.is_suspended());
         assert!(e.timed_out(), "regs {}: {}", regs, r);
     }

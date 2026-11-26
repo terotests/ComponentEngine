@@ -153,6 +153,13 @@ pub const R_NEW: int = 56;
 /// `[a, b, c, …]`: w1 the first item's slot (the array goes there), w2
 /// the count
 pub const R_NEW_ARRAY: int = 57;
+/// w1 dst, w2 obj: obj.#x (the stack op's a the key, b the brand); w3 the
+/// inline cache of an own data field (shape * 65536 + slot)
+pub const R_GET_PRIVATE: int = 58;
+/// w1 obj (and then the value: the op's result), w2 the value: obj.#x = v
+/// for a field or accessor (the stack op's a, b, c); w3 the inline cache
+/// of an own data field
+pub const R_SET_PRIVATE: int = 59;
 
 const BAD: int = 1000000;
 
@@ -686,6 +693,9 @@ impl Tr {
             } else if (c as int) == OP_GET_PROP {
                 let o = self.opnd(d - 1);
                 self.result(i, R_GET_PROP, 0, 1, o, -1);
+            } else if (c as int) == OP_GET_PRIVATE && op.b != -2 {
+                let o = self.opnd(d - 1);
+                self.result(i, R_GET_PRIVATE, 0, 1, o, -1);
             } else if (c as int) == OP_GET_LOCAL_PROP {
                 self.result(i, R_GET_PROP, 0, 0, (op.a as int), -1);
             } else if (c as int) == OP_GET_THIS_PROP {
@@ -740,6 +750,13 @@ impl Tr {
                 let v = self.opnd(d - 1);
                 self.popn(2);
                 self.set(i, R_SET_PROP, 1, ns + d - 2, v, -1);
+                self.push_own(-1);
+            } else if (c as int) == OP_SET_PRIVATE && op.c != 1 {
+                // as OP_SET_PROP: the value stays where the object was
+                self.mat(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(2);
+                self.set(i, R_SET_PRIVATE, 0, ns + d - 2, v, -1);
                 self.push_own(-1);
             } else if (c as int) == OP_TYPEOF {
                 let x = self.opnd(d - 1);

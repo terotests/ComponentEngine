@@ -1954,7 +1954,7 @@ impl Vm {
             }
             VK::Str(_) => String::new(),
             VK::Obj(o) => format!("o{}", o),
-            VK::Big(n) => format!("g{}", crate::bigint::int_text(n as int)),
+            VK::Big(_) => self.big_map_key(k),
         };
         2 * self.intern(s.as_str()) + 1
     }
@@ -4964,7 +4964,7 @@ impl Vm {
                 let n = if args.is_empty() {
                     0.0
                 } else if self.class_of(&prim) == C_BIGINT {
-                    crate::bigint::to_double(self.big_text(&prim).as_str())
+                    self.big_to_double(&prim)
                 } else {
                     self.to_number(&prim)
                 };

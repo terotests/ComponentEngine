@@ -477,33 +477,27 @@ impl Vm {
     /// A BigInt64 / BigUint64 element at byte `at`.
     pub fn buf_read_big(&mut self, b: int, at: int, kind: int, little: bool) -> Val {
         self.buf_to_bytes(b);
-        let mut acc = String::from("0");
+        let mut be: Vec<int> = Vec::new();
         let mut k: int = 0;
         while k < 8 {
             let idx = if little { at + 7 - k } else { at + k };
-            let byte = self.byte(b, idx);
-            acc = crate::bigint::add(crate::bigint::mul(acc.as_str(), "256").as_str(), format!("{}", byte).as_str());
+            be.push(self.byte(b, idx));
             k += 1;
         }
+        let m = crate::bigint::mag_from_bytes(&be);
         if kind == TK_BIGINT64 {
-            acc = crate::bigint::as_int_n(64, acc.as_str());
+            let (n, r) = crate::bigint::mag_as_int_n(64, false, &m);
+            return self.bigint_of(n, &r);
         }
-        self.bigint_val(acc.as_str())
+        self.bigint_of(false, &m)
     }
 
     /// Writes a BigInt (converted already) as 64 bits at byte `at`.
     pub fn buf_write_big(&mut self, b: int, at: int, v: &Val, little: bool) {
         self.buf_to_bytes(b);
-        let t = self.big_text(v);
-        let mut x = crate::bigint::as_uint_n(64, t.as_str());
-        let mut low: Vec<int> = Vec::new();
-        let mut j = 0;
-        while j < 8 {
-            let r = crate::bigint::rem(x.as_str(), "256");
-            low.push(crate::bigint::to_double(r.as_str()) as int);
-            x = crate::bigint::div(x.as_str(), "256");
-            j += 1;
-        }
+        let (xn, xm) = self.big_mag(v);
+        let (_, u) = crate::bigint::mag_as_uint_n(64, xn, &xm);
+        let low = crate::bigint::mag_low_bytes(&u, 8);
         let mut k: int = 0;
         while k < 8 {
             // low[0] is the least significant byte
