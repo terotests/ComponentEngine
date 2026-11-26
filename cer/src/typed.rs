@@ -162,13 +162,13 @@ pub fn zeros(n: int) -> Vec<double> {
 
 /// A float32 from its 32 bits (0 to 2^32 - 1). Rust: the bits as they are.
 #[ranger::target(rust)]
-fn f32_of_bits(u: int) -> double {
+fn f32_of_bits(u: double) -> double {
     f32::from_bits(u as u32) as f64
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn f32_of_bits(u: int) -> double {
-    let ud = u as double;
+fn f32_of_bits(u: double) -> double {
+    let ud = u;
     let sign = if ud >= 2147483648.0 { 1 } else { 0 };
     let r = ud - (sign as double) * 2147483648.0;
     let exp = floor(r / 8388608.0);
@@ -177,52 +177,52 @@ fn f32_of_bits(u: int) -> double {
 
 /// The 32 bits of `x` as a float32 (a NaN as 0x7fc00000).
 #[ranger::target(rust)]
-fn f32_bits(x: double) -> int {
+fn f32_bits(x: double) -> double {
     if x != x {
-        return 2143289344;
+        return 2143289344.0;
     }
-    (x as f32).to_bits() as int
+    (x as f32).to_bits() as f64
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn f32_bits(x: double) -> int {
+fn f32_bits(x: double) -> double {
     let (sign, exp, mant) = float_parts(x, 8, 23);
-    ((sign as double) * 2147483648.0 + (exp as double) * 8388608.0 + mant) as int
+    (sign as double) * 2147483648.0 + (exp as double) * 8388608.0 + mant
 }
 
 /// A float64 from its low and high 32 bits.
 #[ranger::target(rust)]
-fn f64_of_words(lo: int, hi: int) -> double {
+fn f64_of_words(lo: double, hi: double) -> double {
     f64::from_bits(((hi as u64) << 32) | ((lo as u64) & 0xffffffff))
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn f64_of_words(lo: int, hi: int) -> double {
-    let hd = hi as double;
+fn f64_of_words(lo: double, hi: double) -> double {
+    let hd = hi;
     let sign = if hd >= 2147483648.0 { 1 } else { 0 };
     let r = hd - (sign as double) * 2147483648.0;
     let exp = floor(r / 1048576.0);
-    let mant = (r - exp * 1048576.0) * 4294967296.0 + (lo as double);
+    let mant = (r - exp * 1048576.0) * 4294967296.0 + lo;
     float_from_parts(sign, exp as int, mant, 11, 52)
 }
 
 /// The low and high 32 bits of `x` as a float64 (a NaN as
 /// 0x7ff8000000000000).
 #[ranger::target(rust)]
-fn f64_words(x: double) -> (int, int) {
+fn f64_words(x: double) -> (double, double) {
     if x != x {
-        return (0, 2146959360);
+        return (0.0, 2146959360.0);
     }
     let b = x.to_bits();
-    ((b & 0xffffffff) as int, (b >> 32) as int)
+    ((b & 0xffffffff) as f64, (b >> 32) as f64)
 }
 
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
-fn f64_words(x: double) -> (int, int) {
+fn f64_words(x: double) -> (double, double) {
     let (sign, exp, mant) = float_parts(x, 11, 52);
     let top = floor(mant / 4294967296.0);
     let lo = mant - top * 4294967296.0;
-    (lo as int, ((sign as double) * 2147483648.0 + (exp as double) * 1048576.0 + top) as int)
+    (lo, (sign as double) * 2147483648.0 + (exp as double) * 1048576.0 + top)
 }
 
 /// The `size` bytes at `at` of colds[c].nums (bytes, one a slot) as
@@ -865,10 +865,10 @@ impl Vm {
         let size = kind_size(kind);
         let (lo, hi) = get_bytes(&self.colds, c, at, size, little);
         if kind == TK_FLOAT32 {
-            return f32_of_bits(lo as int);
+            return f32_of_bits(lo);
         }
         if kind == TK_FLOAT64 {
-            return f64_of_words(lo as int, hi as int);
+            return f64_of_words(lo, hi);
         }
         if kind == TK_FLOAT16 {
             let sign = if lo >= 32768.0 { 1 } else { 0 };
@@ -896,11 +896,11 @@ impl Vm {
         let size = kind_size(kind);
         let mut hi: double = 0.0;
         let lo: double = if kind == TK_FLOAT32 {
-            f32_bits(x) as double
+            f32_bits(x)
         } else if kind == TK_FLOAT64 {
             let (l, h) = f64_words(x);
-            hi = h as double;
-            l as double
+            hi = h;
+            l
         } else if kind == TK_FLOAT16 {
             let (sign, exp, mant) = float_parts(x, 5, 10);
             (sign as double) * 32768.0 + (exp as double) * 1024.0 + mant
