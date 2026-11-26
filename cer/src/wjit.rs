@@ -7642,6 +7642,13 @@ fn h_get_elem(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
                     let bc = vm.objs[ob.env as usize].cold as usize;
                     r = Val::Num(vm.colds[bc].nums[sl as usize]);
                     done = true;
+                } else {
+                    // over a buffer that holds bytes (views of several kinds)
+                    let (ok, x) = vm.ta_bytes_get(o, i);
+                    if ok {
+                        r = Val::Num(x);
+                        done = true;
+                    }
                 }
             }
         }
@@ -7723,7 +7730,7 @@ fn set_elem_fast(vm: &mut crate::vm::Vm, bp: int, ins: Op, val: Val) -> bool {
     let n = if let Some(x) = (vm.rget(bp, ins.b as int)).as_num() { x } else { return false };
     if o >= 0 && vm.objs[o as usize].class == C_TYPED {
         let i = n as int;
-        return if let Some(x) = val.as_num() { (i as double) == n && vm.ta_put_num(o, i, x) } else { false };
+        return if let Some(x) = val.as_num() { (i as double) == n && (vm.ta_put_num(o, i, x) || vm.ta_bytes_put(o, i, x)) } else { false };
     }
     if o < 0 || vm.objs[o as usize].class != C_ARRAY || vm.objs[o as usize].pos >= 2 {
         return false;
