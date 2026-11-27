@@ -442,3 +442,44 @@ fn cached_property_adds_respect_setters_proxies_and_extensibility() {
     "#);
     assert_eq!(r, "setter 2|[\"x\"]|TypeError|TypeError|trap x|trap y|[]|3|{\"x\":1,\"y\":2}");
 }
+
+#[test]
+fn promise_then_catch_resolve_natively_keep_their_steps() {
+    // then / catch / Promise.resolve take a native path for a plain
+    // promise (fast_wrap): subclasses, an own then or constructor, a
+    // replaced species or then, thenables and the jobs' order as Node
+    let mut e = Engine::new();
+    let r = e.eval(r#"
+        var out = [];
+        var log = function (s) { return function (v) { out.push(s + ":" + v); }; };
+        var p = Promise.resolve(1);
+        p.then(log("a")); p.catch(log("never"));
+        Promise.resolve(p).then(log("same:" + (Promise.resolve(p) === p)));
+        Promise.reject(2).catch(log("c"));
+        var q = Promise.resolve(3); q.then = function (f) { out.push("own then"); return Promise.prototype.then.call(this, f); };
+        q.catch(log("q"));
+        class P2 extends Promise {}
+        var s = P2.resolve(4); out.push(s instanceof P2, s.then(function () {}) instanceof P2, Promise.resolve(s) === s);
+        var t = Promise.resolve(5); t.constructor = P2; out.push(t.then(function () {}) instanceof P2);
+        Promise.resolve({ then: function (r) { out.push("thenable"); r(6); } }).then(log("th"));
+        new Promise(function (r) { r(Promise.resolve(7)); }).then(log("adopt"));
+        Promise.resolve(8).then(function () { out.push("tick1"); }).then(function () { out.push("tick2"); }).then(function () { out.push("tick3"); });
+        var d = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+        out.push(typeof d.get, d.get.name, d.get.call(7), Promise.prototype.then.name, Promise.prototype.then.length, Promise.prototype.catch.name, Promise.resolve.length);
+        Object.defineProperty(Promise, Symbol.species, { get: function () { return P2; }, configurable: true });
+        out.push(Promise.resolve(9).then(function () {}) instanceof P2);
+        Object.defineProperty(Promise, Symbol.species, d);
+        out.push(Promise.resolve(9).then(function () {}) instanceof P2);
+        var oldThen = Promise.prototype.then;
+        Promise.prototype.then = function (a, b) { out.push("patched"); return oldThen.call(this, a, b); };
+        Promise.resolve(10).catch(log("x"));
+        Promise.prototype.then = oldThen;
+        try { Promise.prototype.then.call({}, function () {}); } catch (e) { out.push(e.constructor.name); }
+        try { Promise.resolve.call(1, 2); } catch (e) { out.push(e.constructor.name); }
+        out.push(Promise.resolve.call(P2, 11) instanceof P2);
+        var done = false;
+        'set up'
+    "#);
+    assert_eq!(r, "set up");
+    assert_eq!(e.eval("out.join()"), "own then,true,true,false,true,function,get [Symbol.species],7,then,2,catch,1,true,false,patched,TypeError,TypeError,true,a:1,same:true:1,c:2,thenable,tick1,th:6,tick2,adopt:7,tick3");
+}
