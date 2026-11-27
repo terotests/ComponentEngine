@@ -259,6 +259,11 @@ pub struct Vm {
     /// per function (Proto index): 0 not looked at, 1 an ordinary
     /// comparator, 2 `(a, b) => a - b`, 3 `(a, b) => b - a` (sort_kind)
     pub cmp_kinds: Vec<i32>,
+    /// src_text's marks (jsstr::char_range_marked) of the source string
+    /// src_marks_h, of src_marks_len bytes; -1 for none
+    pub src_marks_h: int,
+    pub src_marks_len: int,
+    pub src_marks: Vec<int>,
     /// the prelude's proxy hooks (an array), -1 before
     pub proxy_hooks: int,
     /// %ThrowTypeError%
@@ -766,6 +771,9 @@ impl Vm {
             async_from_sync: -1,
             array_generic: -1,
             cmp_kinds: Vec::new(),
+            src_marks_h: -1,
+            src_marks_len: 0,
+            src_marks: Vec::new(),
             proxy_hooks: -1,
             thrower: -1,
             callee_pair: -1,

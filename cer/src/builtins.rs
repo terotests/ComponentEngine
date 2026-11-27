@@ -498,6 +498,21 @@ pub fn take_regex_over() -> bool {
 }
 
 impl Vm {
+    /// Chars [a, b) of source string `h` (a function's own text): through
+    /// marks of where every 1024th char starts, kept for the last source
+    /// read, so a bundle's function is not a walk of the text before it
+    /// on each Function.prototype.toString.
+    pub fn src_text(&mut self, h: int, a: int, b: int) -> String {
+        let src = self.sget(h);
+        let n = src.as_bytes().len() as int;
+        if self.src_marks_h != h || self.src_marks_len != n {
+            self.src_marks = Vec::new();
+            self.src_marks_h = h;
+            self.src_marks_len = n;
+        }
+        jsstr::char_range_marked(src.as_str(), a, b, &mut self.src_marks)
+    }
+
     pub fn native_fn(&mut self, name: &str, id: int, length: int) -> int {
         let fp = self.function_proto;
         let f = self.alloc(C_NATIVE, fp);
@@ -2689,8 +2704,7 @@ impl Vm {
                 return 1;
             }
             if let Some(h) = (&self.protos[pi].src).as_str() {
-                let src = self.sget(h);
-                let text = jsstr::char_range(src.as_str(), a, b);
+                let text = self.src_text(h, a, b);
                 k = sub_cmp_kind(squeeze_ws(text.as_str()).as_str());
             }
         }
@@ -5169,13 +5183,9 @@ impl Vm {
                 let ns = self.to_string(&n);
                 if self.objs[o as usize].class == C_FUNCTION {
                     let pi = self.objs[o as usize].func as int;
-                    if let Some(src) = (&self.protos[pi as usize].src).as_str() {
-                        let src = self.sget(src.clone());
+                    if let Some(h) = (&self.protos[pi as usize].src).as_str() {
                         let (a, b) = (self.protos[pi as usize].src_start, self.protos[pi as usize].src_end);
-                        // (an ASCII source's chars are its bytes: a bundle's
-                        // function read with toString was a walk of the
-                        // 700 KB before it, char by char, every time)
-                        let text = jsstr::char_range(src.as_str(), a, b);
+                        let text = self.src_text(h, a, b);
                         return self.string_val(text);
                     }
                     if self.protos[pi as usize].class_ctor {
