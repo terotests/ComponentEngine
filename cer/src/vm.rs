@@ -587,6 +587,9 @@ pub struct Vm {
     /// Where rx_s's units start in rx_units (a later part of the text
     /// before, rx_cache): 0 but after a lexer's `str = str.slice(n)`.
     pub rx_uoff: int,
+    /// A buffer has held views of several kinds (TK_WORDS, buf_to_mixed):
+    /// the JIT then writes their elements' reads and writes in place.
+    pub words_seen: bool,
     /// The text whose units rx_units holds, all of them (rx_s or one it
     /// is the end of).
     pub rx_ufull: Rc<String>,
@@ -979,6 +982,7 @@ impl Vm {
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
             rx_uoff: 0,
+            words_seen: false,
             rx_ufull: Rc::new(String::new()),
             rx_vw: false,
             rx_sbase: 0,
