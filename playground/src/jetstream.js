@@ -22,6 +22,7 @@ const fmtMs = (v) => (v >= 1000 ? (v / 1000).toFixed(1) + " s" : v.toFixed(v >= 
 export function setupJetStream(ctx) {
   let manifest = null;
   let stop = false;
+  let running = null; // { b, id }: the cell being run now
   let results = ctx.store.get("js3-results", null);
   if (!results || results.rev !== ctx.rev) results = { rev: ctx.rev, byCap: {} };
   const save = () => ctx.store.set("js3-results", results);
@@ -107,15 +108,26 @@ export function setupJetStream(ctx) {
         for (const m of members) built.push(await script(m, c, load));
       } catch (err) {
         for (const e of engines) res.engines[e.id].b[b.name] = { error: String(err.message || err) };
+        save();
+        render();
         continue;
       }
       for (const e of engines) {
         if (stop) break;
         const per = [];
         let error = null;
+        running = { b: b.name, id: e.id };
+        render();
         for (let k = 0; k < members.length; k++) {
           status(`${b.name}${members.length > 1 ? " · " + members[k].name : ""} · ${e.name} (${i}/${list.length})`);
-          const r = await runOne(e, built[k], limit);
+          // a runner that throws (a worker that died, an engine that
+          // aborted) fails this cell; the run goes on with the next one
+          let r;
+          try {
+            r = await runOne(e, built[k], limit);
+          } catch (err) {
+            r = { error: String((err && err.message) || err) || "the engine stopped" };
+          }
           if (r.error) {
             error = (members.length > 1 ? members[k].name + ": " : "") + r.error;
             break;
@@ -133,12 +145,15 @@ export function setupJetStream(ctx) {
             ms: per.reduce((a, p) => a + p.times.reduce((x, y) => x + y, 0), 0),
           };
         }
+        running = null;
         save();
         render();
       }
       built.length = 0;
       fileCache.clear();
     }
+    running = null;
+    render();
     for (const e of engines) ctx.setEngineState(e.id, stop ? "stopped" : "done", stop ? "" : "ok");
     progress(0, 0);
     status(stop ? "stopped" : "done");
@@ -158,6 +173,7 @@ export function setupJetStream(ctx) {
       ids.map((id) => `<th>${esc(res.engines[id].name)}</th>`).join("") +
       "</tr></thead>";
     const cell = (id, b, r) => {
+      if (running && running.b === b && running.id === id) return `<td class="pending">running…</td>`;
       if (!r) return "<td></td>";
       // the error in the cell itself (a tooltip alone is easy to miss)
       if (r.error) return `<td class="err" title="${esc(r.error)}">✗ <span class="errmsg">${esc(r.error.length > 80 ? r.error.slice(0, 80) + "…" : r.error)}</span></td>`;
@@ -210,6 +226,75 @@ export function setupJetStream(ctx) {
           );
     }
     $("js3-table").innerHTML = head + "<tbody>" + total + rows.join("") + "</tbody>";
+    $("js3-gaps").textContent = gapReport();
+  }
+
+  // ---- slowest benchmarks, as text for development work ----------------
+
+  /** The benchmarks where each of our engines (CEr*, CErXes*) is furthest
+   * behind the browser and Hermes, its failures, totals, the build and the
+   * browser: plain text to paste into a chat. */
+  function gapReport() {
+    const res = current();
+    const n = Number($("js3-gap-n").value) || 10;
+    const ids = Object.keys(res.engines);
+    const ours = ids.filter((id) => /^cer/.test(id));
+    const refs = ["native", "hermes"].filter((id) => res.engines[id]);
+    const ok = (e, b) => e && e.b[b] && e.b[b].score;
+    const L = [];
+    const nav = typeof navigator !== "undefined" ? navigator : {};
+    L.push(`JetStream 3 gaps · playground build ${ctx.rev || "local"} · JetStream ${manifest.rev.slice(0, 10)}`);
+    L.push(`iterations: ${cap() || "JetStream's own"} · time limit ${Math.round(Number($("js3-limit").value) / 1000)} s`);
+    L.push(`browser: ${nav.userAgent || "?"}`);
+    L.push(
+      `cores ${nav.hardwareConcurrency || "?"}` +
+        (nav.deviceMemory ? ` · memory ${nav.deviceMemory} GB` : "") +
+        ` · crossOriginIsolated ${typeof crossOriginIsolated !== "undefined" ? crossOriginIsolated : "?"}`,
+    );
+    L.push("");
+    L.push("Totals (geometric mean over finished benchmarks):");
+    for (const id of ids) {
+      const e = res.engines[id];
+      const done = manifest.benchmarks.filter((b) => ok(e, b.name));
+      const failed = manifest.benchmarks.filter((b) => e.b[b.name] && e.b[b.name].error).length;
+      L.push(`  ${e.name} [${id}]: ${fmt(geomean(done.map((b) => e.b[b.name].score)))} (${done.length} done, ${failed} failed)`);
+    }
+    if (!ours.length) {
+      L.push("", "No CEr / CErXes results yet: tick one, run, then copy.");
+      return L.join("\n");
+    }
+    for (const id of ours) {
+      const e = res.engines[id];
+      L.push("", `== ${e.name} [${id}] ==`);
+      for (const r of refs) {
+        const ref = res.engines[r];
+        const both = manifest.benchmarks.filter((b) => ok(e, b.name) && ok(ref, b.name));
+        if (!both.length) continue;
+        const rows = both
+          .map((b) => ({ b, x: ref.b[b.name].score / e.b[b.name].score }))
+          .sort((a, b) => b.x - a.x);
+        L.push(`vs ${ref.name}: ${fmt(geomean(rows.map((r) => r.x)))}× slower overall (${both.length} benchmarks); slowest ${Math.min(n, rows.length)}:`);
+        rows.slice(0, n).forEach(({ b, x }, k) => {
+          const me = e.b[b.name];
+          const subs = Object.entries(me.subs).map(([s, v]) => `${s} ${fmt(v)}`).join(", ");
+          L.push(
+            `  ${String(k + 1).padStart(2)}. ${b.name}: ${fmt(x)}× slower · ours ${fmt(me.score)} vs ${fmt(ref.b[b.name].score)}` +
+              ` · ${subs} · ${fmtMs(me.ms)}${b.tags.length ? " · " + b.tags.join(",") : ""}`,
+          );
+        });
+      }
+      const errs = manifest.benchmarks.filter((b) => e.b[b.name] && e.b[b.name].error);
+      if (errs.length) {
+        L.push(`failed (${errs.length}):`);
+        for (const b of errs) {
+          const others = refs.map((r) => `${r} ${ok(res.engines[r], b.name) ? "ok" : res.engines[r].b[b.name] ? "failed" : "not run"}`).join(", ");
+          L.push(`  ${b.name}: ${e.b[b.name].error}${others ? " (" + others + ")" : ""}`);
+        }
+      }
+      const notRun = manifest.benchmarks.filter((b) => selected.has(b.name) && !e.b[b.name]);
+      if (notRun.length) L.push(`not run yet: ${notRun.map((b) => b.name).join(", ")}`);
+    }
+    return L.join("\n");
   }
 
   function renderLists() {
@@ -237,6 +322,8 @@ export function setupJetStream(ctx) {
   }
 
   $("js3-run").onclick = () => run().catch((err) => {
+    running = null;
+    render();
     status(String(err.message || err));
     $("js3-run").disabled = false;
     $("js3-stop").disabled = true;
@@ -249,6 +336,30 @@ export function setupJetStream(ctx) {
     results.byCap[cap()] = { engines: {} };
     save();
     render();
+  };
+  $("js3-gap-n").value = String(ctx.store.get("js3-gap-n", 10));
+  $("js3-gap-n").onchange = () => {
+    ctx.store.set("js3-gap-n", Number($("js3-gap-n").value));
+    render();
+  };
+  $("js3-gap-copy").onclick = async () => {
+    const text = manifest ? gapReport() : "";
+    const say = (m) => {
+      $("js3-gap-status").textContent = m;
+      setTimeout(() => ($("js3-gap-status").textContent = ""), 3000);
+    };
+    try {
+      await navigator.clipboard.writeText(text);
+      say("copied");
+    } catch {
+      // no clipboard permission (e.g. not a secure context): select the text
+      const r = document.createRange();
+      r.selectNodeContents($("js3-gaps"));
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      say("selected: press Ctrl/⌘+C");
+    }
   };
   $("js3-iter").value = String(ctx.store.get("js3-iter", 5));
   $("js3-iter").onchange = () => {

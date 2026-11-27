@@ -130,6 +130,15 @@
       </details>
       <p class="note"><span id="js3-source"></span> Hover a score for its subscores; ✗ shows why an engine failed.</p>
       <div class="table-wrap"><table id="js3-table" class="results js3"></table></div>
+      <h3>Slowest relative to the browser and Hermes</h3>
+      <p class="note">For each of our engines in the table: the benchmarks where it is furthest behind this browser and behind Hermes (WASM),
+        the ones it failed, worked out from the results above. Copy to clipboard puts it, with the build, browser, run settings, totals and every error in full, on the clipboard as plain text for development work.</p>
+      <div class="controls">
+        <label>Show <select id="js3-gap-n"><option>5</option><option selected>10</option><option>20</option></select></label>
+        <button id="js3-gap-copy" type="button" class="primary">Copy to clipboard</button>
+        <span id="js3-gap-status" class="status" aria-live="polite"></span>
+      </div>
+      <pre id="js3-gaps" class="js3-gaps"></pre>
       <h3>Left out</h3>
       <ul id="js3-skipped" class="js3-skipped"></ul>
     </section>
