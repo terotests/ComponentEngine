@@ -2004,8 +2004,12 @@ impl<'a> Cg<'a> {
             self.mem(F64_LOAD, 3, 0);
             self.set(L_A);
             self.op(ELSE);
-            // views of several kinds over one buffer (Vm::ta_bytes_get)
-            self.words_get(pc);
+            // views of several kinds over one buffer (Vm::ta_bytes_get):
+            // the runtime module's wget
+            self.words_call(F_WGET, pc);
+            self.i32c(wval_addr() as i64);
+            self.mem(F64_LOAD, 3, 0);
+            self.set(L_A);
             self.extra -= 1;
             self.op(END);
             }
@@ -2239,6 +2243,73 @@ impl<'a> Cg<'a> {
         self.op(I32_ADD);
         self.set(L_T4);
     }
+    /// f(L_T2, L_T3, L_T6, 0, vm, 0) of the runtime module (wget, wput):
+    /// fails when it answers 0.
+    fn words_call(&mut self, f: u32, pc: i64) {
+        self.get(L_T2);
+        self.get(L_T3);
+        self.get(L_T6);
+        self.i32c(0);
+        self.get(L_VM);
+        self.i32c(0);
+        self.op(CALL);
+        self.w.u(f as u64);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+    }
+    /// The runtime module's wget(view, index, cold, .., vm, ..) and
+    /// wput(...): words_get into wval / words_put from wval, 1; 0 when
+    /// they cannot (the helper then). One copy of that code for every
+    /// typed array site, not one at each (a function's body has a limit,
+    /// MAX_BODY).
+    fn words_body(&mut self, put: bool) -> Vec<u8> {
+        let saved_w = std::mem::replace(&mut self.w, WBuf::new());
+        let (se, sx, ss) = (self.extra, self.exit_d, self.slow_at);
+        // hstore_body's locals
+        self.w.u(4);
+        self.w.u(3);
+        self.w.byte(T_I32);
+        self.w.u(2);
+        self.w.byte(T_F64);
+        self.w.u(4);
+        self.w.byte(T_I64);
+        self.w.u(7);
+        self.w.byte(T_I32);
+        self.extra = 0;
+        self.exit_d = 0;
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.slow_at = Some(self.extra);
+        self.get(0);
+        self.set(L_T2);
+        self.get(1);
+        self.set(L_T3);
+        self.get(2);
+        self.set(L_T6);
+        if put {
+            self.i32c(wval_addr() as i64);
+            self.mem(F64_LOAD, 3, 0);
+            self.set(L_A);
+            self.words_put(0);
+        } else {
+            self.words_get(0);
+            self.i32c(wval_addr() as i64);
+            self.get(L_A);
+            self.mem(F64_STORE, 3, 0);
+        }
+        self.i32c(1);
+        self.op(RETURN);
+        self.extra -= 1;
+        self.op(END);
+        self.i32c(0);
+        self.op(END);
+        let out = std::mem::replace(&mut self.w, saved_w).b;
+        self.extra = se;
+        self.exit_d = sx;
+        self.slow_at = ss;
+        out
+    }
     /// For a typed array (L_T2, index L_T3 inside it, buffer Cold L_T6)
     /// over a buffer holding little-endian words (TK_WORDS: one u32 a
     /// number in nums): its element's byte address in L_T4 and its word's
@@ -2416,14 +2487,12 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
     }
-    /// `ta[i] = val` (a number) over a TK_WORDS buffer (words_at), as
+    /// `ta[i] = L_A` (a number) over a TK_WORDS buffer (words_at), as
     /// typed::words_put writes it; fails for Uint8Clamped and an integer
     /// kind's value outside +-9.2e18 (NaN too), as words_put declines them.
-    fn words_put(&mut self, val: Opnd, pc: i64) {
+    fn words_put(&mut self, pc: i64) {
         use crate::typed::*;
         self.words_at(pc);
-        self.num(val);
-        self.set(L_A);
         self.get(L_T5);
         self.i32c(TK_UINT8C);
         self.op(I32_EQ);
@@ -2570,8 +2639,12 @@ impl<'a> Cg<'a> {
             self.op(IF);
             self.op(T_VOID);
             self.extra += 1;
-            // views of several kinds over one buffer (Vm::ta_bytes_put)
-            self.words_put(val, pc);
+            // views of several kinds over one buffer (Vm::ta_bytes_put):
+            // the runtime module's wput, the number through wval
+            self.i32c(wval_addr() as i64);
+            self.num(val);
+            self.mem(F64_STORE, 3, 0);
+            self.words_call(F_WPUT, pc);
             self.op(BR);
             self.w.u((self.extra - all) as u64);
             self.extra -= 1;
@@ -6947,6 +7020,8 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     let lk = look_body(lay);
     let cd = codes_body();
     let eg = eget_body(lay);
+    let wg = cg.words_body(false);
+    let wp = cg.words_body(true);
     // gone: its pc back, no locals
     let mut gn = WBuf::new();
     gn.u(0);
@@ -6972,7 +7047,7 @@ pub fn rt_module(lay: Layout) -> Vec<u8> {
     m.section(7, &s);
     let mut s = WBuf::new();
     s.u(RT_FNS.len() as u64);
-    for b in [&lk, &cd, &hs, &cx, &pg, &me, &eg, &gn] {
+    for b in [&lk, &cd, &hs, &cx, &pg, &me, &eg, &gn, &wg, &wp] {
         s.u(b.len() as u64);
         s.b.extend_from_slice(b);
     }
@@ -6996,9 +7071,13 @@ const F_EGET: u32 = NHELPERS + 6;
 /// evicted function, so that a call still made to it goes back to the
 /// interpreter at once
 const F_GONE: u32 = NHELPERS + 7;
-const F_SELF: u32 = NHELPERS + 8;
+/// wget / wput(view, index, cold, .., vm, ..): a typed array's element
+/// over a buffer of words (Cg::words_body)
+const F_WGET: u32 = NHELPERS + 8;
+const F_WPUT: u32 = NHELPERS + 9;
+const F_SELF: u32 = NHELPERS + 10;
 /// rt_module's functions: (name, type)
-const RT_FNS: [(&str, u32); 8] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0), ("pget", 0), ("memeq", 2), ("eget", 2), ("gone", 0)];
+const RT_FNS: [(&str, u32); 10] = [("look", 2), ("codes", 2), ("hstore", 0), ("callx", 0), ("pget", 0), ("memeq", 2), ("eget", 2), ("gone", 0), ("wget", 0), ("wput", 0)];
 
 /// eget(o, atom, vm): the address of the value of property `atom` (a
 /// string's, known) of the plain object at o, from its shape or its plain
@@ -8373,6 +8452,13 @@ fn h_set_prop(vm: i32, bp: i32, _pi: i32, _pc: i32, ri: i32) -> i32 {
 // registers, cell[1] kvals, cell[2] a pc for code 3).
 
 static mut CELL: [i32; 16] = [0; 16];
+/// the number wget answers and wput writes
+static mut WVAL: f64 = 0.0;
+
+fn wval_addr() -> usize {
+    // SAFETY: only the address is taken
+    unsafe { std::ptr::addr_of!(WVAL) as usize }
+}
 thread_local! {
     /// debug (mask bit 54): native calls through H_CALL by native id
     pub static NATS: std::cell::Cell<Vec<u32>> = const { std::cell::Cell::new(Vec::new()) };
