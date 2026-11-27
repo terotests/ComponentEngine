@@ -897,6 +897,12 @@ impl Tr {
                 self.set(i, R_ADD_ENV, (op.a as int), x, y, (op.b as int));
             } else if (c as int) == OP_CHECK_TDZ || (c as int) == OP_REQUIRE_OBJ || (c as int) == OP_CHECK_UNINIT {
                 let x = self.opnd(d - 1);
+                if (c as int) == OP_CHECK_TDZ && i > 0 && self.rc[(i - 1) as usize].code == (R_GET_ENV as i32) && (self.rc[(i - 1) as usize].a as int) == x {
+                    // the scope read just before: sub 2, it checks too and
+                    // skips this when the value is there (rvm R_GET_ENV)
+                    let pv = (i - 1) as usize;
+                    self.rc[pv].code = (R_GET_ENV + 512) as i32;
+                }
                 let sub = if (c as int) == OP_CHECK_TDZ { 0 } else if (c as int) == OP_REQUIRE_OBJ { 1 } else { 2 };
                 self.set(i, R_CHECK, sub, x, (op.a as int), 0);
             } else if (c as int) == OP_GET_METHOD_ELEM {

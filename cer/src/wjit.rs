@@ -908,7 +908,7 @@ fn settles(code: &[Op], from: usize, np: i32, fwd: Option<(i32, i32)>, out: &mut
                 pc += 1
             }
             // a scope read has no check that could fail
-            R_GET_ENV if op.a >= np && ((op.code >> 8) & 255) == 0 && op.b >= 0 && op.c >= 0 => {
+            R_GET_ENV if op.a >= np && ((op.code >> 8) & 255) != 1 && op.b >= 0 && op.c >= 0 => {
                 fwd = kill(fwd, op.a);
                 pc += 1
             }
@@ -964,7 +964,7 @@ pub fn inline_ok(code: &[Op], entry: usize, nparams: u32) -> Option<Vec<i32>> {
             R_MOVE | R_ADD | R_SUB | R_MUL => w >= np,
             R_ARITH => w >= np && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR | OP_USHR),
             R_LOAD2 => w >= np,
-            R_GET_ENV => w >= np && sub <= 1 && op.b >= 0 && op.c >= 0,
+            R_GET_ENV => w >= np && sub <= 2 && op.b >= 0 && op.c >= 0,
             R_THIS | R_GET_THIS_PROP => w >= np,
             R_GET_PROP => w >= np && op.b >= 0,
             R_SET_ENV => op.b >= 0 && op.c >= 0 && return if settles(code, pc + 1, np, None, &mut out) { Some(out) } else { None },
@@ -5511,7 +5511,7 @@ impl<'a> Cg<'a> {
                 self.exit_if(p);
                 true
             }
-            R_GET_ENV if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && w3 >= 0 && sub <= 1 => {
+            R_GET_ENV if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && w3 >= 0 && sub <= 2 => {
                 self.env_slot_addr(w2, w3);
                 self.get(L_T2);
                 self.mem(I64_LOAD, 3, 0);

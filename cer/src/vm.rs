@@ -287,6 +287,11 @@ pub struct Vm {
     pub bigint_proto: int,
     pub array_values_fn: int,
     pub roots: Vec<int>,
+    /// the scripts' let / const / class bindings (the global lexical
+    /// environment), an object (in `roots`) of [env, slot, kind] arrays by
+    /// name; -1 before the first. Code of the script that declares one
+    /// reads it in its env; other code, as a global it does not find.
+    pub glex_rec: int,
     pub throwing: bool,
     pub exc: Val,
     pub out: Vec<String>,
@@ -805,6 +810,7 @@ impl Vm {
             bigint_proto: -1,
             array_values_fn: -1,
             roots: Vec::new(),
+            glex_rec: -1,
             throwing: false,
             exc: Val::Undef(),
             out: Vec::new(),
@@ -1411,6 +1417,9 @@ impl Vm {
             let nc = self.ic_of(g, slot);
             self.protos[pi].code[(pc - 1) as usize].c = (nc as i32);
             self.put_slot(g, slot, v);
+        } else if slot < 0 && self.glex_rec >= 0 && self.glex_entry(atom) >= 0 && !self.has_atom(g, atom) {
+            let ent = self.glex_entry(atom);
+            self.glex_set(ent, atom, v);
         } else if slot < 0 && create == 0 && self.strict_now() && !self.has_atom(g, atom) {
             // strict code does not create globals by assignment
             let n = self.atom_str(atom);
@@ -2875,6 +2884,97 @@ impl Vm {
         let p = self.reference_error_proto;
         let e = self.new_error(p, msg);
         self.throw_val(Val::Obj(e));
+    }
+
+    /// The global lexical binding named `atom` (glex_rec): its
+    /// [env, slot, kind] array, or -1.
+    pub fn glex_entry(&self, atom: int) -> int {
+        let r = self.glex_rec;
+        if r < 0 {
+            return -1;
+        }
+        let slot = self.find(r, atom);
+        if slot < 0 {
+            return -1;
+        }
+        let v = self.objs[r as usize].get_slot(slot as usize).clone();
+        obj_of(&v)
+    }
+
+    /// A global lexical binding's value (`ent` from glex_entry); throws in
+    /// its temporal dead zone.
+    pub fn glex_get(&mut self, ent: int, atom: int) -> Val {
+        let e = self.get_index(&Val::Obj(ent), 0);
+        let k = self.get_index(&Val::Obj(ent), 1);
+        let eo = obj_of(&e);
+        let slot = self.to_number(&k) as int;
+        let v = self.evecs[self.objs[eo as usize].elems as usize].v[slot as usize].clone();
+        if obj_of(&v) == self.tdz_obj && self.tdz_obj >= 0 {
+            let n = self.atom_str(atom);
+            self.throw_ref(format!("Cannot access '{}' before initialization", n).as_str());
+            return Val::Undef();
+        }
+        v
+    }
+
+    /// Assigns a global lexical binding (`ent` from glex_entry).
+    pub fn glex_set(&mut self, ent: int, atom: int, v: Val) {
+        let e = self.get_index(&Val::Obj(ent), 0);
+        let k = self.get_index(&Val::Obj(ent), 1);
+        let kd = self.get_index(&Val::Obj(ent), 2);
+        let eo = obj_of(&e);
+        let slot = self.to_number(&k) as int;
+        let cur = self.evecs[self.objs[eo as usize].elems as usize].v[slot as usize].clone();
+        if obj_of(&cur) == self.tdz_obj && self.tdz_obj >= 0 {
+            let n = self.atom_str(atom);
+            self.throw_ref(format!("Cannot access '{}' before initialization", n).as_str());
+            return;
+        }
+        if self.to_number(&kd) as int == 1 {
+            self.throw_type("Assignment to constant variable.");
+            return;
+        }
+        self.put_elem(eo, slot, v);
+    }
+
+    /// The script's global declarations, before any is made
+    /// (GlobalDeclarationInstantiation): `lex` names a let / const /
+    /// class, else a var or function.
+    pub fn glex_check(&mut self, atom: int, lex: bool) {
+        if self.glex_entry(atom) >= 0 {
+            let n = self.atom_str(atom);
+            self.throw_syntax(format!("Identifier '{}' has already been declared", n).as_str());
+            return;
+        }
+        if lex {
+            let g = self.global;
+            let slot = self.find(g, atom);
+            if slot >= 0 && (self.attr_at(g, slot) & P_FIXED) != 0 {
+                let n = self.atom_str(atom);
+                self.throw_syntax(format!("Identifier '{}' has already been declared", n).as_str());
+            }
+        }
+    }
+
+    /// Makes the script's let / const / class `atom` a global lexical
+    /// binding: slot `slot` of the current frame's env, `kind` 0 let,
+    /// 1 const, 2 class.
+    pub fn glex_declare(&mut self, atom: int, slot: int, kind: int) {
+        if self.glex_rec < 0 {
+            let r = self.new_object();
+            self.objs[r as usize].proto = -1;
+            self.roots.push(r);
+            self.glex_rec = r;
+        }
+        let e = self.get_env(0);
+        // (a unit's code is not trusted: the env must be there and hold it)
+        if e < 0 || (e as usize) >= self.objs.len() || slot < 0 || kind < 0 || kind > 2 || self.objs[e as usize].elems < 0 || slot >= self.evecs[self.objs[e as usize].elems as usize].v.len() as int {
+            self.throw_type("internal: a global lexical binding outside its env");
+            return;
+        }
+        let ent = self.new_array(vec![Val::Obj(e), Val::Num(slot as f64), Val::Num(kind as f64)]);
+        let r = self.glex_rec;
+        self.add_own(r, atom, Val::Obj(ent), P_FIXED);
     }
 
     pub fn throw_syntax(&mut self, msg: &str) {
@@ -8143,8 +8243,14 @@ impl Vm {
                     let v = self.get_obj(g, (op.a as int), &Val::Obj(g));
                     self.stack.push(v);
                 } else {
-                    let n = self.atom_str((op.a as int));
-                    self.throw_ref(format!("{} is not defined", n).as_str());
+                    let ent = self.glex_entry((op.a as int));
+                    if ent >= 0 {
+                        let v = self.glex_get(ent, (op.a as int));
+                        self.stack.push(v);
+                    } else {
+                        let n = self.atom_str((op.a as int));
+                        self.throw_ref(format!("{} is not defined", n).as_str());
+                    }
                 }
             }
             OP_SET_GLOBAL => {
@@ -8153,7 +8259,14 @@ impl Vm {
             }
             OP_DECL_GLOBAL => {
                 let g = self.global;
-                if self.find(g, (op.a as int)) < 0 {
+                if op.b == 2 || op.b == 3 {
+                    // a script's check of a let-const-class / var name
+                    self.glex_check((op.a as int), op.b == 2);
+                } else if op.b >= 4 {
+                    // 4 + slot * 4 + kind: a script's global lexical binding
+                    let x = (op.b as int) - 4;
+                    self.glex_declare((op.a as int), x / 4, x % 4);
+                } else if self.find(g, (op.a as int)) < 0 {
                     self.add_own(g, (op.a as int), Val::Undef(), if op.b == 1 { 0 } else { P_FIXED });
                 }
             }
@@ -8165,8 +8278,16 @@ impl Vm {
                     let sv13 = self.string_val(t);
                     self.stack.push(sv13);
                 } else {
-                    let sv12 = self.str_val("undefined");
-                    self.stack.push(sv12);
+                    let ent = self.glex_entry((op.a as int));
+                    if ent >= 0 {
+                        let v = self.glex_get(ent, (op.a as int));
+                        let t = self.type_of(&v);
+                        let sv14 = self.string_val(t);
+                        self.stack.push(sv14);
+                    } else {
+                        let sv12 = self.str_val("undefined");
+                        self.stack.push(sv12);
+                    }
                 }
             }
             OP_DEL_PROP => {

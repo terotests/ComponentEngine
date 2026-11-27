@@ -405,6 +405,7 @@ pub fn snapshot(vm: &Vm) -> String {
         if vm.idx_protos { 1 } else { 0 },
         if vm.pcomp { 1 } else { 0 },
         vm.priv_seq,
+        vm.glex_rec,
     ];
     put_ints(&mut b, &ints);
     // the table of large BigInts (objects) by their text
@@ -757,7 +758,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool, keep_tables: bool) -> bool {
     }
     vm.free_list = free_list;
     let ints = get_ints(&mut r);
-    if ints.len() != 45 {
+    if ints.len() != 46 {
         return false;
     }
     vm.global = ints[0];
@@ -809,6 +810,7 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool, keep_tables: bool) -> bool {
     vm.idx_protos = ints[42] == 1;
     vm.pcomp = ints[43] == 1;
     vm.priv_seq = ints[44];
+    vm.glex_rec = ints[45];
     vm.bigints = HashMap::new();
     let nb = r.num();
     i = 0;
