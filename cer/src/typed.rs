@@ -1068,6 +1068,7 @@ impl Vm {
             return;
         }
         let c = self.cold_id(b) as usize;
+        self.words_seen = true;
         if (mode < 0 || kind_size(mode) == 1) && pack_words(&mut self.colds, c) {
             self.colds[c].home = TK_WORDS;
             return;
