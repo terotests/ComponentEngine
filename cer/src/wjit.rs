@@ -5619,6 +5619,25 @@ impl<'a> Cg<'a> {
                 self.store_val(w1 as u32, L_Q0);
                 true
             }
+            R_PERM => {
+                // the top of w1 .. w1 + m - 1 to w1, the others one up
+                if w1 < 0 {
+                    return false;
+                }
+                let m = (((w0 >> 8) & 255) as i32) + 1;
+                let base = w1 as i32;
+                let t = self.raw(base + m - 1);
+                self.load_val(t, L_Q0);
+                let mut k = m - 1;
+                while k > 0 {
+                    let o = self.raw(base + k - 1);
+                    self.load_val(o, L_Q2);
+                    self.store_val((base + k) as u32, L_Q2);
+                    k -= 1;
+                }
+                self.store_val(base as u32, L_Q0);
+                true
+            }
             R_LOAD2 => {
                 if w1 < 0 {
                     return false;

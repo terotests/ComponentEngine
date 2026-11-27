@@ -170,6 +170,9 @@ pub const R_ADD_PROP: int = 60;
 /// value, w3 the key's atom, sub 1 for a private one; the stack op's c
 /// caches the transition (shape before * 65536 + after)
 pub const R_DEFINE_FIELD: int = 61;
+/// OP_SWAP / OP_ROT3 / OP_ROT4 on values in their own slots: the top of w1
+/// .. w1 + sub (sub 1, 2, 3) goes to w1 and the others one up
+pub const R_PERM: int = 62;
 
 const BAD: int = 1000000;
 
@@ -951,6 +954,47 @@ impl Tr {
                 self.result(i, R_STEP_K, k, k, x, y);
             } else if (c as int) == OP_TDZ || (c as int) == OP_NEW_TARGET || (c as int) == OP_ARGUMENTS || (c as int) == OP_CALLEE || (c as int) == OP_REGEX || (c as int) == OP_TYPEOF_GLOBAL || (c as int) == OP_GET_SUPER {
                 self.result(i, R_STEP_PUSH, 0, 0, 0, 0);
+            } else if ((c as int) == OP_SWAP || (c as int) == OP_ROT3 || (c as int) == OP_ROT4) && d >= (if (c as int) == OP_SWAP { 2 } else if (c as int) == OP_ROT3 { 3 } else { 4 }) {
+                // the top moves m - 1 places down: loads of locals and
+                // constants only change places; else the m values get
+                // their own slots and move (R_PERM)
+                let m: int = if (c as int) == OP_SWAP { 2 } else if (c as int) == OP_ROT3 { 3 } else { 4 };
+                let mut free = true;
+                let mut k = d - m;
+                while k < d {
+                    if self.el[k as usize] < 0 || self.es[k as usize] >= ns {
+                        free = false;
+                    }
+                    k += 1;
+                }
+                if !free {
+                    k = d - m;
+                    while k < d {
+                        self.mat(k);
+                        self.ep[k as usize] = -1;
+                        k += 1;
+                    }
+                    self.set(i, R_PERM, m - 1, ns + d - m, 0, 0);
+                }
+                let ts = self.es[(d - 1) as usize];
+                let tl = self.el[(d - 1) as usize];
+                k = d - 1;
+                while k > d - m {
+                    self.es[k as usize] = self.es[(k - 1) as usize];
+                    self.el[k as usize] = self.el[(k - 1) as usize];
+                    k -= 1;
+                }
+                self.es[(d - m) as usize] = ts;
+                self.el[(d - m) as usize] = tl;
+                if !free {
+                    // own slots again (the values moved with R_PERM)
+                    k = d - m;
+                    while k < d {
+                        self.es[k as usize] = ns + k;
+                        self.el[k as usize] = -1;
+                        k += 1;
+                    }
+                }
             } else {
                 // the stack op on the frame's window
                 self.mat_all();

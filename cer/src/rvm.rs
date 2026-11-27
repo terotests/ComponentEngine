@@ -420,6 +420,20 @@ impl Vm {
                         pc = (pc + 1 + ((w0 >> 16) as int));
                         continue;
                     }
+                    R_PERM => {
+                        let s0 = (bp + (w1 as int)) as usize;
+                        let m = (((w0 >> 8) & 255) as usize) + 1;
+                        let top = self.stack[s0 + m - 1].clone();
+                        let mut k = m - 1;
+                        while k > 0 {
+                            let v = self.stack[s0 + k - 1].clone();
+                            self.stack[s0 + k] = v;
+                            k -= 1;
+                        }
+                        self.stack[s0] = top;
+                        pc = (pc + 1 + ((w0 >> 16) as int));
+                        continue;
+                    }
                     R_LOAD2 => {
                         let v = self.rget(bp, (w2 as int)).clone();
                         let u = self.rget(bp, (w3 as int)).clone();
