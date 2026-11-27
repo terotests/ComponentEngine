@@ -1171,3 +1171,24 @@ while (str.length) {
 [toks.length, toks.slice(0, 9).join(" "), n].join()
 ----
 270,tok_1 = 31 λ x . y 𝒳 3,2016
+
+==== js slice views: a lexer's str = str.slice(n) over a long text, slices of slices, appends and prepends around them, RegExp legacy statics on a view
+var src = ("tok_1 = 0x1f # c\n" + "λx  .y 𝒳 \"s\"\n").repeat(200), str = src, toks = 0, n = 0, r = [];
+while (str.length) {
+  var m = str.match(/^[a-z_]\w*/) || str.match(/^0x[0-9a-f]+/) || str.match(/^\s+/) || str.match(/^\S/u);
+  if (/^#/.test(str)) n += str.length;
+  if (m[0] === "λ") r.push(RegExp.leftContext.length, RegExp.rightContext.length, RegExp.input.length);
+  toks++;
+  str = str.slice(m[0].length);
+}
+var a = "ab,".repeat(800), v = a.slice(5), w = a;
+w += "Z";
+var v2 = w.slice(1200), v3 = v2.slice(3, 1300), p = v3;
+for (var i = 0; i < 5; i++) p = "<" + p;
+var o = {}; o[v3] = 7;
+var s2 = src.slice(9, 2000), s3 = s2.substring(1500, 2);
+r = r.slice(0, 3).concat(r.slice(-3));
+[toks, n, r.join("/"), v.length, v2.length, v3.length, w.slice(-3), p.slice(0, 8), o[a.slice(1203) + "Z"], v3.indexOf("b,a"),
+ s2.length, s3.length, s3.charCodeAt(1), s2 === src.substring(9, 2000), v2.split(",").length, v3.replace(/a/g, "").length].join(" ")
+----
+4400 620500 0/6182/6183/0/13/14 2395 1201 1198 b,Z <<<<<ab, 7 1 1991 1498 32 true 401 799

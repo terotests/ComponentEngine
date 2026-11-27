@@ -270,13 +270,17 @@ impl Vm {
         if caps.is_empty() {
             return self.string_val(String::new());
         }
-        if k == 0 {
+        // (the input is s from unit uo on: a slice view's)
+        let uo = self.rx_last_uo;
+        if k == 0 && uo == 0 {
             return self.rc_val(s);
         }
         let units = jsstr::units(s.as_str());
-        let n = units.len() as int;
+        let n = units.len() as int - uo;
         let ng = (caps.len() / 2) as int;
-        let (a, b) = if k == 1 {
+        let (a, b) = if k == 0 {
+            (0, n)
+        } else if k == 1 {
             (caps[0], caps[1])
         } else if k == 2 {
             if ng > 1 { (caps[((ng - 1) * 2) as usize], caps[((ng - 1) * 2 + 1) as usize]) } else { (0, 0) }
@@ -291,7 +295,7 @@ impl Vm {
         if a < 0 || b < 0 {
             return self.string_val(String::new());
         }
-        self.string_val(jsstr::sub_units(s.as_str(), &units, a, b))
+        self.string_val(jsstr::sub_units(s.as_str(), &units, a + uo, b + uo))
     }
 
     pub fn call_native2(&mut self, id: int, fobj: int, this: Val, args: &Vec<Val>, construct: bool, new_target: Val) -> Val {
@@ -1482,6 +1486,15 @@ impl Vm {
                 self.string_replace(&s, &a0, &a1, id == NF_SP_REPLACEALL)
             }
             NF_SP_MATCH | NF_SP_MATCHALL | NF_SP_SEARCH => {
+                if id == NF_SP_MATCH && self.class_of(&a0) == C_REGEXP {
+                    if let Some(h) = this.as_str() {
+                        // a lexer's str.match(/^…/) on its `str.slice(n)`
+                        let r = self.regexp_exec_view(obj_of(&a0), h, true);
+                        if !r.is_undef() {
+                            return r;
+                        }
+                    }
+                }
                 let s = self.this_str(&this);
                 if self.throwing || self.rx_too_long(&s) {
                     return Val::Undef();
@@ -1512,6 +1525,7 @@ impl Vm {
                     if !caps.is_empty() {
                         self.rx_last_s = s.clone();
                         self.rx_last_caps = caps.clone();
+                        self.rx_last_uo = 0;
                     }
                     return Val::Num(if caps.is_empty() { -1.0 } else { caps[0] as double });
                 }
@@ -1566,6 +1580,7 @@ impl Vm {
                     }
                     self.rx_last_s = s.clone();
                     self.rx_last_caps = caps.clone();
+                    self.rx_last_uo = 0;
                     out.push(self.string_val(jsstr::from_units(&units, caps[0], caps[1])));
                     let uni = self.regexes[idx as usize].unicode || self.regexes[idx as usize].unicode_sets;
                     start = if caps[1] == caps[0] { crate::builtins::adv_index(&units, caps[1], uni) } else { caps[1] };
@@ -1898,6 +1913,15 @@ impl Vm {
                 if ro < 0 || self.objs[ro as usize].class != C_REGEXP {
                     self.throw_type("RegExp method called on incompatible receiver");
                     return Val::Undef();
+                }
+                if let Some(h) = a0.as_str() {
+                    let r = self.regexp_exec_view(ro, h, id != NF_RP_TEST);
+                    if !r.is_undef() {
+                        if id == NF_RP_TEST {
+                            return Val::Bool(!r.is_null());
+                        }
+                        return r;
+                    }
                 }
                 let s = self.to_str(&a0);
                 let inp = if let Some(_) = a0.as_str() { a0 } else { Val::Undef() };
