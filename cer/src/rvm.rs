@@ -319,15 +319,18 @@ impl Vm {
     }
 
     /// R_CHECK's error: a let/const read too early (kind 0, `name` its
-    /// constant) or destructuring null / undefined.
+    /// constant), destructuring null / undefined (1) or a second super(…)
+    /// (2).
     #[inline(never)]
     pub fn r_check_fail(&mut self, pi: usize, kind: int, name: int) {
         if kind == 0 {
             let n = self.protos[pi].consts[name as usize].clone();
             let ns = self.to_string(&n);
             self.throw_ref(format!("Cannot access '{}' before initialization", ns).as_str());
-        } else {
+        } else if kind == 1 {
             self.throw_type("Cannot destructure 'undefined' or 'null'");
+        } else {
+            self.throw_ref("Super constructor may only be called once");
         }
     }
 
@@ -1224,6 +1227,19 @@ impl Vm {
                         }
                         self.r_set_private_slow(pi, rb, bp, fi, pc, (w1 as int), (w2 as int));
                     }
+                    R_ADD_PROP => {
+                        if let Some(o) = (self.rget(bp, (w1 & 65535) as int)).as_obj() {
+                            if w3 >= 65536 && ((w3 >> 16) as int) == self.ob(o).shape as int {
+                                let va_ = *self.rget(bp, (w1 >> 16) as int); let vb_ = *self.rget(bp, (w2 as int));
+                                if va_.is_num() && vb_.is_num() { let x = va_.num(); let y = vb_.num();
+                                    self.put_slot(o, (w3 & 65535) as int, Val::NumC(x + y));
+                                    pc = (pc + 1 + ((w0 >> 16) as int));
+                                    continue;
+                                }
+                            }
+                        }
+                        self.r_add_prop_slow(pi, rb, bp, fi, pc, (w1 as int), (w2 as int));
+                    }
                     R_TYPEOF => {
                         let v = self.rget(bp, (w2 as int)).clone();
                         let t = self.type_val(&v);
@@ -1247,10 +1263,13 @@ impl Vm {
                     }
                     R_CHECK => {
                         let v = *self.rget(bp, (w1 as int));
-                        let bad = if ((w0 >> 8) & 255) == 0 {
+                        let sub = (w0 >> 8) & 255;
+                        let bad = if sub == 0 {
                             if let Some(o) = v.as_obj() { o == self.tdz_obj } else { false }
-                        } else {
+                        } else if sub == 1 {
                             v.is_undef() || v.is_null()
+                        } else {
+                            if let Some(o) = v.as_obj() { o != self.tdz_obj } else { true }
                         };
                         if bad {
                             self.frames[fi].pc = pc + 1;
@@ -1318,6 +1337,23 @@ impl Vm {
                                 self.protos[pi].code[pc as usize].c = (sh * 65536 + sh2) as i32;
                             }
                         }
+                    }
+                    R_DEFINE_FIELD => {
+                        // c caches the transition of a plain object
+                        if let Some(o) = (self.rget(bp, (w1 as int))).as_obj() {
+                            let c = self.protos[pi].code[pc as usize].c;
+                            let ob = self.ob(o);
+                            if c >= 0 && ((c >> 16) as int) == ob.shape as int && ob.class == C_OBJECT && (ob.extensible || ((w0 >> 8) & 255) == 1) {
+                                let v = *self.rget(bp, (w2 as int));
+                                self.objs[o as usize].shape = c & 65535;
+                                let most = self.shapes[self.holder((c & 65535) as int)].keys.len();
+                                slot_room(&mut self.objs[o as usize], most);
+                                self.push_val(o, v);
+                                pc = (pc + 1 + ((w0 >> 16) as int));
+                                continue;
+                            }
+                        }
+                        self.r_define_field(pi, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
                     }
                     R_CLOSURE => {
                         let f = self.closure((w2 as int));
@@ -1508,6 +1544,93 @@ impl Vm {
             return -1;
         }
         self.ta_len_hit(o)
+    }
+
+    /// R_DEFINE_FIELD past its cache: as the stack op (a private field
+    /// added, a public one defined, CreateDataPropertyOrThrow's throw), then
+    /// a plain object's transition cached.
+    #[inline(never)]
+    pub fn r_define_field(&mut self, pi: usize, bp: int, fi: usize, pc: int, w0: int, w1: int, w2: int, w3: int) {
+        let o = obj_of(self.rget(bp, w1));
+        if o < 0 {
+            return;
+        }
+        let v = *self.rget(bp, w2);
+        let atom = w3;
+        self.frames[fi].pc = pc + 1;
+        let sh = self.objs[o as usize].shape as int;
+        let slot = self.find(o, atom);
+        if ((w0 >> 8) & 255) == 1 {
+            // a private field or brand (PrivateFieldAdd): a non-extensible
+            // object still takes it
+            if slot >= 0 {
+                self.throw_private(atom, "initialize twice");
+                return;
+            }
+            self.add_own(o, atom, v, 0);
+        } else if (slot >= 0 && (self.attr_at(o, slot) & P_FIXED) != 0) || (slot < 0 && !self.objs[o as usize].extensible && self.objs[o as usize].class == C_OBJECT) {
+            let n = self.atom_str(atom);
+            self.throw_type(format!("Cannot define property {}, object is not extensible", n).as_str());
+            return;
+        } else {
+            self.define(o, atom, v, 0);
+        }
+        if self.throwing || self.objs[o as usize].class != C_OBJECT || slot >= 0 {
+            return;
+        }
+        // a new key as the next slot: the transition is cached
+        let sh2 = self.objs[o as usize].shape as int;
+        if sh2 != sh && sh < 32768 && sh2 < 65536 && !self.shapes[sh as usize].owned && !self.shapes[sh2 as usize].owned && self.shapes[sh2 as usize].nkeys == self.shapes[sh as usize].nkeys + 1 {
+            self.protos[pi].code[pc as usize].c = (sh * 65536 + sh2) as i32;
+        }
+    }
+
+    /// R_ADD_PROP past its inline cache: OP_ADD_PROP_POP's way (a string
+    /// appended in place while the property still holds it, else the sum
+    /// set), then the cache of an own writable data property filled.
+    #[inline(never)]
+    pub fn r_add_prop_slow(&mut self, pi: usize, rb: int, bp: int, fi: usize, pc: int, w1: int, w2: int) {
+        let target = *self.rget(bp, w1 & 65535);
+        let ra = w1 >> 16;
+        let a = *self.rget(bp, ra);
+        let b = *self.rget(bp, w2);
+        let atom = self.ratom(pi, pc);
+        let o = obj_of(&target);
+        self.frames[fi].pc = pc + 1;
+        if o >= 0 && a.is_str() && b.is_str() {
+            let slot = self.find(o, atom);
+            if slot >= 0 && self.attr_at(o, slot) == 0 {
+                let cur = self.objs[o as usize].get_slot(slot as usize);
+                if cur.is_str() && cur.strh() == a.strh() {
+                    let x = a.strh();
+                    let h = self.append_val(cur, b);
+                    if h >= 0 {
+                        self.objs[o as usize].set_slot(slot as usize, Val::Str(h));
+                        self.sinc(h);
+                        self.sdec(x);
+                        // the old value's register (the get's result, read
+                        // by nothing after) no longer names a string
+                        self.rset((bp + ra) as usize, Val::Undef());
+                        return;
+                    }
+                }
+            }
+        }
+        let r = if a.is_num() && b.is_num() { Val::NumC(a.num() + b.num()) } else { self.add_vals(&a, &b) };
+        if self.throwing {
+            return;
+        }
+        self.set(&target, atom, r);
+        if self.throwing || o < 0 {
+            return;
+        }
+        let slot = self.find(o, atom);
+        if slot >= 0 && (self.attr_at(o, slot) & (P_READONLY | P_ACCESSOR)) == 0 {
+            let c = self.ic_of(o, slot);
+            if c >= 65536 {
+                self.rcode[(rb + pc) as usize].c = c as i32;
+            }
+        }
     }
 
     /// R_SET_PRIVATE past its inline cache: an own data field fills the

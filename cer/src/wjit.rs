@@ -5359,7 +5359,7 @@ impl<'a> Cg<'a> {
                 self.store_val(w1 as u32, L_Q0);
                 true
             }
-            R_CHECK if self.lay.obj_ok && w1 >= 0 => {
+            R_CHECK if self.lay.obj_ok && w1 >= 0 && sub <= 1 => {
                 // the TDZ marker (sub 0) or undefined / null: the
                 // interpreter throws
                 let l = self.lay;
@@ -5642,7 +5642,7 @@ impl<'a> Cg<'a> {
                 }
             }
             R_GET_GLOBAL | R_GET_ENV | R_SET_ENV | R_THIS | R_TYPEOF | R_CHECK | R_STEP_PUSH | R_STEP_K | R_STEP0 | R_GET_METHOD
-            | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_NEW_ARRAY | R_SET_GLOBAL | R_CLOSURE | R_INIT_PROP | R_WIN | R_GET_PRIVATE | R_SET_PRIVATE => {
+            | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_NEW_ARRAY | R_SET_GLOBAL | R_CLOSURE | R_INIT_PROP | R_WIN | R_GET_PRIVATE | R_SET_PRIVATE | R_ADD_PROP | R_DEFINE_FIELD => {
                 let next = p + 1 + ((w0 >> 16) as i64);
                 self.helper(H_OP, p, next);
                 true
@@ -8263,8 +8263,12 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
                 } else {
                     false
                 }
-            } else {
+            } else if sub == 1 {
                 v.is_undef() || v.is_null()
+            } else if let Some(o) = v.as_obj() {
+                o != vm.tdz_obj
+            } else {
+                true
             };
             if bad {
                 vm.frames[fi].pc = pc + 1;
@@ -8274,6 +8278,8 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         R_STEP_PUSH => vm.r_step_push(pi, bp, fi, pc, w1),
         R_GET_PRIVATE => vm.r_get_private_slow(pi, rb, bp, fi, pc, w1, w2),
         R_SET_PRIVATE => vm.r_set_private_slow(pi, rb, bp, fi, pc, w1, w2),
+        R_ADD_PROP => vm.r_add_prop_slow(pi, rb, bp, fi, pc, w1, w2),
+        R_DEFINE_FIELD => vm.r_define_field(pi, bp, fi, pc, w0, w1, w2, w3),
         R_STEP_K => {
             if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
                 // debug: HCOUNT[1300 + the stack op]

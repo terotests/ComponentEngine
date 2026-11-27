@@ -1028,3 +1028,48 @@ ou8.set(wu8.subarray(2, 9), 1); wu8.copyWithin(9, 0, 6);
 [wf[0] < -1.7e38, wi16[1], wu16[2], wi8[5], new Uint32Array(w)[2], wi16[6], wu16[7], wu8[1], Array.prototype.join.call(wu8, " "), Array.prototype.join.call(ou8, " "), ow.getInt32(3), new Uint8Array(w.slice(5, 11)).join(" ")].join()
 ----
 true,-256,32768,-128,2883584,255,4480,44,0 44 0 255 0 128 0 0 0 0 44 0 255 0 128 17,0 0 255 0 128 0 0 0 0 0 0 192 63 0 0,8388608,128 0 0 0 0 44
+
+# `o.p += v;` as a statement (one register op): numbers, a string appended
+# in place, an accessor, a frozen object, an array's length, a deleted
+# property, objects of several shapes at one site
+==== js compound assignment to a property
+var o = {s: "a", n: 1}; for (var i = 0; i < 5; i++) { o.s += "b" + i; o.n += 0.5; }
+var p = {get x() { return this._x || 1; }, set x(v) { this._x = v * 2; }}; p.x += 3; p.x += 1;
+var q = Object.freeze({z: 1}); q.z += 1; var arr = [1, 2]; arr.length += 1; var str = "ab"; var k = {v: str}; k.v += k.v; k.v += 1;
+var r = {}; r.u += 1; var m = {a: 1}; for (var j = 0; j < 3; j++) { m.a += j; if (j == 1) delete m.a; }
+var ps = [{x: 1}, {y: 0, x: 2}, {x: 3}], tot = []; for (var j = 0; j < 6; j++) { var e = ps[j % 3]; e.x += 10; tot.push(e.x); }
+[o.s, o.n, p.x, p._x, q.z, arr.length, k.v, str, r.u, m.a, tot.join(" ")].join()
+----
+ab0b1b2b3b4,3.5,18,18,1,3,abab1,ab,NaN,NaN,11 12 13 21 22 23
+
+# class fields as register ops: public and private, a non-extensible
+# `this`, a private field added twice, a fixed property, an Array subclass
+==== js class fields defined in place
+class A { x = 1; y = this.x + 1; #p = 3; static s = 5; getP() { return this.#p; } }
+class B extends A { z = [this.y]; #q = 7; q() { return this.#q; } }
+var out = [];
+for (var i = 0; i < 3; i++) { var b = new B(); out.push(b.x, b.y, b.z[0], b.getP(), b.q(), Object.keys(b).join("")); }
+class F { constructor() { return Object.preventExtensions({}); } }
+class G extends F { w = 1; }
+for (var i = 0; i < 2; i++) { try { new G(); out.push("no"); } catch (e) { out.push(e.constructor.name); } }
+class J { constructor(o) { return o; } }
+class K extends J { #k = 1; static has(o) { return #k in o; } }
+var tgt = {}; new K(tgt); try { new K(tgt); } catch (e) { out.push(e.constructor.name); } out.push(K.has(tgt));
+class L { a = 1; constructor() { Object.defineProperty(this, "b", { value: 0, configurable: false, writable: true }); } }
+class M extends L { b = 2; }
+try { new M(); } catch (e) { out.push(e.constructor.name); }
+class N extends Array { f = 4; } var na = new N(); na.push(1); out.push(na.f, na.length);
+out.join()
+----
+1,2,2,3,7,xyz,1,2,2,3,7,xyz,1,2,2,3,7,xyz,TypeError,TypeError,TypeError,true,TypeError,4,1
+
+# a second super(...) throws, also from an arrow
+==== js super called twice
+var out = [];
+class A { constructor(x) { this.x = x; } }
+class B extends A { constructor(x) { super(x); try { super(x); } catch (e) { out.push(e.constructor.name, e.message); } } }
+class C extends A { constructor() { var f = () => super(2); f(); try { f(); } catch (e) { out.push(e.constructor.name); } } }
+for (var i = 0; i < 3; i++) { out.push(new B(i).x, new C().x); }
+out.join()
+----
+ReferenceError,Super constructor may only be called once,ReferenceError,0,2,ReferenceError,Super constructor may only be called once,ReferenceError,1,2,ReferenceError,Super constructor may only be called once,ReferenceError,2,2
