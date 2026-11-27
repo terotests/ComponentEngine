@@ -465,6 +465,31 @@ fn words_put(colds: &mut Vec<Cold>, c: usize, at: int, kind: int, x: double) -> 
     false
 }
 
+/// colds[c].nums, bytes one a slot (or a one-byte kind's elements, an
+/// Int8Array's signed), packed in place into little-endian words, four
+/// bytes a slot (the length a multiple of 4): true. Rust only; elsewhere
+/// false and buf_to_mixed writes them one by one.
+#[ranger::target(rust)]
+fn pack_words(colds: &mut Vec<Cold>, c: usize) -> bool {
+    let nums = &mut colds[c].nums;
+    let n = nums.len() / 4;
+    let mut i: usize = 0;
+    while i < n {
+        let k = i * 4;
+        let w = ((nums[k] as i32 as u32) & 255) | (((nums[k + 1] as i32 as u32) & 255) << 8) | (((nums[k + 2] as i32 as u32) & 255) << 16) | (((nums[k + 3] as i32 as u32) & 255) << 24);
+        nums[i] = w as f64;
+        i += 1;
+    }
+    nums.truncate(n);
+    nums.shrink_to_fit();
+    true
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn pack_words(colds: &mut Vec<Cold>, c: usize) -> bool {
+    false
+}
+
 /// 256 to the power `r` (0..3): where byte `r` of a word starts.
 fn word_mul(r: int) -> double {
     if r == 0 {
@@ -966,20 +991,6 @@ impl Vm {
 
     /// A resizable ArrayBuffer (or growable SharedArrayBuffer) keeps its
     /// maximum byte length in `prim`.
-    /// Every byte of buffer `b` (holding bytes) is 0.
-    fn buf_zero(&self, b: int) -> bool {
-        let c = self.objs[b as usize].cold as usize;
-        let n = self.colds[c].nums.len();
-        let mut i: usize = 0;
-        while i < n {
-            if self.colds[c].nums[i] != 0.0 {
-                return false;
-            }
-            i += 1;
-        }
-        true
-    }
-
     pub fn buf_resizable(&self, b: int) -> bool {
         (self.colds[self.objs[b as usize].cold as usize].prim).is_num()
     }
@@ -1057,6 +1068,10 @@ impl Vm {
             return;
         }
         let c = self.cold_id(b) as usize;
+        if (mode < 0 || kind_size(mode) == 1) && pack_words(&mut self.colds, c) {
+            self.colds[c].home = TK_WORDS;
+            return;
+        }
         let old = self.colds[c].nums.clone();
         self.colds[c].nums = zeros(n / 4);
         self.colds[c].home = TK_WORDS;
@@ -2004,9 +2019,9 @@ impl Vm {
             let len = num(&a[3]) as int;
             let tracking = a[3].is_undef();
             // the first view over all of a new buffer: it holds this kind
-            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) && (kind == TK_UINT8 || kind == TK_UINT8C || (kind == TK_INT8 && self.buf_zero(b))) {
-                // one byte per element: the bytes are the elements as they
-                // are (an Int8Array's when all are 0)
+            if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) && kind_size(kind) == 1 {
+                // one byte per element: the bytes (all 0 while home is -1)
+                // are the elements as they are
                 let cid = self.cold_id(b) as usize;
                 self.colds[cid].home = kind;
             } else if !tracking && !self.buf_resizable(b) && self.colds[self.objs[b as usize].cold as usize].home < 0 && !is_big(kind) && off == 0 && len * kind_size(kind) == self.buf_size(b) {
