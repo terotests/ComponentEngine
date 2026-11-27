@@ -7203,6 +7203,9 @@ pub fn stats() -> Stats {
 /// Compiles the function pi (when it has none yet) and runs it from pc;
 /// the pc to go on at, or -1 - pc when its budget ran out.
 pub fn enter(vm: &mut crate::vm::Vm, pi: usize, bp: i64, pc: i64, budget: i32, head: bool) -> i64 {
+    if !cfg!(all(target_arch = "wasm32", feature = "wjit")) {
+        return pc;
+    }
     let f = compiled_fn(vm, pi);
     if f < 0 {
         return pc;
@@ -8097,7 +8100,7 @@ fn set_cell_pc(pc: int) {
 
 macro_rules! export_helper {
     ($name:ident, $inner:ident, $leave:expr, $hk:expr) => {
-        #[no_mangle]
+        #[cfg_attr(all(target_arch = "wasm32", feature = "wjit"), no_mangle)]
         pub extern "C" fn $name(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
             if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
                 let k = unsafe { vm_of(vm) }.rcode[ri as usize].code as usize & 255;
@@ -8121,7 +8124,7 @@ macro_rules! export_helper {
 /// imports the helpers from the table rather than from the exports: a
 /// wasm32-wasip1 export is wrapped to run the constructors and destructors
 /// around each call.
-#[no_mangle]
+#[cfg_attr(all(target_arch = "wasm32", feature = "wjit"), no_mangle)]
 pub extern "C" fn cerxes_jit_helper(k: i32) -> i32 {
     let f: extern "C" fn(i32, i32, i32, i32, i32) -> i32 = match k {
         0 => cerxes_jit_get_elem,
@@ -9468,7 +9471,7 @@ thread_local! {
     static MASK: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
-#[no_mangle]
+#[cfg_attr(all(target_arch = "wasm32", feature = "wjit"), no_mangle)]
 pub extern "C" fn cerxes_jit_mask(lo: i32, hi: i32) {
     MASK.with(|m| m.set((lo as u32 as u64) | ((hi as u32 as u64) << 32)));
 }
