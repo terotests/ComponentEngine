@@ -571,6 +571,12 @@ pub struct Vm {
     /// string converts it once
     pub rx_s: Rc<String>,
     pub rx_units: Vec<int>,
+    /// Where rx_s's units start in rx_units (a later part of the text
+    /// before, rx_cache): 0 but after a lexer's `str = str.slice(n)`.
+    pub rx_uoff: int,
+    /// The text whose units rx_units holds, all of them (rx_s or one it
+    /// is the end of).
+    pub rx_ufull: Rc<String>,
     /// the input and captures of the last successful RegExp match, for the
     /// legacy statics RegExp.lastMatch, $1…$9, leftContext, rightContext…
     pub rx_last_s: Rc<String>,
@@ -944,6 +950,8 @@ impl Vm {
             bi_seen_next: 0,
             rx_s: Rc::new(String::new()),
             rx_units: Vec::new(),
+            rx_uoff: 0,
+            rx_ufull: Rc::new(String::new()),
             rx_last_s: Rc::new(String::new()),
             rx_last_caps: Vec::new(),
             rx_ss: Vec::new(),
@@ -999,8 +1007,26 @@ impl Vm {
             return;
         }
         let mut spare: Vec<int> = Vec::new();
-        let back = self.rx_s.clone();
+        let back = self.rx_ufull.clone();
+        let off = self.rx_uoff;
+        let ulen = self.rx_units.len() as int;
+        // `s` the end of the text before (a lexer's `str = str.slice(n)`):
+        // its units are the end of those (counted from the text before,
+        // then from the whole one)
+        let mut skip = rx_suffix(&self.rx_s, s, ulen - off);
+        if skip >= 0 {
+            skip += off;
+        } else if off > 0 {
+            skip = rx_suffix(&back, s, ulen);
+        }
+        if skip >= 0 {
+            self.rx_uoff = skip;
+            self.rx_s = s.clone();
+            return;
+        }
         let cur = take_ints(&mut self.rx_units, &mut spare);
+        self.rx_uoff = 0;
+        self.rx_ufull = s.clone();
         let mut k: usize = 0;
         while k < self.rx_ss.len() {
             if self.rx_ss[k].as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_ss[k], s) {
@@ -1038,14 +1064,26 @@ impl Vm {
     /// gives them back.
     pub fn rx_take(&mut self, s: &Rc<String>) -> Vec<int> {
         self.rx_cache(s);
-        self.rx_s = Rc::new(String::new());
         let mut spare: Vec<int> = Vec::new();
-        take_ints(&mut self.rx_units, &mut spare)
+        let mut u = take_ints(&mut self.rx_units, &mut spare);
+        if self.rx_uoff > 0 {
+            // s's own units; the whole text's stay kept
+            let mine = units_from(&u, self.rx_uoff);
+            let full = self.rx_ufull.clone();
+            self.rx_keep(full, u);
+            u = mine;
+            self.rx_uoff = 0;
+        }
+        self.rx_s = Rc::new(String::new());
+        self.rx_ufull = Rc::new(String::new());
+        u
     }
 
     pub fn rx_put(&mut self, s: &Rc<String>, units: Vec<int>) {
         self.rx_s = s.clone();
+        self.rx_ufull = s.clone();
         self.rx_units = units;
+        self.rx_uoff = 0;
     }
 
     /// Where unit `i` (0..=length) of handle h's text starts, in bytes of
@@ -10350,6 +10388,49 @@ pub fn take_names(v: &mut Vec<String>) -> Vec<String> {
 #[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
 pub fn take_names(v: &mut Vec<String>) -> Vec<String> {
     v.clone()
+}
+
+/// When `s` (long) is the end of `prev`, whose units are the last
+/// `prev_n` of rx_units: how many units of prev come before it, else -1
+/// (Rust only; a memcmp instead of decoding the text again).
+#[ranger::target(rust)]
+pub fn rx_suffix(prev: &Rc<String>, s: &Rc<String>, prev_n: int) -> int {
+    let a = prev.as_bytes();
+    let b = s.as_bytes();
+    if b.len() < RX_KEEP_MIN || b.len() >= a.len() || !a.ends_with(b) {
+        return -1;
+    }
+    let cut = a.len() - b.len();
+    if !prev.is_char_boundary(cut) {
+        return -1;
+    }
+    let skip = jsstr::len(&prev[..cut]);
+    if skip > prev_n {
+        return -1;
+    }
+    skip
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn rx_suffix(_prev: &Rc<String>, _s: &Rc<String>, _prev_n: int) -> int {
+    -1
+}
+
+/// v's units from `off` on, a copy.
+#[ranger::target(rust)]
+pub fn units_from(v: &Vec<int>, off: int) -> Vec<int> {
+    v[(off as usize)..].to_vec()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn units_from(v: &Vec<int>, off: int) -> Vec<int> {
+    let mut out: Vec<int> = Vec::new();
+    let mut i = off as usize;
+    while i < v.len() {
+        out.push(v[i]);
+        i += 1;
+    }
+    out
 }
 
 #[ranger::target(rust)]

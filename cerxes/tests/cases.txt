@@ -1153,3 +1153,21 @@ r.push(n);
 r.join()
 ----
 301,401,201,ä:b|ä:b|ä:b|ä:b|ä:b,a,b,,2,7545
+
+==== js a lexer's anchored regexps over the rest of a long text (str = str.slice(n))
+var src = ("tok_1 = 0x1f # c\n" + "λx  .y 𝒳 \"s\"\n").repeat(30), toks = [], str = src, n = 0;
+while (str.length) {
+  var m;
+  if (m = str.match(/^#([^\n]*)/)) n++;
+  else if (m = str.match(/^\n/)) n += 2;
+  else if (m = str.match(/^[a-z_]\w*/)) toks.push(m[0]);
+  else if (m = str.match(/^0x([0-9a-f]+)/)) toks.push(parseInt(m[1], 16));
+  else if (m = str.match(/^[ \t]+/)) n += /(?<!\S)\s$/.test(m[0]) ? 0 : 1;
+  else if (m = str.match(/^\".*?\"/)) toks.push(m[0].length);
+  else if (m = str.match(/^\S/u)) toks.push(/^\b/.test(str) ? "b" : m[0]);
+  str = str.slice(m[0].length);
+  if (toks.length === 7) n += str.replace(/\n/g, "").length + str.split("𝒳").length + src.search(/𝒳/) + (/(?<=y) /.exec(str) || []).index;
+}
+[toks.length, toks.slice(0, 9).join(" "), n].join()
+----
+270,tok_1 = 31 λ x . y 𝒳 3,2016

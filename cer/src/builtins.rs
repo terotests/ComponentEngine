@@ -1342,7 +1342,8 @@ impl Vm {
             return Val::Null();
         }
         self.rx_cache(s);
-        let ulen = self.rx_units.len() as int;
+        let uoff = self.rx_uoff;
+        let ulen = self.rx_units.len() as int - uoff;
         let mut start: int = 0;
         let li = self.get_obj(ro, A_LASTINDEX, &Val::Obj(ro));
         let lin = self.to_number(&li);
@@ -1359,7 +1360,16 @@ impl Vm {
                 start = l as int;
             }
         }
-        let caps = self.regexes[idx as usize].exec_in(&self.rx_units, start, &mut self.rx_regs, &mut self.rx_stack);
+        let mut caps = self.regexes[idx as usize].exec_at(&self.rx_units, uoff, start + uoff, &mut self.rx_regs, &mut self.rx_stack);
+        if uoff > 0 {
+            let mut c: usize = 0;
+            while c < caps.len() {
+                if caps[c] >= 0 {
+                    caps[c] -= uoff;
+                }
+                c += 1;
+            }
+        }
         self.rx_after();
         if caps.is_empty() {
             if global || sticky {
@@ -1386,7 +1396,7 @@ impl Vm {
             if a < 0 || b < 0 {
                 items.push(Val::Undef());
             } else {
-                items.push(self.string_val(jsstr::sub_units(s.as_str(), &self.rx_units, a, b)));
+                items.push(self.string_val(jsstr::sub_units_at(s.as_str(), &self.rx_units, uoff, a, b)));
             }
             g += 1;
         }
