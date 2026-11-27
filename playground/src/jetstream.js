@@ -159,7 +159,8 @@ export function setupJetStream(ctx) {
       "</tr></thead>";
     const cell = (id, b, r) => {
       if (!r) return "<td></td>";
-      if (r.error) return `<td class="err" title="${esc(r.error)}">✗</td>`;
+      // the error in the cell itself (a tooltip alone is easy to miss)
+      if (r.error) return `<td class="err" title="${esc(r.error)}">✗ <span class="errmsg">${esc(r.error.length > 80 ? r.error.slice(0, 80) + "…" : r.error)}</span></td>`;
       const tip = Object.entries(r.subs).map(([k, v]) => `${k} ${fmt(v)}`).join(", ") + ` · ${fmtMs(r.ms)} in all`;
       const n = nat && nat.b[b] && nat.b[b].score;
       const ratio = id !== "native" && n ? ` <span class="ratio">${fmt(n / r.score)}×</span>` : "";
