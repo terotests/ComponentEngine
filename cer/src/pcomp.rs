@@ -2076,11 +2076,11 @@ impl PComp {
         while j < self.lazy_stubs.len() {
             // only the bindings the body names: a big function's inner
             // stubs do not each list every binding around them
-            let mut only: HashMap<String, bool> = HashMap::new();
+            let mut only: Vec<String> = Vec::new();
             let mut q0 = self.lazy_lo[j];
             while q0 < self.lazy_hi[j] {
                 let rn = self.ref_name(self.lazy_refs[q0 as usize] as usize);
-                only.insert(rn, true);
+                only.push(rn);
                 q0 += 1;
             }
             let mut desc = self.x_eval_desc(self.lazy_scopes[j], 0, true, &only);
@@ -2210,7 +2210,7 @@ impl PComp {
     /// For a lazy function (`lazy`), a let / const / class binding no read
     /// can find uninitialized has ":1" after its slot: its reads go
     /// unchecked.
-    fn x_eval_desc(&self, site: int, flags: int, lazy: bool, only: &HashMap<String, bool>) -> String {
+    fn x_eval_desc(&self, site: int, flags: int, lazy: bool, only: &Vec<String>) -> String {
         let mut levels: Vec<String> = Vec::new();
         let mut in_fn = false;
         let mut nt = false;
@@ -2227,20 +2227,35 @@ impl PComp {
             }
             if self.scopes[si].has_env {
                 let mut items: Vec<String> = Vec::new();
-                for b in self.scopes[si].binds.iter() {
+                // a lazy function's: only the names it has (looked up, as a
+                // scope of a big script has many)
+                let mut cands: Vec<int> = Vec::new();
+                if lazy {
+                    let ev = String::from("%ev");
+                    match self.scopes[si].names.get(&ev) {
+                        Some(b) => cands.push(*b),
+                        None => {}
+                    }
+                    for nm in only.iter() {
+                        match self.scopes[si].names.get(nm) {
+                            Some(b) => cands.push(*b),
+                            None => {}
+                        }
+                    }
+                } else {
+                    cands = self.scopes[si].binds.clone();
+                }
+                for b in cands.iter() {
                     let bi = *b as usize;
+                    if lazy && (self.binds[bi].scope as int) != s {
+                        continue;
+                    }
                     if !self.binds[bi].in_env || self.binds[bi].global {
                         continue;
                     }
                     let nm = self.binds[bi].name.as_str();
                     if nm.is_empty() || nm.contains(",") || nm.contains(":") || nm.contains(";") || nm.contains("|") || (nm.contains("%") && nm != "%ev") || nm.contains("\u{1}") {
                         continue;
-                    }
-                    if lazy && nm != "%ev" {
-                        let nk = String::from(nm);
-                        if !only.contains_key(&nk) {
-                            continue;
-                        }
                     }
                     let k = self.binds[bi].kind;
                     if lazy && (k == K_LET || k == K_CONST || k == K_CLASS) && !self.binds[bi].tdz {
@@ -2971,7 +2986,7 @@ impl PComp {
             } else if (c as int) == PH_KEND {
                 // nothing
             } else if (c as int) == PH_EVAL {
-                let none: HashMap<String, bool> = HashMap::new();
+                let none: Vec<String> = Vec::new();
                 let desc = self.x_eval_desc((o.a as int), (o.c as int), false, &none);
                 let k = self.xstr(desc.as_str());
                 self.xemit(OP_CALL_EVAL, (o.b as int), k);
