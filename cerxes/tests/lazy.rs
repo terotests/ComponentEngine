@@ -28,6 +28,14 @@ const SCRIPTS: &[&str] = &[
     "var a = 1, b = 2; function tpl(x) { return `v=${x + a}:${`${b}`}`; } tpl(1)",
     "class A { #x = 5; m() { function g(o) { return o.#x + 1; } return g(this); } static s() { return function () { class B extends A { n() { return super.m() * 10; } } return new B().n(); }; } } new A().m() + ',' + A.s()()",
     "function withCls() { class P { #p = 3; get p() { return this.#p; } } return new P().p; } withCls()",
+    // methods, accessors and arrows
+    "var o = { v: 2, m(a, b = 1) { return this.v * a + b; }, get g() { return this.v + 10; }, set s(x) { this.v = x; }, *gen() { yield this.v; }, async am() { return this.v; } }; o.s = 5; [o.m(3), o.g, [...o.gen()].join(), o.m.length, o.m.name, Object.getOwnPropertyDescriptor(o, 'g').get.name, typeof o.m.prototype].join()",
+    "class P { constructor(x) { this.x = x; } m() { return this.x + 1; } static s(a) { return a * 2; } get d() { return this.x * 2; } } class Q extends P { m() { return super.m() * 10; } get d() { return super.d + 1; } } var q = new Q(4); [q.m(), q.d, P.s(3), (function () { try { new q.m(); return 'no'; } catch (e) { return e.name; } })()].join()",
+    "var k = 3; var f = (a, b) => { let t = a + b + k; return t; }; var g = async (x) => { return x; }; var h = (x) => { return typeof this; }; [f(1, 2), f.length, typeof f.prototype, h(1)].join()",
+    "function w() { var self = this; var a = (x) => { return x + arguments[0]; }; return a(1); } w(10)",
+    "var o2 = { [('c' + 'k')](a) { return a + 1; }, 'q r'(b) { return b; }, 5(c) { return c; } }; [o2.ck(1), o2['q r'](2), o2[5](3), o2.ck.name, o2['q r'].name].join()",
+    "class R { #p = 1; #m() { return this.#p + 1; } n() { return this.#m() + `${this.#p}`; } } new R().n()",
+    "var u = { m() { return (() => { return this.x; })(); }, x: 9 }; u.m() + ',' + u.m.toString().length",
     // nested lazy functions, and functions inside a lazy one's own scope
     "function a1(x) { function a2(y) { function a3(z) { return x + y + z; } return a3(3); } return a2(2); } a1(1)",
     "function big(n) { var s = 0; for (var i = 0; i < n; i++) { s += (function (j) { return j * 2; })(i); } return s; } big(10)",

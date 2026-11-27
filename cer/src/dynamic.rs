@@ -291,7 +291,36 @@ impl Vm {
         let at = self.protos[pi].lazy_at;
         let end = self.protos[pi].src_end;
         let body = self.src_text(h, at, end);
-        let text = format!("({}function{} {})", if self.protos[pi].is_async { "async " } else { "" }, if self.protos[pi].generator { "*" } else { "" }, body);
+        // the text compiled: the function alone, in parentheses (a method
+        // in an object literal); `body` starts at its name or `(`
+        let asy = if self.protos[pi].is_async { "async " } else { "" };
+        let gen = if self.protos[pi].generator { "*" } else { "" };
+        let mut head = String::new();
+        let mut tail = String::from(")");
+        if (lazy & 128) != 0 {
+            head.push_str("(");
+            head.push_str(asy);
+        } else if (lazy & 16) != 0 {
+            head.push_str("({ ");
+            if (lazy & 32) != 0 {
+                head.push_str("get m");
+            } else if (lazy & 64) != 0 {
+                head.push_str("set m");
+            } else {
+                head.push_str(asy);
+                head.push_str(gen);
+                head.push_str("m");
+            }
+            tail = String::from(" })");
+        } else {
+            head.push_str("(");
+            head.push_str(asy);
+            head.push_str("function");
+            head.push_str(gen);
+            head.push_str(" ");
+        }
+        let prefix: int = head.as_bytes().len() as int;
+        let text = format!("{}{}{}", head, body, tail);
         let desc = self.protos[pi].lazy_desc.clone();
         self.atoms_sync();
         let atoms = crate::vm::take_atoms(&mut self.atoms);
@@ -318,7 +347,6 @@ impl Vm {
         let inner = c.first_fn as usize;
         // the functions' texts lie in the script's (`text` is not kept, and
         // their lazy ones read the script's text, as the stub did)
-        let prefix: int = 10 + if self.protos[pi].is_async { 6 } else { 0 } + if self.protos[pi].generator { 1 } else { 0 };
         let delta = at - prefix;
         let src_val = self.protos[pi].src.clone();
         for pr in c.protos {

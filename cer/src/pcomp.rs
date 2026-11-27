@@ -531,14 +531,20 @@ pub struct PComp {
     /// the native stack where compiling began (stack_deeper_than)
     pub sp0: int,
     toks: Vec<PTok>,
-    /// the tokens' texts, each once (`name_ids` finds one)
+    /// the tokens' texts, each once (`name_find` finds one)
     names: Vec<String>,
-    name_ids: HashMap<String, int>,
-    /// name_id's cache: a text's cheap hash to its index, -1 for none;
-    /// name_mask + 1 entries (fewer for a short text: a lazy function's
-    /// compile does not clear 16 K of them)
+    /// names' hashes (name_hash_of), by name id
+    name_hashes: Vec<int>,
+    /// open addressing by hash: name id + 1, 0 for none; name_mask + 1
+    /// entries, at least twice the names (fewer for a short text: a lazy
+    /// function's compile does not clear 16 K of them)
     name_cache: Vec<int>,
     name_mask: int,
+    /// lazy_stub: per name id, the stub (lazy_stamp) that has dealt with it
+    name_stamp: Vec<int>,
+    lazy_stamp: int,
+    /// lex_tokens: punctuator index to name id, -1 for not yet
+    punct_nids: Vec<int>,
     /// the number tokens' values
     nums: Vec<double>,
     /// the token closing each bracket (and the one opening each closing
@@ -740,9 +746,12 @@ impl PComp {
             sp0: crate::vm::native_sp(),
             toks: Vec::new(),
             names: Vec::new(),
-            name_ids: HashMap::new(),
+            name_hashes: Vec::new(),
             name_cache: Vec::new(),
             name_mask: cache_mask(src),
+            name_stamp: Vec::new(),
+            lazy_stamp: 0,
+            punct_nids: Vec::new(),
             nums: Vec::new(),
             mate: Vec::new(),
             xs: Vec::new(),
@@ -867,9 +876,22 @@ impl PComp {
     /// extras start in `xs`.
     fn lex_tokens(&mut self, lx: &mut Lexer, xbase: int) {
         let base = self.toks.len();
+        // punctuators come by index (no text made for each): punct_nids
+        // keeps their name ids
+        lx.lean = true;
         loop {
             let t = next_tok(lx);
             let k = t.kind;
+            if t.punct >= 0 && t.text.is_empty() {
+                while (self.punct_nids.len() as int) <= t.punct {
+                    self.punct_nids.push(-1);
+                }
+                let pk = t.punct as usize;
+                if self.punct_nids[pk] < 0 {
+                    let pt0 = lx.punct_text(t.punct);
+                    self.punct_nids[pk] = self.name_id(pt0.as_str());
+                }
+            }
             let pt = self.small_tok(&t, xbase);
             self.toks.push(pt);
             if k == T_EOF {
@@ -905,7 +927,7 @@ impl PComp {
         if t.escaped {
             flags = flags | PT_ESCAPED;
         }
-        let v = self.name_id(t.text.as_str());
+        let v = if t.punct >= 0 && t.text.is_empty() { self.punct_nids[t.punct as usize] } else { self.name_id(t.text.as_str()) };
         // a number's value is in `nums`, at its `x`
         let x = if t.kind == T_NUM {
             self.nums.push(t.num);
@@ -919,43 +941,72 @@ impl PComp {
     }
 
     fn name_id(&mut self, s: &str) -> int {
-        // most texts repeat: a direct-mapped cache by a cheap hash first
-        let n = s.as_bytes().len();
-        let mut h: int = n as int;
-        let mut i: usize = 0;
-        while i < n && i < 8 {
-            h = (h * 131 + (s.as_bytes()[i] as int)) & 16777215;
-            i += 1;
+        let h = name_hash_of(s);
+        let f = self.name_find_h(s, h);
+        if f >= 0 {
+            return f;
         }
-        if n > 8 {
-            h = (h * 131 + (s.as_bytes()[n - 1] as int)) & 16777215;
+        let id = self.names.len() as int;
+        self.names.push(String::from(s));
+        self.name_hashes.push(h);
+        if (id + 1) * 2 > self.name_mask {
+            self.name_grow();
+        } else {
+            self.name_place(id);
         }
-        let slot = ((h ^ (h >> 14)) & self.name_mask) as usize;
-        if self.name_cache.is_empty() {
-            let mut k = 0;
-            while k <= self.name_mask {
-                self.name_cache.push(-1);
-                k += 1;
-            }
-        }
-        let c = self.name_cache[slot];
-        if c >= 0 && self.names[c as usize].as_str() == s {
-            return c;
-        }
-        let id = self.name_id_slow(s);
-        self.name_cache[slot] = id;
         id
     }
 
-    fn name_id_slow(&mut self, s: &str) -> int {
-        match self.name_ids.get(s) {
-            Some(i) => *i,
-            None => {
-                let i = self.names.len() as int;
-                self.names.push(String::from(s));
-                self.name_ids.insert(String::from(s), i);
-                i
+    /// The id of name `s`, -1 when it has none.
+    fn name_find(&mut self, s: &str) -> int {
+        let h = name_hash_of(s);
+        self.name_find_h(s, h)
+    }
+
+    fn name_find_h(&mut self, s: &str, h: int) -> int {
+        if self.name_cache.is_empty() {
+            let mut k = 0;
+            while k <= self.name_mask {
+                self.name_cache.push(0);
+                k += 1;
             }
+        }
+        let mut slot = h & self.name_mask;
+        loop {
+            let c = self.name_cache[slot as usize];
+            if c == 0 {
+                return -1;
+            }
+            let id = c - 1;
+            if self.name_hashes[id as usize] == h && self.names[id as usize].as_str() == s {
+                return id;
+            }
+            slot = (slot + 1) & self.name_mask;
+        }
+    }
+
+    fn name_place(&mut self, id: int) {
+        let mut slot = self.name_hashes[id as usize] & self.name_mask;
+        while self.name_cache[slot as usize] != 0 {
+            slot = (slot + 1) & self.name_mask;
+        }
+        self.name_cache[slot as usize] = id + 1;
+    }
+
+    /// Twice the slots, the names placed again.
+    fn name_grow(&mut self) {
+        self.name_mask = self.name_mask * 2 + 1;
+        self.name_cache = Vec::new();
+        let mut k = 0;
+        while k <= self.name_mask {
+            self.name_cache.push(0);
+            k += 1;
+        }
+        let n = self.names.len() as int;
+        let mut i: int = 0;
+        while i < n {
+            self.name_place(i);
+            i += 1;
         }
     }
 
@@ -7130,10 +7181,7 @@ impl PComp {
     }
 
     fn kcallee_scan(&mut self, name: &str) -> int {
-        let nid = match self.name_ids.get(name) {
-            Some(i) => *i,
-            None => -1,
-        };
+        let nid = self.name_find(name);
         if nid < 0 || is_reserved(name) || is_strict_reserved(name) || name == "async" || name == "eval" || name == "arguments" || name == "let" {
             return -1;
         }
@@ -7703,7 +7751,7 @@ impl PComp {
 
     /// Parameters and body; answers the proto.
     fn function_rest(&mut self, flags: int, name: &str, first: int) -> int {
-        if self.lazy_toks > 0 && (flags & (F_ARROW | F_METHOD | F_CTOR | F_GETTER | F_SETTER | F_DERIVED)) == 0 {
+        if self.lazy_toks > 0 && (flags & (F_CTOR | F_DERIVED)) == 0 {
             let p = self.lazy_stub(flags, name, first);
             if p >= 0 {
                 return p;
@@ -7989,7 +8037,9 @@ impl PComp {
         }
         // `(function` and `!function`: most often called at once (an IIFE,
         // or an argument), so compiled with the script
-        if (flags & F_DECL) == 0 && first > 0 {
+        let arrow = (flags & F_ARROW) != 0;
+        let method = (flags & (F_METHOD | F_GETTER | F_SETTER)) != 0;
+        if (flags & F_DECL) == 0 && !method && first > 0 {
             let pf = first - 1;
             if self.tok_is(pf, "(") || self.tok_is(pf, "!") {
                 return -1;
@@ -8000,7 +8050,13 @@ impl PComp {
             return -1;
         }
         let pc = self.mate_of(po);
-        let bo = pc + 1;
+        let mut bo = pc + 1;
+        if arrow {
+            if !self.tok_is(bo, "=>") {
+                return -1;
+            }
+            bo += 1;
+        }
         if !self.tok_is(pc, ")") || !self.tok_is(bo, "{") {
             return -1;
         }
@@ -8017,6 +8073,13 @@ impl PComp {
         }
         let mut names: Vec<String> = Vec::new();
         let mut seen: HashMap<String, bool> = HashMap::new();
+        // name ids done with (kept, or a reserved word): name_stamp ==
+        // this stub's stamp
+        self.lazy_stamp += 1;
+        let stamp = self.lazy_stamp;
+        while self.name_stamp.len() < self.names.len() {
+            self.name_stamp.push(0);
+        }
         let mut privs = false;
         let mut i = po;
         while i <= bc {
@@ -8034,22 +8097,47 @@ impl PComp {
                 if (t.flags() & PT_ESCAPED) != 0 {
                     return -1;
                 }
-                let w = self.names[t.v as usize].clone();
-                let prop = i > 0 && (self.tok_is(i - 1, ".") || self.tok_is(i - 1, "?."));
+                let wv = t.v as int;
+                if self.name_stamp[wv as usize] == stamp {
+                    i += 1;
+                    continue;
+                }
+                let w = self.names[wv as usize].as_str();
+                let im = i - 1;
+                let prop = i > 0 && (self.tok_is(im, ".") || self.tok_is(im, "?."));
                 // (`super` in a plain function is a method's inside it, or
                 // an early error its compile reports)
                 if !prop && (w == "eval" || w == "import" || (i < pc && w == "arguments")) {
                     return -1;
                 }
-                if !prop && !is_reserved(w.as_str()) && w != "arguments" && !seen.contains_key(&w) {
-                    seen.insert(w.clone(), true);
-                    names.push(w);
+                // an arrow's `this`, `arguments`, `super` and `new.target`
+                // are the function's around it
+                if arrow && !prop && (w == "this" || w == "arguments" || w == "super" || (w == "new" && self.tok_is(i + 1, "."))) {
+                    return -1;
+                }
+                let mut done_id = false;
+                if !prop && !is_reserved(w) && w != "arguments" {
+                    let ws = String::from(w);
+                    if !seen.contains_key(&ws) {
+                        seen.insert(ws.clone(), true);
+                        names.push(ws);
+                    }
+                    // (a name seen as a property may be a binding elsewhere)
+                    done_id = true;
+                } else if !prop && is_reserved(w) && w != "new" && w != "import" {
+                    done_id = true;
+                }
+                if done_id {
+                    self.name_stamp[wv as usize] = stamp;
                 }
             } else if k == T_TEMPLATE {
                 let xi = t.x();
                 if xi >= 0 {
                     let exprs = self.xs[xi as usize].exprs.clone();
                     for e in exprs.iter() {
+                        if arrow && (e.contains("this") || e.contains("arguments") || e.contains("super") || e.contains("new")) {
+                            return -1;
+                        }
                         if !lazy_sub_names(e.as_str(), &mut names, &mut seen, 0) {
                             return -1;
                         }
@@ -8108,7 +8196,7 @@ impl PComp {
         // are never the ones around it: those are not kept in scope
         // objects for it. (A var inside braces may be a method's.)
         let mut own = pnames.clone();
-        if (flags & F_DECL) == 0 && !name.is_empty() {
+        if (flags & F_DECL) == 0 && !arrow && !method && !name.is_empty() {
             own.insert(String::from(name), true);
         }
         let mut k = bo + 1;
@@ -8116,18 +8204,23 @@ impl PComp {
         while k < bc {
             let kk = self.toks[k as usize].kind() as int;
             let k1 = k + 1;
-            let at_stmt = self.tok_is(k - 1, ";") || self.tok_is(k - 1, "{") || self.tok_is(k - 1, "}");
             if kk == T_PUNCT {
-                if self.tok_is(k, "{") {
+                let pv = self.toks[k as usize].v as usize;
+                let ps = self.names[pv].as_str();
+                if ps == "{" {
                     depth += 1;
-                } else if self.tok_is(k, "}") {
+                } else if ps == "}" {
                     depth -= 1;
-                } else if self.tok_is(k, "=>") && self.tok_is(k1, "{") {
+                } else if ps == "=>" && self.tok_is(k1, "{") {
                     // an arrow's body: its declarations are its own
                     k = self.mate_of(k1);
                 }
             } else if kk == T_IDENT {
-                let w = self.names[self.toks[k as usize].v as usize].clone();
+                let wv = self.toks[k as usize].v as usize;
+                let w = self.names[wv].as_str();
+                let decl_word = w == "function" || w == "var" || w == "let" || w == "const" || w == "class";
+                let km = k - 1;
+                let at_stmt = decl_word && (self.tok_is(km, ";") || self.tok_is(km, "{") || self.tok_is(km, "}"));
                 if w == "function" {
                     let mut n1 = k1;
                     if self.tok_is(n1, "*") {
@@ -8184,14 +8277,17 @@ impl PComp {
         let outer_strict = self.fs[self.fs.len() - 1].proto.strict;
         let parser_strict = self.strict;
         let mut proto = Proto::new(name);
-        proto.strict = outer_strict || own_strict || (flags & F_STRICT) != 0;
+        proto.strict = outer_strict || own_strict || (flags & (F_STRICT | F_METHOD)) != 0;
         proto.generator = (flags & F_GENERATOR) != 0;
         proto.is_async = (flags & F_ASYNC) != 0;
+        proto.arrow = arrow;
+        proto.method = (flags & F_METHOD) != 0;
+        proto.getter_setter = (flags & (F_GETTER | F_SETTER)) != 0;
         proto.nparams = nparams;
         proto.length = length;
         proto.rest = rest;
         let pn = po - 1;
-        let named = (flags & F_DECL) == 0 && !name.is_empty() && pn >= 0 && (self.toks[pn as usize].kind() as int) == T_IDENT && !self.tok_is(pn, "function");
+        let named = (flags & F_DECL) == 0 && !arrow && !method && !name.is_empty() && pn >= 0 && (self.toks[pn as usize].kind() as int) == T_IDENT && !self.tok_is(pn, "function");
         let mut lz: int = 1;
         if named {
             lz += 2;
@@ -8202,12 +8298,24 @@ impl PComp {
         if outer_strict {
             lz += 8;
         }
+        if method {
+            lz += 16;
+        }
+        if (flags & F_GETTER) != 0 {
+            lz += 32;
+        }
+        if (flags & F_SETTER) != 0 {
+            lz += 64;
+        }
+        if arrow {
+            lz += 128;
+        }
         proto.lazy = lz;
         let at_tok = if named { pn } else { po };
         proto.lazy_at = self.toks[at_tok as usize].start as int;
         let outer = self.cur_scope;
         let fnid = self.push_fn(proto, false, 0);
-        let g = self.new_scope(outer, true, false);
+        let g = self.new_scope(outer, true, arrow);
         self.scopes[g as usize].decl_fn = (flags & F_DECL) != 0;
         self.fns[fnid as usize].fscope = g;
         self.cur_scope = g;
@@ -10160,6 +10268,22 @@ fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &s
     u.entry = entry;
     u.source = String::from(src);
     u
+}
+
+/// A name's hash: its length, first 8 bytes and last byte (most names
+/// are short; a longer one is told apart by comparing).
+fn name_hash_of(s: &str) -> int {
+    let n = s.as_bytes().len();
+    let mut h: int = n as int;
+    let mut i: usize = 0;
+    while i < n && i < 8 {
+        h = (h * 131 + (s.as_bytes()[i] as int)) & 16777215;
+        i += 1;
+    }
+    if n > 8 {
+        h = (h * 131 + (s.as_bytes()[n - 1] as int)) & 16777215;
+    }
+    h ^ (h >> 11)
 }
 
 /// PComp.name_mask for a source: 16 K entries for 64 K bytes or more, at
