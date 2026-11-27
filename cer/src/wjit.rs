@@ -140,6 +140,8 @@ pub struct Layout {
     pub str_blen: u32,
     pub off_pos: u32,
     pub off_cold: u32,
+    /// Cold.elems2's buffer word (hole marks)
+    pub cold_e2_ptr: u32,
     pub vm_shapes_ptr: u32,
     pub shape_size: u32,
     pub sh_nkeys: u32,
@@ -251,6 +253,7 @@ pub fn probe() -> Layout {
         str_blen: 0,
         off_pos: 0,
         off_cold: 0,
+        cold_e2_ptr: 0,
         vm_shapes_ptr: 0,
         shape_size: 0,
         sh_nkeys: 0,
@@ -348,6 +351,7 @@ pub fn probe() -> Layout {
         // Elems.v is an EVec whose first field is its Vec (evec.rs)
         l.elems_vp = std::mem::offset_of!(crate::value::Elems, v) as u32 + std::mem::offset_of!(crate::evec::EVec, inner) as u32 + vp;
         l.elems_vl = std::mem::offset_of!(crate::value::Elems, v) as u32 + std::mem::offset_of!(crate::evec::EVec, inner) as u32 + vl;
+        l.cold_e2_ptr = std::mem::offset_of!(crate::value::Cold, elems2) as u32 + vp;
         l.off_rc = std::mem::offset_of!(JsObj, rc) as u32;
         let vc = 12 - vp - vl;
         l.off_ext = std::mem::offset_of!(JsObj, extensible) as u32;
@@ -522,6 +526,7 @@ const I64_NE: u8 = 0x52;
 const I64_EQ: u8 = 0x51;
 const I64_AND: u8 = 0x83;
 const I32_WRAP_I64: u8 = 0xa7;
+const I64_TRUNC_F64_S: u8 = 0xb0;
 const I64_STORE: u8 = 0x37;
 const F64_STORE: u8 = 0x39;
 const I32_STORE8: u8 = 0x3a;
@@ -753,7 +758,7 @@ enum KnFx {
 fn kn_fx(ins: Op, spec: bool) -> KnFx {
     let kind = (ins.code & 255) as int;
     let sub = ((ins.code >> 8) & 255) as int;
-    if spec && ins.a >= 0 && (kind == R_ADD || kind == R_SUB || kind == R_MUL || (kind == R_ARITH && (sub == OP_SUB || sub == OP_MUL || sub == OP_DIV))) {
+    if spec && ins.a >= 0 && (kind == R_ADD || kind == R_SUB || kind == R_MUL || (kind == R_ARITH && (sub == OP_SUB || sub == OP_MUL || sub == OP_DIV || (sub >= OP_BAND && sub <= OP_USHR)))) {
         return KnFx::Spec(ins.a, ins.b, ins.c);
     }
     match kind {
@@ -957,7 +962,7 @@ pub fn inline_ok(code: &[Op], entry: usize, nparams: u32) -> Option<Vec<i32>> {
         let is_this = |r: i32| r >= 0 && r < 64 && this_regs & (1u64 << r) != 0;
         let ok = match k {
             R_MOVE | R_ADD | R_SUB | R_MUL => w >= np,
-            R_ARITH => w >= np && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR),
+            R_ARITH => w >= np && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR | OP_USHR),
             R_LOAD2 => w >= np,
             R_GET_ENV => w >= np && sub <= 1 && op.b >= 0 && op.c >= 0,
             R_THIS | R_GET_THIS_PROP => w >= np,
@@ -2200,12 +2205,24 @@ impl<'a> Cg<'a> {
         self.get(L_SP);
         self.mem(I32_LOAD, 2, ob * VS + l.off_int);
         self.obj_addr();
-        self.w.byte(LOCAL_TEE);
-        self.w.u(L_T2 as u64);
+        self.set(L_T2);
+        // a plain array's element (set_elem_array); typed arrays go on
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        let all = self.extra;
+        self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_class);
         self.i32c(C_TYPED as i64);
         self.op(I32_NE);
-        self.fail_if(pc);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.set_elem_array(key, val, pc);
+        self.op(BR);
+        self.w.u((self.extra - all) as u64);
+        self.extra -= 1;
+        self.op(END);
         self.index_key(key, pc);
         self.typed_at(pc);
         self.get(L_T2);
@@ -2277,6 +2294,8 @@ impl<'a> Cg<'a> {
         self.mem(F64_STORE, 3, 0);
         self.extra -= 1;
         self.op(END);
+        self.extra -= 1;
+        self.op(END);
         if keep {
             if !self.load_val(val, L_Q0) {
                 return false;
@@ -2284,6 +2303,87 @@ impl<'a> Cg<'a> {
             self.store_val(ob, L_Q0);
         }
         true
+    }
+    /// The array at L_T2 (key and val checked numbers): an element inside
+    /// its length that holds no string or object gets the number `val`, as
+    /// rrun's R_SET_ELEM does (pos < 2; a Cold's hole mark cleared); fails
+    /// otherwise. Nothing to count: neither the old value nor the new one
+    /// is on the heap.
+    fn set_elem_array(&mut self, key: Opnd, val: Opnd, pc: i64) {
+        let l = self.lay;
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_ARRAY as i64);
+        self.op(I32_NE);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.i32c(2);
+        self.op(I32_GE_S);
+        self.fail_if(pc);
+        self.index_key(key, pc);
+        // its Elems: k < v.len()
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_elems);
+        self.i32c(l.elems_size as i64);
+        self.op(I32_MUL);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_evecs_ptr);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T4 as u64);
+        self.mem(I32_LOAD, 2, l.elems_vl);
+        self.get(L_T3);
+        self.op(I32_LE_U);
+        self.fail_if(pc);
+        self.get(L_T4);
+        self.mem(I32_LOAD, 2, l.elems_vp);
+        self.get(L_T3);
+        self.i32c(VS as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.set(L_T4);
+        // the old value: a number, undefined, null or a boolean
+        self.rtag(L_T4, 0);
+        self.i32c((crate::value::V_STR >> 48) as i64);
+        self.op(I32_GE_U);
+        self.fail_if(pc);
+        self.get(L_T4);
+        self.num(val);
+        self.mem(F64_STORE, 3, 0);
+        // a Cold's elems2 (hole marks) inside its length: false there
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_cold);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(L_T5);
+        self.i32c(l.cold_size as i64);
+        self.op(I32_MUL);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_colds_ptr);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.mem(I32_LOAD, 2, l.cold_e2_len);
+        self.get(L_T3);
+        self.op(I32_GT_U);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(L_T5);
+        self.mem(I32_LOAD, 2, l.cold_e2_ptr);
+        self.get(L_T3);
+        self.i32c(VS as i64);
+        self.op(I32_MUL);
+        self.op(I32_ADD);
+        self.i64c(crate::value::V_BOOL as i64);
+        self.mem(I64_STORE, 3, 0);
+        self.extra -= 1;
+        self.op(END);
+        self.extra -= 1;
+        self.op(END);
     }
     /// fail unless the value at b + off is an object
     fn need_obj(&mut self, b: u32, off: u32, pc: i64) {
@@ -3454,7 +3554,7 @@ impl<'a> Cg<'a> {
             OP_SUB => F64_SUB,
             OP_MUL => F64_MUL,
             OP_DIV => F64_DIV,
-            OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR => 0,
+            OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR | OP_USHR => 0,
             _ => return false,
         };
         if dst < 0 {
@@ -3472,40 +3572,51 @@ impl<'a> Cg<'a> {
             self.store_num(dst as u32, L_A);
             return true;
         }
-        // int32 operands only (the interpreter's fast path); others return
-        self.num(a);
+        self.int32(a, L_A, pc);
+        self.int32(b, L_B, pc);
+        self.bit_op(code);
         self.set(L_A);
-        self.num(b);
-        self.set(L_B);
-        for l in [L_A, L_B] {
-            // !(v >= -2^31 && v <= 2^31 - 1)
-            self.get(l);
-            self.op(F64_CONST);
-            self.w.b.extend_from_slice(&(-2147483648.0f64).to_le_bytes());
-            self.op(F64_GE);
-            self.get(l);
-            self.op(F64_CONST);
-            self.w.b.extend_from_slice(&2147483647.0f64.to_le_bytes());
-            self.op(F64_LE);
-            self.op(I32_AND);
-            self.op(I32_EQZ);
-            self.fail_if(pc);
+        self.store_num(dst as u32, L_A);
+        true
+    }
+    /// ToInt32 of a number operand on the wasm stack (an i32): a constant's
+    /// at compile time; a register's through i64 (exact below 2^63, the low
+    /// 32 bits are ToInt32 there), larger or NaN fails. `l`: an f64 local
+    /// to use.
+    fn int32(&mut self, o: Opnd, l: u32, pc: i64) {
+        if let Opnd::Num(n) = o {
+            let v = if n.is_finite() { (n.trunc() % 4294967296.0) as i64 as i32 } else { 0 };
+            self.i32c(v as i64);
+            return;
         }
-        self.get(L_A);
-        self.op(I32_TRUNC_F64_S);
-        self.get(L_B);
-        self.op(I32_TRUNC_F64_S);
+        self.num(o);
+        self.int32_top(l, pc);
+    }
+    /// int32 for the f64 on the wasm stack; a failed check returns pc
+    fn int32_top(&mut self, l: u32, pc: i64) {
+        self.w.byte(LOCAL_TEE);
+        self.w.u(l as u64);
+        self.op(F64_ABS);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&9223372036854775808.0f64.to_le_bytes());
+        self.op(F64_LT);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        self.get(l);
+        self.op(I64_TRUNC_F64_S);
+        self.op(I32_WRAP_I64);
+    }
+    /// the bit op on the two i32s on the wasm stack, its number (f64)
+    fn bit_op(&mut self, code: int) {
         self.op(match code {
             OP_BAND => I32_AND,
             OP_BOR => I32_OR,
             OP_BXOR => I32_XOR,
             OP_SHL => I32_SHL,
-            _ => I32_SHR_S,
+            OP_SHR => I32_SHR_S,
+            _ => I32_SHR_U,
         });
-        self.op(F64_CONVERT_I32_S);
-        self.set(L_A);
-        self.store_num(dst as u32, L_A);
-        true
+        self.op(if code == OP_USHR { F64_CONVERT_I32_U } else { F64_CONVERT_I32_S });
     }
 
     /// A helper for the op at pc: 0 it did it, 1 it did not (return pc),
@@ -5034,7 +5145,7 @@ impl<'a> Cg<'a> {
                 R_ADD => OP_ADD,
                 R_SUB => OP_SUB,
                 R_MUL => OP_MUL,
-                R_ARITH if sub == OP_SUB || sub == OP_MUL || sub == OP_DIV => sub,
+                R_ARITH if sub == OP_SUB || sub == OP_MUL || sub == OP_DIV || (sub >= OP_BAND && sub <= OP_USHR) => sub,
                 _ => -1,
             };
             if code >= 0 {
@@ -5165,17 +5276,30 @@ impl<'a> Cg<'a> {
     /// A speculated + - * /: numbers or back to the interpreter at pc; the
     /// result is written to its register and kept known.
     fn spec_arith(&mut self, code: int, dst: i32, x: i32, y: i32, pc: i64) -> bool {
-        let fop = match code {
-            OP_ADD => F64_ADD,
-            OP_SUB => F64_SUB,
-            OP_MUL => F64_MUL,
-            _ => F64_DIV,
-        };
         let a = self.opnd(x);
         let b = self.opnd(y);
-        self.spec_num(a, pc);
-        self.spec_num(b, pc);
-        self.op(fop);
+        if code >= OP_BAND && code <= OP_USHR {
+            // int32s (int32_top), a number past 2^63 or NaN back at pc
+            for (o, l) in [(a, L_A), (b, L_B)] {
+                if let Opnd::Num(_) = o {
+                    self.int32(o, l, pc);
+                } else {
+                    self.spec_num(o, pc);
+                    self.int32_top(l, pc);
+                }
+            }
+            self.bit_op(code);
+        } else {
+            let fop = match code {
+                OP_ADD => F64_ADD,
+                OP_SUB => F64_SUB,
+                OP_MUL => F64_MUL,
+                _ => F64_DIV,
+            };
+            self.spec_num(a, pc);
+            self.spec_num(b, pc);
+            self.op(fop);
+        }
         // a register known to hold a number has its tag in memory already
         let was = (dst as usize) < self.kn.len() && self.kn[dst as usize] >= 0;
         let l = self.kn_take(dst as u32);
@@ -5203,7 +5327,7 @@ impl<'a> Cg<'a> {
         match kind {
             R_ADD | R_SUB | R_MUL | R_ARITH | R_CMP | R_INC_LOCAL | R_POSTINC | R_INC | R_TONUM | R_ADD_LOCAL_POP => {
                 let can = match kind {
-                    R_ARITH => w1 >= 0 && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_MOD | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR),
+                    R_ARITH => w1 >= 0 && matches!(sub, OP_SUB | OP_MUL | OP_DIV | OP_MOD | OP_BAND | OP_BOR | OP_BXOR | OP_SHL | OP_SHR | OP_USHR),
                     R_CMP => w1 >= 0 && cmp_ok(sub),
                     R_POSTINC => w1 >= 0 && w2 >= 0,
                     _ => w1 >= 0,
@@ -5512,7 +5636,7 @@ impl<'a> Cg<'a> {
                 self.with_helper(H_GET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.get_elem_fast(w1 as u32, w2 as u32, key, p))
             }
             R_SET_ELEM if self.lay.obj_ok && w1 >= 0 && MASK.with(|m| m.get()) & (1u64 << 61) == 0 => {
-                // a typed array's element (set_elem_typed), else the helper
+                // a plain or typed array's element (set_elem_typed), else the helper
                 let key = self.opnd(w2);
                 let val = self.opnd(w3);
                 if key.is_k() || val.is_k() {
