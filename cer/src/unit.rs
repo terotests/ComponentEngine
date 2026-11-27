@@ -26,7 +26,7 @@ use crate::vm::*;
 
 /// Bumped when the text, the ops or what they mean change: older texts
 /// are then not read.
-pub const UNIT_FORMAT: int = 2;
+pub const UNIT_FORMAT: int = 3;
 
 pub struct Unit {
     pub atom_names: Vec<String>,
@@ -150,6 +150,10 @@ pub fn link(vm: &mut Vm, u: Unit) -> int {
                 }
             }
             ci += 1;
+        }
+        // a lazy function's desc too (pcomp lazy_stub)
+        if p.lazy != 0 && p.lazy_desc.contains(";p|") {
+            p.lazy_desc = remap_priv_ids(p.lazy_desc.as_str(), &mut ids, vm);
         }
         vm.link_strs(&mut p);
         if p.fwd_atom >= 0 {
@@ -308,6 +312,11 @@ pub fn encode(u: &Unit, input: &str) -> String {
         put_bool(&mut out, p.generator);
         put_bool(&mut out, p.is_async);
         put_bool(&mut out, p.lexical_ctor);
+        put_num(&mut out, p.lazy);
+        if p.lazy != 0 {
+            put_num(&mut out, p.lazy_at);
+            put_str(&mut out, p.lazy_desc.as_str());
+        }
         // where the function's text is: none, in the source, its own
         if (&p.src).is_undef() { put_num(&mut out, 0) } else if let Some(k) = (&p.src).as_str() {
                 let s = &p.cstrs[k as usize];
@@ -457,6 +466,11 @@ pub fn decode(text: &str, input: &str) -> Unit {
         p.generator = r.flag();
         p.is_async = r.flag();
         p.lexical_ctor = r.flag();
+        p.lazy = r.num();
+        if p.lazy != 0 {
+            p.lazy_at = r.num();
+            p.lazy_desc = r.string();
+        }
         let sk = r.num();
         if sk == 1 {
             p.src = Val::Str(p.cstrs.len() as int);

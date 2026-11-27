@@ -4546,8 +4546,18 @@ impl Vm {
         if o < 0 {
             return true;
         }
+        let class = self.objs[o as usize].class;
+        if class == C_ARGUMENTS && self.objs[o as usize].pos != 0 {
+            // parameters mapped when the object is first written (map_arg's
+            // lazy mapping): a method that writes maps them first and takes
+            // the generic path, whose writes reach the parameters
+            let mutates = id == NF_AP_PUSH || id == NF_AP_POP || id == NF_AP_SHIFT || id == NF_AP_UNSHIFT || id == NF_AP_SPLICE || id == NF_AP_REVERSE || id == NF_AP_SORT || id == NF_AP_FILL || id == NF_AP_COPYWITHIN;
+            if mutates {
+                self.slow_args(o);
+                return true;
+            }
+        }
         let ob = &self.objs[o as usize];
-        let class = ob.class;
         if class == C_ARGUMENTS || class == C_TYPED {
             return false;
         }

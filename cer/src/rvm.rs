@@ -343,6 +343,9 @@ impl Vm {
         while i < self.frames.len() {
             let pi = self.frames[i].proto as usize;
             if self.protos[pi].rstate == 0 {
+                if self.protos[pi].lazy != 0 && !self.lazy_compile(pi) {
+                    return false;
+                }
                 unpack_code(&mut self.protos[pi]);
                 let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
                 if !e.is_empty() {
@@ -383,6 +386,9 @@ impl Vm {
             let mut bp = self.frames[fi].bp;
             let mut pc = self.frames[fi].pc;
             if self.protos[pi].rstate == 0 {
+                if self.protos[pi].lazy != 0 && !self.lazy_compile(pi) {
+                    continue 'frames;
+                }
                 unpack_code(&mut self.protos[pi]);
                 let e = translate(&mut self.protos[pi], &mut self.rcode, &mut self.kvals, &mut self.rtab);
                 if !e.is_empty() {
@@ -3139,6 +3145,9 @@ impl Vm {
     /// where the frame does.
     pub fn renter(&mut self, fo: int, fpos: int, argc: int, ret: int) -> bool {
         let pi = self.ob(fo).func as usize;
+        if proto_at(&self.protos, pi).lazy != 0 && !self.lazy_compile(pi) {
+            return false;
+        }
         if proto_at(&self.protos, pi).rstate == 0 && !self.renter_translate(pi) {
             return false;
         }
