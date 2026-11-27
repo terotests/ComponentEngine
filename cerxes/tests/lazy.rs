@@ -36,6 +36,10 @@ const SCRIPTS: &[&str] = &[
     "var o2 = { [('c' + 'k')](a) { return a + 1; }, 'q r'(b) { return b; }, 5(c) { return c; } }; [o2.ck(1), o2['q r'](2), o2[5](3), o2.ck.name, o2['q r'].name].join()",
     "class R { #p = 1; #m() { return this.#p + 1; } n() { return this.#m() + `${this.#p}`; } } new R().n()",
     "var u = { m() { return (() => { return this.x; })(); }, x: 9 }; u.m() + ',' + u.m.toString().length",
+    // a script's let / const / class: the global lexical environment, not
+    // the global object; other code finds them by name
+    "let gx = 1; const gc = 2; class GK {} function gf() { return gx + gc; } [gf(), typeof globalThis.gx, typeof globalThis.GK, 'gc' in globalThis, (0, eval)('gx + gc'), new Function('return typeof GK')()].join()",
+    "let Array = 4; let r = [Array, typeof globalThis.Array]; let gy = 1; new Function('gy = 5')(); r.push(gy); const gz = 1; try { new Function('gz = 2')(); } catch (e) { r.push(e.name); } try { (0, eval)('let gy = 2'); r.push('own'); } catch (e) { r.push(e.name); } r.join()",
     // nested lazy functions, and functions inside a lazy one's own scope
     "function a1(x) { function a2(y) { function a3(z) { return x + y + z; } return a3(3); } return a2(2); } a1(1)",
     "function big(n) { var s = 0; for (var i = 0; i < n; i++) { s += (function (j) { return j * 2; })(i); } return s; } big(10)",

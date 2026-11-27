@@ -1356,12 +1356,16 @@ impl PComp {
             }
         }
         let lexical = kind == K_LET || kind == K_CONST || kind == K_CLASS;
-        // eval code's lexical declarations are its own
-        let global = self.scopes[scope as usize].is_program && !self.local_program && !(self.local_if_strict && lexical);
+        // eval code's lexical declarations are its own; a script's are in
+        // the global lexical environment: its env, which the VM makes
+        // reachable by name from other code (OP_DECL_GLOBAL 4+)
+        let at_top = self.scopes[scope as usize].is_program && !self.local_program;
+        let global = at_top && !lexical;
+        let script_lex = at_top && lexical && !self.local_if_strict;
         self.binds.push(PBind {
             name: String::from(name),
             kind: kind,
-            captured: false,
+            captured: script_lex,
             slot: -1,
             in_env: false,
             scope: scope,
@@ -2335,9 +2339,8 @@ impl PComp {
         let pi = self.fns[fi].proto as usize;
         self.protos[pi].nslots = next_slot;
         let fs = self.fns[fi].fscope;
-        if !self.fns[fi].is_program || self.local_program || self.local_if_strict {
-            self.protos[pi].env_size = self.scopes[fs as usize].env_size;
-        }
+        // (a script's own env: its let / const / class bindings)
+        self.protos[pi].env_size = self.scopes[fs as usize].env_size;
     }
 
     /// The function scope's `arguments` binding, or -1.
@@ -2948,6 +2951,19 @@ impl PComp {
                     self.x_ev_decls((o.a as int));
                 } else if !self.local_program {
                     let binds = self.scopes[o.a as usize].binds.clone();
+                    let script = !self.local_if_strict;
+                    if script {
+                        // a script's: every name checked before any is made
+                        for b in binds.iter() {
+                            let k = self.binds[*b as usize].kind;
+                            let lex = k == K_LET || k == K_CONST || k == K_CLASS;
+                            if lex || k == K_VAR || k == K_FUNC {
+                                let nm = self.binds[*b as usize].name.clone();
+                                let a = self.atom(nm.as_str());
+                                self.xemit(OP_DECL_GLOBAL, a, if lex { 2 } else { 3 });
+                            }
+                        }
+                    }
                     for b in binds.iter() {
                         let k = self.binds[*b as usize].kind;
                         if k == K_VAR || k == K_FUNC {
@@ -2955,6 +2971,18 @@ impl PComp {
                             let a = self.atom(nm.as_str());
                             // eval code's vars and functions can be deleted
                             self.xemit(OP_DECL_GLOBAL, a, if self.local_if_strict { 1 } else { 0 });
+                        }
+                    }
+                    if script {
+                        for b in binds.iter() {
+                            let k = self.binds[*b as usize].kind;
+                            if (k == K_LET || k == K_CONST || k == K_CLASS) && self.binds[*b as usize].in_env {
+                                let nm = self.binds[*b as usize].name.clone();
+                                let a = self.atom(nm.as_str());
+                                let kc = if k == K_CONST { 1 } else if k == K_CLASS { 2 } else { 0 };
+                                let slot = self.binds[*b as usize].slot;
+                                self.xemit(OP_DECL_GLOBAL, a, 4 + slot * 4 + kc);
+                            }
                         }
                     }
                 }
@@ -3411,9 +3439,7 @@ impl PComp {
         self.f().var_scope = s;
         self.cur_scope = s;
         self.eval_prog = s;
-        if self.local_program || self.local_if_strict {
-            self.emit(PH_ENTER, s, 1);
-        }
+        self.emit(PH_ENTER, s, 1);
         self.emit(PH_DECL_GLOBALS, s, 0);
         self.emit(PH_HOIST, s, 0);
         self.op(OP_UNDEF);

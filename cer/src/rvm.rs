@@ -1190,11 +1190,29 @@ impl Vm {
                     R_GET_ENV => {
                         let e = self.env_of(fi, (w2 as int));
                         let v = self.env_slot(e, (w3 as int));
-                        self.rset((bp + (w1 as int)) as usize, v);
+                        let nx = pc + 1 + ((w0 >> 16) as int);
                         if ((w0 >> 8) & 255) == 1 {
+                            self.rset((bp + (w1 as int)) as usize, v);
                             self.rset((bp + (w1 as int) + 1) as usize, Val::Undef());
+                            pc = nx;
+                            continue;
                         }
-                        pc = (pc + 1 + ((w0 >> 16) as int));
+                        // sub 2: the binding's TDZ check comes right after it
+                        // (regs.rs); done here, without its own dispatch, when
+                        // it passes
+                        if ((w0 >> 8) & 255) == 2 {
+                            let n = code_op(&self.rcode, cp, nx);
+                            let tdz = if let Some(o) = v.as_obj() { o == self.tdz_obj } else { false };
+                            self.rset((bp + (w1 as int)) as usize, v);
+                            if (n.code & 65535) == (R_CHECK as i32) && n.a == (w1 as i32) && !tdz {
+                                pc = nx + 1 + ((n.code >> 16) as int);
+                                continue;
+                            }
+                            pc = nx;
+                            continue;
+                        }
+                        self.rset((bp + (w1 as int)) as usize, v);
+                        pc = nx;
                         continue;
                     }
                     R_SET_ENV => {
@@ -1294,6 +1312,10 @@ impl Vm {
                         if bad {
                             self.frames[fi].pc = pc + 1;
                             self.r_check_fail(pi, ((w0 >> 8) & 255) as int, (w2 as int));
+                        } else {
+                            // (nothing called out: straight on)
+                            pc = (pc + 1 + ((w0 >> 16) as int));
+                            continue;
                         }
                     }
                     R_TONUM => {
