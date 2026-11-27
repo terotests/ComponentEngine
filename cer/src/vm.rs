@@ -330,6 +330,19 @@ pub struct Vm {
     pub szct_limit: int,
     /// strings reclaim() freed (statistics)
     pub sfree_count: int,
+    /// hslice's slice view thresholds (SLICE_MIN, SLICE_KEEP)
+    pub slice_min: int,
+    pub slice_keep: int,
+    /// > 0: a slice view keeps at most this many bytes of its buffer that
+    /// are not its own (SLICE_WASTE)
+    pub slice_waste: int,
+    /// counts for CERXES_STATS: slice views made; long slices copied and
+    /// their bytes; views copied out by sflat and their bytes
+    pub sl_views: int,
+    pub sl_copies: int,
+    pub sl_copy_bytes: int,
+    pub sl_flats: int,
+    pub sl_flat_bytes: int,
     /// strings made since the last collection, and how many make one due
     pub snew: int,
     pub slimit: int,
@@ -580,10 +593,17 @@ pub struct Vm {
     /// The text whose units rx_units holds, all of them (rx_s or one it
     /// is the end of).
     pub rx_ufull: Rc<String>,
+    /// rx_units[rx_uoff..] are a slice view's units (rx_cache_view),
+    /// whose text is never copied out; rx_s's units start at rx_sbase then
+    pub rx_vw: bool,
+    pub rx_sbase: int,
     /// the input and captures of the last successful RegExp match, for the
     /// legacy statics RegExp.lastMatch, $1…$9, leftContext, rightContext…
     pub rx_last_s: Rc<String>,
     pub rx_last_caps: Vec<int>,
+    /// > 0: the last match's input is rx_last_s from that unit on (a
+    /// slice view's, regexp_exec_view)
+    pub rx_last_uo: int,
     /// longer texts used before (most recent first, at most RX_KEEP;
     /// rx_cache swaps a hit to the front): a tokenizer that runs a sticky
     /// regexp over its whole input and others over short words or other
@@ -837,6 +857,14 @@ impl Vm {
             szct: Vec::new(),
             szct_spare: Vec::new(),
             sfree_count: 0,
+            slice_min: SLICE_MIN,
+            slice_keep: SLICE_KEEP,
+            slice_waste: SLICE_WASTE,
+            sl_views: 0,
+            sl_copies: 0,
+            sl_copy_bytes: 0,
+            sl_flats: 0,
+            sl_flat_bytes: 0,
             szct_limit: ZCT_MIN,
             snew: 0,
             slimit: SLIMIT_MIN,
@@ -956,8 +984,11 @@ impl Vm {
             rx_uoff: 0,
             words_seen: false,
             rx_ufull: Rc::new(String::new()),
+            rx_vw: false,
+            rx_sbase: 0,
             rx_last_s: Rc::new(String::new()),
             rx_last_caps: Vec::new(),
+            rx_last_uo: 0,
             rx_ss: Vec::new(),
             rx_us: Vec::new(),
             rx_regs: Vec::new(),
@@ -1006,6 +1037,11 @@ impl Vm {
     }
 
     pub fn rx_cache(&mut self, s: &Rc<String>) {
+        if self.rx_vw {
+            // (rx_s's own units, not the view's)
+            self.rx_uoff = self.rx_sbase;
+            self.rx_vw = false;
+        }
         if self.rx_s.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s, s) {
             self.rx_s = s.clone();
             return;
@@ -1049,6 +1085,54 @@ impl Vm {
         jsstr::units_into(s.as_str(), &mut self.rx_units);
     }
 
+    /// rx_cache for string handle `h` when it is a slice view (hslice)
+    /// that ends where its buffer's text ends and the cache holds that
+    /// text's units: its units are the end of those, found without a copy
+    /// or a compare of the view's text. False (nothing changed) otherwise.
+    pub fn rx_cache_view(&mut self, h: int) -> bool {
+        let hi = h as usize;
+        let u = self.strs[hi].suo as int;
+        if u < 0 {
+            return false;
+        }
+        let mut r = self.strs[hi].up as usize;
+        while self.strs[r].up >= 0 {
+            r = self.strs[r].up as usize;
+        }
+        let rb = self.strs[r].s.as_bytes().len() as int;
+        if (self.strs[hi].off as int) + (self.strs[hi].len as int) != rb {
+            return false;
+        }
+        let mut base: int = 0;
+        let sb = if self.rx_vw { self.rx_sbase } else { self.rx_uoff };
+        if rc_same(&self.rx_ufull, &self.strs[r].s) {
+            // (the units' own text)
+        } else if rc_same(&self.rx_s, &self.strs[r].s) {
+            // the end of the units' text: a copy of a view made when it
+            // was too small a part of its buffer
+            base = sb;
+        } else {
+            // the buffer's units, kept or converted once (copying the
+            // view out instead would cost as much, at every token after
+            // other text took the cache)
+            let rs = self.strs[r].s.clone();
+            if self.rx_too_long(&rs) {
+                return false;
+            }
+            self.rx_cache(&rs);
+            base = self.rx_uoff;
+        }
+        if base + u > (self.rx_units.len() as int) {
+            return false;
+        }
+        if !self.rx_vw {
+            self.rx_sbase = self.rx_uoff;
+        }
+        self.rx_uoff = base + u;
+        self.rx_vw = true;
+        true
+    }
+
     /// A text and its units into the kept ones (rx_ss), when it is long
     /// enough to be worth keeping: short words are converted again.
     fn rx_keep(&mut self, s: Rc<String>, units: Vec<int>) {
@@ -1078,6 +1162,7 @@ impl Vm {
             u = mine;
             self.rx_uoff = 0;
         }
+        self.rx_vw = false;
         self.rx_s = Rc::new(String::new());
         self.rx_ufull = Rc::new(String::new());
         u
@@ -1088,6 +1173,7 @@ impl Vm {
         self.rx_ufull = s.clone();
         self.rx_units = units;
         self.rx_uoff = 0;
+        self.rx_vw = false;
     }
 
     /// Where unit `i` (0..=length) of handle h's text starts, in bytes of
@@ -1126,6 +1212,9 @@ impl Vm {
             if self.strs[h as usize].off != 0 {
                 x = self.strs[h as usize].up as int;
                 off = self.strs[h as usize].off as int;
+                while self.strs[x as usize].up >= 0 {
+                    x = self.strs[x as usize].up as int;
+                }
             } else {
                 while self.strs[x as usize].up >= 0 {
                     x = self.strs[x as usize].up as int;
@@ -1206,7 +1295,7 @@ impl Vm {
     /// each unit. -1 for other strings and when not known this way (the
     /// caller's str_at then).
     pub fn hview_unit(&mut self, h: int, i: int) -> int {
-        if self.strs[h as usize].up < 0 || self.hbytes(h) < 1024 {
+        if self.strs[h as usize].up < 0 || (self.hbytes(h) < 1024 && self.strs[h as usize].suo < 0) {
             return -1;
         }
         let b = self.hbyte_of(h, i);
@@ -1226,7 +1315,7 @@ impl Vm {
         if a >= b {
             return Val::Str(0);
         }
-        if self.strs[h as usize].up < 0 && !self.sc_ascii && rc_same(&self.sc_s, &self.strs[h as usize].s) {
+        if b - a < self.slice_min && self.strs[h as usize].up < 0 && !self.sc_ascii && rc_same(&self.sc_s, &self.strs[h as usize].s) {
             // the text str_cache holds the units of (a tokenizer's loop)
             let t0 = jsstr::from_units(&self.sc_units, a, b);
             return self.string_val(t0);
@@ -1239,8 +1328,83 @@ impl Vm {
         if y < 0 {
             return Val::Undef();
         }
+        let v = self.slice_view(h, a, b, x, y);
+        if v > 0 {
+            return Val::Str(v);
+        }
+        self.sl_copies += 1;
+        self.sl_copy_bytes += y - x;
         let t = jsstr::byte_slice(self.sref(h), x, y);
         self.string_val(t)
+    }
+
+    /// Units [a, b) of handle h's text, bytes [x, y) of it, as a slice
+    /// view: a handle whose text stays where it is in the buffer h's text
+    /// lies in (a lexer's `str = str.slice(n)` copies nothing). Only a
+    /// long piece (SLICE_MIN bytes) that is at least a SLICE_KEEP:th of
+    /// that buffer and leaves at most SLICE_WASTE bytes of it, so a piece
+    /// does not keep much more text alive than its own; a
+    /// slice of a slice is a view of the same buffer, until it is too
+    /// small a part of it and is copied. Rust only (prepend_ok); -1 when
+    /// it does not apply.
+    fn slice_view(&mut self, h: int, a: int, b: int, x: int, y: int) -> int {
+        let n = y - x;
+        if !prepend_ok() || n < self.slice_min {
+            return -1;
+        }
+        let hi = h as usize;
+        let mut r = h as usize;
+        let mut base: int = 0;
+        let mut ubase: int = 0;
+        if self.strs[hi].up >= 0 {
+            if self.strs[hi].suo >= 0 {
+                base = self.strs[hi].off as int;
+                ubase = self.strs[hi].suo as int;
+            } else if self.strs[hi].off != 0 {
+                // a front view (str_prepend): its units are not counted
+                return -1;
+            }
+            r = self.strs[hi].up as usize;
+            while self.strs[r].up >= 0 {
+                r = self.strs[r].up as usize;
+            }
+        }
+        let rb = self.strs[r].s.as_bytes().len() as int;
+        if n * self.slice_keep < rb {
+            return -1;
+        }
+        if self.slice_waste > 0 && rb - n > self.slice_waste {
+            return -1;
+        }
+        self.sl_views += 1;
+        let v = self.take_handle(0, 0);
+        let vi = v as usize;
+        self.strs[vi].s = self.sempty.clone();
+        self.strs[vi].up = r as i32;
+        self.strs[vi].off = (base + x) as i32;
+        self.strs[vi].len = n as i32;
+        self.strs[vi].ulen = (b - a) as i32;
+        self.strs[vi].suo = (ubase + a) as i32;
+        self.strs[r].rc += 1;
+        v
+    }
+
+    /// A slice view's text in a buffer of its own (to_str: a view many
+    /// operations read through sget is copied once, not at each one).
+    pub fn sflat(&mut self, h: int) -> Rc<String> {
+        let rc = Rc::new(String::from(self.sref(h)));
+        self.sl_flats += 1;
+        self.sl_flat_bytes += rc.as_bytes().len() as int;
+        let hi = h as usize;
+        let up = self.strs[hi].up as int;
+        self.sbytes += jsstr::size(rc.as_str());
+        self.strs[hi].s = rc.clone();
+        self.strs[hi].up = -1;
+        self.strs[hi].off = 0;
+        self.strs[hi].len = 0;
+        self.strs[hi].suo = -1;
+        self.sdec(up);
+        rc
     }
 
     /// Whether `p` ends at unit `end` (0 <= end <= length) of handle h's
@@ -1876,6 +2040,7 @@ impl Vm {
             self.strs[i].flag = flag as i32;
             self.strs[i].rc = 0;
             self.strs[i].atom = -1;
+            self.strs[i].suo = -1;
             h
         } else {
             let e = self.sempty.clone();
@@ -1936,6 +2101,7 @@ impl Vm {
         self.strs[i].up = -1;
         self.strs[i].len = 0;
         self.strs[i].off = 0;
+        self.strs[i].suo = -1;
         self.strs[i].flag = 2;
         self.strs[i].inz = false;
         self.sfreed.push(h);
@@ -2015,7 +2181,11 @@ impl Vm {
     /// buffer's handle (always `up` itself).
     #[inline(never)]
     fn sref_front(&self, h: int) -> &str {
-        let x = self.strs[h as usize].up;
+        let mut x = self.strs[h as usize].up;
+        // (a slice view's buffer may have moved on: str_append)
+        while self.strs[x as usize].up >= 0 {
+            x = self.strs[x as usize].up;
+        }
         jsstr::mid(self.strs[x as usize].s.as_str(), self.strs[h as usize].off as int, self.strs[h as usize].len as int)
     }
 
@@ -2346,6 +2516,7 @@ impl Vm {
                 rc_vacate(&mut self.strs[i].s, &self.sempty);
                 self.strs[i].up = -1;
                 self.strs[i].off = 0;
+                self.strs[i].suo = -1;
                 self.strs[i].flag = 2;
                 self.sfreed.push(i as int);
             } else if self.strs[i].flag != 2 {
@@ -3171,6 +3342,9 @@ impl Vm {
 
     pub fn to_str(&mut self, v: &Val) -> Rc<String> {
         if let Some(s) = v.as_str() {
+            if self.strs[s as usize].suo >= 0 {
+                return self.sflat(s);
+            }
             return self.sget(s);
         }
         match v.kind() {
@@ -10808,6 +10982,16 @@ pub fn prepend_ok() -> bool {
     false
 }
 
+/// The shortest slice (bytes) hslice makes a view of, not a copy.
+pub const SLICE_MIN: int = 256;
+/// A slice view is at least 1/SLICE_KEEP of the buffer it lies in.
+pub const SLICE_KEEP: int = 4;
+/// and leaves at most this many bytes of it that are not its own: a 600 KB
+/// section of a 2 MB text is copied, not a view keeping 1.4 MB more alive
+/// (a lexer over a long text then copies its rest once per MB read: over
+/// 20 MB, 190 MB copied, ~2 % of the time)
+pub const SLICE_WASTE: int = 1048576;
+
 /// Back jumps between two reads of the clock while slices are on.
 pub const SLICE_TICKS: int = 1000;
 
@@ -10841,11 +11025,15 @@ pub struct SEnt {
     pub mark: bool,
     /// in szct
     pub inz: bool,
+    /// a slice view's start in UTF-16 units of its buffer's text (hslice:
+    /// `len` bytes from byte `off` of handle `up`'s buffer, or of the
+    /// newer one an append moved it to); -1 for every other handle
+    pub suo: i32,
 }
 
 impl SEnt {
     pub fn new(s: Rc<String>, flag: i32) -> SEnt {
-        SEnt { s: s, up: -1, len: 0, off: 0, ulen: -1, flag: flag, rc: 0, atom: -1, mark: false, inz: false }
+        SEnt { s: s, up: -1, len: 0, off: 0, ulen: -1, flag: flag, rc: 0, atom: -1, mark: false, inz: false, suo: -1 }
     }
 }
 

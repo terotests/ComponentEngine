@@ -1079,7 +1079,7 @@ impl Vm {
 
     pub fn this_str(&mut self, this: &Val) -> Rc<String> {
         match this.kind() {
-            VK::Str(s) => self.sget(s),
+            VK::Str(_) => self.to_str(this),
             VK::Undef | VK::Null => {
                 self.throw_type("String.prototype method called on null or undefined");
                 Rc::new(String::new())
@@ -1333,15 +1333,37 @@ impl Vm {
     /// the whole text again toward the next collection), and for test()
     /// (`want` false) only true or null, no match array.
     pub fn regexp_exec_in(&mut self, ro: int, s: &Rc<String>, inp: Val, want: bool) -> Val {
+        if self.rx_too_long(s) {
+            return Val::Null();
+        }
+        self.rx_cache(s);
+        self.regexp_exec_units(ro, s, inp, want)
+    }
+
+    /// regexp_exec_in on string handle `h` when it is a slice view whose
+    /// units the rx cache holds (rx_cache_view): its text is not copied.
+    /// Undefined when that does not apply (the caller's general path).
+    pub fn regexp_exec_view(&mut self, ro: int, h: int, want: bool) -> Val {
+        if h <= 0 || self.strs[h as usize].suo < 0 || ro < 0 || self.objs[ro as usize].class != C_REGEXP {
+            return Val::Undef();
+        }
+        if !self.rx_cache_view(h) {
+            return Val::Undef();
+        }
+        let none = self.rx_s.clone();
+        self.regexp_exec_units(ro, &none, Val::Str(h), want)
+    }
+
+    /// regexp_exec_in once the rx cache holds the input's units (from
+    /// rx_uoff on): `s` the input's text unless rx_vw (a slice view's,
+    /// `inp` then).
+    fn regexp_exec_units(&mut self, ro: int, s: &Rc<String>, inp: Val, want: bool) -> Val {
         let idx = self.objs[ro as usize].func as int;
         let (global, sticky, ngroups, has_indices) = {
             let re = &self.regexes[idx as usize];
             (re.global, re.sticky, re.ngroups, re.has_indices)
         };
-        if self.rx_too_long(s) {
-            return Val::Null();
-        }
-        self.rx_cache(s);
+        let vw = self.rx_vw;
         let uoff = self.rx_uoff;
         let ulen = self.rx_units.len() as int - uoff;
         let mut start: int = 0;
@@ -1383,7 +1405,13 @@ impl Vm {
                 return Val::Undef();
             }
         }
-        self.rx_last_s = s.clone();
+        if vw {
+            self.rx_last_s = self.rx_ufull.clone();
+            self.rx_last_uo = uoff;
+        } else {
+            self.rx_last_s = s.clone();
+            self.rx_last_uo = 0;
+        }
         self.rx_last_caps = caps.clone();
         if !want {
             return Val::Bool(true);
@@ -1396,7 +1424,8 @@ impl Vm {
             if a < 0 || b < 0 {
                 items.push(Val::Undef());
             } else {
-                items.push(self.string_val(jsstr::sub_units_at(s.as_str(), &self.rx_units, uoff, a, b)));
+                let t = jsstr::sub_units(self.rx_ufull.as_str(), &self.rx_units, a + uoff, b + uoff);
+                items.push(self.string_val(t));
             }
             g += 1;
         }
@@ -1659,6 +1688,7 @@ impl Vm {
                 }
                 self.rx_last_s = s.clone();
                 self.rx_last_caps = caps.clone();
+                self.rx_last_uo = 0;
                 let (ms, me) = (caps[0], caps[1]);
                 jsstr::push_js(&mut out, jsstr::sub_units(s.as_str(), units, last, ms).as_str());
                 if plain_repl {
@@ -1818,6 +1848,7 @@ impl Vm {
                 }
                 self.rx_last_s = s.clone();
                 self.rx_last_caps = caps.clone();
+                self.rx_last_uo = 0;
                 let (ms, me) = (caps[0], caps[1]);
                 if me >= n + 1 || ms >= n {
                     break;

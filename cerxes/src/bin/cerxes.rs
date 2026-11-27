@@ -61,6 +61,18 @@ fn main() {
     if std::env::var("CERXES_RC_CHECK").map(|v| v == "stress").unwrap_or(false) {
         e.vm.rc_stress();
     }
+    // CERXES_SLICE=min,keep[,waste]: hslice's slice view thresholds
+    if let Ok(v) = std::env::var("CERXES_SLICE") {
+        let p: Vec<i64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        if p.len() >= 2 {
+            e.vm.slice_min = p[0];
+            e.vm.slice_keep = p[1];
+        }
+        if p.len() >= 3 {
+            e.vm.slice_waste = p[2];
+        }
+
+    }
     // CER_REGS=1 / 0: on the register machine (rvm.rs) or the stack one
     if let Ok(v) = std::env::var("CER_REGS") {
         e.vm.regs = v == "1";
@@ -167,6 +179,22 @@ fn main() {
             std::mem::size_of::<cerxes::value::JsObj>()
         );
         eprintln!("strs={} free={} shape_epoch={} pic={}", v.strs.len(), v.sfree.len() + v.sfreed.len(), v.shape_epoch, v.pic.len() / 14);
+        // slice views: made, long slices copied, views copied out; the live
+        // views' bytes and the bytes of the buffers they keep
+        let (mut lv, mut lvb, mut roots) = (0usize, 0i64, std::collections::HashSet::new());
+        for st in v.strs.iter() {
+            if st.flag != 2 && st.suo >= 0 {
+                lv += 1;
+                lvb += st.len as i64;
+                let mut r = st.up as usize;
+                while v.strs[r].up >= 0 {
+                    r = v.strs[r].up as usize;
+                }
+                roots.insert(r);
+            }
+        }
+        let rb: usize = roots.iter().map(|r| v.strs[*r].s.len()).sum();
+        eprintln!("slices: views={} copies={} copy_bytes={} flats={} flat_bytes={} live_views={} live_view_bytes={} kept_buffers={} kept_bytes={}", v.sl_views, v.sl_copies, v.sl_copy_bytes, v.sl_flats, v.sl_flat_bytes, lv, lvb, roots.len(), rb);
         if std::env::var("CERXES_MEM").is_ok() {
             // a rough heap breakdown in bytes (capacities; malloc headers not counted)
             let vs = std::mem::size_of::<cerxes::value::Val>();
