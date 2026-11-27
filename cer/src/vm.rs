@@ -565,11 +565,12 @@ pub struct Vm {
     /// legacy statics RegExp.lastMatch, $1…$9, leftContext, rightContext…
     pub rx_last_s: Rc<String>,
     pub rx_last_caps: Vec<int>,
-    /// the one before (rx_cache swaps the two): a tokenizer that runs a
-    /// sticky regexp over its whole input and others over short words in
-    /// turn converted the input again after each word
-    pub rx_s2: Rc<String>,
-    pub rx_units2: Vec<int>,
+    /// longer texts used before (most recent first, at most RX_KEEP;
+    /// rx_cache swaps a hit to the front): a tokenizer that runs a sticky
+    /// regexp over its whole input and others over short words or other
+    /// long texts in turn converted the input again after each of them
+    pub rx_ss: Vec<Rc<String>>,
+    pub rx_us: Vec<Vec<int>>,
     /// Regex::exec_in's registers and backtrack stack, kept between execs
     pub rx_regs: Vec<int>,
     pub rx_stack: Vec<(int, int, int)>,
@@ -583,6 +584,11 @@ pub struct Vm {
 
 /// The same string: the same one first (Rust's Rc, Go's string compare
 /// sees the same bytes), then by content.
+/// rx_cache: how many longer texts it keeps besides the current one, and
+/// from what length on
+pub const RX_KEEP: usize = 3;
+pub const RX_KEEP_MIN: usize = 256;
+
 fn same_str(a: &Rc<String>, b: &Rc<String>) -> bool {
     let r: bool = ranger::native!(
         rust: { Rc::ptr_eq(a, b) || a.as_str() == b.as_str() },
@@ -920,8 +926,8 @@ impl Vm {
             rx_units: Vec::new(),
             rx_last_s: Rc::new(String::new()),
             rx_last_caps: Vec::new(),
-            rx_s2: Rc::new(String::new()),
-            rx_units2: Vec::new(),
+            rx_ss: Vec::new(),
+            rx_us: Vec::new(),
             rx_regs: Vec::new(),
             rx_stack: Vec::new(),
             norm: crate::normalize::Norm::new(),
@@ -973,24 +979,38 @@ impl Vm {
             return;
         }
         let mut spare: Vec<int> = Vec::new();
-        if self.rx_s2.as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_s2, s) {
-            // the one kept back comes forward, the current one steps back
-            let cur = take_ints(&mut self.rx_units, &mut spare);
-            let back = self.rx_s.clone();
-            self.rx_units = take_ints(&mut self.rx_units2, &mut spare);
-            self.rx_s = s.clone();
-            self.rx_s2 = back;
-            self.rx_units2 = cur;
-            return;
+        let back = self.rx_s.clone();
+        let cur = take_ints(&mut self.rx_units, &mut spare);
+        let mut k: usize = 0;
+        while k < self.rx_ss.len() {
+            if self.rx_ss[k].as_bytes().len() == s.as_bytes().len() && same_str(&self.rx_ss[k], s) {
+                // a kept one comes forward, the current one steps back
+                self.rx_units = take_ints(&mut self.rx_us[k], &mut spare);
+                self.rx_ss.remove(k);
+                self.rx_us.remove(k);
+                self.rx_s = s.clone();
+                self.rx_keep(back, cur);
+                return;
+            }
+            k += 1;
         }
-        // the current one is kept back unless a longer one is (the short
-        // words between two reads of the input do not push it out)
-        if self.rx_s.as_bytes().len() >= self.rx_s2.as_bytes().len() {
-            self.rx_s2 = self.rx_s.clone();
-            self.rx_units2 = take_ints(&mut self.rx_units, &mut spare);
-        }
+        self.rx_keep(back, cur);
         self.rx_s = s.clone();
         jsstr::units_into(s.as_str(), &mut self.rx_units);
+    }
+
+    /// A text and its units into the kept ones (rx_ss), when it is long
+    /// enough to be worth keeping: short words are converted again.
+    fn rx_keep(&mut self, s: Rc<String>, units: Vec<int>) {
+        if s.as_bytes().len() < RX_KEEP_MIN {
+            return;
+        }
+        self.rx_ss.insert(0, s);
+        self.rx_us.insert(0, units);
+        if self.rx_ss.len() > RX_KEEP {
+            self.rx_ss.truncate(RX_KEEP);
+            self.rx_us.truncate(RX_KEEP);
+        }
     }
 
     /// `s`'s UTF-16 units out of the rx cache (computed when it holds
