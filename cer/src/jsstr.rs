@@ -131,6 +131,23 @@ pub fn sub_units(s: &str, u: &Vec<int>, a: int, b: int) -> String {
     r
 }
 
+/// sub_units for a text whose units are u[off..] (Vm::rx_uoff).
+pub fn sub_units_at(s: &str, u: &Vec<int>, off: int, a: int, b: int) -> String {
+    let r: String = ranger::native!(rust: { sub_units_at_of(s, u, off, a, b) }, es6: "{s}.slice({a}, {b})");
+    r
+}
+
+fn sub_units_at_of(s: &str, u: &Vec<int>, off: int, a: int, b: int) -> String {
+    if off == 0 {
+        return sub_units_of(s, u, a, b);
+    }
+    let n = u.len() as int - off;
+    if s.as_bytes().len() as int == n && a >= 0 && a <= b && b <= n {
+        return String::from(&s[(a as usize)..(b as usize)]);
+    }
+    from_units(u, a + off, b + off)
+}
+
 fn sub_units_of(s: &str, u: &Vec<int>, a: int, b: int) -> String {
     if s.as_bytes().len() == u.len() && a >= 0 && a <= b && (b as usize) <= u.len() {
         return String::from(&s[(a as usize)..(b as usize)]);

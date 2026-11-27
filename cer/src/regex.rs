@@ -2487,9 +2487,9 @@ impl Regex {
 
     /// The character ending at `pos` (going right to left) and its width:
     /// under /u a surrogate pair is one code point, as unit_at reads it.
-    fn unit_before(&self, input: &Vec<int>, pos: int) -> (int, int) {
+    fn unit_before(&self, input: &Vec<int>, lo: int, pos: int) -> (int, int) {
         let d = input[(pos - 1) as usize];
-        if self.unicode && d >= 0xdc00 && d <= 0xdfff && pos >= 2 {
+        if self.unicode && d >= 0xdc00 && d <= 0xdfff && pos >= lo + 2 {
             let c = input[(pos - 2) as usize];
             if c >= 0xd800 && c <= 0xdbff {
                 return (0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00), 2);
@@ -2500,7 +2500,7 @@ impl Regex {
 
     /// Runs the program from `pc` at `start`; answers the end position or
     /// -1. `back` runs it right to left (lookbehind).
-    fn run(&self, input: &Vec<int>, start: int, pc0: int, caps: &mut Vec<int>, regs: &mut Vec<int>, back: bool, stack: &mut Vec<(int, int, int)>) -> int {
+    fn run(&self, input: &Vec<int>, lo: int, start: int, pc0: int, caps: &mut Vec<int>, regs: &mut Vec<int>, back: bool, stack: &mut Vec<(int, int, int)>) -> int {
         let n = input.len() as int;
         // the backtrack entries of this run sit above base: a lookaround's
         // run shares the list and leaves it as it found it
@@ -2516,8 +2516,8 @@ impl Regex {
             match ins.op {
                 I_CHAR => {
                     if back {
-                        let (c, w) = if pos > 0 { self.unit_before(input, pos) } else { (-1, 0) };
-                        if pos > 0 && self.eq(c, ins.a, ins.b != 0) {
+                        let (c, w) = if pos > lo { self.unit_before(input, lo, pos) } else { (-1, 0) };
+                        if pos > lo && self.eq(c, ins.a, ins.b != 0) {
                             pos -= w;
                             pc += 1;
                         } else {
@@ -2537,8 +2537,8 @@ impl Regex {
                 }
                 I_ANY | I_ANYNL => {
                     if back {
-                        let (c, w) = if pos > 0 { self.unit_before(input, pos) } else { (-1, 0) };
-                        if pos > 0 && (ins.op == I_ANYNL || !is_line_term(c)) {
+                        let (c, w) = if pos > lo { self.unit_before(input, lo, pos) } else { (-1, 0) };
+                        if pos > lo && (ins.op == I_ANYNL || !is_line_term(c)) {
                             pos -= w;
                             pc += 1;
                         } else {
@@ -2558,8 +2558,8 @@ impl Regex {
                 }
                 I_CLASS => {
                     if back {
-                        let (c, w) = if pos > 0 { self.unit_before(input, pos) } else { (-1, 0) };
-                        if pos > 0 && self.class_has(ins.a, c, ins.b != 0) {
+                        let (c, w) = if pos > lo { self.unit_before(input, lo, pos) } else { (-1, 0) };
+                        if pos > lo && self.class_has(ins.a, c, ins.b != 0) {
                             pos -= w;
                             pc += 1;
                         } else {
@@ -2682,7 +2682,7 @@ impl Regex {
                     }
                 }
                 I_BOL => {
-                    if pos == 0 || (ins.a != 0 && is_line_term(input[(pos - 1) as usize])) {
+                    if pos == lo || (ins.a != 0 && is_line_term(input[(pos - 1) as usize])) {
                         pc += 1;
                     } else {
                         ok = false;
@@ -2696,7 +2696,7 @@ impl Regex {
                     }
                 }
                 I_WORDB | I_NWORDB => {
-                    let a = pos > 0 && self.word_at(input, pos - 1);
+                    let a = pos > lo && self.word_at(input, pos - 1);
                     let b = pos < n && self.word_at(input, pos);
                     let at = a != b;
                     if (ins.op == I_WORDB) == at {
@@ -2713,7 +2713,7 @@ impl Regex {
                     } else {
                         let len = e - s;
                         if (ins.b & 1) == 1 {
-                            if pos - len < 0 {
+                            if pos - len < lo {
                                 ok = false;
                             } else {
                                 let mut k: int = 0;
@@ -2752,7 +2752,7 @@ impl Regex {
                     let neg = (kind & 1) == 1;
                     let behind = kind >= 2;
                     let saved = caps.clone();
-                    let r = self.run(input, pos, ins.b, caps, regs, behind, stack);
+                    let r = self.run(input, lo, pos, ins.b, caps, regs, behind, stack);
                     let hit = r >= 0;
                     if hit == neg {
                         // failed: undo what the lookaround captured
@@ -2875,6 +2875,13 @@ impl Regex {
     /// them between calls, RegExp.prototype.exec): two fewer allocations
     /// for each exec of a short match
     pub fn exec_in(&self, input: &Vec<int>, start: int, regs: &mut Vec<int>, stack: &mut Vec<(int, int, int)>) -> Vec<int> {
+        self.exec_at(input, 0, start, regs, stack)
+    }
+
+    /// exec_in over the units of input from `lo` on (the text is
+    /// input[lo..], a later part of a text whose units the caller holds);
+    /// `start` and the positions answered count from 0 of input.
+    pub fn exec_at(&self, input: &Vec<int>, lo: int, start: int, regs: &mut Vec<int>, stack: &mut Vec<(int, int, int)>) -> Vec<int> {
         if crate::builtins::regex_stopped() {
             // an attempt ran out of steps or time: no more tries until
             // Vm::rx_after has thrown
@@ -2895,12 +2902,12 @@ impl Regex {
         let mut caps: Vec<int> = Vec::with_capacity(ncap);
         // where lit was found last (-1: not looked for yet)
         let mut lp: int = -1;
-        if self.anchor == 1 && s > 0 {
+        if self.anchor == 1 && s > lo {
             // `^` matches only at 0
             return Vec::new();
         }
         while s <= n {
-            if self.anchor == 2 && s > 0 && !is_line_term(input[(s - 1) as usize]) {
+            if self.anchor == 2 && s > lo && !is_line_term(input[(s - 1) as usize]) {
                 // a multiline `^`: the next start after a line terminator
                 while s < n && !is_line_term(input[s as usize]) {
                     s += 1;
@@ -2910,7 +2917,25 @@ impl Regex {
                     break;
                 }
             }
-            if !self.lit.is_empty() {
+            // a match that can only start here (`^`, sticky): no scan for
+            // where one could start
+            let here = self.sticky || self.anchor == 1;
+            if here {
+                if self.first >= 0 && (s >= n || input[s as usize] != self.first) {
+                    return Vec::new();
+                }
+                if self.first < 0 && !self.fset.is_empty() {
+                    let ok = if s >= n {
+                        false
+                    } else {
+                        let u = input[s as usize];
+                        if u < 128 { self.fset[u as usize] } else { self.fhi }
+                    };
+                    if !ok {
+                        return Vec::new();
+                    }
+                }
+            } else if !self.lit.is_empty() {
                 if lp < s + self.lit_min {
                     lp = self.find_lit(input, s + self.lit_min);
                     if lp < 0 {
@@ -2921,7 +2946,9 @@ impl Regex {
                     s = lp - self.lit_max;
                 }
             }
-            if self.first >= 0 && !self.sticky {
+            if here {
+                // (checked above)
+            } else if self.first >= 0 {
                 while s < n && input[s as usize] != self.first {
                     s += 1;
                 }
@@ -2947,7 +2974,7 @@ impl Regex {
                 caps.push(-1);
                 i += 1;
             }
-            let e = self.run(input, s, 0, &mut caps, regs, false, stack);
+            let e = self.run(input, lo, s, 0, &mut caps, regs, false, stack);
             if e >= 0 {
                 return caps;
             }
