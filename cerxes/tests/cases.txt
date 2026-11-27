@@ -1171,3 +1171,27 @@ while (str.length) {
 [toks.length, toks.slice(0, 9).join(" "), n].join()
 ----
 270,tok_1 = 31 λ x . y 𝒳 3,2016
+
+==== js typed arrays of every kind over one buffer (words): reads and writes, the JIT's inline path
+var buf = new ArrayBuffer(256), u8 = new Uint8Array(buf), i8 = new Int8Array(buf), u16 = new Uint16Array(buf), i16 = new Int16Array(buf);
+var u32 = new Uint32Array(buf), i32 = new Int32Array(buf), f32 = new Float32Array(buf), f64 = new Float64Array(buf), c8 = new Uint8ClampedArray(buf), v = new Int16Array(buf, 6, 20);
+var h = 0, k;
+for (k = 0; k < 64; k++) i32[k] = k * 0x01030507 - 0x40000000;
+for (k = 0; k < 256; k++) h = (h * 31 + u8[k] + i8[k]) | 0;
+for (k = 0; k < 128; k++) h = (h * 31 + u16[k] + i16[k]) | 0;
+for (k = 0; k < 64; k++) h = (h * 31 + (u32[k] % 1000003) + i32[k] + (f32[k] === f32[k] ? Math.round(f32[k] * 1e3) % 997 : 7)) | 0;
+for (k = 0; k < 20; k++) { v[k] = -k * 1000 - 5; h = (h * 31 + v[k] + u8[6 + 2 * k]) | 0; }
+for (k = 0; k < 32; k++) { f64[k] = k / 3 - 2.5; h = (h * 31 + Math.round(f64[k] * 1e6) + u16[k * 4 + 3]) | 0; }
+for (k = 0; k < 64; k++) { f32[k] = k * 1.1 - 9; h = (h * 31 + Math.round(f32[k] * 1e4) + u8[k * 4 + 2]) | 0; }
+for (k = 0; k < 256; k++) { u8[k] = 300 + k * 7; i8[(k * 5) & 255] = -k; c8[k] = (k * 3) - 200; }
+for (k = 0; k < 128; k++) { u16[k] = 70000 + k * 999; i16[(k * 3) & 127] = -40000 + k * 77; }
+for (k = 0; k < 64; k++) { u32[k] = -k * 123457 + 0.5; i32[(k * 7) & 63] = 2 ** 33 + k * 3; h = (h * 31 + i32[k] + u32[k] % 9973) | 0; }
+for (k = 0; k < 32; k++) { f64[k] = k === 3 ? NaN : k === 4 ? -0 : 1e300 * k; }
+for (k = 0; k < 32; k++) { f32[k * 2] = k === 5 ? NaN : k === 6 ? 1e40 : k / 7; }
+var nan = 0, s = 0;
+for (k = 0; k < 32; k++) { var x = f64[k]; if (x !== x) nan++; else s += 1 / (x || Infinity); }
+for (k = 0; k < 64; k++) { var y = f32[k]; if (y !== y) nan++; else if (isFinite(y)) s += y; else nan += 10; }
+for (k = 0; k < 256; k++) h = (h * 31 + u8[k] + i8[k] + c8[k]) | 0;
+[h, nan, s.toFixed(6), Object.is(f64[4], -0), [f64[3]].join(), u32[63], i16[100]].join()
+----
+1221937624,13,-Infinity,false,NaN,2122786074,-28087

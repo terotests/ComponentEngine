@@ -527,6 +527,12 @@ const I64_EQ: u8 = 0x51;
 const I64_AND: u8 = 0x83;
 const I32_WRAP_I64: u8 = 0xa7;
 const I64_TRUNC_F64_S: u8 = 0xb0;
+const F32_DEMOTE_F64: u8 = 0xb6;
+const F64_PROMOTE_F32: u8 = 0xbb;
+const I32_REINTERPRET_F32: u8 = 0xbc;
+const I64_REINTERPRET_F64: u8 = 0xbd;
+const F32_REINTERPRET_I32: u8 = 0xbe;
+const F64_REINTERPRET_I64: u8 = 0xbf;
 const I64_STORE: u8 = 0x37;
 const F64_STORE: u8 = 0x39;
 const I32_STORE8: u8 = 0x3a;
@@ -1985,10 +1991,29 @@ impl<'a> Cg<'a> {
             self.op(T_VOID);
             self.extra += 1;
             self.index_key(key, pc);
-            self.typed_at(pc);
+            self.typed_view(pc);
+            if !WORDS.with(|w| w.get()) {
+                self.typed_home_check(pc);
+            } else {
+            self.typed_home_is_kind();
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.typed_slot(pc);
             self.get(L_T4);
             self.mem(F64_LOAD, 3, 0);
             self.set(L_A);
+            self.op(ELSE);
+            // views of several kinds over one buffer (Vm::ta_bytes_get)
+            self.words_get(pc);
+            self.extra -= 1;
+            self.op(END);
+            }
+            if !WORDS.with(|w| w.get()) {
+                self.get(L_T4);
+                self.mem(F64_LOAD, 3, 0);
+                self.set(L_A);
+            }
             self.store_num(dst, L_A);
             self.op(BR);
             self.w.u((self.extra - tdone) as u64);
@@ -2087,11 +2112,23 @@ impl<'a> Cg<'a> {
         self.op(F64_NE);
         self.fail_if(pc);
     }
-    /// For the typed array at L_T2 and the index in L_T3: the address of
-    /// its element's number in L_T4, as Vm::ta_slot finds it (a fixed-length
-    /// view of a buffer neither detached nor resizable that holds this
-    /// kind, the index inside both); fails otherwise. Uses L_T5, L_T6.
-    fn typed_at(&mut self, pc: i64) {
+    /// After typed_view: fails unless the buffer holds the view's kind,
+    /// then typed_slot.
+    fn typed_home_check(&mut self, pc: i64) {
+        let l = self.lay;
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_home);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.typed_slot(pc);
+    }
+    /// For the typed array at L_T2 and the index in L_T3, Vm::ta_slot's
+    /// checks: a fixed-length view of a buffer neither detached nor
+    /// resizable, the index inside it; L_T6 the buffer's Cold. Fails
+    /// otherwise. Uses L_T5.
+    fn typed_view_in(&mut self, pc: i64) {
         let l = self.lay;
         // the buffer: an object, not detached (pos bit 0)
         self.get(L_T2);
@@ -2144,12 +2181,24 @@ impl<'a> Cg<'a> {
         self.not_num(L_T6, l.cold_prim);
         self.op(I32_EQZ);
         self.fail_if(pc);
+    }
+    /// typed_at's checks but the buffer's home: L_T6 its Cold's address.
+    fn typed_view(&mut self, pc: i64) {
+        self.typed_view_in(pc);
+    }
+    /// 1 on the wasm stack when the buffer (L_T6) holds the view's (L_T2)
+    /// kind as its elements (typed_slot then), else 0.
+    fn typed_home_is_kind(&mut self) {
+        let l = self.lay;
         self.get(L_T6);
         self.mem(I32_LOAD, 2, l.cold_home);
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_pos);
-        self.op(I32_NE);
-        self.fail_if(pc);
+        self.op(I32_EQ);
+    }
+    /// typed_at's end: the element's address in L_T4 (home == kind).
+    fn typed_slot(&mut self, pc: i64) {
+        let l = self.lay;
         // log2 of the element size: (kind >= 3) + (kind >= 5) + (kind >= 8)
         // - 2 (kind == 11, Float16)
         self.get(L_T2);
@@ -2190,6 +2239,296 @@ impl<'a> Cg<'a> {
         self.op(I32_ADD);
         self.set(L_T4);
     }
+    /// For a typed array (L_T2, index L_T3 inside it, buffer Cold L_T6)
+    /// over a buffer holding little-endian words (TK_WORDS: one u32 a
+    /// number in nums): its element's byte address in L_T4 and its word's
+    /// address in L_T3, the kind in L_T5; fails for a BigInt or Float16
+    /// view or an element past nums. Uses L_C.
+    fn words_at(&mut self, pc: i64) {
+        let l = self.lay;
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_home);
+        self.i32c(crate::typed::TK_WORDS as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_pos);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T5 as u64);
+        self.i32c(crate::typed::TK_FLOAT64 as i64);
+        self.op(I32_GT_U);
+        self.fail_if(pc);
+        // log2 of the element size
+        for k in [3i64, 5, 8] {
+            self.get(L_T5);
+            self.i32c(k);
+            self.op(I32_GE_S);
+        }
+        self.op(I32_ADD);
+        self.op(I32_ADD);
+        self.set(L_C);
+        // byteOffset + index << log2 (a view lies inside its buffer)
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_func);
+        self.get(L_T3);
+        self.get(L_C);
+        self.op(I32_SHL);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T4 as u64);
+        // its word (and a Float64's second) inside nums
+        self.i32c(2);
+        self.op(I32_SHR_U);
+        self.get(L_T5);
+        self.i32c(crate::typed::TK_FLOAT64 as i64);
+        self.op(I32_EQ);
+        self.op(I32_ADD);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_nums_l);
+        self.op(I32_GE_U);
+        self.fail_if(pc);
+        self.get(L_T6);
+        self.mem(I32_LOAD, 2, l.cold_nums_p);
+        self.get(L_T4);
+        self.i32c(2);
+        self.op(I32_SHR_U);
+        self.i32c(3);
+        self.op(I32_SHL);
+        self.op(I32_ADD);
+        self.set(L_T3);
+    }
+    /// The u32 word at L_T3 + off (a number in nums) on the wasm stack.
+    fn word_load(&mut self, off: u32) {
+        self.get(L_T3);
+        self.mem(F64_LOAD, 3, off);
+        self.op(I64_TRUNC_F64_S);
+        self.op(I32_WRAP_I64);
+    }
+    /// The i32 on the wasm stack stored as the word at L_T3 + off.
+    fn word_store(&mut self, off: u32) {
+        self.set(L_C);
+        self.get(L_T3);
+        self.get(L_C);
+        self.op(F64_CONVERT_I32_U);
+        self.mem(F64_STORE, 3, off);
+    }
+    /// `if kind (L_T5) == k` with an f64 result (else follows).
+    fn if_kind(&mut self, k: i64, ty: u8) {
+        self.get(L_T5);
+        self.i32c(k);
+        self.op(I32_EQ);
+        self.op(IF);
+        self.op(ty);
+        self.extra += 1;
+    }
+    /// typed array element over a TK_WORDS buffer (words_at) into L_A, as
+    /// typed::words_get reads it; a NaN as the one NaN.
+    fn words_get(&mut self, pc: i64) {
+        use crate::typed::*;
+        self.words_at(pc);
+        // the word in L_T6, the element's shift in its word in L_T4
+        self.word_load(0);
+        self.set(L_T6);
+        self.get(L_T4);
+        self.i32c(3);
+        self.op(I32_AND);
+        self.i32c(3);
+        self.op(I32_SHL);
+        self.set(L_T4);
+        let shifted = |cg: &mut Cg<'a>| {
+            cg.get(L_T6);
+            cg.get(L_T4);
+            cg.op(I32_SHR_U);
+        };
+        let mut opened = 0;
+        self.if_kind(TK_INT32, T_F64);
+        self.get(L_T6);
+        self.op(F64_CONVERT_I32_S);
+        self.op(ELSE);
+        opened += 1;
+        self.if_kind(TK_FLOAT64, T_F64);
+        self.get(L_T6);
+        self.op(I64_EXTEND_I32_U);
+        self.word_load(8);
+        self.op(I64_EXTEND_I32_U);
+        self.i64c(32);
+        self.op(I64_SHL);
+        self.op(I64_OR);
+        self.op(F64_REINTERPRET_I64);
+        self.op(ELSE);
+        opened += 1;
+        self.if_kind(TK_FLOAT32, T_F64);
+        self.get(L_T6);
+        self.op(F32_REINTERPRET_I32);
+        self.op(F64_PROMOTE_F32);
+        self.op(ELSE);
+        opened += 1;
+        self.if_kind(TK_UINT32, T_F64);
+        self.get(L_T6);
+        self.op(F64_CONVERT_I32_U);
+        self.op(ELSE);
+        opened += 1;
+        self.if_kind(TK_UINT16, T_F64);
+        shifted(self);
+        self.i32c(65535);
+        self.op(I32_AND);
+        self.op(F64_CONVERT_I32_U);
+        self.op(ELSE);
+        opened += 1;
+        self.if_kind(TK_INT16, T_F64);
+        shifted(self);
+        self.i32c(16);
+        self.op(I32_SHL);
+        self.i32c(16);
+        self.op(I32_SHR_S);
+        self.op(F64_CONVERT_I32_S);
+        self.op(ELSE);
+        opened += 1;
+        self.if_kind(TK_INT8, T_F64);
+        shifted(self);
+        self.i32c(24);
+        self.op(I32_SHL);
+        self.i32c(24);
+        self.op(I32_SHR_S);
+        self.op(F64_CONVERT_I32_S);
+        self.op(ELSE);
+        opened += 1;
+        // Uint8, Uint8Clamped
+        shifted(self);
+        self.i32c(255);
+        self.op(I32_AND);
+        self.op(F64_CONVERT_I32_U);
+        for _ in 0..opened {
+            self.extra -= 1;
+            self.op(END);
+        }
+        self.set(L_A);
+        // a NaN (Float32 / Float64 bits) as the one NaN
+        self.get(L_A);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&f64::NAN.to_bits().to_le_bytes());
+        self.set(L_A);
+        self.extra -= 1;
+        self.op(END);
+    }
+    /// `ta[i] = val` (a number) over a TK_WORDS buffer (words_at), as
+    /// typed::words_put writes it; fails for Uint8Clamped and an integer
+    /// kind's value outside +-9.2e18 (NaN too), as words_put declines them.
+    fn words_put(&mut self, val: Opnd, pc: i64) {
+        use crate::typed::*;
+        self.words_at(pc);
+        self.num(val);
+        self.set(L_A);
+        self.get(L_T5);
+        self.i32c(TK_UINT8C);
+        self.op(I32_EQ);
+        self.fail_if(pc);
+        self.op(BLOCK);
+        self.op(T_VOID);
+        self.extra += 1;
+        let stored = self.extra;
+        // Float64: its bits (a NaN as 0x7ff8000000000000) in two words
+        self.if_kind(TK_FLOAT64, T_VOID);
+        self.get(L_A);
+        self.op(I64_REINTERPRET_F64);
+        self.i64c(0x7ff8000000000000u64 as i64);
+        self.get(L_A);
+        self.get(L_A);
+        self.op(F64_EQ);
+        self.op(SELECT);
+        self.set(L_Q0);
+        self.get(L_Q0);
+        self.op(I32_WRAP_I64);
+        self.word_store(0);
+        self.get(L_Q0);
+        self.i64c(32);
+        self.op(I64_SHR_U);
+        self.op(I32_WRAP_I64);
+        self.word_store(8);
+        self.op(BR);
+        self.w.u((self.extra - stored) as u64);
+        self.extra -= 1;
+        self.op(END);
+        // Float32: its bits (a NaN as 0x7fc00000)
+        self.if_kind(TK_FLOAT32, T_VOID);
+        self.get(L_A);
+        self.op(F32_DEMOTE_F64);
+        self.op(I32_REINTERPRET_F32);
+        self.i32c(0x7fc00000);
+        self.get(L_A);
+        self.get(L_A);
+        self.op(F64_EQ);
+        self.op(SELECT);
+        self.word_store(0);
+        self.op(BR);
+        self.w.u((self.extra - stored) as u64);
+        self.extra -= 1;
+        self.op(END);
+        // an integer kind: (x as i64) as u32, x inside +-9.2e18
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&(-9.2e18f64).to_le_bytes());
+        self.op(F64_GT);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&9.2e18f64.to_le_bytes());
+        self.op(F64_LT);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        self.get(L_A);
+        self.op(I64_TRUNC_F64_S);
+        self.op(I32_WRAP_I64);
+        self.set(L_T2);
+        // 32-bit kinds: the word
+        self.get(L_T5);
+        self.i32c(TK_INT32);
+        self.op(I32_GE_S);
+        self.op(IF);
+        self.op(T_VOID);
+        self.extra += 1;
+        self.get(L_T2);
+        self.word_store(0);
+        self.op(BR);
+        self.w.u((self.extra - stored) as u64);
+        self.extra -= 1;
+        self.op(END);
+        // 8 / 16 bits: mask m (L_T5) at shift sh (L_T4) of the word
+        self.i32c(65535);
+        self.i32c(255);
+        self.get(L_T5);
+        self.i32c(TK_INT16);
+        self.op(I32_GE_S);
+        self.op(SELECT);
+        self.set(L_T5);
+        self.get(L_T4);
+        self.i32c(3);
+        self.op(I32_AND);
+        self.i32c(3);
+        self.op(I32_SHL);
+        self.set(L_T4);
+        self.word_load(0);
+        self.get(L_T5);
+        self.get(L_T4);
+        self.op(I32_SHL);
+        self.i32c(-1);
+        self.op(I32_XOR);
+        self.op(I32_AND);
+        self.get(L_T2);
+        self.get(L_T5);
+        self.op(I32_AND);
+        self.get(L_T4);
+        self.op(I32_SHL);
+        self.op(I32_OR);
+        self.word_store(0);
+        self.extra -= 1;
+        self.op(END);
+    }
     /// R_SET_ELEM on a typed array by a whole number in range: a number
     /// the element kind holds as it is (Float64 any, the integer kinds a
     /// whole number in their range) stored, the rest to H_SET_ELEM. sub 1:
@@ -2224,7 +2563,23 @@ impl<'a> Cg<'a> {
         self.extra -= 1;
         self.op(END);
         self.index_key(key, pc);
-        self.typed_at(pc);
+        self.typed_view(pc);
+        if WORDS.with(|w| w.get()) {
+            self.typed_home_is_kind();
+            self.op(I32_EQZ);
+            self.op(IF);
+            self.op(T_VOID);
+            self.extra += 1;
+            // views of several kinds over one buffer (Vm::ta_bytes_put)
+            self.words_put(val, pc);
+            self.op(BR);
+            self.w.u((self.extra - all) as u64);
+            self.extra -= 1;
+            self.op(END);
+            self.typed_slot(pc);
+        } else {
+            self.typed_home_check(pc);
+        }
         self.get(L_T2);
         self.mem(I32_LOAD, 2, l.off_pos);
         self.set(L_T6);
@@ -7160,6 +7515,10 @@ pub fn available() -> bool {
 
 thread_local! {
     static LAYOUT: Layout = probe();
+    /// Vm.words_seen when the function being compiled was taken up: its
+    /// typed array sites get the TK_WORDS path (words_get / words_put),
+    /// which other code would carry for nothing
+    static WORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Counters for a report.
@@ -7259,6 +7618,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
                 (0..n).map(|i| on && !st.nonnum.get(rb + i).cloned().unwrap_or(false)).collect()
             });
             let p = &vm.protos[pi];
+            WORDS.with(|w| w.set(vm.words_seen));
             if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &pics, &atoms, p.fsize as u32, inl, &spec) {
                 f = PENDING;
                 let full = with_state(vm, |st| {
