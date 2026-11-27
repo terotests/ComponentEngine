@@ -1266,10 +1266,11 @@ impl Vm {
                     }
                     NF_SP_LASTINDEXOF => {
                         let n = self.to_number(&a1);
-                        let from = if is_nan(n) { len } else { to_integer(n) as int };
-                        // the spec clamps the start to 0..len
-                        let from = if from < 0 { 0 } else if from > len { len } else { from };
-                        let r = jsstr::last_index_of(s.as_str(), p.as_str(), from);
+                        // the spec clamps the start to 0..len (as a double:
+                        // Infinity is no int in every target)
+                        let fd = if is_nan(n) { len as double } else { to_integer(n) };
+                        let from = if fd < 0.0 { 0 } else if fd > (len as double) { len } else { fd as int };
+                        let r = self.str_last_index_of(&s, p.as_str(), from);
                         if self.check_expired() {
                             return Val::Undef();
                         }
