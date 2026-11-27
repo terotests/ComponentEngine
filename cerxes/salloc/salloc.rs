@@ -100,6 +100,20 @@ unsafe impl GlobalAlloc for SmallAlloc {
     }
 
     #[inline]
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        if !small(&l) {
+            // the system's (calloc): fresh pages come zeroed, no memset
+            return System.alloc_zeroed(l);
+        }
+        let p = self.alloc(l);
+        if !p.is_null() {
+            // SAFETY: p holds at least l.size() bytes
+            ptr::write_bytes(p, 0, l.size());
+        }
+        p
+    }
+
+    #[inline]
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         if !small(&l) {
             System.dealloc(p, l);
