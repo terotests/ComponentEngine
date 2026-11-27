@@ -1854,6 +1854,19 @@ impl Vm {
             let a = self.new_array(out);
             return Val::Obj(a);
         }
+        // no code point from U+100000 on (byte 0xF4) in either: no lone
+        // surrogate stand-in, so a text match of the separator is a match
+        // of its units, and the pieces are the text between matches
+        if !jsstr::is_ascii(s.as_str()) && no_f4(s.as_str()) && no_f4(sepstr.as_str()) {
+            for part in s.split(sepstr.as_str()) {
+                if (out.len() as int) >= lim {
+                    break;
+                }
+                out.push(self.str_val(part));
+            }
+            let a = self.new_array(out);
+            return Val::Obj(a);
+        }
         if jsstr::is_ascii(s.as_str()) && jsstr::is_ascii(sepstr.as_str()) {
             if sepstr.as_bytes().len() == 1 {
                 // one separator byte: a scan, no substring search
@@ -6431,4 +6444,18 @@ pub fn adv_index(units: &Vec<int>, i: int, unicode: bool) -> int {
         }
     }
     i + 1
+}
+
+/// No byte 0xF4 in `t`: no code point from U+100000 on, so no lone
+/// surrogate stand-in (jsstr::LONE) either.
+pub fn no_f4(t: &str) -> bool {
+    let b = t.as_bytes();
+    let mut i: usize = 0;
+    while i < b.len() {
+        if b[i] == 244 {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
