@@ -137,7 +137,8 @@ pub const R_ADD_ENV: int = 51;
 /// w1 dst (f; the receiver in dst + 1), w2 obj, w3 key: `o[k](...)`
 pub const R_GET_METHOD_ELEM: int = 52;
 /// w1 the value (it stays), sub 0: a let/const read before its
-/// declaration (w2 the name's constant), sub 1: destructuring null/undefined
+/// declaration (w2 the name's constant), sub 1: destructuring null/undefined,
+/// sub 2: a second super(…) (the value is `this`, bound already)
 pub const R_CHECK: int = 53;
 /// w1 x, w2 where to go when x is not undefined (a default's test)
 pub const R_JNU: int = 54;
@@ -160,6 +161,15 @@ pub const R_GET_PRIVATE: int = 58;
 /// for a field or accessor (the stack op's a, b, c); w3 the inline cache
 /// of an own data field
 pub const R_SET_PRIVATE: int = 59;
+/// `o.p += v;` as a statement (OP_ADD_PROP_POP, the stack op's a the
+/// atom): w1 o + old * 65536 (o and the old value o.p in registers below
+/// 32768), w2 v; w3 the inline cache of an own writable data property
+/// (shape * 65536 + slot)
+pub const R_ADD_PROP: int = 60;
+/// A class field (OP_DEFINE_FIELD): w1 the object (it stays there), w2 the
+/// value, w3 the key's atom, sub 1 for a private one; the stack op's c
+/// caches the transition (shape before * 65536 + after)
+pub const R_DEFINE_FIELD: int = 61;
 
 const BAD: int = 1000000;
 
@@ -706,6 +716,12 @@ impl Tr {
                 self.popn(2);
                 self.set(i, R_SET_PROP, 0, o, v, -1);
                 next = i + 2;
+            } else if (c as int) == OP_ADD_PROP_POP && d >= 3 && self.es[(d - 3) as usize] >= 0 && self.es[(d - 3) as usize] < 32768 && self.es[(d - 2) as usize] >= 0 && self.es[(d - 2) as usize] < 32768 {
+                let o = self.opnd(d - 3);
+                let old = self.opnd(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(3);
+                self.set(i, R_ADD_PROP, 0, o + old * 65536, v, -1);
             } else if (c as int) == OP_GET_ELEM {
                 let o = self.opnd(d - 2);
                 let k = self.opnd(d - 1);
@@ -876,9 +892,10 @@ impl Tr {
                 let y = self.opnd(d - 1);
                 self.popn(2);
                 self.set(i, R_ADD_ENV, (op.a as int), x, y, (op.b as int));
-            } else if (c as int) == OP_CHECK_TDZ || (c as int) == OP_REQUIRE_OBJ {
+            } else if (c as int) == OP_CHECK_TDZ || (c as int) == OP_REQUIRE_OBJ || (c as int) == OP_CHECK_UNINIT {
                 let x = self.opnd(d - 1);
-                self.set(i, R_CHECK, if (c as int) == OP_CHECK_TDZ { 0 } else { 1 }, x, (op.a as int), 0);
+                let sub = if (c as int) == OP_CHECK_TDZ { 0 } else if (c as int) == OP_REQUIRE_OBJ { 1 } else { 2 };
+                self.set(i, R_CHECK, sub, x, (op.a as int), 0);
             } else if (c as int) == OP_GET_METHOD_ELEM {
                 let o = self.opnd(d - 2);
                 let k = self.opnd(d - 1);
@@ -897,6 +914,14 @@ impl Tr {
                 self.popn(1);
                 self.set(i, R_INIT_PROP, 0, o, v, (op.a as int));
                 // the object stays where it was; nothing writes it elsewhere
+                let t = self.top();
+                self.ep[(t - 1) as usize] = -1;
+            } else if (c as int) == OP_DEFINE_FIELD && (op.b == 0 || op.b == 1) {
+                let o = self.opnd(d - 2);
+                let v = self.opnd(d - 1);
+                self.popn(1);
+                self.set(i, R_DEFINE_FIELD, (op.b as int), o, v, (op.a as int));
+                // the object stays where it was (as R_INIT_PROP)
                 let t = self.top();
                 self.ep[(t - 1) as usize] = -1;
             } else if (c as int) == OP_CLOSURE {
