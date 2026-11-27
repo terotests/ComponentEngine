@@ -1073,3 +1073,16 @@ for (var i = 0; i < 3; i++) { out.push(new B(i).x, new C().x); }
 out.join()
 ----
 ReferenceError,Super constructor may only be called once,ReferenceError,0,2,ReferenceError,Super constructor may only be called once,ReferenceError,1,2,ReferenceError,Super constructor may only be called once,ReferenceError,2,2
+
+# Function.prototype.toString over a long non-ASCII source, functions read back to front
+==== js toString over non-ASCII source
+var out = [];
+var src = 'var p1 = "' + "ö".repeat(1500) + '"; function f0() { return "å€"; } var fs = [f0];' +
+  'for (var i = 0; i < 4; i++) fs.push(function g() { return "ü" + i; });' +
+  'var p2 = "' + "漢".repeat(2100) + '"; function f1(a, b) { /* ñ */ return a + b; }' +
+  'fs.push(f1, (x) => x * 2, class Q { m() { return "ß"; } }); fs';
+var fs = eval(src);
+for (var r = 0; r < 3; r++) for (var k = fs.length - 1; k >= 0; k--) out.push(fs[k].toString().length + ":" + fs[k].toString().slice(-6));
+out.join()
+----
+31:"; } },12: x * 2,43:+ b; },32:+ i; },32:+ i; },32:+ i; },32:+ i; },30:å€"; },31:"; } },12: x * 2,43:+ b; },32:+ i; },32:+ i; },32:+ i; },32:+ i; },30:å€"; },31:"; } },12: x * 2,43:+ b; },32:+ i; },32:+ i; },32:+ i; },32:+ i; },30:å€"; }

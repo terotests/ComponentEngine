@@ -577,6 +577,48 @@ pub fn mid(s: &str, _a: int, _n: int) -> &str {
     s
 }
 
+/// char_range with `marks` (filled on the first call for `s`, kept by the
+/// caller for the next ones): the byte where every 1024th char of `s`
+/// starts. Rust: a walk of at most 1023 chars from the mark before each
+/// end; elsewhere char_range.
+#[ranger::target(rust)]
+pub fn char_range_marked(s: &str, a: int, b: int, marks: &mut Vec<int>) -> String {
+    let (ua, ub) = (a as usize, b as usize);
+    if ua >= ub {
+        return String::new();
+    }
+    if marks.is_empty() {
+        let mut ci: usize = 0;
+        for (bi, _) in s.char_indices() {
+            if ci % 1024 == 0 {
+                marks.push(bi as int);
+            }
+            ci += 1;
+        }
+    }
+    let x = byte_of_char(s, marks, ua);
+    let y = byte_of_char(s, marks, ub);
+    String::from(&s[x..y])
+}
+
+#[ranger::target(rust)]
+fn byte_of_char(s: &str, marks: &Vec<int>, ci: usize) -> usize {
+    let k = ci / 1024;
+    if k >= marks.len() {
+        return s.len();
+    }
+    let from = marks[k] as usize;
+    match s[from..].char_indices().nth(ci - k * 1024) {
+        Some((off, _)) => from + off,
+        None => s.len(),
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn char_range_marked(s: &str, a: int, b: int, marks: &mut Vec<int>) -> String {
+    char_range(s, a, b)
+}
+
 /// Chars [a, b) of `s` (a function's own text, sort_kind). Rust: when
 /// the text before b is ASCII, chars are bytes and no decoding is needed.
 #[ranger::target(rust)]
