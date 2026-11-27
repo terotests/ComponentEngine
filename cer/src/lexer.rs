@@ -31,6 +31,15 @@ pub struct Tok {
     /// where the token starts and ends in the source (chars)
     pub start: int,
     pub end: int,
+    /// (cerxes: a punctuator's index; always -1 here)
+    pub punct: int,
+}
+
+impl Lexer {
+    /// (cerxes: punctuator `ki`'s text; no punctuator has an index here)
+    pub fn punct_text(&self, _ki: int) -> String {
+        String::new()
+    }
 }
 
 impl Tok {
@@ -45,6 +54,7 @@ impl Tok {
             escaped: false,
             start: -1,
             end: -1,
+            punct: -1,
         }
     }
 }
@@ -88,6 +98,8 @@ pub struct Lexer {
     /// where a host's compile began (CErXes' lexer checks the stack from
     /// it; this one reads a substitution as text and does not recurse)
     pub sp0: int,
+    /// (cerxes: punctuators by index, without text)
+    pub lean: bool,
 }
 
 /// The next token (pcomp reads them one at a time); after the last, or
@@ -180,7 +192,7 @@ pub fn push_code_point(out: &mut String, cp: int) {
 
 impl Lexer {
     pub fn new(src: &str) -> Lexer {
-        let mut lx = Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), buf: Vec::new(), bi: 0, filled: false, sp0: 0 };
+        let mut lx = Lexer { xs: Vec::new(), src: src.chars().collect::<Vec<char>>(), pos: 0, line: 1, error: String::new(), buf: Vec::new(), bi: 0, filled: false, sp0: 0, lean: false };
         // a hashbang line at the very start is a comment
         if lx.src.len() >= 2 && lx.src[0] == '#' && lx.src[1] == '!' {
             while (lx.pos as usize) < lx.src.len() && lx.src[lx.pos as usize] != '\n' && lx.src[lx.pos as usize] != '\r' {

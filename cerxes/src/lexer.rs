@@ -40,6 +40,8 @@ pub struct Tok {
     /// what a `(` or `)` did to the lexer's parentheses (PAREN_*), so that
     /// a rewind can undo it
     pub paren: int,
+    /// a punctuator's index (Lexer.punct_text), -1 for other tokens
+    pub punct: int,
 }
 
 pub const PAREN_NONE: int = 0;
@@ -61,6 +63,7 @@ impl Tok {
             start: 0,
             end: -1,
             paren: PAREN_NONE,
+            punct: -1,
         }
     }
 }
@@ -124,6 +127,8 @@ pub struct Lexer {
     of_end: int,
     /// the native stack where reading began (stack_deeper_than)
     pub sp0: int,
+    /// punctuators given by index only (Tok.punct), without their text
+    pub lean: bool,
     /// inside a substitution's scan for its `}`: a template read there is
     /// dropped, so its substitutions' text is not copied
     scanning: int,
@@ -347,8 +352,45 @@ impl Lexer {
             type_depth: 0,
             of_end: -1,
             sp0: crate::vm::native_sp(),
+            lean: false,
             scanning: 0,
         }
+    }
+
+    /// Punctuator `ki`'s text.
+    pub fn punct_text(&self, ki: int) -> String {
+        let a = self.pstart[ki as usize] as usize;
+        let k1 = (ki + 1) as usize;
+        let b = self.pstart[k1] as usize;
+        String::from(&self.pbytes[a..b])
+    }
+
+    /// Punctuator `ki` is `w`.
+    fn punct_is(&self, ki: int, w: &str) -> bool {
+        let a = self.pstart[ki as usize];
+        let k1 = (ki + 1) as usize;
+        let b = self.pstart[k1];
+        let n = w.as_bytes().len() as int;
+        if b - a != n {
+            return false;
+        }
+        let mut j: int = 0;
+        while j < n {
+            let aj = (a + j) as usize;
+            if self.pbytes.as_bytes()[aj] != w.as_bytes()[j as usize] {
+                return false;
+            }
+            j += 1;
+        }
+        true
+    }
+
+    /// A token's text is `w` (a punctuator given by index too).
+    fn tok_text_is(&self, t: &Tok, w: &str) -> bool {
+        if t.punct >= 0 && t.text.is_empty() {
+            return self.punct_is(t.punct, w);
+        }
+        t.text.as_str() == w
     }
 
     pub fn at(&self, i: int) -> char {
@@ -588,6 +630,7 @@ impl Lexer {
         let mut k: int = if c0 < 128 { self.pfirst[c0 as usize] } else { -1 };
         while k >= 0 {
             let ki = k as usize;
+            let k_here = k;
             k = self.pnext[ki];
             let pa = self.pstart[ki];
             let ki1 = ki + 1;
@@ -611,21 +654,18 @@ impl Lexer {
                 }
             }
             if ok {
-                let pau = pa as usize;
-                let pbu = pb as usize;
-                let p = String::from(&self.pbytes[pau..pbu]);
                 let mut t = Tok::new(T_PUNCT, line, nl);
                 self.pos += plen;
-                let s = p.as_str();
-                self.after_dot = s == "." || s == "?.";
-                self.regex_ok = !(s == ")" || s == "]" || s == "}" || s == "++" || s == "--");
-                if s == "}" {
+                t.punct = k_here;
+                self.after_dot = self.punct_is(k_here, ".") || self.punct_is(k_here, "?.");
+                self.regex_ok = !(self.punct_is(k_here, ")") || self.punct_is(k_here, "]") || self.punct_is(k_here, "}") || self.punct_is(k_here, "++") || self.punct_is(k_here, "--"));
+                if self.punct_is(k_here, "}") {
                     self.regex_ok = true;
                 }
-                if s == "(" {
+                if self.punct_is(k_here, "(") {
                     self.parens.push(keyword);
                     t.paren = PAREN_OPEN;
-                } else if s == ")" {
+                } else if self.punct_is(k_here, ")") {
                     let n = self.parens.len();
                     if n == 0 {
                         t.paren = PAREN_CLOSE_EXTRA;
@@ -639,7 +679,9 @@ impl Lexer {
                         self.parens.pop();
                     }
                 }
-                t.text = p;
+                if !self.lean {
+                    t.text = self.punct_text(k_here);
+                }
                 return t;
             }
         }
@@ -685,7 +727,24 @@ impl Lexer {
     }
 
     fn read_ident(&mut self, escaped: &mut bool) -> String {
-        let mut s = String::new();
+        // most names: ASCII letters, digits, `_` and `$` up to the end, read
+        // into a string of their length at once
+        let n = self.src.len() as int;
+        let mut e = self.pos;
+        while e < n {
+            let c = self.src[e as usize];
+            if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$' {
+                e += 1;
+            } else {
+                break;
+            }
+        }
+        let ne = e - self.pos;
+        let mut s = str_with_cap(ne);
+        while self.pos < e {
+            s.push(self.src[self.pos as usize]);
+            self.pos += 1;
+        }
         loop {
             let c = self.cur();
             if c == '\\' && self.at(self.pos + 1) == 'u' {
@@ -1177,9 +1236,9 @@ impl Lexer {
                         break;
                     }
                     if tok.kind == T_PUNCT {
-                        if tok.text.as_str() == "{" || tok.text.as_str() == "${" {
+                        if self.tok_text_is(&tok, "{") || tok.text.as_str() == "${" {
                             depth += 1;
-                        } else if tok.text.as_str() == "}" {
+                        } else if self.tok_text_is(&tok, "}") {
                             if depth == 0 {
                                 to = tok.start;
                                 break;
@@ -1389,9 +1448,9 @@ impl Lexer {
                 return;
             }
             if t.kind == T_PUNCT {
-                if t.text.as_str() == "{" {
+                if self.tok_text_is(&t, "{") {
                     depth += 1;
-                } else if t.text.as_str() == "}" {
+                } else if self.tok_text_is(&t, "}") {
                     depth -= 1;
                 }
             }
@@ -1782,6 +1841,17 @@ pub fn decode_entities(s: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// An empty string with room for `n` bytes (Rust; others grow as needed).
+#[ranger::target(rust)]
+fn str_with_cap(n: int) -> String {
+    String::with_capacity(n as usize)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn str_with_cap(_n: int) -> String {
+    String::new()
 }
 
 /// Rust: the token buffer grows by a quarter (at least 256 tokens), not by
