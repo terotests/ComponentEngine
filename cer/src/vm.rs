@@ -1266,6 +1266,37 @@ impl Vm {
         -1
     }
 
+    /// lastIndexOf with `from` clamped to 0..len: a long non-ASCII text
+    /// searched in its cached UTF-16 units (str_cache), not converted again
+    /// on every call. Gives up (-1) once the host's time limit passed.
+    pub fn str_last_index_of(&mut self, s: &Rc<String>, pat: &str, from: int) -> int {
+        if s.as_bytes().len() < 256 {
+            return jsstr::last_index_of(s.as_str(), pat, from);
+        }
+        self.str_cache(s);
+        if self.sc_ascii {
+            return jsstr::last_index_of(s.as_str(), pat, from);
+        }
+        let p = jsstr::units(pat);
+        let n = self.sc_len;
+        let m = p.len() as int;
+        let mut i = if from > n - m { n - m } else { from };
+        while i >= 0 {
+            let mut k: int = 0;
+            while k < m && self.sc_units[(i + k) as usize] == p[k as usize] {
+                k += 1;
+            }
+            if k == m {
+                return i;
+            }
+            if (i & 65535) == 0 && crate::builtins::time_up(65536) {
+                return -1;
+            }
+            i -= 1;
+        }
+        -1
+    }
+
     /// Notes that some object has `atom` as a setter or read-only.
     pub fn mark_setter(&mut self, atom: int) {
         if atom < 0 {
