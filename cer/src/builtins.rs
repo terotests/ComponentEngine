@@ -6447,15 +6447,14 @@ pub fn adv_index(units: &Vec<int>, i: int, unicode: bool) -> int {
 }
 
 /// No byte 0xF4 in `t`: no code point from U+100000 on, so no lone
-/// surrogate stand-in (jsstr::LONE) either.
+/// surrogate stand-in (jsstr::LONE) either. Other targets: false (their
+/// strings are not UTF-8 text with stand-ins; split keeps its unit path).
+#[ranger::target(rust)]
 pub fn no_f4(t: &str) -> bool {
-    let b = t.as_bytes();
-    let mut i: usize = 0;
-    while i < b.len() {
-        if b[i] == 244 {
-            return false;
-        }
-        i += 1;
-    }
-    true
+    !t.as_bytes().contains(&0xF4u8)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn no_f4(_t: &str) -> bool {
+    false
 }
