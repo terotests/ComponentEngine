@@ -9,6 +9,7 @@
 //   node cerxes/bench/cases.mjs --targets=cer-js    # CEr's cases on CEr's JS build
 //   CER_REGS=1 node cerxes/bench/cases.mjs --targets=cer-js   # … on its register VM
 //   node cerxes/bench/cases.mjs --build             # rebuild first
+//   CERXES_LAZY=all node cerxes/bench/cases.mjs     # functions compiled lazily
 //
 // js is `rgrc -es6 -nodemodule src/lib.rs`; cpp and go are
 // bench/CerxesMain.rgr through `rgrc -l=cpp|go`, then g++ / go build.
@@ -46,6 +47,12 @@ for (const t of targets) {
       e.through_text = process.env.CER_THROUGH_TEXT === "1";
       // CER_RC_CHECK=1: a reclaim at every safe point, checked
       if (RC) e.vm.rc_stress();
+      // CERXES_LAZY=all: every function that can be is compiled at its
+      // first call (Vm.lazy_toks, Vm.lazy_src)
+      if (process.env.CERXES_LAZY === "all") {
+        e.vm.lazy_toks = 1;
+        e.vm.lazy_src = 0;
+      }
       e.set_syntax(mode.includes("ts"), mode.includes("x"));
       try {
         const r = e.eval(src);

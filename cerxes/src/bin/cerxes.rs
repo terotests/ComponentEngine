@@ -65,6 +65,18 @@ fn main() {
     if let Ok(v) = std::env::var("CER_REGS") {
         e.vm.regs = v == "1";
     }
+    // CERXES_LAZY=off / all / n: no function compiled lazily / every one
+    // that can be / those of n tokens or more (Vm.lazy_toks, Vm.lazy_src)
+    if let Ok(v) = std::env::var("CERXES_LAZY") {
+        if v == "off" {
+            e.vm.lazy_toks = 0;
+        } else if v == "all" {
+            e.vm.lazy_toks = 1;
+            e.vm.lazy_src = 0;
+        } else if let Ok(n) = v.parse::<i64>() {
+            e.vm.lazy_toks = n;
+        }
+    }
     // CERXES_PROF=1: the sampling profiler (Vm::prof_tick); the functions
     // that took the most time are printed to stderr at the end
     let prof = std::env::var("CERXES_PROF").is_ok();

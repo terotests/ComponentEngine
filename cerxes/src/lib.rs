@@ -254,7 +254,8 @@ impl Engine {
         if self.vm.pcomp && !self.syntax.typescript && !self.syntax.jsx {
             // JavaScript, its `import`s the host's modules; what pcomp does
             // not read goes to the parser
-            let u = pcomp::compile_script(src, false, false, "", "");
+            let lt = self.vm.lazy_toks_for(src);
+            let u = pcomp::compile_script_lazy(src, false, false, "", "", lt);
             if u.error.is_empty() {
                 return u;
             }
@@ -266,7 +267,8 @@ impl Engine {
             // not read (decorators …) goes to the parser
             let mut sx = self.syntax.clone();
             crate::jsx::read_pragmas(src, &mut sx);
-            let u = pcomp::compile_script(src, sx.typescript, sx.jsx, sx.jsx_factory.as_str(), sx.jsx_fragment.as_str());
+            let lt = self.vm.lazy_toks_for(src);
+            let u = pcomp::compile_script_lazy(src, sx.typescript, sx.jsx, sx.jsx_factory.as_str(), sx.jsx_fragment.as_str(), lt);
             if u.error.is_empty() {
                 return u;
             }

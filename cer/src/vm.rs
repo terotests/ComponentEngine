@@ -298,6 +298,11 @@ pub struct Vm {
     pub regs: bool,
     /// compile with pcomp.rs (tokens to bytecode in one pass, no tree)
     pub pcomp: bool,
+    /// lazy compiling (pcomp lazy_stub): in a script of at least lazy_src
+    /// chars, a plain function whose body has at least lazy_toks tokens is
+    /// compiled when it is first called (lazy_toks 0: none is)
+    pub lazy_toks: int,
+    pub lazy_src: int,
     /// the register code of every translated function (Proto.rbase) and
     /// the constants it reads (a register x < 0 is kvals[-1 - x])
     pub rcode: Vec<Op>,
@@ -586,6 +591,13 @@ pub struct Vm {
 /// sees the same bytes), then by content.
 /// rx_cache: how many longer texts it keeps besides the current one, and
 /// from what length on
+/// Vm.lazy_toks, Vm.lazy_src: a function of 40 tokens or more is compiled
+/// at its first call in a script of 32 K chars or more. A small script
+/// (a test's) is compiled whole, and its early errors are all reported
+/// before it runs; in a big one (a bundle) an early error inside a
+/// function that is not called yet is reported when it is
+pub const LAZY_TOKS: int = 40;
+pub const LAZY_SRC: int = 32768;
 pub const RX_KEEP: usize = 3;
 pub const RX_KEEP_MIN: usize = 256;
 
@@ -799,6 +811,8 @@ impl Vm {
             echo: false,
             regs: false,
             pcomp: false,
+            lazy_toks: LAZY_TOKS,
+            lazy_src: LAZY_SRC,
             rcode: Vec::new(),
             kvals: Vec::new(),
             rtab: Vec::new(),
@@ -5669,6 +5683,11 @@ impl Vm {
             return false;
         }
         let pi = self.objs[fo as usize].func as int;
+        if self.protos[pi as usize].lazy != 0 && !self.lazy_compile(pi as usize) {
+            let bp = (self.stack.len() as int) - argc;
+            self.stack.truncate((bp - 2) as usize);
+            return false;
+        }
         if !construct && !self.protos[pi as usize].uses_args && self.protos[pi as usize].rest < 0 && !self.protos[pi as usize].class_ctor {
             return self.enter_plain(fo, pi, argc);
         }
@@ -10189,6 +10208,29 @@ pub fn arith_num(code: int, x: double, y: double) -> double {
 /// doubling: a JsObj is big and most of a doubled table would stay empty.
 /// `v`'s items, `v` left empty. Rust: `v` takes `spare`'s buffer and the
 /// items keep theirs (no copy); the other targets copy them.
+/// Vm.atoms for a compile, which gives them back (Rust: moved, not copied:
+/// a lazy function's compile is not a copy of every name the engine knows).
+#[ranger::target(rust)]
+pub fn take_atoms(m: &mut HashMap<String, int>) -> HashMap<String, int> {
+    std::mem::take(m)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn take_atoms(m: &mut HashMap<String, int>) -> HashMap<String, int> {
+    m.clone()
+}
+
+/// Vm.atom_names for a compile, as take_atoms.
+#[ranger::target(rust)]
+pub fn take_names(v: &mut Vec<String>) -> Vec<String> {
+    std::mem::take(v)
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn take_names(v: &mut Vec<String>) -> Vec<String> {
+    v.clone()
+}
+
 #[ranger::target(rust)]
 pub fn take_ints(v: &mut Vec<int>, spare: &mut Vec<int>) -> Vec<int> {
     let mut out = std::mem::take(spare);

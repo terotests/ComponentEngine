@@ -99,7 +99,8 @@ pub struct Lexer {
     parens: Vec<bool>,
     /// the previous token was one of those keywords
     paren_keyword: bool,
-    puncts: Vec<String>,
+    pbytes: String,
+    pstart: Vec<int>,
     /// by a punctuator's first byte (below 128) the first in `puncts` that
     /// starts with it, and for each the next one that does: -1 for none
     pfirst: Vec<int>,
@@ -216,6 +217,75 @@ fn punct_nexts() -> Vec<int> {
     next
 }
 
+/// The punctuators one after another, and where each starts (one more
+/// entry: the end).
+fn punct_bytes() -> String {
+    let ps = puncts();
+    let mut out = String::new();
+    for p in ps.iter() {
+        out.push_str(p.as_str());
+    }
+    out
+}
+
+fn punct_starts() -> Vec<int> {
+    let ps = puncts();
+    let mut out: Vec<int> = Vec::new();
+    let mut at: int = 0;
+    for p in ps.iter() {
+        out.push(at);
+        at += p.as_bytes().len() as int;
+    }
+    out.push(at);
+    out
+}
+
+/// Rust: the tables are built once per thread (a lexer is made for every
+/// function compiled at its first call).
+#[ranger::target(rust)]
+fn lex_pbytes() -> String {
+    thread_local! { static T: String = punct_bytes(); }
+    T.with(|t| t.clone())
+}
+
+#[ranger::target(rust)]
+fn lex_pstart() -> Vec<int> {
+    thread_local! { static T: Vec<int> = punct_starts(); }
+    T.with(|t| t.clone())
+}
+
+#[ranger::target(rust)]
+fn lex_pfirst() -> Vec<int> {
+    thread_local! { static T: Vec<int> = punct_firsts(); }
+    T.with(|t| t.clone())
+}
+
+#[ranger::target(rust)]
+fn lex_pnext() -> Vec<int> {
+    thread_local! { static T: Vec<int> = punct_nexts(); }
+    T.with(|t| t.clone())
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn lex_pbytes() -> String {
+    punct_bytes()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn lex_pstart() -> Vec<int> {
+    punct_starts()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn lex_pfirst() -> Vec<int> {
+    punct_firsts()
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+fn lex_pnext() -> Vec<int> {
+    punct_nexts()
+}
+
 fn puncts() -> Vec<String> {
     let list = vec![
         ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "=>", "==", "!=", "<=", ">=",
@@ -264,9 +334,10 @@ impl Lexer {
             regex_ok: true,
             parens: Vec::new(),
             paren_keyword: false,
-            puncts: puncts(),
-            pfirst: punct_firsts(),
-            pnext: punct_nexts(),
+            pbytes: lex_pbytes(),
+            pstart: lex_pstart(),
+            pfirst: lex_pfirst(),
+            pnext: lex_pnext(),
             jsx: false,
             jsx_factory: String::from("__jsx"),
             jsx_fragment: String::from("__jsxFragment"),
@@ -518,11 +589,15 @@ impl Lexer {
         while k >= 0 {
             let ki = k as usize;
             k = self.pnext[ki];
-            let plen = self.puncts[ki].as_bytes().len() as int;
+            let pa = self.pstart[ki];
+            let ki1 = ki + 1;
+            let pb = self.pstart[ki1];
+            let plen = pb - pa;
             let mut ok = true;
             let mut j: int = 1;
             while j < plen {
-                if (self.at(self.pos + j) as int) != (self.puncts[ki].as_bytes()[j as usize] as int) {
+                let pj = (pa + j) as usize;
+                if (self.at(self.pos + j) as int) != (self.pbytes.as_bytes()[pj] as int) {
                     ok = false;
                     break;
                 }
@@ -536,7 +611,9 @@ impl Lexer {
                 }
             }
             if ok {
-                let p = self.puncts[ki].clone();
+                let pau = pa as usize;
+                let pbu = pb as usize;
+                let p = String::from(&self.pbytes[pau..pbu]);
                 let mut t = Tok::new(T_PUNCT, line, nl);
                 self.pos += plen;
                 let s = p.as_str();

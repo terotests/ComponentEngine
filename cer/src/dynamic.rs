@@ -6,6 +6,7 @@
 
 use ranger::prelude::*;
 
+use std::rc::Rc;
 use crate::compiler;
 use crate::parser;
 use crate::value::*;
@@ -195,6 +196,7 @@ impl Vm {
         let mut c = crate::pcomp::PComp::new(code, atoms, names, base);
         c.local_program = strict;
         c.local_if_strict = is_eval;
+        c.lazy_toks = self.lazy_toks_for(code);
         // its classes' private keys: ids of the engine (as unit::link's)
         c.priv_next = self.priv_seq + 1;
         let entry = c.compile_program();
@@ -234,6 +236,7 @@ impl Vm {
         c.force_strict = strict;
         c.local_if_strict = true;
         c.outer_desc = String::from(desc);
+        c.lazy_toks = self.lazy_toks_for(src);
         c.priv_next = self.priv_seq + 1;
         let entry = c.compile_program();
         self.priv_seq = c.priv_next;
@@ -256,6 +259,102 @@ impl Vm {
         self.protos[entry as usize].lexical_ctor = true;
         let f = self.closure(entry);
         self.call_value(Val::Obj(f), Val::Undef(), Vec::new())
+    }
+
+    /// PComp.lazy_toks for the script `src` (Vm.lazy_src).
+    pub fn lazy_toks_for(&self, src: &str) -> int {
+        if self.lazy_toks > 0 && (src.as_bytes().len() as int) >= self.lazy_src {
+            self.lazy_toks
+        } else {
+            0
+        }
+    }
+
+    /// A lazy function's first call (pcomp lazy_stub): its text compiled
+    /// as direct eval code is, over the environments around it
+    /// (Proto.lazy_desc), and the function that makes put in the stub's
+    /// place, where its closures find it; false (a SyntaxError thrown) when
+    /// the text is not a function.
+    pub fn lazy_compile(&mut self, pi: usize) -> bool {
+        let lazy = self.protos[pi].lazy;
+        if lazy == 0 {
+            return true;
+        }
+        let h = match (&self.protos[pi].src).as_str() {
+            Some(h) => h,
+            None => -1,
+        };
+        if h < 0 {
+            self.throw_syntax("a lazy function without its text");
+            return false;
+        }
+        let at = self.protos[pi].lazy_at;
+        let end = self.protos[pi].src_end;
+        let body = self.src_text(h, at, end);
+        let text = format!("({}function{} {})", if self.protos[pi].is_async { "async " } else { "" }, if self.protos[pi].generator { "*" } else { "" }, body);
+        let desc = self.protos[pi].lazy_desc.clone();
+        self.atoms_sync();
+        let atoms = crate::vm::take_atoms(&mut self.atoms);
+        let names = crate::vm::take_names(&mut self.atom_names);
+        let base = self.protos.len() as int;
+        let mut c = crate::pcomp::PComp::new(text.as_str(), atoms, names, base);
+        c.force_strict = (lazy & 4) != 0;
+        c.lazy_proto_strict = (lazy & 8) != 0;
+        c.local_if_strict = true;
+        c.outer_desc = desc;
+        c.lazy_body = true;
+        c.lazy_toks = self.lazy_toks;
+        c.priv_next = self.priv_seq + 1;
+        let entry = c.compile_program();
+        self.priv_seq = c.priv_next;
+        // the names back (with the ones the compile added)
+        self.atoms = c.atoms;
+        self.atom_names = c.atom_names;
+        if !c.error.is_empty() || entry < 0 || c.first_fn < 0 {
+            let e = if c.error.is_empty() { String::from("invalid code") } else { c.error.replace("SyntaxError: ", "") };
+            self.throw_syntax(e.as_str());
+            return false;
+        }
+        let inner = c.first_fn as usize;
+        // the functions' texts lie in the script's (`text` is not kept, and
+        // their lazy ones read the script's text, as the stub did)
+        let prefix: int = 10 + if self.protos[pi].is_async { 6 } else { 0 } + if self.protos[pi].generator { 1 } else { 0 };
+        let delta = at - prefix;
+        let src_val = self.protos[pi].src.clone();
+        for pr in c.protos {
+            let mut p2 = pr;
+            let own = match (&p2.src).as_str() {
+                Some(k) => k,
+                None => -1,
+            };
+            if own >= 0 && (own as usize) < p2.cstrs.len() {
+                p2.cstrs[own as usize] = Rc::new(String::new());
+            }
+            self.link_strs(&mut p2);
+            pack_code(&mut p2);
+            if own >= 0 {
+                p2.src = src_val.clone();
+                p2.src_start += delta;
+                p2.src_end += delta;
+                if p2.lazy != 0 {
+                    p2.lazy_at += delta;
+                }
+            }
+            self.protos.push(p2);
+        }
+        self.link_done();
+        // the stub, with the name and text closures of it show, goes where
+        // the compiled function was (only the program made it there)
+        self.protos.swap(pi, inner);
+        let name = self.protos[inner].name.clone();
+        let src = self.protos[inner].src.clone();
+        let (s0, s1) = (self.protos[inner].src_start, self.protos[inner].src_end);
+        let p = &mut self.protos[pi];
+        p.name = name;
+        p.src = src;
+        p.src_start = s0;
+        p.src_end = s1;
+        true
     }
 
     /// A module's function (`parser::module_source`) compiled with pcomp
@@ -482,7 +581,11 @@ impl Vm {
             return Val::Undef();
         }
         let src = format!("({} anonymous({}\n) {{\n{}\n}})", head, params, body);
+        // compiled whole: its early errors are the constructor's
+        let lt = self.lazy_toks;
+        self.lazy_toks = 0;
         let f = self.eval_source(src.as_str(), false, false);
+        self.lazy_toks = lt;
         if self.throwing {
             return Val::Undef();
         }
@@ -522,3 +625,4 @@ fn dyn_part_ok(src: &str) -> bool {
     }
     depth == 0
 }
+

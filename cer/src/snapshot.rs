@@ -244,7 +244,7 @@ pub fn snapshot(vm: &Vm) -> String {
         put_num(&mut b, p.env_size);
         put_num(&mut b, p.rest);
         let mut flags: int = 0;
-        let fl = vec![p.uses_args, p.arrow, p.strict, p.class_ctor, p.derived, p.method, p.getter_setter, p.generator, p.is_async, p.lexical_ctor];
+        let fl = vec![p.uses_args, p.arrow, p.strict, p.class_ctor, p.derived, p.method, p.getter_setter, p.generator, p.is_async, p.lexical_ctor, p.lazy != 0];
         let mut bit: int = 1;
         for f in fl.iter() {
             if *f {
@@ -256,6 +256,11 @@ pub fn snapshot(vm: &Vm) -> String {
         put_val(&mut b, &mut st, vm, &p.src);
         put_num(&mut b, p.src_start);
         put_num(&mut b, p.src_end);
+        if p.lazy != 0 {
+            put_num(&mut b, p.lazy);
+            put_num(&mut b, p.lazy_at);
+            put_num(&mut b, st.id(p.lazy_desc.as_str()));
+        }
         put_vals(&mut b, &mut st, vm, &p.consts);
         let ops = proto_ops(p);
         put_num(&mut b, ops.len() as int);
@@ -585,6 +590,11 @@ fn restore_as(vm: &mut Vm, text: &str, check: bool, keep_tables: bool) -> bool {
         p.src = get_val(&mut r, &strs);
         p.src_start = r.num();
         p.src_end = r.num();
+        if (flags / 1024) % 2 == 1 {
+            p.lazy = r.num();
+            p.lazy_at = r.num();
+            p.lazy_desc = get_str(&mut r, &texts);
+        }
         p.consts = get_vals(&mut r, &strs);
         let nc = r.num();
         let mut k: int = 0;

@@ -534,8 +534,11 @@ pub struct PComp {
     /// the tokens' texts, each once (`name_ids` finds one)
     names: Vec<String>,
     name_ids: HashMap<String, int>,
-    /// name_id's cache: a text's cheap hash to its index, -1 for none
+    /// name_id's cache: a text's cheap hash to its index, -1 for none;
+    /// name_mask + 1 entries (fewer for a short text: a lazy function's
+    /// compile does not clear 16 K of them)
     name_cache: Vec<int>,
+    name_mask: int,
     /// the number tokens' values
     nums: Vec<double>,
     /// the token closing each bracket (and the one opening each closing
@@ -573,6 +576,30 @@ pub struct PComp {
     pub script_imports: bool,
     /// direct eval code: the caller's environments (`x_eval_desc`)
     pub outer_desc: String,
+    /// lazy compiling: a plain function whose body has at least this many
+    /// tokens is not compiled with the script (0: every one is). Its
+    /// proto is a stub (Proto.lazy) that the engine compiles at the
+    /// function's first call (Vm::lazy_compile) as direct eval code is,
+    /// over the environments around it (Proto.lazy_desc)
+    pub lazy_toks: int,
+    /// the stubs (their protos) and the scopes they were declared in
+    lazy_stubs: Vec<int>,
+    lazy_scopes: Vec<int>,
+    /// the names each stub's body may read, as references made from a
+    /// scope of the stub's own: they keep those bindings in scope objects
+    lazy_refs: Vec<int>,
+    /// each stub's references: lazy_refs[lazy_lo[j]..lazy_hi[j]]
+    lazy_lo: Vec<int>,
+    lazy_hi: Vec<int>,
+    /// each stub's private names around it (priv_env_desc), "" for none
+    lazy_privs: Vec<String>,
+    /// the first function the program makes (Vm::lazy_compile's)
+    pub first_fn: int,
+    /// Vm::lazy_compile's code, `(function …)`: that function is compiled
+    pub lazy_body: bool,
+    /// Vm::lazy_compile: the function was in one whose proto is strict (a
+    /// method's), and its proto is too
+    pub lazy_proto_strict: bool,
     /// the scopes of direct eval calls
     eval_sites: Vec<int>,
     /// per binding: some code stores to it after it is declared (a
@@ -715,6 +742,7 @@ impl PComp {
             names: Vec::new(),
             name_ids: HashMap::new(),
             name_cache: Vec::new(),
+            name_mask: cache_mask(src),
             nums: Vec::new(),
             mate: Vec::new(),
             xs: Vec::new(),
@@ -736,6 +764,16 @@ impl PComp {
             module_path: String::new(),
             script_imports: false,
             outer_desc: String::new(),
+            lazy_toks: 0,
+            lazy_stubs: Vec::new(),
+            lazy_scopes: Vec::new(),
+            lazy_refs: Vec::new(),
+            lazy_lo: Vec::new(),
+            lazy_hi: Vec::new(),
+            lazy_privs: Vec::new(),
+            first_fn: -1,
+            lazy_body: false,
+            lazy_proto_strict: false,
             eval_sites: Vec::new(),
             bind_stored: Vec::new(),
             eval_privs: HashMap::new(),
@@ -892,10 +930,10 @@ impl PComp {
         if n > 8 {
             h = (h * 131 + (s.as_bytes()[n - 1] as int)) & 16777215;
         }
-        let slot = ((h ^ (h >> 14)) & 16383) as usize;
+        let slot = ((h ^ (h >> 14)) & self.name_mask) as usize;
         if self.name_cache.is_empty() {
             let mut k = 0;
-            while k < 16384 {
+            while k <= self.name_mask {
                 self.name_cache.push(-1);
                 k += 1;
             }
@@ -1983,6 +2021,52 @@ impl PComp {
             self.expand(f);
             f += 1;
         }
+        let mut j: usize = 0;
+        while j < self.lazy_stubs.len() {
+            // only the bindings the body names: a big function's inner
+            // stubs do not each list every binding around them
+            let mut only: HashMap<String, bool> = HashMap::new();
+            let mut q0 = self.lazy_lo[j];
+            while q0 < self.lazy_hi[j] {
+                let rn = self.ref_name(self.lazy_refs[q0 as usize] as usize);
+                only.insert(rn, true);
+                q0 += 1;
+            }
+            let mut desc = self.x_eval_desc(self.lazy_scopes[j], 0, true, &only);
+            // the script's let / const / class bindings the body names
+            // (global ones, read by name): their kinds, for the checks
+            let mut items: Vec<String> = Vec::new();
+            let mut q = self.lazy_lo[j];
+            while q < self.lazy_hi[j] {
+                let r = self.lazy_refs[q as usize] as usize;
+                let rn = self.ref_name(r);
+                let b = self.lookup(self.refs[r].scope as int, rn.as_str());
+                if b >= 0 && self.binds[b as usize].global {
+                    let k = self.binds[b as usize].kind;
+                    let nm = self.binds[b as usize].name.clone();
+                    if (k == K_LET || k == K_CONST || k == K_CLASS) && !nm.contains(",") && !nm.contains(":") && !nm.contains(";") && !nm.contains("|") && !nm.contains("%") && !nm.contains("\u{1}") {
+                        if self.binds[b as usize].tdz {
+                            items.push(format!("{}:{}:0", nm, k));
+                        } else {
+                            items.push(format!("{}:{}:0:1", nm, k));
+                        }
+                    }
+                }
+                q += 1;
+            }
+            if !items.is_empty() {
+                desc = format!("{};g|{}", desc, items.join(","));
+            }
+            if !self.lazy_privs[j].is_empty() {
+                desc = format!("{};{}", desc, self.lazy_privs[j]);
+            }
+            let pi = (self.lazy_stubs[j] - self.proto_base) as usize;
+            self.protos[pi].lazy_desc = desc;
+            // (slots for the parameters, as a unit's or a snapshot's checks
+            // of a proto want them; the compiled function has its own)
+            self.protos[pi].nslots = self.protos[pi].nparams;
+            j += 1;
+        }
     }
 
     /// bind_stored: the bindings some name reference stores to (anything
@@ -2015,6 +2099,13 @@ impl PComp {
                 k += 1;
             }
             f += 1;
+        }
+        // a lazy function's body may store to any name it has
+        for r in self.lazy_refs.iter() {
+            let b = self.refs[*r as usize].bind as int;
+            if b >= 0 {
+                st[b as usize] = true;
+            }
         }
         let ns = self.scopes.len();
         let mut s: usize = 0;
@@ -2065,7 +2156,10 @@ impl PComp {
     /// "F" (in a function) or "G", then per environment, innermost first,
     /// ";" + "f" (a function's) or "b" + "|" + its bindings as
     /// "name:kind:slot", joined by ",".
-    fn x_eval_desc(&self, site: int, flags: int) -> String {
+    /// For a lazy function (`lazy`), a let / const / class binding no read
+    /// can find uninitialized has ":1" after its slot: its reads go
+    /// unchecked.
+    fn x_eval_desc(&self, site: int, flags: int, lazy: bool, only: &HashMap<String, bool>) -> String {
         let mut levels: Vec<String> = Vec::new();
         let mut in_fn = false;
         let mut nt = false;
@@ -2091,7 +2185,18 @@ impl PComp {
                     if nm.is_empty() || nm.contains(",") || nm.contains(":") || nm.contains(";") || nm.contains("|") || (nm.contains("%") && nm != "%ev") || nm.contains("\u{1}") {
                         continue;
                     }
-                    items.push(format!("{}:{}:{}", nm, self.binds[bi].kind, self.binds[bi].slot));
+                    if lazy && nm != "%ev" {
+                        let nk = String::from(nm);
+                        if !only.contains_key(&nk) {
+                            continue;
+                        }
+                    }
+                    let k = self.binds[bi].kind;
+                    if lazy && (k == K_LET || k == K_CONST || k == K_CLASS) && !self.binds[bi].tdz {
+                        items.push(format!("{}:{}:{}:1", nm, k, self.binds[bi].slot));
+                    } else {
+                        items.push(format!("{}:{}:{}", nm, k, self.binds[bi].slot));
+                    }
                 }
                 let flag = if self.scopes[si].is_func && !self.scopes[si].is_program { "f" } else { "b" };
                 levels.push(format!("{}|{}", flag, items.join(",")));
@@ -2405,7 +2510,7 @@ impl PComp {
         }
         if b < 0 {
             let ps = if self.eval_prog >= 0 { self.eval_prog } else { 0 };
-            let gb = if self.scopes.is_empty() {
+            let mut gb = if self.scopes.is_empty() {
                 -1
             } else {
                 match self.scopes[ps as usize].names.get(&name) {
@@ -2413,6 +2518,20 @@ impl PComp {
                     None => -1,
                 }
             };
+            if gb < 0 && !self.scopes.is_empty() {
+                // a lazy function's: its script's (outer_scopes "g|")
+                let mut s = self.scopes[ps as usize].parent;
+                while s >= 0 && gb < 0 {
+                    let x = match self.scopes[s as usize].names.get(&name) {
+                        Some(x) => *x,
+                        None => -1,
+                    };
+                    if x >= 0 && self.binds[x as usize].global {
+                        gb = x;
+                    }
+                    s = self.scopes[s as usize].parent;
+                }
+            }
             if gb >= 0 && self.eval_ev >= 0 && self.binds[gb as usize].global && self.binds[gb as usize].scope == ps {
                 self.xstore_bind(gb, init, scope);
                 return;
@@ -2801,7 +2920,8 @@ impl PComp {
             } else if (c as int) == PH_KEND {
                 // nothing
             } else if (c as int) == PH_EVAL {
-                let desc = self.x_eval_desc((o.a as int), (o.c as int));
+                let none: HashMap<String, bool> = HashMap::new();
+                let desc = self.x_eval_desc((o.a as int), (o.c as int), false, &none);
                 let k = self.xstr(desc.as_str());
                 self.xemit(OP_CALL_EVAL, (o.b as int), k);
             } else if (c as int) == OP_POP {
@@ -3213,7 +3333,7 @@ impl PComp {
             self.local_program = true;
         }
         let mut proto = Proto::new("<script>");
-        proto.strict = strict;
+        proto.strict = strict || self.lazy_proto_strict;
         let outer = if self.outer_desc.is_empty() { -1 } else { self.outer_scopes(strict) };
         // direct eval code takes its caller's context (eval_ctx); indirect
         // eval code is global code, where super is an early error
@@ -3279,6 +3399,38 @@ impl PComp {
                 privs.insert(0, lv);
                 continue;
             }
+            if lv.starts_with("g|") {
+                // a lazy function's script's global let / const / class
+                // bindings (pcomp lazy_stub)
+                let gs = self.new_scope(parent, false, false);
+                let gn = lv.as_bytes().len();
+                let gitems = if gn > 2 { String::from(&lv[2..gn]) } else { String::new() };
+                for it in split_on(gitems.as_str(), 44).iter() {
+                    let f = split_on(it.as_str(), 58);
+                    if f.len() != 3 && f.len() != 4 {
+                        continue;
+                    }
+                    let kind = digits_int(f[1].as_str());
+                    let checked = f.len() == 3;
+                    self.binds.push(PBind {
+                        name: f[0].clone(),
+                        kind: kind,
+                        captured: false,
+                        slot: -1,
+                        in_env: false,
+                        scope: gs,
+                        global: true,
+                        placed: true,
+                        tdz: checked,
+                        init_seq: if checked { SEQ_NEVER } else { 0 },
+                    });
+                    let b = (self.binds.len() as int) - 1;
+                    self.scopes[gs as usize].names.insert(f[0].clone(), b);
+                    self.scopes[gs as usize].binds.push(b);
+                }
+                parent = gs;
+                continue;
+            }
             let s = self.new_scope(parent, false, false);
             self.scopes[s as usize].has_env = true;
             fn_level.insert(0, lv.starts_with("f"));
@@ -3288,12 +3440,13 @@ impl PComp {
             let entries = split_on(items.as_str(), 44);
             for it in entries.iter() {
                 let f = split_on(it.as_str(), 58);
-                if f.len() != 3 {
+                if f.len() != 3 && f.len() != 4 {
                     continue;
                 }
                 let kind = digits_int(f[1].as_str());
                 let slot = digits_int(f[2].as_str());
-                let lexical = kind == K_LET || kind == K_CONST || kind == K_CLASS;
+                // ":1": never read uninitialized (a lazy function's)
+                let lexical = (kind == K_LET || kind == K_CONST || kind == K_CLASS) && f.len() == 3;
                 self.binds.push(PBind {
                     name: f[0].clone(),
                     kind: kind,
@@ -7550,6 +7703,12 @@ impl PComp {
 
     /// Parameters and body; answers the proto.
     fn function_rest(&mut self, flags: int, name: &str, first: int) -> int {
+        if self.lazy_toks > 0 && (flags & (F_ARROW | F_METHOD | F_CTOR | F_GETTER | F_SETTER | F_DERIVED)) == 0 {
+            let p = self.lazy_stub(flags, name, first);
+            if p >= 0 {
+                return p;
+            }
+        }
         let arrow = (flags & F_ARROW) != 0;
         let mut proto = Proto::new(name);
         proto.arrow = arrow;
@@ -7810,6 +7969,264 @@ impl PComp {
         let p = self.pop_fn();
         if self.error.is_empty() {
             self.set_span(p, first);
+        }
+        if self.first_fn < 0 && self.fs.len() == 1 {
+            self.first_fn = p;
+        }
+        p
+    }
+
+    /// A plain function (at its `(`) left for its first call: a stub proto
+    /// with what is seen of the function before it runs (its length, rest
+    /// parameter, kind, strictness, text) and references to the names its
+    /// text has, which keep those bindings in scope objects where the
+    /// compiled body finds them. -1 when it is compiled now: a small body,
+    /// one that may see more than names and private names (a direct eval,
+    /// `import`, JSX), in a `with`, TypeScript or a module.
+    fn lazy_stub(&mut self, flags: int, name: &str, first: int) -> int {
+        if self.ts || self.module_code || self.in_params || !self.error.is_empty() || self.fs.is_empty() || (self.lazy_body && self.fs.len() == 1) {
+            return -1;
+        }
+        // `(function` and `!function`: most often called at once (an IIFE,
+        // or an argument), so compiled with the script
+        if (flags & F_DECL) == 0 && first > 0 {
+            let pf = first - 1;
+            if self.tok_is(pf, "(") || self.tok_is(pf, "!") {
+                return -1;
+            }
+        }
+        let po = self.pos;
+        if po >= self.main_toks || !self.is("(") {
+            return -1;
+        }
+        let pc = self.mate_of(po);
+        let bo = pc + 1;
+        if !self.tok_is(pc, ")") || !self.tok_is(bo, "{") {
+            return -1;
+        }
+        let bc = self.mate_of(bo);
+        if bc >= self.main_toks || !self.tok_is(bc, "}") || bc - bo < self.lazy_toks {
+            return -1;
+        }
+        let mut sc = self.cur_scope;
+        while sc >= 0 {
+            if self.scopes[sc as usize].with_bind >= 0 {
+                return -1;
+            }
+            sc = self.scopes[sc as usize].parent;
+        }
+        let mut names: Vec<String> = Vec::new();
+        let mut seen: HashMap<String, bool> = HashMap::new();
+        let mut privs = false;
+        let mut i = po;
+        while i <= bc {
+            let t = &self.toks[i as usize];
+            let k = t.kind() as int;
+            // JSX: the lexer's tokens of an element have no width (the
+            // body is compiled again without JSX)
+            if self.jsx && t.end <= t.start {
+                return -1;
+            }
+            if k == T_PRIVATE {
+                privs = true;
+            }
+            if k == T_IDENT {
+                if (t.flags() & PT_ESCAPED) != 0 {
+                    return -1;
+                }
+                let w = self.names[t.v as usize].clone();
+                let prop = i > 0 && (self.tok_is(i - 1, ".") || self.tok_is(i - 1, "?."));
+                // (`super` in a plain function is a method's inside it, or
+                // an early error its compile reports)
+                if !prop && (w == "eval" || w == "import" || (i < pc && w == "arguments")) {
+                    return -1;
+                }
+                if !prop && !is_reserved(w.as_str()) && w != "arguments" && !seen.contains_key(&w) {
+                    seen.insert(w.clone(), true);
+                    names.push(w);
+                }
+            } else if k == T_TEMPLATE {
+                let xi = t.x();
+                if xi >= 0 {
+                    let exprs = self.xs[xi as usize].exprs.clone();
+                    for e in exprs.iter() {
+                        if !lazy_sub_names(e.as_str(), &mut names, &mut seen, 0) {
+                            return -1;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        // the parameters: `length` counts those before the first default
+        // or rest one (pnames: the plain ones' names)
+        let mut nparams: int = 0;
+        let mut length: int = 0;
+        let mut counting = true;
+        let mut rest: int = -1;
+        let mut q = po + 1;
+        let mut pnames: HashMap<String, bool> = HashMap::new();
+        while q < pc {
+            // one parameter: to the next `,` at its depth
+            let mut plain = true;
+            if (self.toks[q as usize].kind() as int) == T_IDENT {
+                // a name given twice: an early error in some functions
+                let w = self.names[self.toks[q as usize].v as usize].clone();
+                if pnames.contains_key(&w) {
+                    return -1;
+                }
+                pnames.insert(w, true);
+            }
+            if self.tok_is(q, "...") {
+                rest = nparams;
+                plain = false;
+                let q1 = q + 1;
+                if (self.toks[q1 as usize].kind() as int) == T_IDENT {
+                    let w = self.names[self.toks[q1 as usize].v as usize].clone();
+                    pnames.insert(w, true);
+                }
+            }
+            while q < pc && !self.tok_is(q, ",") {
+                if self.tok_is(q, "(") || self.tok_is(q, "[") || self.tok_is(q, "{") {
+                    q = self.mate_of(q);
+                } else if self.tok_is(q, "=") {
+                    plain = false;
+                }
+                q += 1;
+            }
+            nparams += 1;
+            if !plain {
+                counting = false;
+            }
+            if counting {
+                length += 1;
+            }
+            q += 1;
+        }
+        // names the function declares itself (its parameters, and in its
+        // body outside any braces its vars, functions, let / const / class)
+        // are never the ones around it: those are not kept in scope
+        // objects for it. (A var inside braces may be a method's.)
+        let mut own = pnames.clone();
+        if (flags & F_DECL) == 0 && !name.is_empty() {
+            own.insert(String::from(name), true);
+        }
+        let mut k = bo + 1;
+        let mut depth: int = 0;
+        while k < bc {
+            let kk = self.toks[k as usize].kind() as int;
+            let k1 = k + 1;
+            let at_stmt = self.tok_is(k - 1, ";") || self.tok_is(k - 1, "{") || self.tok_is(k - 1, "}");
+            if kk == T_PUNCT {
+                if self.tok_is(k, "{") {
+                    depth += 1;
+                } else if self.tok_is(k, "}") {
+                    depth -= 1;
+                } else if self.tok_is(k, "=>") && self.tok_is(k1, "{") {
+                    // an arrow's body: its declarations are its own
+                    k = self.mate_of(k1);
+                }
+            } else if kk == T_IDENT {
+                let w = self.names[self.toks[k as usize].v as usize].clone();
+                if w == "function" {
+                    let mut n1 = k1;
+                    if self.tok_is(n1, "*") {
+                        n1 += 1;
+                    }
+                    let decl = depth == 0 && (at_stmt || (self.tok_is(k - 1, "async") && (self.tok_is(k - 2, ";") || self.tok_is(k - 2, "{") || self.tok_is(k - 2, "}"))));
+                    if decl && (self.toks[n1 as usize].kind() as int) == T_IDENT && self.tok_is(n1 + 1, "(") {
+                        let fnm = self.names[self.toks[n1 as usize].v as usize].clone();
+                        own.insert(fnm, true);
+                    }
+                    // past the inner function: its declarations are its own
+                    let mut f = n1;
+                    while f < bc && !self.tok_is(f, "(") {
+                        f += 1;
+                    }
+                    let fc = self.mate_of(f);
+                    let fb = fc + 1;
+                    if f < bc && self.tok_is(fb, "{") {
+                        k = self.mate_of(fb);
+                    }
+                } else if (self.toks[k1 as usize].kind() as int) == T_IDENT && depth == 0 && (w == "var" || (at_stmt && (w == "let" || w == "const" || w == "class"))) {
+                    let dn = self.names[self.toks[k1 as usize].v as usize].clone();
+                    if !is_reserved(dn.as_str()) {
+                        own.insert(dn, true);
+                    }
+                }
+            }
+            k += 1;
+        }
+        if !own.is_empty() {
+            let mut kept: Vec<String> = Vec::new();
+            for nm in names.iter() {
+                let nk = nm.clone();
+                if !own.contains_key(&nk) {
+                    kept.push(nk);
+                }
+            }
+            names = kept;
+        }
+        // "use strict" in the body's directives
+        let mut own_strict = false;
+        let mut d = bo + 1;
+        while d < bc && (self.toks[d as usize].kind() as int) == T_STR {
+            if self.text_is(d, "use strict") && !self.tok_escaped(d) {
+                own_strict = true;
+            }
+            d += 1;
+            if self.tok_is(d, ";") {
+                d += 1;
+            } else if !(d < bc && self.tok_nl(d)) {
+                break;
+            }
+        }
+        let outer_strict = self.fs[self.fs.len() - 1].proto.strict;
+        let parser_strict = self.strict;
+        let mut proto = Proto::new(name);
+        proto.strict = outer_strict || own_strict || (flags & F_STRICT) != 0;
+        proto.generator = (flags & F_GENERATOR) != 0;
+        proto.is_async = (flags & F_ASYNC) != 0;
+        proto.nparams = nparams;
+        proto.length = length;
+        proto.rest = rest;
+        let pn = po - 1;
+        let named = (flags & F_DECL) == 0 && !name.is_empty() && pn >= 0 && (self.toks[pn as usize].kind() as int) == T_IDENT && !self.tok_is(pn, "function");
+        let mut lz: int = 1;
+        if named {
+            lz += 2;
+        }
+        if parser_strict {
+            lz += 4;
+        }
+        if outer_strict {
+            lz += 8;
+        }
+        proto.lazy = lz;
+        let at_tok = if named { pn } else { po };
+        proto.lazy_at = self.toks[at_tok as usize].start as int;
+        let outer = self.cur_scope;
+        let fnid = self.push_fn(proto, false, 0);
+        let g = self.new_scope(outer, true, false);
+        self.scopes[g as usize].decl_fn = (flags & F_DECL) != 0;
+        self.fns[fnid as usize].fscope = g;
+        self.cur_scope = g;
+        self.lazy_lo.push(self.lazy_refs.len() as int);
+        for nm in names.iter() {
+            let r = self.new_ref(nm.as_str(), false, -1);
+            self.lazy_refs.push(r);
+        }
+        self.lazy_hi.push(self.lazy_refs.len() as int);
+        self.goto(bc + 1);
+        let p = self.pop_fn();
+        self.set_span(p, first);
+        self.lazy_stubs.push(p);
+        self.lazy_scopes.push(outer);
+        // private names: the classes around, as a direct eval's
+        let pv = if privs { self.priv_env_desc() } else { String::new() };
+        self.lazy_privs.push(pv);
+        if self.first_fn < 0 && self.fs.len() == 1 {
+            self.first_fn = p;
         }
         p
     }
@@ -9706,16 +10123,21 @@ pub fn compile_unit_with(src: &str, ts: bool) -> crate::unit::Unit {
 /// compile_unit: TypeScript's types skipped with `ts`, JSX read with `jsx`
 /// (`factory`, `fragment` its names).
 pub fn compile_unit_syntax(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str) -> crate::unit::Unit {
-    compile_unit_full(src, ts, jsx, factory, fragment, false)
+    compile_unit_full(src, ts, jsx, factory, fragment, false, 0)
 }
 
 /// A host's script (CErXes `Engine::compile`): compile_unit_syntax, and
 /// its `import`s read the host's modules (`script_imports`).
 pub fn compile_script(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str) -> crate::unit::Unit {
-    compile_unit_full(src, ts, jsx, factory, fragment, true)
+    compile_unit_full(src, ts, jsx, factory, fragment, true, 0)
 }
 
-fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str, imports: bool) -> crate::unit::Unit {
+/// compile_script, its functions compiled lazily (PComp.lazy_toks).
+pub fn compile_script_lazy(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str, lazy_toks: int) -> crate::unit::Unit {
+    compile_unit_full(src, ts, jsx, factory, fragment, true, lazy_toks)
+}
+
+fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &str, imports: bool, lazy_toks: int) -> crate::unit::Unit {
     let names = crate::vm::first_atoms();
     let mut atoms: HashMap<String, int> = HashMap::new();
     let mut i: int = 0;
@@ -9726,6 +10148,7 @@ fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &s
     let mut c = PComp::new_syntax(src, atoms, names, 0, jsx, factory, fragment);
     c.ts = ts;
     c.script_imports = imports;
+    c.lazy_toks = lazy_toks;
     let entry = c.compile_program();
     let mut u = crate::unit::Unit::new();
     if !c.error.is_empty() || entry < 0 {
@@ -9737,6 +10160,55 @@ fn compile_unit_full(src: &str, ts: bool, jsx: bool, factory: &str, fragment: &s
     u.entry = entry;
     u.source = String::from(src);
     u
+}
+
+/// PComp.name_mask for a source: 16 K entries for 64 K bytes or more, at
+/// least 256.
+fn cache_mask(src: &str) -> int {
+    let n = (src.as_bytes().len() as int) / 4;
+    let mut m: int = 255;
+    while m < n && m < 16383 {
+        m = m * 2 + 1;
+    }
+    m
+}
+
+/// lazy_stub: the names a template substitution's source `src` has (in
+/// `out`, once each); false when it has what a stub cannot have.
+fn lazy_sub_names(src: &str, out: &mut Vec<String>, seen: &mut HashMap<String, bool>, depth: int) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let mut lx = lexer_for(src, false, "", "");
+    let mut after_dot = false;
+    loop {
+        let t = next_tok(&mut lx);
+        if t.kind == T_EOF {
+            break;
+        }
+        if t.kind == T_PRIVATE || t.escaped {
+            return false;
+        }
+        if t.kind == T_IDENT {
+            let w = t.text.clone();
+            if w == "eval" || w == "super" || w == "import" {
+                return false;
+            }
+            if !after_dot && !is_reserved(w.as_str()) && w != "arguments" && !seen.contains_key(&w) {
+                seen.insert(w.clone(), true);
+                out.push(w);
+            }
+        } else if t.kind == T_TEMPLATE && t.x >= 0 {
+            let exprs = lx.xs[t.x as usize].exprs.clone();
+            for e in exprs.iter() {
+                if !lazy_sub_names(e.as_str(), out, seen, depth + 1) {
+                    return false;
+                }
+            }
+        }
+        after_dot = t.kind == T_PUNCT && (t.text == "." || t.text == "?.");
+    }
+    lx.error.is_empty()
 }
 
 /// Rust: the script's tokens without the room their doubling left.

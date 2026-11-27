@@ -1489,6 +1489,15 @@ pub struct Proto {
     /// where a call starts in rcode
     pub rentry: int,
     pub rstate: int,
+    /// a function not compiled yet (pcomp lazy_stub; Vm::lazy_compile at
+    /// its first call): 0 for none, else 1 + 2 (its text names it, a
+    /// function expression's own name) + 4 (the code around is strict) + 8
+    /// (the function around has a strict proto: a method)
+    pub lazy: int,
+    /// where its text from the name or the `(` on lies in `src` (chars)
+    pub lazy_at: int,
+    /// the environments around it, as pcomp's x_eval_desc writes them
+    pub lazy_desc: String,
 }
 
 impl Proto {
@@ -1528,6 +1537,9 @@ impl Proto {
             fsize: 0,
             rentry: 0,
             rstate: 0,
+            lazy: 0,
+            lazy_at: 0,
+            lazy_desc: String::new(),
         }
     }
 }
