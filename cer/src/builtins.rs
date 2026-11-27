@@ -243,6 +243,9 @@ pub const NF_WM_GETORINSERT: int = 366;
 pub const NF_WM_GETORINSERTC: int = 367;
 // Promise
 pub const NF_PR_THEN: int = 350;
+/// Promise[Symbol.species]: `this` (native, so that a plain promise's
+/// then can tell the getter is the intrinsic one)
+pub const NF_SPECIES_SELF: int = 911;
 pub const NF_PR_CATCH: int = 351;
 pub const NF_PR_RESOLVE: int = 352;
 pub const NF_PR_REJECT: int = 353;
@@ -1048,6 +1051,7 @@ impl Vm {
         self.method(pp, "then", NF_PR_THEN, 2);
         self.method(pp, "catch", NF_PR_CATCH, 1);
         self.method(pp, "finally", NF_PR_FINALLY, 1);
+        self.getter(prc, "@@species", NF_SPECIES_SELF);
         self.setup_coroutines();
         self.setup_typed();
         self.setup_proxy();
@@ -1548,6 +1552,9 @@ impl Vm {
     pub fn fast_wrap(&mut self, f: int, fpos: int, argc: int) -> bool {
         let inner = self.objs[f as usize].pos as int;
         let bp = (fpos + 2) as usize;
+        if inner == NF_PR_THEN || inner == NF_PR_CATCH || inner == NF_PR_RESOLVE {
+            return self.promise_fast(inner, fpos, argc);
+        }
         let h = if let Some(h) = (self.stack[bp - 1]).as_str() { h } else { return false };
         let a0 = if argc >= 1 { self.stack[bp] } else { Val::Undef() };
         let a1 = if argc >= 2 { self.stack[bp + 1] } else { Val::Undef() };
@@ -4141,7 +4148,14 @@ impl Vm {
             } else {
                 // thenable job: then.call(thenable, resolve, reject)
                 kind = JK_THENABLE;
-                self.call_fixed(a, b, 2, c, d.clone(), Val::Undef());
+                let tp = obj_of(&b);
+                if self.intrinsic_then(&a) && self.plain_promise(tp) {
+                    // the intrinsic then of a plain promise: its steps
+                    // without a call
+                    self.promise_then(tp, c, d.clone());
+                } else {
+                    self.call_fixed(a, b, 2, c, d.clone(), Val::Undef());
+                }
             }
             if self.suspended {
                 // the slice ran out in the job's script: how it ends
@@ -4280,6 +4294,104 @@ impl Vm {
         self.temp_roots.pop();
         self.temp_roots.pop();
         c
+    }
+
+    /// Whether `v` is the intrinsic Promise constructor with its own
+    /// Symbol.species getter.
+    pub fn intrinsic_promise_ctor(&mut self, v: &Val) -> bool {
+        let c = obj_of(v);
+        if c < 0 || self.objs[c as usize].class != C_NATIVE || (self.objs[c as usize].func as int) != NF_PROMISE {
+            return false;
+        }
+        if self.a_species < 0 {
+            self.a_species = self.atom_lookup("@@species");
+        }
+        let a = self.a_species;
+        let sl = self.find(c, a);
+        if sl < 0 || (self.attr_at(c, sl) & P_ACCESSOR) == 0 {
+            return false;
+        }
+        let pair = obj_of(&self.objs[c as usize].get_slot(sl as usize));
+        let g = obj_of(&self.evecs[self.objs[pair as usize].elems as usize].v[0]);
+        g >= 0 && self.objs[g as usize].class == C_NATIVE && (self.objs[g as usize].func as int) == NF_SPECIES_SELF
+    }
+
+    /// Whether promise steps on `o` may skip their lookups: a promise
+    /// straight on Promise.prototype, without its own constructor, whose
+    /// constructor is the intrinsic Promise with its species getter (so
+    /// SpeciesConstructor is Promise and `x.constructor === Promise`).
+    pub fn plain_promise(&mut self, o: int) -> bool {
+        if o < 0 || self.objs[o as usize].class != C_PROMISE || (self.objs[o as usize].proto as int) != self.promise_proto {
+            return false;
+        }
+        if self.objs[o as usize].shape != 0 && self.find(o, A_CONSTRUCTOR) >= 0 {
+            return false;
+        }
+        let pp = self.promise_proto;
+        let sl = self.find(pp, A_CONSTRUCTOR);
+        if sl < 0 || (self.attr_at(pp, sl) & P_ACCESSOR) != 0 {
+            return false;
+        }
+        let c = self.objs[pp as usize].get_slot(sl as usize).clone();
+        self.intrinsic_promise_ctor(&c)
+    }
+
+    /// Whether `f` is Promise.prototype.then as the prelude installs it
+    /// (its native body for plain promises).
+    pub fn intrinsic_then(&self, f: &Val) -> bool {
+        let o = obj_of(f);
+        o >= 0 && self.objs[o as usize].class == C_NATIVE
+            && (((self.objs[o as usize].func as int) == crate::typed::NF_FAST_WRAP && (self.objs[o as usize].pos as int) == NF_PR_THEN)
+                || (self.objs[o as usize].func as int) == NF_PR_THEN)
+    }
+
+    /// then / catch on a plain promise and Promise.resolve(x) of the
+    /// intrinsic Promise for a promise of its own or a primitive, natively
+    /// off the stack at fpos (fast_wrap). False: the prelude's function.
+    fn promise_fast(&mut self, inner: int, fpos: int, argc: int) -> bool {
+        let bp = (fpos + 2) as usize;
+        let this = self.stack[bp - 1];
+        let a0 = if argc >= 1 { self.stack[bp] } else { Val::Undef() };
+        let a1 = if argc >= 2 { self.stack[bp + 1] } else { Val::Undef() };
+        if inner == NF_PR_RESOLVE {
+            if !self.intrinsic_promise_ctor(&this) {
+                return false;
+            }
+            let x = obj_of(&a0);
+            if x >= 0 {
+                if !self.plain_promise(x) {
+                    return false;
+                }
+                self.stack[fpos as usize] = a0;
+                return true;
+            }
+            let p = self.new_promise();
+            self.settle(p, 1, a0);
+            self.stack[fpos as usize] = Val::Obj(p);
+            return true;
+        }
+        let p = obj_of(&this);
+        if !self.plain_promise(p) {
+            return false;
+        }
+        if inner == NF_PR_CATCH {
+            // catch is this.then(undefined, err): the intrinsic then, not
+            // one of the promise's own
+            if self.objs[p as usize].shape != 0 && self.find(p, A_THEN) >= 0 {
+                return false;
+            }
+            let pp = self.promise_proto;
+            let sl = self.find(pp, A_THEN);
+            if sl < 0 || (self.attr_at(pp, sl) & P_ACCESSOR) != 0 || !self.intrinsic_then(&self.objs[pp as usize].get_slot(sl as usize)) {
+                return false;
+            }
+            let r = self.promise_then(p, Val::Undef(), a0);
+            self.stack[fpos as usize] = r;
+            return true;
+        }
+        let r = self.promise_then(p, a0, a1);
+        self.stack[fpos as usize] = r;
+        true
     }
 
     pub fn promise_then(&mut self, p: int, on_ok: Val, on_err: Val) -> Val {
@@ -4624,6 +4736,9 @@ impl Vm {
         }
         if id == crate::typed::NF_TA_LEN || id == crate::typed::NF_TA_SET || (id >= crate::typed::NF_DV_MAKE && id <= crate::typed::NF_DV_METHOD) {
             return self.call_native_ta(id, &this, args);
+        }
+        if id == NF_SPECIES_SELF {
+            return this;
         }
         if id == crate::proxy::NF_PROMISE_OF {
             let p = self.new_promise();

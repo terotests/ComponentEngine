@@ -261,6 +261,8 @@ pub struct Vm {
     pub cmp_kinds: Vec<i32>,
     /// src_text's marks (jsstr::char_range_marked) of the source string
     /// src_marks_h, of src_marks_len bytes; -1 for none
+    /// the atom of Symbol.species (found on first use)
+    pub a_species: int,
     pub src_marks_h: int,
     pub src_marks_len: int,
     pub src_marks: Vec<int>,
@@ -771,6 +773,7 @@ impl Vm {
             async_from_sync: -1,
             array_generic: -1,
             cmp_kinds: Vec::new(),
+            a_species: -1,
             src_marks_h: -1,
             src_marks_len: 0,
             src_marks: Vec::new(),

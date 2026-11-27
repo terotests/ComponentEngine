@@ -629,7 +629,7 @@ hide(OP, '__lookupSetter__', function __lookupSetter__(name) { return lookup(thi
 
 // ---- Promise: species, subclassing, the combinators over the native core
 var PP = Promise.prototype;
-var nativeThen = PP.then;
+var nativeThen = PP.then, nativeCatch = PP.catch, nativeResolve = Promise.resolve, promiseFastWrap = globalThis.__fastWrap;
 var isPromiseObj = globalThis.__isPromise;
 delete globalThis.__isPromise;
 var promiseOf = globalThis.__promiseOf, PromiseI = Promise;
@@ -656,8 +656,9 @@ function capability(C) {
   if (!isCallable(res) || !isCallable(rej)) throw new TypeError('Promise resolve or reject function is not callable');
   return { promise: p, resolve: res, reject: rej };
 }
-getter(Promise, Symbol.species, function () { return this; });
-hide(PP, 'then', function then(ok, err) {
+// Promise[Symbol.species] is native (NF_SPECIES_SELF). then, catch and
+// resolve: a native body for plain promises (fast_wrap), these for the rest
+hide(PP, 'then', promiseFastWrap(nativeThen, function then(ok, err) {
   if (!isPromise(this)) throw new TypeError('Promise.prototype.then called on incompatible receiver');
   var C = speciesOf(this, Promise);
   var d = nativeThen.call(this, ok, err);
@@ -665,8 +666,8 @@ hide(PP, 'then', function then(ok, err) {
   var cap = capability(C);
   nativeThen.call(d, cap.resolve, cap.reject);
   return cap.promise;
-});
-hide(PP, 'catch', function (err) { return this.then(undefined, err); });
+}, 'then', 2));
+hide(PP, 'catch', promiseFastWrap(nativeCatch, function (err) { return this.then(undefined, err); }, 'catch', 1));
 hide(PP, 'finally', function (f) {
   if (!isObject(this)) throw new TypeError('Promise.prototype.finally called on a non-object');
   var C = speciesOf(this, Promise);
@@ -682,11 +683,12 @@ var promiseResolveFn = function resolve(x) {
   if (this === PromiseI) return promiseOf(x);
   var cap = capability(this); cap.resolve(x); return cap.promise;
 };
-hide(Promise, 'resolve', promiseResolveFn);
+var promiseResolveW = promiseFastWrap(nativeResolve, promiseResolveFn, 'resolve', 1);
+hide(Promise, 'resolve', promiseResolveW);
 // resolveFn.call(C, v) of the combinators, without the call when both
 // are the intrinsic ones
 function resolveVia(C, resolveFn, v) {
-  if (resolveFn === promiseResolveFn && C === PromiseI) return isPromise(v) && v.constructor === PromiseI ? v : promiseOf(v);
+  if (resolveFn === promiseResolveW && C === PromiseI) return isPromise(v) && v.constructor === PromiseI ? v : promiseOf(v);
   return resolveFn.call(C, v);
 }
 hide(Promise, 'reject', function reject(e) {
