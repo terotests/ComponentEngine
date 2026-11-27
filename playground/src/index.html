@@ -128,7 +128,7 @@
         <div class="controls"><button id="js3-all" type="button">All</button> <button id="js3-none" type="button">None</button></div>
         <div id="js3-list" class="workload-list"></div>
       </details>
-      <p class="note"><span id="js3-source"></span> Hover a score for its subscores; ✗ shows why an engine failed.</p>
+      <p class="note"><span id="js3-source"></span> Hover a score for its subscores; ✗ shows why an engine failed. Each run also hashes what the benchmark computed (the values runIteration returns, what it logs, the benchmark object at the end); a score marked "≠ browser output" computed something else than this browser. The benchmarks whose output varies from run to run (the inspector code loads, proxy-mobx, web-ssr) are not compared.</p>
       <div class="table-wrap"><table id="js3-table" class="results js3"></table></div>
       <h3>Slowest relative to the browser and Hermes</h3>
       <p class="note">For each of our engines in the table: the benchmarks where it is furthest behind this browser and behind Hermes (WASM),

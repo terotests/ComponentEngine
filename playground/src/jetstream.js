@@ -14,6 +14,12 @@ import { script, parse, subScores, groupScores, scoreOf, geomean, plan } from ".
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const fmt = (v) => (v == null ? "" : v >= 100 ? String(Math.round(v)) : v >= 10 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v.toPrecision(2));
+// benchmarks whose output differs from run to run in the same engine
+// (timestamps, ids): their digest is not compared
+const VARIES = new Set(["first-inspector-code-load", "multi-inspector-code-load", "proxy-mobx", "web-ssr"]);
+/** "same", "differs" or null (nothing to compare) for an engine's result
+ * against the browser's. */
+const sameAs = (r, nat, b) => (VARIES.has(b) || !r || !nat || !r.digest || !nat.digest ? null : r.digest === nat.digest ? "same" : "differs");
 const fmtMs = (v) => (v >= 1000 ? (v / 1000).toFixed(1) + " s" : v.toFixed(v >= 10 ? 0 : 1) + " ms");
 
 /**
@@ -132,7 +138,7 @@ export function setupJetStream(ctx) {
             error = (members.length > 1 ? members[k].name + ": " : "") + r.error;
             break;
           }
-          per.push({ name: members[k].name, times: r.times, subs: subScores(members[k], r.times, c) });
+          per.push({ name: members[k].name, times: r.times, digest: r.digest, subs: subScores(members[k], r.times, c) });
         }
         if (stop && !error) error = "stopped";
         if (error) res.engines[e.id].b[b.name] = { error: error.length > 300 ? error.slice(0, 300) + "…" : error };
@@ -143,6 +149,7 @@ export function setupJetStream(ctx) {
             subs,
             members: b.subs ? Object.fromEntries(per.map((p) => [p.name, scoreOf(p.subs)])) : undefined,
             ms: per.reduce((a, p) => a + p.times.reduce((x, y) => x + y, 0), 0),
+            digest: per.every((p) => p.digest) ? per.map((p) => p.digest).join(",") : undefined,
           };
         }
         running = null;
@@ -180,6 +187,8 @@ export function setupJetStream(ctx) {
       const tip = Object.entries(r.subs).map(([k, v]) => `${k} ${fmt(v)}`).join(", ") + ` · ${fmtMs(r.ms)} in all`;
       const n = nat && nat.b[b] && nat.b[b].score;
       const ratio = id !== "native" && n ? ` <span class="ratio">${fmt(n / r.score)}×</span>` : "";
+      if (id !== "native" && sameAs(r, nat && nat.b[b], b) === "differs")
+        return `<td class="err" title="${esc(tip + " · output differs from the browser: " + r.digest + " vs " + nat.b[b].digest)}">${fmt(r.score)}${ratio}<span class="errmsg">≠ browser output</span></td>`;
       return `<td title="${esc(tip)}">${fmt(r.score)}${ratio}</td>`;
     };
     // total: geometric mean over the benchmarks the engine finished; and
@@ -193,7 +202,8 @@ export function setupJetStream(ctx) {
         const both = done.filter((b) => nat.b[b.name] && nat.b[b.name].score);
         if (both.length) ratio = geomean(both.map((b) => nat.b[b.name].score / e.b[b.name].score));
       }
-      return { id, score, n: done.length, ratio };
+      const cmp = id === "native" || !nat ? [] : done.map((b) => sameAs(e.b[b.name], nat.b[b.name], b.name)).filter(Boolean);
+      return { id, score, n: done.length, ratio, same: cmp.filter((x) => x === "same").length, compared: cmp.length };
     });
     const total =
       `<tr class="total"><td><strong>Score</strong> <span class="ratio">(geometric mean)</span></td>` +
@@ -202,6 +212,7 @@ export function setupJetStream(ctx) {
           (t) =>
             `<td><strong>${fmt(t.score)}</strong> <span class="ratio">${t.n}/${manifest.benchmarks.length}` +
             (t.ratio ? ` · ${fmt(t.ratio)}× slower` : "") +
+            (t.compared ? ` · output = browser ${t.same}/${t.compared}` : "") +
             `</span></td>`,
         )
         .join("") +
@@ -282,6 +293,12 @@ export function setupJetStream(ctx) {
               ` · ${subs} · ${fmtMs(me.ms)}${b.tags.length ? " · " + b.tags.join(",") : ""}`,
           );
         });
+      }
+      const nat = res.engines.native;
+      if (nat && id !== "native") {
+        const cmp = manifest.benchmarks.map((b) => [b, sameAs(e.b[b.name], nat.b[b.name], b.name)]).filter(([, x]) => x);
+        const diff = cmp.filter(([, x]) => x === "differs");
+        L.push(`output vs browser: ${cmp.length - diff.length}/${cmp.length} same` + (diff.length ? `; differs: ${diff.map(([b]) => `${b.name} (${e.b[b.name].digest} vs ${nat.b[b.name].digest})`).join(", ")}` : ""));
       }
       const errs = manifest.benchmarks.filter((b) => e.b[b.name] && e.b[b.name].error);
       if (errs.length) {

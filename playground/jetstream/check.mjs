@@ -111,8 +111,10 @@ async function main() {
         else {
           const subs = r.res.length > 1 ? core.groupScores(r.res.map((x) => core.subScores(b.subs.find((s) => s.name === x.name), x.times, cap))) : core.subScores(b, r.res[0].times, cap);
           const sc = core.scoreOf(subs);
-          cell = `${sc.toFixed(2)} (${(r.ms / 1000).toFixed(1)} s)`;
+          const dig = r.res.map((x) => x.digest || "-").join(",");
+          cell = `${sc.toFixed(2)} (${(r.ms / 1000).toFixed(1)} s) #${dig}`;
           (results[b.name] ||= {})[engine] = sc;
+          (results[b.name].digest ||= {})[engine] = dig;
         }
       }
       row.push(engine + " " + cell.replace(/\s+/g, " ").slice(0, 160));
