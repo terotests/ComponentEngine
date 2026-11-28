@@ -1279,3 +1279,14 @@ r.push(0, 12, .25, 3.14159, 123456789012345, 1234567890123456, 0.1 + 0.2, 1., 5.
 r.join()
 ----
 -65,191,191,191,191,65,65,-447,65089,255,127,127,-129,65407,0,65,65,-17087,48449,255,0,0,0,0,0,-1,255,-1,65535,255,-1,255,-1,65535,255,0,0,-7168,58368,255,0,0,7168,7168,0,-1,255,255,255,255,0,0,0,0,0,11264,65024,0,44,65024,0,12,0.25,3.14159,123456789012345,1234567890123456,0.30000000000000004,1,5,200,1000,15,9,8.5
+==== js a text built by appends, then a prefix view of it, read unit by unit many times
+var s = "ä€";
+for (var i = 0; i < 400; i++) s += "x" + i + "😀;";
+var u = s + "!", v = s.slice(1) + "?";
+var t = v.slice(0, 300) + "#";
+var sum = 0, sum2 = 0, sum3 = 0;
+for (var r = 0; r < 4; r++) for (var i = 0; i < s.length; i++) { sum += s.charCodeAt(i) * (i % 7); sum2 += s[i].length; }
+for (var i = 0; i < 600; i++) sum3 += v.charCodeAt(i) + (v.slice(0, 300)).charCodeAt(i % 300);
+[sum, sum2, sum3, s.length, s.charCodeAt(5), s.charCodeAt(s.length - 2), s.slice(11, 16).charCodeAt(0), u.length, v.charCodeAt(4000), s.charCodeAt(-1)].join()
+----
+339740204,10768,22856066,2692,56832,56832,59,2693,NaN,NaN
