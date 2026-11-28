@@ -1268,3 +1268,14 @@ for (var i = 0; i < 300; i++) { s += a.charCodeAt(i % a.length) + b.charCodeAt(i
 [s, a.charCodeAt(401), b.charCodeAt(301), b.charCodeAt(302), a.slice(400, 403), b.indexOf("w"), a.length, b.length].join()
 ----
 106732,8364,55357,56832,x€y,303,403,304
+==== js one- and two-byte typed arrays given wider integers, a buffer packed into words, plain decimal literals
+var i8 = new Int8Array(4), u8 = new Uint8Array(4), i16 = new Int16Array(2), u16 = new Uint16Array(2), c8 = new Uint8ClampedArray(2);
+var r = [];
+var vs = [191, 65089, -129, 5750081, -2147483648, 2147483647, 4294967295, 1e10, -1e10, 255.5, -0.5];
+for (var k = 0; k < vs.length; k++) { var v = vs[k]; i8[0] = v; u8[0] = v; i16[0] = v; u16[0] = v; c8[0] = v; r.push(i8[0], u8[0], i16[0], u16[0], c8[0]); }
+var buf = new ArrayBuffer(16); var b8 = new Int8Array(buf); b8[1] = 300; b8[5] = -2; var w = new Uint32Array(buf); var dv = new DataView(buf);
+r.push(w[0], w[1], w[2], dv.getInt8(1), dv.getUint16(4, true));
+r.push(0, 12, .25, 3.14159, 123456789012345, 1234567890123456, 0.1 + 0.2, 1., 5..toString(), 2.e2, 1_000, 017, 09, 08.5);
+r.join()
+----
+-65,191,191,191,191,65,65,-447,65089,255,127,127,-129,65407,0,65,65,-17087,48449,255,0,0,0,0,0,-1,255,-1,65535,255,-1,255,-1,65535,255,0,0,-7168,58368,255,0,0,7168,7168,0,-1,255,255,255,255,0,0,0,0,0,11264,65024,0,44,65024,0,12,0.25,3.14159,123456789012345,1234567890123456,0.30000000000000004,1,5,200,1000,15,9,8.5
