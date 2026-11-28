@@ -1340,3 +1340,17 @@ var s = Symbol("s"); t[s] = 1; log.push(Reflect.set(t, s, 4, p), t[s]);
 log.join("|")
 ----
 true|2|false|1|true|3|gopd a|def a {"value":7}|true|7|true|7|9|true|4
+==== js private fields read and written in hot loops (compiled code reads and writes them in place), another shape, string and object values, a missing field
+class A { #x = 1; #s = "a"; #o = null; get x() { return this.#x; } bump(v) { var r = (this.#x = this.#x + v); return r; } tag(i) { this.#s = "s" + (i % 3); this.#o = { i: i }; return this.#s + this.#o.i; } static peek(a) { return a.#x; } }
+class B extends A { y = 2; z = 3; }
+var r = [], s = 0, t = "";
+for (var i = 0; i < 3000; i++) {
+  var a = i % 4 ? new A() : new B();
+  s += a.bump(i) + a.x + A.peek(a);
+  if (i % 500 == 0) t += a.tag(i);
+}
+try { A.peek({}); } catch (e) { r.push(e instanceof TypeError); }
+r.push(s, t);
+r.join()
+----
+true,13504500,s00s2500s11000s01500s22000s12500
