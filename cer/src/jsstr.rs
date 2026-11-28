@@ -579,13 +579,23 @@ pub fn mid(s: &str, _a: int, _n: int) -> &str {
 
 /// char_range with `marks` (filled on the first call for `s`, kept by the
 /// caller for the next ones): the byte where every 1024th char of `s`
-/// starts. Rust: a walk of at most 1023 chars from the mark before each
-/// end; elsewhere char_range.
+/// starts (or -1 alone: `s` is ASCII, chars are bytes). Rust: a walk of
+/// at most 1023 chars from the mark before each end; elsewhere char_range.
 #[ranger::target(rust)]
 pub fn char_range_marked(s: &str, a: int, b: int, marks: &mut Vec<int>) -> String {
     let (ua, ub) = (a as usize, b as usize);
     if ua >= ub {
         return String::new();
+    }
+    if marks.is_empty() && s.is_ascii() {
+        // chars are bytes: -1 says so to the next calls
+        marks.push(-1);
+    }
+    if !marks.is_empty() && marks[0] < 0 {
+        let n = s.len();
+        let x = if ua > n { n } else { ua };
+        let y = if ub > n { n } else { ub };
+        return String::from(&s[x..y]);
     }
     if marks.is_empty() {
         let mut ci: usize = 0;
