@@ -492,6 +492,31 @@ impl Vm {
         if self.throwing {
             return 0;
         }
+        if mode == GM_NEXT {
+            // a generator with %GeneratorPrototype%.next: resumed here, as
+            // that native would (no call, and no result object when it ends)
+            let io = obj_of(&it);
+            let mo = obj_of(&m);
+            if io >= 0 && mo >= 0 && self.objs[mo as usize].class == C_NATIVE && (self.objs[mo as usize].func as int) == NF_GEN_NEXT && self.objs[io as usize].class == C_GENERATOR && !self.protos[self.objs[io as usize].func as usize].is_async {
+                if self.stack_exhausted() {
+                    self.throw_range("Maximum call stack size exceeded");
+                    return 0;
+                }
+                let v = self.gen_resume_s(io, GM_NEXT, received, false);
+                if self.throwing {
+                    return 0;
+                }
+                if self.gen_done {
+                    let n = self.stack.len();
+                    self.stack[n - 1] = v;
+                    return 1;
+                }
+                // an inner yield* hands on its own inner result as it is
+                let r = if self.gen_raw { v } else { self.iter_result(v, false) };
+                self.stack.push(r);
+                return 0;
+            }
+        }
         if m.is_undef() || m.is_null() {
             if mode == GM_RETURN {
                 self.stack.push(received);
