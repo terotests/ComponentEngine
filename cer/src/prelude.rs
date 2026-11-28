@@ -2140,7 +2140,10 @@ function setLength(f, n) { defineProperty(f, 'length', { value: n, writable: fal
 /** ArraySpeciesCreate: null when a plain Array does. */
 function arraySpecies(o, n) {
   if (!Array.isArray(o)) return null;
-  var C = o.constructor;
+  return arraySpeciesOf(o.constructor, n);
+}
+/** arraySpecies past its isArray check, `C` the array's constructor. */
+function arraySpeciesOf(C, n) {
   if (C === Array) return null;
   if (isObject(C)) { C = C[SymSpecies]; if (C === null) C = undefined; }
   if (C === undefined || C === Array) return null;
@@ -2160,8 +2163,11 @@ function arrayThis(t) {
   if (t === null || t === undefined) throw new TypeError('Array.prototype method called on null or undefined');
   return Object(t);
 }
+// (an object `this` and a uint32 length, as from an array, without the
+// calls of arrayThis and toLength)
 hide(AP, 'forEach', setLength(function forEach(f, t) {
-  var o = arrayThis(this), n = toLength(o.length);
+  var o = typeof this === 'object' && this !== null ? this : arrayThis(this), n = o.length;
+  if ((n >>> 0) !== n) n = toLength(n);
   if (typeof f !== 'function') throw new TypeError('callback is not a function');
   // no thisArg: a plain call, which passes undefined as `this` the same
   // way and runs in the caller's loop (call() goes through a native)
@@ -2169,9 +2175,12 @@ hide(AP, 'forEach', setLength(function forEach(f, t) {
   else for (var i = 0; i < n; i++) if (i in o) fcall.call(f, t, o[i], i, o);
 }, 1));
 hide(AP, 'map', setLength(function map(f, t) {
-  var o = arrayThis(this), n = toLength(o.length);
+  var o = typeof this === 'object' && this !== null ? this : arrayThis(this), n = o.length;
+  if ((n >>> 0) !== n) n = toLength(n);
   if (typeof f !== 'function') throw new TypeError('callback is not a function');
-  var A = arraySpecies(o, n), plain = A === null;
+  var A = null;
+  if (Array.isArray(o)) { var C = o.constructor; if (C !== Array) A = arraySpeciesOf(C, n); }
+  var plain = A === null;
   if (plain) A = new Array(n);
   for (var i = 0; i < n; i++) {
     if (i in o) {
