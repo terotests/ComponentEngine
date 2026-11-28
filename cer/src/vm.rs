@@ -346,6 +346,9 @@ pub struct Vm {
     pub sl_copies: int,
     pub sl_copy_bytes: int,
     pub sl_flats: int,
+    /// the view hview_unit read last and how many times in a row
+    pub hv_h: int,
+    pub hv_n: int,
     pub sl_flat_bytes: int,
     /// strings made since the last collection, and how many make one due
     pub snew: int,
@@ -894,6 +897,8 @@ impl Vm {
             sl_copies: 0,
             sl_copy_bytes: 0,
             sl_flats: 0,
+            hv_h: -1,
+            hv_n: 0,
             sl_flat_bytes: 0,
             szct_limit: ZCT_MIN,
             snew: 0,
@@ -1361,6 +1366,22 @@ impl Vm {
     pub fn hview_unit(&mut self, h: int, i: int) -> int {
         if self.strs[h as usize].up < 0 || (self.hbytes(h) < 1024 && self.strs[h as usize].suo < 0) {
             return -1;
+        }
+        // one view read many times (a tokenizer's loop over a text built
+        // by appends): its own copy once the reads would cost more than
+        // the copy (each read walks up to 32 units of it, or all of a
+        // short view); str_cache's units then
+        if h == self.hv_h {
+            self.hv_n += 1;
+            if self.hv_n >= 64 && self.hv_n * 64 >= self.hbytes(h) {
+                self.hv_h = -1;
+                self.hv_n = 0;
+                self.sflat(h);
+                return -1;
+            }
+        } else {
+            self.hv_h = h;
+            self.hv_n = 1;
         }
         let b = self.hbyte_of(h, i);
         if b >= 0 {
