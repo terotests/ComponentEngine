@@ -4056,6 +4056,161 @@ impl<'a> Cg<'a> {
     /// R_CALL: H_CALL, and when it pushed a compiled callee's frame (6) the
     /// call of its code from here and H_RET for what it returned
     fn call_op(&mut self, pc: i64, next: i64, plain: bool, dst: i32, f: i32, argc: i32, sub: int) {
+        let cca = CCA.with(|c| {
+            let c = c.borrow();
+            if (pc as usize) < c.1.len() && c.1[pc as usize] { c.0 } else { 0 }
+        });
+        if cca != 0 && !self.inlining && plain && sub == 0 && argc == 1 && dst >= 0 && f >= 0 && self.lay.str_data != 0 && MASK.with(|m| m.get()) & (1u64 << 41) == 0 {
+            // a site that called String.prototype.charCodeAt: an ASCII
+            // string's unit read here, any other case the call
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.extra += 1;
+            self.op(BLOCK);
+            self.op(T_VOID);
+            self.extra += 1;
+            let saved = self.slow_at;
+            self.slow_at = Some(self.extra);
+            self.char_code(dst as u32, f as u32, cca, pc);
+            self.slow_at = saved;
+            self.op(BR);
+            self.w.u(1);
+            self.extra -= 1;
+            self.op(END);
+            self.call_op_any(pc, next, plain, dst, f, argc, sub);
+            self.extra -= 1;
+            self.op(END);
+            return;
+        }
+        self.call_op_any(pc, next, plain, dst, f, argc, sub);
+    }
+    /// charCodeAt (the native at f, whose Val bits are fbits) of the string
+    /// at f + 1 and the index at f + 2 into dst, when the string is a whole
+    /// buffer (not a view) of ASCII text (its unit length known and equal
+    /// to its bytes) and the index a whole number in range; else fails
+    fn char_code(&mut self, dst: u32, f: u32, fbits: i64, pc: i64) {
+        let l = self.lay;
+        let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
+        let o_up = std::mem::offset_of!(crate::vm::SEnt, up) as u32;
+        let o_ulen = std::mem::offset_of!(crate::vm::SEnt, ulen) as u32;
+        let o_s = std::mem::offset_of!(crate::vm::SEnt, s) as u32;
+        // the function: the same object, still that native
+        self.get(L_SP);
+        self.mem(I64_LOAD, 3, f * VS);
+        self.i64c(fbits);
+        self.op(I64_NE);
+        self.fail_if(pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, f * VS + l.off_int);
+        self.obj_addr();
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T2 as u64);
+        self.mem(I32_LOAD, 2, l.off_class);
+        self.i32c(C_NATIVE as i64);
+        self.op(I32_NE);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.off_func);
+        self.i32c(crate::builtins::NF_SP_CHARCODEAT as i64);
+        self.op(I32_NE);
+        self.op(I32_OR);
+        self.fail_if(pc);
+        // the receiver: a string, a whole buffer
+        self.rtag(L_SP, (f + 1) * VS);
+        self.i32c(l.t_str as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, (f + 1) * VS + l.off_int);
+        self.i32c(sz);
+        self.op(I32_MUL);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_srcs_ptr);
+        self.op(I32_ADD);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T3 as u64);
+        self.mem(I32_LOAD, 2, o_up);
+        self.i32c(0);
+        self.op(I32_GE_S);
+        self.fail_if(pc);
+        // its unit length (-1 not known yet) is its byte length: ASCII
+        self.get(L_T3);
+        self.mem(I32_LOAD, 2, o_s);
+        self.set(L_T2);
+        self.get(L_T3);
+        self.mem(I32_LOAD, 2, o_ulen);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T4 as u64);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.str_blen);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        // the index: a whole number 0 <= k < length (anything not a number
+        // is a NaN here)
+        self.get(L_SP);
+        self.mem(F64_LOAD, 3, (f + 2) * VS);
+        self.set(L_A);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&0f64.to_le_bytes());
+        self.op(F64_GE);
+        self.get(L_A);
+        self.op(F64_CONST);
+        self.w.b.extend_from_slice(&2147483647f64.to_le_bytes());
+        self.op(F64_LE);
+        self.op(I32_AND);
+        self.op(I32_EQZ);
+        self.fail_if(pc);
+        self.get(L_A);
+        self.op(I32_TRUNC_F64_S);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T3 as u64);
+        self.op(F64_CONVERT_I32_S);
+        self.get(L_A);
+        self.op(F64_NE);
+        self.get(L_T3);
+        self.get(L_T4);
+        self.op(I32_GE_U);
+        self.op(I32_OR);
+        self.fail_if(pc);
+        self.get(L_T2);
+        self.mem(I32_LOAD, 2, l.str_data);
+        self.get(L_T3);
+        self.op(I32_ADD);
+        self.mem(I32_LOAD8_U, 0, 0);
+        self.op(F64_CONVERT_I32_U);
+        self.set(L_A);
+        self.store_num(dst, L_A);
+    }
+    /// a string's length (an R_GET_PROP site that read one: rrun's c = -6)
+    /// when its unit length is known; else fails
+    fn str_len(&mut self, dst: u32, ob: u32, pc: i64) -> bool {
+        let l = self.lay;
+        let sz = std::mem::size_of::<crate::vm::SEnt>() as i64;
+        let o_ulen = std::mem::offset_of!(crate::vm::SEnt, ulen) as u32;
+        self.rtag(L_SP, ob * VS);
+        self.i32c(l.t_str as i64);
+        self.op(I32_NE);
+        self.fail_if(pc);
+        self.get(L_SP);
+        self.mem(I32_LOAD, 2, ob * VS + l.off_int);
+        self.i32c(sz);
+        self.op(I32_MUL);
+        self.get(L_VM);
+        self.mem(I32_LOAD, 2, l.vm_srcs_ptr);
+        self.op(I32_ADD);
+        self.mem(I32_LOAD, 2, o_ulen);
+        self.w.byte(LOCAL_TEE);
+        self.w.u(L_T3 as u64);
+        self.i32c(0);
+        self.op(I32_LT_S);
+        self.fail_if(pc);
+        self.get(L_T3);
+        self.op(F64_CONVERT_I32_S);
+        self.set(L_A);
+        self.store_num(dst, L_A);
+        true
+    }
+    fn call_op_any(&mut self, pc: i64, next: i64, plain: bool, dst: i32, f: i32, argc: i32, sub: int) {
         let inl = if plain && dst >= 0 && f >= 0 && argc >= 0 && MASK.with(|m| m.get()) & (1u64 << 43) == 0 {
             self.inl.get(pc as usize).cloned().flatten()
         } else {
@@ -6073,6 +6228,10 @@ impl<'a> Cg<'a> {
                 }
                 self.with_helper(H_SET_ELEM, p, next, false, &|cg: &mut Cg<'a>| cg.set_elem_typed(w1 as u32, key, val, sub == 1, p))
             }
+            R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && w3 == -6 && MASK.with(|m| m.get()) & (1u64 << 41) == 0 => {
+                // a site that reads a string's length
+                self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.str_len(w1 as u32, w2 as u32, p))
+            }
             R_GET_PROP if self.lay.obj_ok && w2 >= 0 && w1 >= 0 && w3 == -4 => {
                 // a site that reads an array's length (rrun's c = -4)
                 self.with_helper(H_GET_PROP, p, next, false, &|cg: &mut Cg<'a>| cg.array_len(w1 as u32, w2 as u32, p))
@@ -7598,6 +7757,49 @@ thread_local! {
     /// typed array sites get the TK_WORDS path (words_get / words_put),
     /// which other code would carry for nothing
     static WORDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// String.prototype.charCodeAt's Val bits (0 none) and, by pc, the
+    /// calls of the function being compiled that got it from a method get
+    /// of that name (cca_sites)
+    static CCA: std::cell::RefCell<(i64, Vec<bool>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+
+/// CCA for function pi: its R_CALLs of one argument whose function is an
+/// R_GET_METHOD's of "charCodeAt" (only R_MOVEs between them)
+fn cca_sites(vm: &mut crate::vm::Vm, pi: usize, rb: usize, n: usize) -> (i64, Vec<bool>) {
+    let mut out = vec![false; n];
+    let atom = vm.intern("charCodeAt");
+    let sp = vm.string_proto;
+    if sp < 0 {
+        return (0, out);
+    }
+    let slot = vm.find(sp, atom);
+    if slot < 0 {
+        return (0, out);
+    }
+    let fv = crate::rvm::slot_at(&vm.objs[sp as usize], slot as usize);
+    let fo = crate::vm::obj_of(&fv);
+    if fo < 0 || vm.objs[fo as usize].class != C_NATIVE || (vm.objs[fo as usize].func as int) != crate::builtins::NF_SP_CHARCODEAT {
+        return (0, out);
+    }
+    let mut gm: i32 = -1;
+    let mut any = false;
+    let mut i = 0usize;
+    while i < n {
+        let op = vm.rcode[rb + i];
+        let k = (op.code & 255) as int;
+        if k == R_GET_METHOD && vm.protos[pi].code[i].a as int == atom {
+            gm = op.a;
+        } else if k == R_MOVE && gm >= 0 && op.a != gm && op.a != gm + 1 {
+        } else {
+            if k == R_CALL && gm >= 0 && op.a == gm && op.b == 1 {
+                out[i] = true;
+                any = true;
+            }
+            gm = -1;
+        }
+        i += 1 + ((op.code >> 16) as usize);
+    }
+    (if any { fv.b as i64 } else { 0 }, out)
 }
 
 /// Counters for a report.
@@ -7698,6 +7900,9 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
             });
             let p = &vm.protos[pi];
             WORDS.with(|w| w.set(vm.words_seen));
+            let cs = cca_sites(vm, pi, rb, n);
+            CCA.with(|c| *c.borrow_mut() = cs);
+            let p = &vm.protos[pi];
             if let Some(c) = compile(&name, &vm.rcode[rb..rb + n], &vm.kvals, &vm.rtab, lay, pi as u32, rb as u32, p.rentry as usize, &caches, &pics, &atoms, p.fsize as u32, inl, &spec) {
                 f = PENDING;
                 let full = with_state(vm, |st| {

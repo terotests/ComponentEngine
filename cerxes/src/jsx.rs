@@ -26,10 +26,47 @@ use crate::parser::{Parser, Syntax};
 
 /// `@jsx h` and `@jsxFrag Fragment` anywhere in the source (they belong in
 /// a comment) replace the factory and the fragment.
+#[ranger::target(rust)]
 pub fn read_pragmas(src: &str, sx: &mut Syntax) {
     if !src.contains("@jsx") {
         return;
     }
+    // each `@jsx` found in the bytes, read from the characters after it
+    // (a large script's text is not made into characters)
+    let bs = src.as_bytes();
+    let nb = bs.len();
+    let mut at: usize = 0;
+    while at + 4 < nb {
+        if !(bs[at] == b'@' && bs[at + 1] == b'j' && bs[at + 2] == b's' && bs[at + 3] == b'x') {
+            at += 1;
+            continue;
+        }
+        let mut end = if at + 512 < nb { at + 512 } else { nb };
+        while end < nb && !src.is_char_boundary(end) {
+            end += 1;
+        }
+        // (a pragma is read from its own @jsx: the window's first)
+        read_pragmas_one(&src[at..end], sx);
+        at += 4;
+    }
+}
+
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn read_pragmas(src: &str, sx: &mut Syntax) {
+    if !src.contains("@jsx") {
+        return;
+    }
+    read_pragmas_chars(src, sx, false);
+}
+
+#[ranger::target(rust)]
+fn read_pragmas_one(src: &str, sx: &mut Syntax) {
+    read_pragmas_chars(src, sx, true);
+}
+
+/// read_pragmas over the text as characters
+/// (first: only a pragma at the start)
+fn read_pragmas_chars(src: &str, sx: &mut Syntax, first: bool) {
     let cs = src.chars().collect::<Vec<char>>();
     let n = cs.len() as int;
     let mut i: int = 0;
@@ -58,8 +95,14 @@ pub fn read_pragmas(src: &str, sx: &mut Syntax) {
                     }
                 }
             }
+            if first {
+                return;
+            }
             i = j;
             continue;
+        }
+        if first {
+            return;
         }
         i += 1;
     }
