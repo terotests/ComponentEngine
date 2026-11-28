@@ -26,12 +26,13 @@ use crate::parser::{Parser, Syntax};
 
 /// `@jsx h` and `@jsxFrag Fragment` anywhere in the source (they belong in
 /// a comment) replace the factory and the fragment.
+#[ranger::target(rust)]
 pub fn read_pragmas(src: &str, sx: &mut Syntax) {
     if !src.contains("@jsx") {
         return;
     }
-    // each `@jsx` found in the bytes, its pragma read from the characters
-    // after it (a large script's text is not made into characters)
+    // each `@jsx` found in the bytes, read from the characters after it
+    // (a large script's text is not made into characters)
     let bs = src.as_bytes();
     let nb = bs.len();
     let mut at: usize = 0;
@@ -44,37 +45,66 @@ pub fn read_pragmas(src: &str, sx: &mut Syntax) {
         while end < nb && !src.is_char_boundary(end) {
             end += 1;
         }
-        read_pragma_at(&src[at..end], sx);
+        // (a pragma is read from its own @jsx: the window's first)
+        read_pragmas_one(&src[at..end], sx);
         at += 4;
     }
 }
 
-/// The pragma at the start of `src` (which starts with `@jsx`), if one.
-fn read_pragma_at(src: &str, sx: &mut Syntax) {
+#[ranger::target(es6, python, go, cpp, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn read_pragmas(src: &str, sx: &mut Syntax) {
+    if !src.contains("@jsx") {
+        return;
+    }
+    read_pragmas_chars(src, sx, false);
+}
+
+#[ranger::target(rust)]
+fn read_pragmas_one(src: &str, sx: &mut Syntax) {
+    read_pragmas_chars(src, sx, true);
+}
+
+/// read_pragmas over the text as characters
+/// (first: only a pragma at the start)
+fn read_pragmas_chars(src: &str, sx: &mut Syntax, first: bool) {
     let cs = src.chars().collect::<Vec<char>>();
     let n = cs.len() as int;
-    let mut j: int = 4;
-    let mut word = String::new();
-    while j < n && cs[j as usize].is_alphabetic() {
-        word.push(cs[j as usize]);
-        j += 1;
-    }
-    if j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') && (word.is_empty() || word.as_str() == "Frag") {
-        while j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') {
-            j += 1;
-        }
-        let mut name = String::new();
-        while j < n && (is_id_part(cs[j as usize]) || cs[j as usize] == '.') {
-            name.push(cs[j as usize]);
-            j += 1;
-        }
-        if !name.is_empty() {
-            if word.is_empty() {
-                sx.jsx_factory = name;
-            } else {
-                sx.jsx_fragment = name;
+    let mut i: int = 0;
+    while i + 4 < n {
+        if cs[i as usize] == '@' && cs[(i + 1) as usize] == 'j' && cs[(i + 2) as usize] == 's' && cs[(i + 3) as usize] == 'x' {
+            let mut j = i + 4;
+            let mut word = String::new();
+            while j < n && cs[j as usize].is_alphabetic() {
+                word.push(cs[j as usize]);
+                j += 1;
             }
+            if j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') && (word.is_empty() || word.as_str() == "Frag") {
+                while j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') {
+                    j += 1;
+                }
+                let mut name = String::new();
+                while j < n && (is_id_part(cs[j as usize]) || cs[j as usize] == '.') {
+                    name.push(cs[j as usize]);
+                    j += 1;
+                }
+                if !name.is_empty() {
+                    if word.is_empty() {
+                        sx.jsx_factory = name;
+                    } else {
+                        sx.jsx_fragment = name;
+                    }
+                }
+            }
+            if first {
+                return;
+            }
+            i = j;
+            continue;
         }
+        if first {
+            return;
+        }
+        i += 1;
     }
 }
 
