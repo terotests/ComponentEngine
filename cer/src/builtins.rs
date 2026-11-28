@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::jsstr;
 use crate::num::*;
 use crate::regex;
+use crate::proxy::PH_ORDSET;
 use crate::value::*;
 use crate::vm::*;
 
@@ -5899,6 +5900,27 @@ impl Vm {
             NF_REFLECT_SET => {
                 let k = arg(&args, 1);
                 let v = arg(&args, 2);
+                if !a0.is_obj() {
+                    self.throw_type("Reflect.set called on non-object");
+                    return Val::Undef();
+                }
+                if args.len() >= 4 {
+                    let r = arg(&args, 3);
+                    if obj_of(&r) != obj_of(&a0) {
+                        // another receiver: a plain store, or the prelude's
+                        // OrdinarySet
+                        if self.reflect_set_via(&a0, &k, &v, &r) {
+                            return Val::Bool(true);
+                        }
+                        if self.proxy_hooks < 0 {
+                            self.set_elem(&a0, &k, v);
+                            return Val::Bool(!self.throwing);
+                        }
+                        let hook = self.evecs[self.objs[self.proxy_hooks as usize].elems as usize].v[PH_ORDSET as usize].clone();
+                        let res = self.call_value(hook, Val::Undef(), vec![a0, k, v, r]);
+                        return Val::Bool(self.truthy_v(&res));
+                    }
+                }
                 self.set_elem(&a0, &k, v);
                 Val::Bool(!self.throwing)
             }

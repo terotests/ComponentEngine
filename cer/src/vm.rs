@@ -263,6 +263,10 @@ pub struct Vm {
     pub a_species: int,
     /// the atom "has" (proxy_has_atom, found on first use)
     pub a_has: int,
+    /// the atoms "defineProperty" and "getOwnPropertyDescriptor"
+    /// (reflect_set_via, found on first use)
+    pub a_defprop: int,
+    pub a_gopd: int,
     /// src_text's marks (jsstr::char_range_marked) of the last few source
     /// strings read: entry k is source src_marks_h[k] of src_marks_len[k]
     /// bytes, the oldest replaced first (src_marks_next)
@@ -865,6 +869,8 @@ impl Vm {
             cmp_kinds: Vec::new(),
             a_species: -1,
             a_has: -1,
+            a_defprop: -1,
+            a_gopd: -1,
             src_marks_h: Vec::new(),
             src_marks_len: Vec::new(),
             src_marks: Vec::new(),
