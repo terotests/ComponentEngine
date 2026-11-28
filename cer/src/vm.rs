@@ -590,6 +590,23 @@ pub struct Vm {
     /// A buffer has held views of several kinds (TK_WORDS, buf_to_mixed):
     /// the JIT then writes their elements' reads and writes in place.
     pub words_seen: bool,
+    /// By proto: a field initializer's fields when each is a constant
+    /// that is not on the heap (`x = 0; y = null;`), found from its code
+    /// (field_tpl): 0 not looked at, -1 not such, else 1 + where its
+    /// atoms and values start in ftpl_atoms / ftpl_vals; ftpl_n how many,
+    /// ftpl_code the code's length when it was looked at
+    pub ftpl_at: Vec<int>,
+    pub ftpl_n: Vec<int>,
+    pub ftpl_code: Vec<int>,
+    pub ftpl_atoms: Vec<int>,
+    pub ftpl_vals: Vec<Val>,
+    /// by entry of ftpl_atoms: a private field (PrivateFieldAdd)
+    pub ftpl_priv: Vec<bool>,
+    /// by proto: the shape an empty plain object had and the one it got
+    /// from those fields, last time (-1 none): the next such object takes
+    /// that shape and the values at once
+    pub ftpl_from: Vec<int>,
+    pub ftpl_to: Vec<int>,
     /// The text whose units rx_units holds, all of them (rx_s or one it
     /// is the end of).
     pub rx_ufull: Rc<String>,
@@ -983,6 +1000,14 @@ impl Vm {
             rx_units: Vec::new(),
             rx_uoff: 0,
             words_seen: false,
+            ftpl_at: Vec::new(),
+            ftpl_n: Vec::new(),
+            ftpl_code: Vec::new(),
+            ftpl_atoms: Vec::new(),
+            ftpl_vals: Vec::new(),
+            ftpl_priv: Vec::new(),
+            ftpl_from: Vec::new(),
+            ftpl_to: Vec::new(),
             rx_ufull: Rc::new(String::new()),
             rx_vw: false,
             rx_sbase: 0,
@@ -6156,7 +6181,158 @@ impl Vm {
             return;
         }
         let f = self.colds[self.objs[ctor as usize].cold as usize].elems2[0].clone();
+        if self.fields_fast(&f, this) {
+            return;
+        }
         self.call_fixed(f, this.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
+    }
+
+    /// Field initializer f's fields defined on `this` without a call, when
+    /// its code is only `this.key = constant` for constants not on the heap
+    /// (field_tpl): what its OP_DEFINE_FIELDs would do, true; false when
+    /// it is not such (the caller calls it).
+    pub fn fields_fast(&mut self, f: &Val, this: &Val) -> bool {
+        let fo = obj_of(f);
+        let o = obj_of(this);
+        if fo < 0 || o < 0 || self.objs[fo as usize].class != C_FUNCTION {
+            return false;
+        }
+        let pi = self.objs[fo as usize].func as int;
+        let at = self.field_tpl(pi);
+        if at < 0 {
+            return false;
+        }
+        let n = self.ftpl_n[pi as usize];
+        let p = pi as usize;
+        let sh0 = self.objs[o as usize].shape as int;
+        let plain = self.objs[o as usize].class == C_OBJECT && !self.objs[o as usize].is_proto && self.objs[o as usize].nv == 0 && !self.shapes[sh0 as usize].owned;
+        if plain && self.ftpl_from[p] == sh0 && !self.shapes[self.ftpl_to[p] as usize].owned {
+            // the shape these fields gave the last such object
+            let to = self.ftpl_to[p];
+            self.objs[o as usize].shape = to as i32;
+            let most = self.shapes[self.holder(to)].keys.len();
+            slot_room(&mut self.objs[o as usize], most);
+            let mut j: int = 0;
+            while j < n {
+                let v = self.ftpl_vals[(at + j) as usize].clone();
+                self.push_val(o, v);
+                j += 1;
+            }
+            return true;
+        }
+        let mut k: int = 0;
+        while k < n {
+            let atom = self.ftpl_atoms[(at + k) as usize];
+            let v = self.ftpl_vals[(at + k) as usize].clone();
+            let slot = self.find(o, atom);
+            if self.ftpl_priv[(at + k) as usize] {
+                // OP_DEFINE_FIELD's PrivateFieldAdd
+                if slot >= 0 {
+                    self.throw_private(atom, "initialize twice");
+                    return true;
+                }
+                self.add_own(o, atom, v, 0);
+                k += 1;
+                continue;
+            }
+            // OP_DEFINE_FIELD's CreateDataPropertyOrThrow
+            if (slot >= 0 && (self.attr_at(o, slot) & P_FIXED) != 0) || (slot < 0 && !self.objs[o as usize].extensible && self.objs[o as usize].class == C_OBJECT) {
+                let nm = self.atom_str(atom);
+                self.throw_type(format!("Cannot define property {}, object is not extensible", nm).as_str());
+                return true;
+            }
+            self.define(o, atom, v, 0);
+            if self.throwing {
+                return true;
+            }
+            k += 1;
+        }
+        let sh1 = self.objs[o as usize].shape as int;
+        if plain && !self.shapes[sh1 as usize].owned && (self.objs[o as usize].nv as int) == n {
+            self.ftpl_from[p] = sh0;
+            self.ftpl_to[p] = sh1;
+        }
+        true
+    }
+
+    /// Where proto pi's constant fields start in ftpl_atoms / ftpl_vals
+    /// (fields_fast), -1 when its code is not `this.key = constant; ...`
+    /// (OP_THIS, a constant, OP_DEFINE_FIELD of a key or a private name,
+    /// OP_POP; then
+    /// OP_RETURN_UNDEF) or not compiled yet.
+    fn field_tpl(&mut self, pi: int) -> int {
+        let p = pi as usize;
+        while self.ftpl_at.len() <= p {
+            self.ftpl_at.push(0);
+            self.ftpl_n.push(0);
+            self.ftpl_code.push(0);
+            self.ftpl_from.push(-1);
+            self.ftpl_to.push(-1);
+        }
+        let len = self.protos[p].code.len() as int;
+        if self.ftpl_at[p] != 0 && self.ftpl_code[p] == len {
+            return if self.ftpl_at[p] < 0 { -1 } else { self.ftpl_at[p] - 1 };
+        }
+        if len == 0 {
+            // not compiled yet (lazy): looked at again after its first call
+            return -1;
+        }
+        self.ftpl_code[p] = len;
+        self.ftpl_at[p] = -1;
+        self.ftpl_from[p] = -1;
+        self.ftpl_to[p] = -1;
+        let mut atoms: Vec<int> = Vec::new();
+        let mut vals: Vec<Val> = Vec::new();
+        let mut privs: Vec<bool> = Vec::new();
+        let mut i: usize = 0;
+        let n = len as usize;
+        while i + 4 <= n {
+            let a = self.protos[p].code[i];
+            let c = self.protos[p].code[i + 1];
+            let d = self.protos[p].code[i + 2];
+            let e = self.protos[p].code[i + 3];
+            if (a.code as int) != OP_THIS || (d.code as int) != OP_DEFINE_FIELD || d.b < 0 || d.b > 1 || (e.code as int) != OP_POP {
+                return -1;
+            }
+            let cc = c.code as int;
+            let v = if cc == OP_UNDEF {
+                Val::Undef()
+            } else if cc == OP_NULL {
+                Val::Null()
+            } else if cc == OP_TRUE {
+                Val::Bool(true)
+            } else if cc == OP_FALSE {
+                Val::Bool(false)
+            } else if cc == OP_INT {
+                Val::Num(c.a as double)
+            } else if cc == OP_CONST {
+                let k = self.protos[p].consts[c.a as usize].clone();
+                if !k.is_num() {
+                    return -1;
+                }
+                k
+            } else {
+                return -1;
+            };
+            atoms.push(d.a as int);
+            vals.push(v);
+            privs.push(d.b == 1);
+            i += 4;
+        }
+        if i + 1 != n || (self.protos[p].code[i].code as int) != OP_RETURN_UNDEF {
+            return -1;
+        }
+        let start = self.ftpl_atoms.len() as int;
+        let mut j: usize = 0;
+        while j < atoms.len() {
+            self.ftpl_atoms.push(atoms[j]);
+            self.ftpl_vals.push(vals[j].clone());
+            self.ftpl_priv.push(privs[j]);
+            j += 1;
+        }
+        self.ftpl_n[p] = atoms.len() as int;
+        self.ftpl_at[p] = start + 1;
+        start
     }
 
     /// Unwinds to the innermost handler of this run; false when there is

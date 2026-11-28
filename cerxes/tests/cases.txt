@@ -1216,3 +1216,25 @@ for (k = 0; k < 256; k++) h = (h * 31 + u8[k] + i8[k] + c8[k]) | 0;
 [h, nan, s.toFixed(6), Object.is(f64[4], -0), [f64[3]].join(), u32[63], i16[100]].join()
 ----
 1221937624,13,-Infinity,false,NaN,2122786074,-28087
+
+==== js constant class fields without the initializer call (shape kept), getters that return a field
+class P { #a = 1; #b = null; c = 2; get a() { return this.#a; } static has(o) { return #b in o; } }
+var s = 0; for (var i = 0; i < 5; i++) { var p = new P(); s += p.a + p.c + (P.has(p) ? 10 : 0); }
+class Q { #a = 1; constructor(o) { return o; } }
+class R extends Q { #z = 3; static z(o) { return o.#z; } }
+var o = {}; new R(o); var r = [s, R.z(o)];
+try { new R(o); } catch (e) { r.push(e.constructor.name); }
+var fz = Object.freeze({}); new R(fz); r.push(R.z(fz));
+class S extends Q { y = 5; } try { new S(Object.preventExtensions({})); } catch (e) { r.push(e.constructor.name); }
+class D { x = 1; x = 2; y = 0.5; } var d1 = new D(), d2 = new D(); r.push(d1.x, d2.x, Object.keys(d2).join(""));
+class A { #x = 1; _y = 2; get x() { return this.#x; } get y() { return this._y; } static gx(o) { try { return Object.getOwnPropertyDescriptor(A.prototype, "x").get.call(o); } catch (e) { return e.constructor.name; } } }
+class B extends A { get y() { return this._y; } }
+var a = new A(), b = new B(), t = 0;
+for (var j = 0; j < 5; j++) t += a.x + a.y + b.x + b.y;
+r.push(t, A.gx({}), A.gx(a));
+var pa = Object.create(a); r.push(pa.y, (function () { try { return pa.x; } catch (e) { return e.constructor.name; } })());
+var q = new Proxy(a, {}); r.push(q.y);
+Object.defineProperty(a, "_y", { get() { return 7; } }); r.push(a.y);
+r.join()
+----
+65,3,TypeError,3,TypeError,2,2,xy,30,TypeError,1,2,TypeError,2,7
