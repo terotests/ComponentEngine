@@ -528,6 +528,8 @@ pub struct Vm {
     /// each cache keeps its buffer (compiled code has its address)
     pub jit_cache_at: Vec<int>,
     pub jit_caches: Vec<Vec<i32>>,
+    /// by cache (jit_caches index): its site's rcode index
+    pub jit_cache_ri: Vec<int>,
     /// by proto, 8 words: what a compiled caller needs to call it directly
     /// (wjit.rs callx: proto, table index, nparams, nslots, fsize, entry,
     /// strict), table index -1 when it cannot be
@@ -570,6 +572,11 @@ pub struct Vm {
     pub sc_ascii: bool,
     pub sc_len: int,
     pub sc_units: Vec<int>,
+    /// the long non-ASCII string str_cache held before (0 or 1 entries)
+    /// and its units: two texts read in turn (a compiler's two sources)
+    /// are not converted again on every switch
+    pub sc_ks: Vec<Rc<String>>,
+    pub sc_ku: Vec<Vec<int>>,
     /// long non-ASCII texts' unit indexes (jsstr::unit_cps) for
     /// hbyte_of, a few at a time (taken in turn): the buffer (held, so it
     /// does not change), the byte offset and length of the text in it, the
@@ -971,6 +978,7 @@ impl Vm {
             jit_res: Vec::new(),
             jit_cache_at: Vec::new(),
             jit_caches: Vec::new(),
+            jit_cache_ri: Vec::new(),
             jit_calls: Vec::new(),
             prelude_protos: 0,
             temp_roots: Vec::new(),
@@ -993,6 +1001,8 @@ impl Vm {
             sc_ascii: true,
             sc_len: 0,
             sc_units: Vec::new(),
+            sc_ks: Vec::new(),
+            sc_ku: Vec::new(),
             bi_s: Vec::new(),
             bi_off: Vec::new(),
             bi_len: Vec::new(),
@@ -1048,7 +1058,30 @@ impl Vm {
             self.sc_s = s.clone();
             return;
         }
+        let mut spare: Vec<int> = Vec::new();
+        let mut back: Vec<int> = Vec::new();
+        let mut hit = false;
+        if self.sc_ks.len() > 0 && self.sc_ks[0].as_bytes().len() == s.as_bytes().len() && same_str(&self.sc_ks[0], s) {
+            back = take_ints(&mut self.sc_ku[0], &mut spare);
+            hit = true;
+            self.sc_ks.clear();
+            self.sc_ku.clear();
+        }
+        if !self.sc_ascii && self.sc_units.len() >= 256 {
+            // the current one steps back
+            let cur = take_ints(&mut self.sc_units, &mut spare);
+            self.sc_ks.clear();
+            self.sc_ku.clear();
+            self.sc_ks.push(self.sc_s.clone());
+            self.sc_ku.push(cur);
+        }
         self.sc_s = s.clone();
+        if hit {
+            self.sc_ascii = false;
+            self.sc_len = back.len() as int;
+            self.sc_units = back;
+            return;
+        }
         self.sc_ascii = jsstr::is_ascii(s.as_str());
         if self.sc_ascii {
             self.sc_units = Vec::new();

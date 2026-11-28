@@ -1261,3 +1261,10 @@ var f = Object.freeze([1]); var dd = Object.getOwnPropertyDescriptor(f, 0); r.pu
 r.join()
 ----
 6,4,true,false,glengthg0glengthg1glengthg2glengthgpushglengths3slengthglengthh1hx,1,true,false,false,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,false,TypeError,0,true,false,false,false
+==== js two long non-ASCII strings read in turn (str_cache keeps the one before)
+var a = "ä" + "x".repeat(400) + "€y", b = "ö" + "z".repeat(300) + "😀w", c = "q".repeat(500);
+var s = 0;
+for (var i = 0; i < 300; i++) { s += a.charCodeAt(i % a.length) + b.charCodeAt(i % b.length) + c.charCodeAt(i); }
+[s, a.charCodeAt(401), b.charCodeAt(301), b.charCodeAt(302), a.slice(400, 403), b.indexOf("w"), a.length, b.length].join()
+----
+106732,8364,55357,56832,x€y,303,403,304

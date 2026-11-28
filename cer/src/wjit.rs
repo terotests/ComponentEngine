@@ -8024,10 +8024,12 @@ fn evict_as(vm: &mut crate::vm::Vm, m: &Module, counts: &mut Vec<u8>, count: boo
         }
     }
     // a call site's record of a callee that went: its proto no longer
-    // matches, so the next call fills it again
-    for ri in 0..vm.rcode.len().min(vm.jit_cache_at.len()) {
-        if (vm.rcode[ri].code & 255) as int == R_CALL && vm.jit_cache_at[ri] >= 0 {
-            let b = &mut vm.jit_caches[vm.jit_cache_at[ri] as usize];
+    // matches, so the next call fills it again (the sites with a cache,
+    // not every instruction of the program)
+    for k in 0..vm.jit_caches.len().min(vm.jit_cache_ri.len()) {
+        let ri = vm.jit_cache_ri[k] as usize;
+        if ri < vm.rcode.len() && (vm.rcode[ri].code & 255) as int == R_CALL {
+            let b = &mut vm.jit_caches[k];
             if b.len() > 1 && mine(b[1] as i64) {
                 b[0] = -1;
                 b[1] = -1;
@@ -9215,6 +9217,7 @@ fn site_cache(vm: &mut crate::vm::Vm, ri: usize) -> u32 {
         x[CACHE_N - 1] = 0;
         vm.jit_cache_at[ri] = vm.jit_caches.len() as int;
         vm.jit_caches.push(x);
+        vm.jit_cache_ri.push(ri as int);
     }
     vm.jit_caches[vm.jit_cache_at[ri] as usize].as_ptr() as usize as u32
 }
