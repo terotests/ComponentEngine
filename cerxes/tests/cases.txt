@@ -1290,3 +1290,24 @@ for (var i = 0; i < 600; i++) sum3 += v.charCodeAt(i) + (v.slice(0, 300)).charCo
 [sum, sum2, sum3, s.length, s.charCodeAt(5), s.charCodeAt(s.length - 2), s.slice(11, 16).charCodeAt(0), u.length, v.charCodeAt(4000), s.charCodeAt(-1)].join()
 ----
 339740204,10768,22856066,2692,56832,56832,59,2693,NaN,NaN
+==== js charCodeAt and length at JIT-compiled sites: ASCII, non-ASCII, a view, a String object, odd indexes, a replaced charCodeAt
+function f(s, i) { return s.charCodeAt(i); }
+function g(s) { return s.length; }
+var r = [], big = "abc"; for (var k = 0; k < 50; k++) big += "xy" + k;
+var view = big; var big2 = big + "!";
+var vals = ["hello", "äö€", "", big, view, new String("obj"), 12345];
+for (var k = 0; k < 3; k++) {
+  for (var j = 0; j < vals.length; j++) {
+    var s = vals[j];
+    for (var i of [0, 1, 2, -1, 1.5, 100, NaN, "1", undefined, 4294967296, -0, 2.0]) { try { r.push(typeof s === "string" ? f(s, i) : String.prototype.charCodeAt.call(s, i)); } catch (e) { r.push("E"); } }
+    r.push(g(s), g([1, 2, 3]), g({ length: "L" }));
+  }
+}
+var o = String.prototype.charCodeAt;
+String.prototype.charCodeAt = function (i) { return "patched" + i; };
+r.push(f("abc", 1));
+String.prototype.charCodeAt = o;
+r.push(f("abc", 1));
+r.join()
+----
+104,101,108,NaN,101,NaN,104,101,104,NaN,104,108,5,3,L,228,246,8364,NaN,246,NaN,228,246,228,NaN,228,8364,3,3,L,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,0,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,111,98,106,NaN,98,NaN,111,98,111,NaN,111,106,3,3,L,49,50,51,NaN,50,NaN,49,50,49,NaN,49,51,,3,L,104,101,108,NaN,101,NaN,104,101,104,NaN,104,108,5,3,L,228,246,8364,NaN,246,NaN,228,246,228,NaN,228,8364,3,3,L,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,0,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,111,98,106,NaN,98,NaN,111,98,111,NaN,111,106,3,3,L,49,50,51,NaN,50,NaN,49,50,49,NaN,49,51,,3,L,104,101,108,NaN,101,NaN,104,101,104,NaN,104,108,5,3,L,228,246,8364,NaN,246,NaN,228,246,228,NaN,228,8364,3,3,L,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,0,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,111,98,106,NaN,98,NaN,111,98,111,NaN,111,106,3,3,L,49,50,51,NaN,50,NaN,49,50,49,NaN,49,51,,3,L,patched1,98

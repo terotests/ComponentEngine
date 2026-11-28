@@ -30,38 +30,51 @@ pub fn read_pragmas(src: &str, sx: &mut Syntax) {
     if !src.contains("@jsx") {
         return;
     }
-    let cs = src.chars().collect::<Vec<char>>();
-    let n = cs.len() as int;
-    let mut i: int = 0;
-    while i + 4 < n {
-        if cs[i as usize] == '@' && cs[(i + 1) as usize] == 'j' && cs[(i + 2) as usize] == 's' && cs[(i + 3) as usize] == 'x' {
-            let mut j = i + 4;
-            let mut word = String::new();
-            while j < n && cs[j as usize].is_alphabetic() {
-                word.push(cs[j as usize]);
-                j += 1;
-            }
-            if j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') && (word.is_empty() || word.as_str() == "Frag") {
-                while j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') {
-                    j += 1;
-                }
-                let mut name = String::new();
-                while j < n && (is_id_part(cs[j as usize]) || cs[j as usize] == '.') {
-                    name.push(cs[j as usize]);
-                    j += 1;
-                }
-                if !name.is_empty() {
-                    if word.is_empty() {
-                        sx.jsx_factory = name;
-                    } else {
-                        sx.jsx_fragment = name;
-                    }
-                }
-            }
-            i = j;
+    // each `@jsx` found in the bytes, its pragma read from the characters
+    // after it (a large script's text is not made into characters)
+    let bs = src.as_bytes();
+    let nb = bs.len();
+    let mut at: usize = 0;
+    while at + 4 < nb {
+        if !(bs[at] == b'@' && bs[at + 1] == b'j' && bs[at + 2] == b's' && bs[at + 3] == b'x') {
+            at += 1;
             continue;
         }
-        i += 1;
+        let mut end = if at + 512 < nb { at + 512 } else { nb };
+        while end < nb && !src.is_char_boundary(end) {
+            end += 1;
+        }
+        read_pragma_at(&src[at..end], sx);
+        at += 4;
+    }
+}
+
+/// The pragma at the start of `src` (which starts with `@jsx`), if one.
+fn read_pragma_at(src: &str, sx: &mut Syntax) {
+    let cs = src.chars().collect::<Vec<char>>();
+    let n = cs.len() as int;
+    let mut j: int = 4;
+    let mut word = String::new();
+    while j < n && cs[j as usize].is_alphabetic() {
+        word.push(cs[j as usize]);
+        j += 1;
+    }
+    if j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') && (word.is_empty() || word.as_str() == "Frag") {
+        while j < n && (cs[j as usize] == ' ' || cs[j as usize] == '\t') {
+            j += 1;
+        }
+        let mut name = String::new();
+        while j < n && (is_id_part(cs[j as usize]) || cs[j as usize] == '.') {
+            name.push(cs[j as usize]);
+            j += 1;
+        }
+        if !name.is_empty() {
+            if word.is_empty() {
+                sx.jsx_factory = name;
+            } else {
+                sx.jsx_fragment = name;
+            }
+        }
     }
 }
 
