@@ -476,6 +476,12 @@ fn pack_words(colds: &mut Vec<Cold>, c: usize) -> bool {
     let mut i: usize = 0;
     while i < n {
         let k = i * 4;
+        if (nums[k].to_bits() | nums[k + 1].to_bits() | nums[k + 2].to_bits() | nums[k + 3].to_bits()) == 0 {
+            // four +0 bytes (most of a fresh heap)
+            nums[i] = 0.0;
+            i += 1;
+            continue;
+        }
         let w = ((nums[k] as i32 as u32) & 255) | (((nums[k + 1] as i32 as u32) & 255) << 8) | (((nums[k + 2] as i32 as u32) & 255) << 16) | (((nums[k + 3] as i32 as u32) & 255) << 24);
         nums[i] = w as f64;
         i += 1;
@@ -735,6 +741,21 @@ fn element_value(kind: int, x: double) -> double {
         };
         if x >= lo && x <= hi {
             return x;
+        }
+        // a one- or two-byte kind's integer of 32 bits (`bytes[i] = v` of a
+        // wider value): its low bits, without to_uint32's modulo
+        if x >= -2147483648.0 && x < 2147483648.0 && kind != TK_UINT8C && kind_size(kind) <= 2 {
+            let iv = x as int;
+            if kind == TK_UINT8 {
+                return (iv & 255) as double;
+            }
+            if kind == TK_INT8 {
+                return (((iv & 255) ^ 128) - 128) as double;
+            }
+            if kind == TK_UINT16 {
+                return (iv & 65535) as double;
+            }
+            return (((iv & 65535) ^ 32768) - 32768) as double;
         }
     }
     let u = int_bits(kind, x);

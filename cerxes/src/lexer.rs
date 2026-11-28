@@ -868,6 +868,47 @@ impl Lexer {
                 return v;
             }
         }
+        // a plain decimal of at most 15 digits (`12`, `0.5`, `.25`): its
+        // value at once, exact (mantissa below 2^53, divided by an exact
+        // power of ten up to 1e22: one correctly rounded division)
+        if !(c == '0' && nx >= '0' && nx <= '9') {
+            let mut k = self.pos;
+            let mut m: double = 0.0;
+            let mut nd: int = 0;
+            let mut nf: int = 0;
+            while self.at(k) >= '0' && self.at(k) <= '9' {
+                m = m * 10.0 + (((self.at(k) as int) - 48) as double);
+                nd += 1;
+                k += 1;
+            }
+            let mut dot = false;
+            if self.at(k) == '.' {
+                dot = true;
+                k += 1;
+                while self.at(k) >= '0' && self.at(k) <= '9' {
+                    m = m * 10.0 + (((self.at(k) as int) - 48) as double);
+                    nd += 1;
+                    nf += 1;
+                    k += 1;
+                }
+            }
+            let e = self.at(k);
+            let plain = nd > 0 && nd <= 15 && e != '_' && e != 'e' && e != 'E' && e != 'n' && !(dot && nf == 0 && e == '.');
+            if plain {
+                self.pos = k;
+                self.check_after_number();
+                if nf == 0 {
+                    return m;
+                }
+                let mut p10: double = 1.0;
+                let mut j: int = 0;
+                while j < nf {
+                    p10 = p10 * 10.0;
+                    j += 1;
+                }
+                return m / p10;
+            }
+        }
         let mut text = String::new();
         let lead0 = c == '0';
         self.dec_digits(&mut text, lead0);
