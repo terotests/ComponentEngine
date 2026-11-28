@@ -1867,6 +1867,9 @@ impl Vm {
                         };
                         if plain {
                             let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
+                            if self.simple_getter(self.objs[go as usize].func as usize, &recv, (bp + w1) as usize) {
+                                return false;
+                            }
                             self.frames[fi].pc = pc + 1;
                             let fpos = bp + self.protos[pi].fsize;
                             self.grow_stack((fpos + 2) as usize);
@@ -1909,6 +1912,9 @@ impl Vm {
                     };
                     if plain {
                         let recv = if (w0 & 255) == R_GET_PROP { *self.rget(bp, w2) } else { self.frames[fi].this_val };
+                        if self.simple_getter(gp, &recv, (bp + w1) as usize) {
+                            return false;
+                        }
                         self.frames[fi].pc = pc + 1;
                         let fpos = bp + self.protos[pi].fsize;
                         while (self.stack.len() as int) < fpos + 2 {
@@ -1934,6 +1940,39 @@ impl Vm {
             self.stack[(bp + w1) as usize] = r;
         }
         false
+    }
+
+    /// A getter whose code is only `return this.x` or `return this.#x` (a
+    /// field): the receiver's own data property's value into stack[dst]
+    /// without the call, true; false when the getter has other code or
+    /// the receiver has no such own data property (the getter runs then).
+    fn simple_getter(&mut self, gp: usize, recv: &Val, dst: usize) -> bool {
+        let n = self.protos[gp].code.len();
+        let atom = if n == 3 {
+            let a = self.protos[gp].code[0];
+            if (a.code as int) != OP_GET_THIS_PROP || (self.protos[gp].code[1].code as int) != OP_RETURN {
+                return false;
+            }
+            a.a as int
+        } else if n == 4 {
+            let a = self.protos[gp].code[1];
+            if (self.protos[gp].code[0].code as int) != OP_THIS || (a.code as int) != OP_GET_PRIVATE || a.b != -1 || (self.protos[gp].code[2].code as int) != OP_RETURN {
+                return false;
+            }
+            a.a as int
+        } else {
+            return false;
+        };
+        let o = obj_of(recv);
+        if o < 0 || self.objs[o as usize].class == C_PROXY {
+            return false;
+        }
+        let slot = self.find(o, atom);
+        if slot < 0 || (self.attr_at(o, slot) & (P_ACCESSOR | P_MAPPED)) != 0 {
+            return false;
+        }
+        self.stack[dst] = self.objs[o as usize].get_slot(slot as usize);
+        true
     }
 
     /// `p[atom]` (receiver `recv`) for a proxy of a plain object whose
@@ -2883,6 +2922,9 @@ impl Vm {
             return true;
         }
         let f = self.colds[c].elems2[0];
+        if self.fields_fast(&f, &this) {
+            return true;
+        }
         let fo = obj_of(&f);
         if fo < 0 || self.objs[fo as usize].class != C_FUNCTION {
             return false;
