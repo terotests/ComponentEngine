@@ -1287,6 +1287,6 @@ var t = v.slice(0, 300) + "#";
 var sum = 0, sum2 = 0, sum3 = 0;
 for (var r = 0; r < 4; r++) for (var i = 0; i < s.length; i++) { sum += s.charCodeAt(i) * (i % 7); sum2 += s[i].length; }
 for (var i = 0; i < 600; i++) sum3 += v.charCodeAt(i) + (v.slice(0, 300)).charCodeAt(i % 300);
-[sum, sum2, sum3, s.length, s.charCodeAt(5), s.charCodeAt(s.length - 2), s.slice(10, 16).charCodeAt(0), u.length, v.charCodeAt(4000), s.charCodeAt(-1)].join()
+[sum, sum2, sum3, s.length, s.charCodeAt(5), s.charCodeAt(s.length - 2), s.slice(11, 16).charCodeAt(0), u.length, v.charCodeAt(4000), s.charCodeAt(-1)].join()
 ----
-339740204,10768,22856066,2692,56832,56832,56832,2693,NaN,NaN
+339740204,10768,22856066,2692,56832,56832,59,2693,NaN,NaN
