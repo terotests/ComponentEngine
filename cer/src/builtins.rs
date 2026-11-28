@@ -502,18 +502,34 @@ pub fn take_regex_over() -> bool {
 
 impl Vm {
     /// Chars [a, b) of source string `h` (a function's own text): through
-    /// marks of where every 1024th char starts, kept for the last source
-    /// read, so a bundle's function is not a walk of the text before it
-    /// on each Function.prototype.toString.
+    /// marks of where every 1024th char starts, kept for the last 4
+    /// sources read, so a bundle's function is not a walk of the text
+    /// before it on each Function.prototype.toString, also when calls
+    /// alternate between a bundle and its loader.
     pub fn src_text(&mut self, h: int, a: int, b: int) -> String {
         let src = self.sget(h);
         let n = src.as_bytes().len() as int;
-        if self.src_marks_h != h || self.src_marks_len != n {
-            self.src_marks = Vec::new();
-            self.src_marks_h = h;
-            self.src_marks_len = n;
+        let mut k: usize = 0;
+        while k < self.src_marks_h.len() {
+            if self.src_marks_h[k] == h && self.src_marks_len[k] == n {
+                break;
+            }
+            k += 1;
         }
-        jsstr::char_range_marked(src.as_str(), a, b, &mut self.src_marks)
+        if k == self.src_marks_h.len() {
+            if k < 4 {
+                self.src_marks_h.push(h);
+                self.src_marks_len.push(n);
+                self.src_marks.push(Vec::new());
+            } else {
+                k = self.src_marks_next as usize;
+                self.src_marks_next = ((k + 1) % 4) as int;
+                self.src_marks_h[k] = h;
+                self.src_marks_len[k] = n;
+                self.src_marks[k] = Vec::new();
+            }
+        }
+        jsstr::char_range_marked(src.as_str(), a, b, &mut self.src_marks[k])
     }
 
     pub fn native_fn(&mut self, name: &str, id: int, length: int) -> int {
@@ -2642,10 +2658,12 @@ impl Vm {
         let d = self.new_object();
         if i >= 0 && (class == C_ARRAY || class == C_ARGUMENTS) && i < (self.evecs[self.objs[o as usize].elems as usize].v.len() as int) && !self.is_hole(o, i) {
             let v = self.evecs[self.objs[o as usize].elems as usize].v[i as usize].clone();
+            // a frozen array's elements (pos 2) are read-only and fixed
+            let open = !(class == C_ARRAY && self.objs[o as usize].pos == 2);
             self.add_own(d, A_VALUE, v, 0);
-            self.add_own(d, A_WRITABLE, Val::Bool(true), 0);
+            self.add_own(d, A_WRITABLE, Val::Bool(open), 0);
             self.add_own(d, A_ENUMERABLE, Val::Bool(true), 0);
-            self.add_own(d, A_CONFIGURABLE, Val::Bool(true), 0);
+            self.add_own(d, A_CONFIGURABLE, Val::Bool(open), 0);
             return Val::Obj(d);
         }
         if i >= 0 && class == C_STRING {

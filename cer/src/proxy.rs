@@ -95,7 +95,7 @@ impl Vm {
         }
         let target = self.objs[p as usize].env as int;
         let handler = self.colds[self.objs[p as usize].cold as usize].home;
-        if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT {
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || !self.proxy_target_plain(target) || self.objs[handler as usize].class != C_OBJECT {
             let k = self.key_val(atom);
             return self.proxy_call(p, PH_GET, vec![k, r]);
         }
@@ -104,6 +104,11 @@ impl Vm {
             return Val::Undef();
         }
         if trap.is_undef() || trap.is_null() {
+            if self.objs[target as usize].class == C_ARRAY && crate::jsstr::array_index(self.atom_str(atom).as_str()) >= 0 {
+                // an element (Reflect.get's way)
+                let k = self.key_val(atom);
+                return self.get_elem(&Val::Obj(target), &k);
+            }
             return self.get_obj(target, atom, &r);
         }
         if !self.is_callable(&trap) {
@@ -146,7 +151,7 @@ impl Vm {
     pub fn proxy_set_atom(&mut self, p: int, atom: int, v: Val, r: Val) -> bool {
         let target = self.objs[p as usize].env as int;
         let handler = self.colds[self.objs[p as usize].cold as usize].home;
-        if handler < 0 || target < 0 || self.proxy_hooks < 0 || self.objs[target as usize].class != C_OBJECT {
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || !self.proxy_target_plain(target) || self.objs[handler as usize].class != C_OBJECT {
             let k = self.key_val(atom);
             return self.proxy_bool(p, PH_SET, vec![k, v, r]);
         }
@@ -190,6 +195,89 @@ impl Vm {
             }
         }
         true
+    }
+
+    /// A target whose own properties are its slots, or an extensible
+    /// array's elements (configurable) and writable length: the
+    /// invariants on a trap's answer are checked here, without the
+    /// prelude's hook. The callers also want a handler that is not a
+    /// proxy: a missing set trap goes to the hook, which looks it up
+    /// again, and a proxy handler would see that.
+    pub fn proxy_target_plain(&self, t: int) -> bool {
+        let ob = &self.objs[t as usize];
+        let c = ob.class;
+        if c == C_ARRAY {
+            // not frozen (2) nor with a read-only length (3)
+            return ob.extensible && ob.pos != 2 && ob.pos != 3;
+        }
+        c == C_OBJECT || c == C_MAP || c == C_SET
+    }
+
+    /// `atom in p` for a proxy: a plain target's has trap called here and
+    /// its invariants checked; other cases take the prelude's hook.
+    pub fn proxy_has_atom(&mut self, p: int, atom: int) -> bool {
+        let target = self.objs[p as usize].env as int;
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
+        if handler < 0 || target < 0 || self.proxy_hooks < 0 || !self.proxy_target_plain(target) || self.objs[handler as usize].class != C_OBJECT {
+            let k = self.key_val(atom);
+            return self.proxy_bool(p, PH_HAS, vec![k]);
+        }
+        if self.a_has < 0 {
+            self.a_has = self.intern("has");
+        }
+        let ah = self.a_has;
+        let trap = self.get_obj(handler, ah, &Val::Obj(handler));
+        if self.throwing {
+            return false;
+        }
+        if trap.is_undef() || trap.is_null() {
+            let k = self.key_val(atom);
+            return self.proxy_bool(p, PH_HAS, vec![k]);
+        }
+        if !self.is_callable(&trap) {
+            self.throw_type("'has' on proxy: trap is not a function");
+            return false;
+        }
+        let k = self.key_val(atom);
+        let b = self.call_fixed(trap, Val::Obj(handler), 2, Val::Obj(target), k, Val::Undef());
+        if self.throwing {
+            return false;
+        }
+        if self.truthy_v(&b) {
+            return true;
+        }
+        // false: the target must not have it as non-configurable, nor at
+        // all when it is not extensible
+        let mut own = false;
+        let mut fixed = false;
+        let slot = self.find(target, atom);
+        if slot >= 0 {
+            own = true;
+            fixed = (self.attr_at(target, slot) & P_FIXED) != 0;
+        } else if self.objs[target as usize].class == C_ARRAY {
+            if atom == A_LENGTH {
+                own = true;
+                fixed = true;
+            } else {
+                let i = crate::jsstr::array_index(self.atom_str(atom).as_str());
+                let ev = self.objs[target as usize].elems as usize;
+                if i >= 0 && i < (self.evecs[ev].v.len() as int) && !self.is_hole(target, i) {
+                    own = true;
+                }
+            }
+        }
+        if own {
+            let n = self.atom_str(atom);
+            if fixed {
+                self.throw_type(format!("'has' on proxy: trap returned falsish for property '{}' which exists in the proxy target as non-configurable", n).as_str());
+                return false;
+            }
+            if !self.objs[target as usize].extensible {
+                self.throw_type(format!("'has' on proxy: trap returned falsish for property '{}' but the proxy target is not extensible", n).as_str());
+                return false;
+            }
+        }
+        false
     }
 
     pub fn proxy_bool(&mut self, p: int, which: int, args: Vec<Val>) -> bool {

@@ -1238,3 +1238,26 @@ Object.defineProperty(a, "_y", { get() { return 7; } }); r.push(a.y);
 r.join()
 ----
 65,3,TypeError,3,TypeError,2,2,xy,30,TypeError,1,2,TypeError,2,7
+==== js proxy traps over arrays, Sets and Maps called directly (invariants checked), a frozen array's element descriptor
+var r = [], log = [];
+var h = { get(t, k, rc) { log.push("g" + String(k)); return Reflect.get(t, k, rc); }, set(t, k, v, rc) { log.push("s" + String(k)); return Reflect.set(t, k, v, rc); }, has(t, k) { log.push("h" + String(k)); return k in t; } };
+var pa = new Proxy([1, 2, 3], h); var s = 0; for (var i = 0; i < pa.length; i++) s += pa[i]; pa.push(4); r.push(s, pa.length, 1 in pa, "x" in pa, log.join(""));
+var ps = new Proxy(new Set([1]), { get(t, k) { var v = Reflect.get(t, k, t); return typeof v === "function" ? v.bind(t) : v; } }); r.push(ps.size, ps.has(1));
+var no = new Proxy([1, 2], { has() { return false; } }); r.push(0 in no, "y" in no);
+try { "length" in no; } catch (e) { r.push(e.constructor.name); }
+var ne = Object.preventExtensions([5]); var pne = new Proxy(ne, { has() { return false; } });
+try { 0 in pne; } catch (e) { r.push(e.constructor.name); }
+var fr = Object.freeze([7]); var pfr = new Proxy(fr, { get() { return 8; } });
+try { pfr[0]; } catch (e) { r.push(e.constructor.name); }
+try { pfr.length; } catch (e) { r.push(e.constructor.name); }
+var o = {}; Object.defineProperty(o, "z", { value: 1 }); var po = new Proxy(o, { has() { return false; }, get() { return 2; } });
+try { "z" in po; } catch (e) { r.push(e.constructor.name); }
+try { po.z; } catch (e) { r.push(e.constructor.name); }
+r.push("q" in po);
+var bad = new Proxy([], { has: 5 }); try { 0 in bad; } catch (e) { r.push(e.constructor.name); }
+var lenp = new Proxy([1, 2], { set(t, k, v) { t[k] = v; return true; } }); lenp.length = 0; r.push(lenp.length);
+var mp = new Proxy(new Map([[1, 2]]), { has(t, k) { return k === "foo"; } }); r.push("foo" in mp, "bar" in mp);
+var f = Object.freeze([1]); var dd = Object.getOwnPropertyDescriptor(f, 0); r.push(dd.writable, dd.configurable);
+r.join()
+----
+6,4,true,false,glengthg0glengthg1glengthg2glengthgpushglengths3slengthglengthh1hx,1,true,false,false,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,false,TypeError,0,true,false,false,false

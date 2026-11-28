@@ -259,13 +259,17 @@ pub struct Vm {
     /// per function (Proto index): 0 not looked at, 1 an ordinary
     /// comparator, 2 `(a, b) => a - b`, 3 `(a, b) => b - a` (sort_kind)
     pub cmp_kinds: Vec<i32>,
-    /// src_text's marks (jsstr::char_range_marked) of the source string
-    /// src_marks_h, of src_marks_len bytes; -1 for none
     /// the atom of Symbol.species (found on first use)
     pub a_species: int,
-    pub src_marks_h: int,
-    pub src_marks_len: int,
-    pub src_marks: Vec<int>,
+    /// the atom "has" (proxy_has_atom, found on first use)
+    pub a_has: int,
+    /// src_text's marks (jsstr::char_range_marked) of the last few source
+    /// strings read: entry k is source src_marks_h[k] of src_marks_len[k]
+    /// bytes, the oldest replaced first (src_marks_next)
+    pub src_marks_h: Vec<int>,
+    pub src_marks_len: Vec<int>,
+    pub src_marks: Vec<Vec<int>>,
+    pub src_marks_next: int,
     /// the prelude's proxy hooks (an array), -1 before
     pub proxy_hooks: int,
     /// %ThrowTypeError%
@@ -843,9 +847,11 @@ impl Vm {
             array_generic: -1,
             cmp_kinds: Vec::new(),
             a_species: -1,
-            src_marks_h: -1,
-            src_marks_len: 0,
+            a_has: -1,
+            src_marks_h: Vec::new(),
+            src_marks_len: Vec::new(),
             src_marks: Vec::new(),
+            src_marks_next: 0,
             proxy_hooks: -1,
             thrower: -1,
             callee_pair: -1,
@@ -4706,8 +4712,7 @@ impl Vm {
         let mut cur = o;
         while cur >= 0 {
             if self.objs[cur as usize].class == C_PROXY {
-                let k = self.key_val(a);
-                return self.proxy_bool(cur, PH_HAS, vec![k]);
+                return self.proxy_has_atom(cur, a);
             }
             if self.find(cur, a) >= 0 {
                 return true;
