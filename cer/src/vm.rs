@@ -523,6 +523,13 @@ pub struct Vm {
     pub jit_id: int,
     /// by proto: back edges taken while not compiled
     pub jit_hot: Vec<int>,
+    /// calls by the interpreter of each function (jit_call_run) and how
+    /// many it takes before a call enters its compiled code
+    pub jit_hot_call: Vec<int>,
+    pub jit_call_min: int,
+    /// the next frame from its start stays in the interpreter (a class's
+    /// field initializer: its compiled code costs more than it saves)
+    pub jit_start_skip: bool,
     /// by rcode index of a loop head: entries that left at once (wjit.rs)
     pub jit_miss: Vec<int>,
     /// by rcode index: the pc after a call in compiled code (wjit.rs)
@@ -979,6 +986,9 @@ impl Vm {
             jit_fn: Vec::new(),
             jit_id: 0,
             jit_hot: Vec::new(),
+            jit_hot_call: Vec::new(),
+            jit_call_min: 512,
+            jit_start_skip: false,
             jit_miss: Vec::new(),
             jit_res: Vec::new(),
             jit_cache_at: Vec::new(),
@@ -6243,7 +6253,11 @@ impl Vm {
         if self.fields_fast(&f, this) {
             return;
         }
+        // its frame stays in the interpreter (entering its compiled code
+        // on every new cost more than it saved: raytrace class fields)
+        self.jit_start_skip = true;
         self.call_fixed(f, this.clone(), 0, Val::Undef(), Val::Undef(), Val::Undef());
+        self.jit_start_skip = false;
     }
 
     /// Field initializer f's fields defined on `this` without a call, when

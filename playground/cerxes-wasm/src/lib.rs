@@ -254,7 +254,12 @@ pub unsafe extern "C" fn cx_jit(e: *mut Engine, on: i32, min: i32) -> i32 {
     let engine = &mut *e;
     let ok = cerxes::wjit::available();
     engine.vm.jit_on = on != 0 && ok;
-    engine.vm.jit_min = min as i64;
+    // min's high 16 bits, when set: the calls before a call by the
+    // interpreter enters a function's compiled code (Vm::jit_call_min)
+    engine.vm.jit_min = (min & 65535) as i64;
+    if min >= 65536 {
+        engine.vm.jit_call_min = (min >> 16) as i64;
+    }
     if ok {
         1
     } else {

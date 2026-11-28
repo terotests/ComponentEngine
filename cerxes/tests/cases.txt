@@ -1311,3 +1311,20 @@ r.push(f("abc", 1));
 r.join()
 ----
 104,101,108,NaN,101,NaN,104,101,104,NaN,104,108,5,3,L,228,246,8364,NaN,246,NaN,228,246,228,NaN,228,8364,3,3,L,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,0,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,111,98,106,NaN,98,NaN,111,98,111,NaN,111,106,3,3,L,49,50,51,NaN,50,NaN,49,50,49,NaN,49,51,,3,L,104,101,108,NaN,101,NaN,104,101,104,NaN,104,108,5,3,L,228,246,8364,NaN,246,NaN,228,246,228,NaN,228,8364,3,3,L,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,0,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,111,98,106,NaN,98,NaN,111,98,111,NaN,111,106,3,3,L,49,50,51,NaN,50,NaN,49,50,49,NaN,49,51,,3,L,104,101,108,NaN,101,NaN,104,101,104,NaN,104,108,5,3,L,228,246,8364,NaN,246,NaN,228,246,228,NaN,228,8364,3,3,L,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,NaN,0,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,97,98,99,NaN,98,54,97,98,97,NaN,97,99,193,3,L,111,98,106,NaN,98,NaN,111,98,111,NaN,111,106,3,3,L,49,50,51,NaN,50,NaN,49,50,49,NaN,49,51,,3,L,patched1,98
+==== js getters, a proxy get trap and class field initializers in hot loops (run nested from compiled code, entered at their start)
+var D = { k: 3 };
+class P { a = 1; b = D.k; c = this.a + this.b; get sum() { return this.a + this.b + this.c; } get deep() { return this.sum * 2 + this.twice(this.c); } twice(x) { return x + x; } get bad() { if (this.a > 900) throw new Error("big " + this.a); return this.a; } }
+class Q extends P { d = this.sum; get sum() { return super.sum + 1; } }
+var pr = new Proxy({}, { get(t, k) { return k === "n" ? 5 : k.length; } });
+var r = [], s = 0, t = 0, u = 0, e = 0;
+for (var i = 0; i < 3000; i++) {
+  var p = i % 3 ? new P() : new Q();
+  p.a = i;
+  s += p.sum + p.deep;
+  t += pr.n + pr.xyz;
+  try { u += p.bad; } catch (x) { e++; }
+  if (i % 1000 == 999) r.push(s, t, u, e, p.c, p.d === undefined ? "u" : p.d);
+}
+r.join()
+----
+1528502,8000,405450,99,4,9,6057001,16000,405450,1099,4,u,13585500,24000,405450,2099,4,u
