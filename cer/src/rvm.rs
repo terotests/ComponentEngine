@@ -169,6 +169,41 @@ impl Vm {
         self.jit_go(pi, bp, fi, pc, true)
     }
 
+    /// R_DEFINE_FIELD on a plain object whose transition the op's c caches:
+    /// done, true (the interpreter and compiled code; false: r_define_field)
+    pub fn define_field_cached(&mut self, pi: usize, bp: int, pc: int, w0: int, w1: int, w2: int) -> bool {
+        if let Some(o) = (self.rget(bp, w1)).as_obj() {
+            let c = self.protos[pi].code[pc as usize].c;
+            let ob = self.ob(o);
+            if c >= 0 && ((c >> 16) as int) == ob.shape as int && ob.class == C_OBJECT && (ob.extensible || ((w0 >> 8) & 255) == 1) {
+                let v = *self.rget(bp, w2);
+                self.objs[o as usize].shape = c & 65535;
+                let most = self.shapes[self.holder((c & 65535) as int)].keys.len();
+                slot_room(&mut self.objs[o as usize], most);
+                self.push_val(o, v);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A call by the interpreter of function pi (its frame entered at pc):
+    /// its compiled code runs from there when it has some, or once called
+    /// jit_call_min times (a function without a loop is compiled only for
+    /// calls this many; its module costs more than a few interpreted runs)
+    pub fn jit_call_run(&mut self, pi: usize, rb: int, bp: int, fi: usize, pc: int) -> int {
+        if !jit_compiled(self, pi) {
+            while self.jit_hot_call.len() <= pi {
+                self.jit_hot_call.push(0);
+            }
+            if self.jit_hot_call[pi] < self.jit_call_min {
+                self.jit_hot_call[pi] += 1;
+                return pc;
+            }
+        }
+        self.jit_run(pi, rb, bp, fi, pc)
+    }
+
     /// Runs the compiled code of function pi from pc: the pc to go on at,
     /// -1 the time slice ended (the frame is stopped), -2 an op threw (the
     /// frame's pc is set), -3 frames changed (go on with the top one).
@@ -407,6 +442,23 @@ impl Vm {
                 self.frames[fi].mv_to = -1;
             }
             let mut cp = code_at(&self.rcode, rb);
+            if pc == 0 && self.jit_on && jit_at_start() {
+                if self.jit_start_skip {
+                    self.jit_start_skip = false;
+                } else {
+                    // a frame from its start (a getter, a proxy trap, a call
+                    // from compiled code or through the slow call path): its
+                    // compiled code, counted as a call
+                    pc = self.jit_call_run(pi, rb, bp, fi, pc);
+                    cp = code_at(&self.rcode, rb);
+                    if pc < 0 {
+                        if pc == -1 || (pc == -2 && !self.unwind(base)) {
+                            return;
+                        }
+                        continue 'frames;
+                    }
+                }
+            }
             loop {
                 let ins = code_op(&self.rcode, cp, pc);
                 let w0 = ins.code;
@@ -1026,7 +1078,7 @@ impl Vm {
                                 }
                                 if self.jit_on && jit_at_call() {
                                     // the callee's compiled code from its start
-                                    pc = self.jit_run(pi, rb, bp, fi, pc);
+                                    pc = self.jit_call_run(pi, rb, bp, fi, pc);
                                     cp = code_at(&self.rcode, rb);
                                     if pc < 0 {
                                         if pc == -1 || (pc == -2 && !self.unwind(base)) {
@@ -1381,19 +1433,9 @@ impl Vm {
                         }
                     }
                     R_DEFINE_FIELD => {
-                        // c caches the transition of a plain object
-                        if let Some(o) = (self.rget(bp, (w1 as int))).as_obj() {
-                            let c = self.protos[pi].code[pc as usize].c;
-                            let ob = self.ob(o);
-                            if c >= 0 && ((c >> 16) as int) == ob.shape as int && ob.class == C_OBJECT && (ob.extensible || ((w0 >> 8) & 255) == 1) {
-                                let v = *self.rget(bp, (w2 as int));
-                                self.objs[o as usize].shape = c & 65535;
-                                let most = self.shapes[self.holder((c & 65535) as int)].keys.len();
-                                slot_room(&mut self.objs[o as usize], most);
-                                self.push_val(o, v);
-                                pc = (pc + 1 + ((w0 >> 16) as int));
-                                continue;
-                            }
+                        if self.define_field_cached(pi, bp, pc, (w0 as int), w1, w2) {
+                            pc = (pc + 1 + ((w0 >> 16) as int));
+                            continue;
                         }
                         self.r_define_field(pi, bp, fi, pc, (w0 as int), (w1 as int), (w2 as int), (w3 as int));
                     }
@@ -3766,16 +3808,50 @@ pub fn jit_enter(vm: &mut Vm, pi: usize, bp: int, pc: int, budget: int, head: bo
     crate::wjit::enter(vm, pi, bp, pc, budget as i32, head)
 }
 
+/// Whether function pi has compiled code (wjit.rs jit_fn), or is waiting
+/// for its batch to be compiled.
+#[ranger::target(rust)]
+pub fn jit_compiled(vm: &Vm, pi: usize) -> bool {
+    pi < vm.jit_fn.len() && (vm.jit_fn[pi] >= 0 || vm.jit_fn[pi] == crate::wjit::PENDING)
+}
+
+/// C++ (njit.rs): every call goes to njit, which counts calls itself
+#[ranger::target(cpp, es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_compiled(_vm: &Vm, _pi: usize) -> bool {
+    true
+}
+
 /// Whether a call enters the callee's compiled code at its start (njit.rs:
-/// a function without a loop is compiled too). wjit.rs is entered at back
-/// edges only.
+/// a function without a loop is compiled too).
 #[ranger::target(cpp)]
 pub fn jit_at_call() -> bool {
     true
 }
 
-#[ranger::target(rust, es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
+/// wjit.rs (WebAssembly): a callee's compiled code is entered at its
+/// start too, so a function the interpreter calls (from a native's
+/// callback, a constructor, a function without a loop) runs compiled once
+/// hot. Native Rust has no JIT.
+#[ranger::target(rust)]
 pub fn jit_at_call() -> bool {
+    cfg!(all(target_arch = "wasm32", feature = "wjit"))
+}
+
+#[ranger::target(es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_at_call() -> bool {
+    false
+}
+
+/// Whether a frame the interpreter starts (a getter, a proxy trap, a
+/// callback of a native, a call from compiled code) enters its compiled
+/// code too: wjit.rs only.
+#[ranger::target(rust)]
+pub fn jit_at_start() -> bool {
+    cfg!(all(target_arch = "wasm32", feature = "wjit"))
+}
+
+#[ranger::target(cpp, es6, python, go, java7, kotlin, csharp, dart, scala, php, swift6)]
+pub fn jit_at_start() -> bool {
     false
 }
 

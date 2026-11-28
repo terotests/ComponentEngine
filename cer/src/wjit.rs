@@ -7932,7 +7932,7 @@ pub fn compiled_fn(vm: &mut crate::vm::Vm, pi: usize) -> i64 {
 }
 
 /// jit_fn's mark for a function compiled and waiting for its batch
-const PENDING: i64 = -3;
+pub const PENDING: i64 = -3;
 /// a batch goes to the host at this many functions or body bytes, when
 /// its functions have been asked for this many times since, or after this
 /// many ends of the machine's run
@@ -8621,8 +8621,29 @@ fn get_prop_slow(vm: &mut crate::vm::Vm, bp: int, pi: i32, pc: i32, ri: i32, o: 
     let ins = vm.rcode[ri as usize];
     let fi = vm.frames.len() - 1;
     let rb = vm.protos[pi as usize].rbase;
+    let nf = vm.frames.len();
     if vm.r_get_prop_slow(o, pi as usize, rb, bp, fi, pc as int, ins.code as int, ins.a as int, ins.b as int) {
-        return 5;
+        // a getter's frame: run here, nested, and the compiled code goes on
+        // after it (leaving the code for each getter call cost more than
+        // the call); the interpreter's when nesting is not allowed
+        if vm.frames.len() != nf + 1 || no_nesting(vm) || MASK.with(|m| m.get()) & (1u64 << 40) != 0 {
+            return 5;
+        }
+        NEST.with(|n| n.set(n.get() + 1));
+        vm.rrun(nf as int);
+        NEST.with(|n| n.set(n.get() - 1));
+        if vm.throwing {
+            return 4;
+        }
+        if vm.suspended || vm.frames.len() != nf {
+            return 5;
+        }
+        // the base frame's return leaves its value at the stack's end
+        let v = vm.stack.pop().unwrap_or(Val::Undef());
+        let want = (bp + vm.protos[pi as usize].fsize) as usize;
+        vm.grow_stack(want);
+        vm.rset((bp + ins.a as int) as usize, v);
+        return 0;
     }
     settle(vm, fi, pc as int)
 }
@@ -9078,7 +9099,11 @@ fn h_op(vm: i32, bp: i32, pi: i32, pc: i32, ri: i32) -> i32 {
         R_GET_PRIVATE => vm.r_get_private_slow(pi, rb, bp, fi, pc, w1, w2),
         R_SET_PRIVATE => vm.r_set_private_slow(pi, rb, bp, fi, pc, w1, w2),
         R_ADD_PROP => vm.r_add_prop_slow(pi, rb, bp, fi, pc, w1, w2),
-        R_DEFINE_FIELD => vm.r_define_field(pi, bp, fi, pc, w0, w1, w2, w3),
+        R_DEFINE_FIELD => {
+            if !vm.define_field_cached(pi, bp, pc, w0, w1, w2) {
+                vm.r_define_field(pi, bp, fi, pc, w0, w1, w2, w3);
+            }
+        }
         R_STEP_K => {
             if MASK.with(|m| m.get()) & (1u64 << 54) != 0 {
                 // debug: HCOUNT[1300 + the stack op]
