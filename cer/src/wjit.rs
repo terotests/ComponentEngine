@@ -6371,6 +6371,28 @@ impl<'a> Cg<'a> {
                     self.arith(sub, w1, w2, w3, p)
                 }
             }
+            R_GET_PRIVATE if self.lay.obj_ok && w1 >= 0 && w2 >= 0 && w3 >= 65536 && MASK.with(|m| m.get()) & (1u64 << 39) == 0 => {
+                // this.#x: the field's (shape, slot) the interpreter cached
+                // when this was compiled, read in place; the op's helper
+                // for another shape
+                let next = p + 1 + ((w0 >> 16) as i64);
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| cg.get_prop_ic(w1 as u32, w2 as u32, w3 as i32, p))
+            }
+            R_SET_PRIVATE if self.lay.obj_ok && w1 >= 0 && w3 >= 65536 && MASK.with(|m| m.get()) & (1u64 << 39) == 0 => {
+                // this.#x = v: a store in place at the cached (shape, slot)
+                // (set_prop_ic: not for a string or object value), then the
+                // value into w1, as rrun's R_SET_PRIVATE
+                let next = p + 1 + ((w0 >> 16) as i64);
+                self.with_helper(H_OP, p, next, false, &|cg: &mut Cg<'a>| {
+                    if !cg.set_prop_ic(w1 as u32, w2, w3 as i32, p) {
+                        return false;
+                    }
+                    let o = cg.raw(w2);
+                    cg.load_val(o, L_Q0);
+                    cg.store_val(w1 as u32, L_Q0);
+                    true
+                })
+            }
             R_GET_GLOBAL | R_GET_ENV | R_SET_ENV | R_THIS | R_TYPEOF | R_CHECK | R_STEP_PUSH | R_STEP_K | R_STEP0 | R_GET_METHOD
             | R_GET_METHOD_ELEM | R_ADD_ENV | R_NEW_OBJECT | R_NEW_ARRAY | R_SET_GLOBAL | R_CLOSURE | R_INIT_PROP | R_WIN | R_GET_PRIVATE | R_SET_PRIVATE | R_ADD_PROP | R_DEFINE_FIELD => {
                 let next = p + 1 + ((w0 >> 16) as i64);
