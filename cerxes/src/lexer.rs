@@ -305,8 +305,27 @@ fn puncts() -> Vec<String> {
     out
 }
 
+// indexes in puncts() of the punctuators read_token looks for
+const PI_QDOT: int = 19;
+const PI_INC: int = 20;
+const PI_DEC: int = 21;
+const PI_RBRACE: int = 34;
+const PI_LPAREN: int = 35;
+const PI_RPAREN: int = 36;
+const PI_RBRACK: int = 38;
+const PI_DOT: int = 56;
+
 /// Keywords after which a `/` starts a regular expression.
 fn regex_after_word(w: &str) -> bool {
+    let n = w.as_bytes().len();
+    if n < 2 || n > 10 {
+        return false;
+    }
+    // (their first letters: a c d e i n o r t v y)
+    let b = w.as_bytes()[0] as int;
+    if b < 97 || b > 121 || b == 98 || b == 102 || b == 103 || b == 104 || b == 106 || b == 107 || b == 108 || b == 109 || b == 112 || b == 113 || b == 115 || b == 117 || b == 119 || b == 120 {
+        return false;
+    }
     w == "return"
         || w == "typeof"
         || w == "instanceof"
@@ -590,7 +609,8 @@ impl Lexer {
             self.regex_ok = regex_after_word(t.text.as_str()) && !t.escaped && !self.after_dot;
             self.after_dot = false;
             let w = t.text.as_str();
-            self.paren_keyword = !t.escaped && (w == "if" || w == "while" || w == "for" || w == "with");
+            let w0 = if w.is_empty() { 0 } else { w.as_bytes()[0] as int };
+            self.paren_keyword = !t.escaped && (w0 == 105 || w0 == 119 || w0 == 102) && (w == "if" || w == "while" || w == "for" || w == "with");
             return t;
         }
         if c == '#' && (is_id_start(self.at(self.pos + 1)) || self.at(self.pos + 1) == '\\') {
@@ -657,15 +677,12 @@ impl Lexer {
                 let mut t = Tok::new(T_PUNCT, line, nl);
                 self.pos += plen;
                 t.punct = k_here;
-                self.after_dot = self.punct_is(k_here, ".") || self.punct_is(k_here, "?.");
-                self.regex_ok = !(self.punct_is(k_here, ")") || self.punct_is(k_here, "]") || self.punct_is(k_here, "}") || self.punct_is(k_here, "++") || self.punct_is(k_here, "--"));
-                if self.punct_is(k_here, "}") {
-                    self.regex_ok = true;
-                }
-                if self.punct_is(k_here, "(") {
+                self.after_dot = k_here == PI_DOT || k_here == PI_QDOT;
+                self.regex_ok = !(k_here == PI_RPAREN || k_here == PI_RBRACK || k_here == PI_INC || k_here == PI_DEC);
+                if k_here == PI_LPAREN {
                     self.parens.push(keyword);
                     t.paren = PAREN_OPEN;
-                } else if self.punct_is(k_here, ")") {
+                } else if k_here == PI_RPAREN {
                     let n = self.parens.len();
                     if n == 0 {
                         t.paren = PAREN_CLOSE_EXTRA;

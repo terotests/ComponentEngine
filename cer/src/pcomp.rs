@@ -900,14 +900,21 @@ impl PComp {
         }
         let n = self.toks.len();
         let mut stack: Vec<int> = Vec::new();
+        // the brackets' name ids (compared as numbers, not as text)
+        let o1 = self.name_id("(") as i32;
+        let o2 = self.name_id("[") as i32;
+        let o3 = self.name_id("{") as i32;
+        let c1 = self.name_id(")") as i32;
+        let c2 = self.name_id("]") as i32;
+        let c3 = self.name_id("}") as i32;
         let mut i: usize = base;
         while i < n {
             self.mate.push(-1);
             if (self.toks[i].kind() as int) as int == T_PUNCT {
-                let s = self.names[self.toks[i].v as usize].as_str();
-                if s == "(" || s == "[" || s == "{" {
+                let s = self.toks[i].v;
+                if s == o1 || s == o2 || s == o3 {
                     stack.push(i as int);
-                } else if s == ")" || s == "]" || s == "}" {
+                } else if s == c1 || s == c2 || s == c3 {
                     if !stack.is_empty() {
                         let o = stack.pop().unwrap();
                         self.mate[o as usize] = i as i32;
