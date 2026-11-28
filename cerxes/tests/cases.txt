@@ -1328,3 +1328,15 @@ for (var i = 0; i < 3000; i++) {
 r.join()
 ----
 1528502,8000,405450,99,4,9,6057001,16000,405450,1099,4,u,13585500,24000,405450,2099,4,u
+==== js Reflect.set with a receiver: a proxy of the target without traps (a plain store), a read-only and a new property, traps that see the define, a plain object receiver, a symbol key
+var log = [];
+var t = { a: 1 }; Object.defineProperty(t, "ro", { value: 1, writable: false, configurable: true });
+var p = new Proxy(t, {});
+var q = new Proxy(t, { defineProperty(tt, k, d) { log.push("def " + k + " " + JSON.stringify(d)); return Reflect.defineProperty(tt, k, d); }, getOwnPropertyDescriptor(tt, k) { log.push("gopd " + k); return Reflect.getOwnPropertyDescriptor(tt, k); } });
+log.push(Reflect.set(t, "a", 2, p), t.a, Reflect.set(t, "ro", 5, p), t.ro, Reflect.set(t, "n", 3, p), t.n);
+log.push(Reflect.set(t, "a", 7, q), t.a);
+var o2 = {}; log.push(Reflect.set(t, "a", 9, o2), t.a, o2.a);
+var s = Symbol("s"); t[s] = 1; log.push(Reflect.set(t, s, 4, p), t[s]);
+log.join("|")
+----
+true|2|false|1|true|3|gopd a|def a {"value":7}|true|7|true|7|9|true|4

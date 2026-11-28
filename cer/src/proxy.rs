@@ -25,6 +25,8 @@ pub const PH_PREVENTEXT: int = 10;
 pub const PH_APPLY: int = 11;
 pub const PH_CONSTRUCT: int = 12;
 pub const PH_ISARRAY: int = 13;
+/// OrdinarySet for Reflect.set with another receiver (hook(t, k, v, r))
+pub const PH_ORDSET: int = 14;
 
 pub const NF_PROXY: int = 930;
 pub const NF_PROXY_REVOKE: int = 931;
@@ -211,6 +213,59 @@ impl Vm {
             return ob.extensible && ob.pos != 2 && ob.pos != 3;
         }
         c == C_OBJECT || c == C_MAP || c == C_SET
+    }
+
+    /// Whether handler h (a plain object) and its prototype chain have
+    /// no own property `atom`, looked up without calling getters.
+    fn no_trap(&self, h: int, atom: int) -> bool {
+        let mut o = h;
+        let mut n = 0;
+        while o >= 0 && n < 8 {
+            if self.objs[o as usize].class != C_OBJECT || self.find(o, atom) >= 0 {
+                return false;
+            }
+            o = self.objs[o as usize].proto as int;
+            n += 1;
+        }
+        o < 0
+    }
+
+    /// Reflect.set(t, k, v, r) where r is a proxy of t whose handler has
+    /// no defineProperty nor getOwnPropertyDescriptor trap and t has k
+    /// as an own writable data property: r's [[GetOwnProperty]] and
+    /// [[DefineOwnProperty]] are t's, so OrdinarySet is a plain store on
+    /// t (Vue's reactive set trap). Done, true; false: the prelude's
+    /// OrdinarySet.
+    pub fn reflect_set_via(&mut self, t: &Val, k: &Val, v: &Val, r: &Val) -> bool {
+        let to = obj_of(t);
+        let p = obj_of(r);
+        if to < 0 || p < 0 || self.objs[p as usize].class != C_PROXY || self.objs[p as usize].env as int != to {
+            return false;
+        }
+        if self.objs[to as usize].class != C_OBJECT || !k.is_str() {
+            return false;
+        }
+        let handler = self.colds[self.objs[p as usize].cold as usize].home;
+        if handler < 0 {
+            return false;
+        }
+        let (i, a) = self.to_key(k);
+        if self.throwing || i >= 0 {
+            return false;
+        }
+        let slot = self.find(to, a);
+        if slot < 0 || (self.attr_at(to, slot) & (P_READONLY | P_ACCESSOR | P_MAPPED)) != 0 {
+            return false;
+        }
+        if self.a_defprop < 0 {
+            self.a_defprop = self.intern("defineProperty");
+            self.a_gopd = self.intern("getOwnPropertyDescriptor");
+        }
+        if !self.no_trap(handler, self.a_defprop) || !self.no_trap(handler, self.a_gopd) {
+            return false;
+        }
+        self.put_slot(to, slot, v.clone());
+        true
     }
 
     /// `atom in p` for a proxy: a plain target's has trap called here and

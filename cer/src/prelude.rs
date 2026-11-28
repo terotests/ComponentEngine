@@ -2100,10 +2100,9 @@ hide(Proxy, 'revocable', function revocable(target, handler) {
   var p = new Proxy(target, handler);
   return { proxy: p, revoke: function () { proxyRevoke(p); } };
 });
-// Reflect.set with a receiver other than the target: OrdinarySet
-hide(Reflect, 'set', function set(t, k, v, r) {
-  if (!isObject(t)) throw new TypeError('Reflect.set called on non-object');
-  if (arguments.length < 4 || r === t) return nativeReflectSet(t, k, v);
+// Reflect.set with a receiver other than the target, when it is not a
+// plain store (the native Reflect.set calls this): OrdinarySet
+proxyHooks[14] = function (t, k, v, r) {
   var o = t;
   while (o !== null) {
     var d = gopd(o, k);
@@ -2121,7 +2120,7 @@ hide(Reflect, 'set', function set(t, k, v, r) {
     return reflectDefine(r, k, { value: v });
   }
   return reflectDefine(r, k, { value: v, writable: true, enumerable: true, configurable: true });
-});
+};
 if (!Reflect.getOwnPropertyDescriptor) hide(Reflect, 'getOwnPropertyDescriptor', function getOwnPropertyDescriptor(t, k) {
   if (!isObject(t)) throw new TypeError('Reflect.getOwnPropertyDescriptor called on non-object'); return gopd(t, k);
 });
